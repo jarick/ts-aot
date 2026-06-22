@@ -1,0 +1,24 @@
+[package]
+name = "ts2zig-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Shared core types for the ts2zig compiler: type system, IDs, diagnostics"
+
+[dependencies]
+oxc_span.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dev-dependencies]
+proptest.workspace = true

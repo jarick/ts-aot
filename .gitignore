@@ -1,0 +1,30 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+.idea/
+.vscode/
+*.iml
+
+.DS_Store
+Thumbs.db
+
+.claude/
+.mavis/
+target
+
+# test262 harness artifacts
+tests/harness-out/
+tests/test262-report.json
+
+# test262 — embedded sparse clone, will be added as submodule in PR-23
+tests/test262/
+
+# leftover build artifacts
+*.wasm.o
+*.wasm
+
+# stale root-level artifacts
+/p.txt
+/stderr.txt
+/stdout.txt

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ts2zig-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/ts2zig"
+publish = false
+
+[workspace.dependencies]
+oxc_allocator = "0.7"
+oxc_ast = "0.7"
+oxc_parser = "0.7"
+oxc_semantic = "0.7"
+oxc_span = "0.7"
+oxc_syntax = "0.7"
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
