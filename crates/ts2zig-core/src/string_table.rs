@@ -1,44 +1,32 @@
-use std::collections::HashMap;
-
 use crate::ids::StringId;
+use crate::interner::Interner;
 
 #[derive(Debug, Default, Clone)]
-pub struct StringTable {
-    strings: Vec<String>,
-    ids_by_string: HashMap<String, StringId>,
-}
+pub struct StringTable(Interner<String, StringId>);
 
 impl StringTable {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self(Interner::new())
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.strings.len()
+        self.0.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.strings.is_empty()
+        self.0.is_empty()
     }
 
     pub fn intern(&mut self, s: &str) -> StringId {
-        if let Some(&id) = self.ids_by_string.get(s) {
-            return id;
-        }
-
-        let id = u32::try_from(self.strings.len()).expect("string table overflow");
-        self.strings.push(s.to_string());
-        let id = StringId::from_raw(id);
-        self.ids_by_string.insert(s.to_string(), id);
-        id
+        self.0.intern(s)
     }
 
     #[must_use]
     pub fn resolve(&self, id: StringId) -> Option<&str> {
-        self.strings.get(id.raw() as usize).map(String::as_str)
+        self.0.resolve(id).map(String::as_str)
     }
 }
 
