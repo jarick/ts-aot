@@ -14,6 +14,18 @@ macro_rules! define_id {
                 self.0
             }
         }
+
+        impl From<u32> for $name {
+            fn from(raw: u32) -> Self {
+                Self::from_raw(raw)
+            }
+        }
+
+        impl From<$name> for u32 {
+            fn from(id: $name) -> Self {
+                id.raw()
+            }
+        }
     };
 }
 
@@ -47,5 +59,17 @@ mod tests {
     #[test]
     fn raw_roundtrips() {
         assert_eq!(TypeId::from_raw(42).raw(), 42);
+    }
+
+    #[test]
+    fn from_u32_matches_from_raw() {
+        assert_eq!(TypeId::from(99u32), TypeId::from_raw(99));
+    }
+
+    #[test]
+    fn into_u32_matches_raw() {
+        let id = TypeId::from_raw(123);
+        let raw: u32 = id.into();
+        assert_eq!(raw, 123);
     }
 }
