@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ts2zig-core",
+    "crates/ts2zig-ir-hir",
 ]
 
 [workspace.package]

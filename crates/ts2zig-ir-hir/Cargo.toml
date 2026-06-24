@@ -1,0 +1,10 @@
+[package]
+name = "ts2zig-ir-hir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ts2zig-core = { path = "../ts2zig-core" }
