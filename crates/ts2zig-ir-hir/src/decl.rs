@@ -1,4 +1,5 @@
 use crate::expr::HirExpr;
+use crate::stmt::HirStmt;
 use ts2zig_core::{GenericParamId, StringId, SymbolId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,14 +75,4 @@ pub enum HirDecl {
         name: SymbolId,
         members: Vec<HirDecl>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct HirStmt;
-
-impl HirStmt {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
 }
