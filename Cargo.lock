@@ -430,6 +430,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts2zig-ir-mir"
+version = "0.1.0"
+dependencies = [
+ "ts2zig-core",
+]
+
+[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
