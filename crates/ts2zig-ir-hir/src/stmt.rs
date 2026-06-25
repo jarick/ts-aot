@@ -127,8 +127,8 @@ impl HirStmt {
                 catch,
                 finally,
             } => try_completion(body, catch.as_ref(), finally.as_deref()),
+            Self::DoWhile { body, .. } => body.completion(),
             Self::While { .. }
-            | Self::DoWhile { .. }
             | Self::ForOf { .. }
             | Self::ForIn { .. }
             | Self::Let { .. }
@@ -916,5 +916,65 @@ mod tests {
             cases,
         };
         assert!(s.is_terminal());
+    }
+
+    #[test]
+    fn dowhile_with_return_body_is_terminal() {
+        let s = HirStmt::DoWhile {
+            body: Box::new(HirStmt::ret(None)),
+            cond: HirExpr::Bool(true),
+        };
+        assert!(s.is_terminal());
+        assert_eq!(s.completion(), Completion::Returns);
+    }
+
+    #[test]
+    fn dowhile_with_throw_body_is_terminal() {
+        let s = HirStmt::DoWhile {
+            body: Box::new(HirStmt::Throw {
+                expr: HirExpr::Unit,
+            }),
+            cond: HirExpr::Bool(true),
+        };
+        assert!(s.is_terminal());
+        assert_eq!(s.completion(), Completion::Throws);
+    }
+
+    #[test]
+    fn dowhile_with_fallthrough_body_is_not_terminal() {
+        let s = HirStmt::DoWhile {
+            body: Box::new(HirStmt::expr(HirExpr::Int(0))),
+            cond: HirExpr::Bool(false),
+        };
+        assert!(!s.is_terminal());
+        assert_eq!(s.completion(), Completion::MayFallThrough);
+    }
+
+    #[test]
+    fn dowhile_with_try_return_body_is_terminal_regardless_of_cond() {
+        let s = HirStmt::DoWhile {
+            body: Box::new(HirStmt::Try {
+                body: Box::new(HirStmt::ret(None)),
+                catch: None,
+                finally: None,
+            }),
+            cond: HirExpr::Bool(false),
+        };
+        assert!(s.is_terminal());
+        assert_eq!(s.completion(), Completion::Returns);
+    }
+
+    #[test]
+    fn dowhile_with_if_return_body_is_terminal() {
+        let s = HirStmt::DoWhile {
+            body: Box::new(HirStmt::If {
+                cond: HirExpr::Bool(false),
+                then: Box::new(HirStmt::ret(None)),
+                otherwise: Some(Box::new(HirStmt::ret(None))),
+            }),
+            cond: HirExpr::Bool(false),
+        };
+        assert!(s.is_terminal());
+        assert_eq!(s.completion(), Completion::Returns);
     }
 }
