@@ -1,0 +1,241 @@
+use ts2zig_core::{FieldId, FunctionId, LocalId, StringId, StructId, SymbolId, TypeId};
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MirBlock {
+    pub stmts: Vec<MirStmt>,
+}
+
+impl MirBlock {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with(stmt: MirStmt) -> Self {
+        Self { stmts: vec![stmt] }
+    }
+
+    pub fn push(&mut self, stmt: MirStmt) {
+        self.stmts.push(stmt);
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.stmts.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.stmts.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MirBody {
+    pub locals: Vec<MirLocalDecl>,
+    pub block: MirBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MirLocalDecl {
+    pub id: LocalId,
+    pub name: SymbolId,
+    pub ty: TypeId,
+    pub mutable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirStmt {
+    Let {
+        local: LocalId,
+        ty: TypeId,
+        init: Option<MirExpr>,
+        mutable: bool,
+    },
+    Assign {
+        target: MirPlace,
+        value: MirExpr,
+    },
+    Expr(MirExpr),
+    Return(Option<MirExpr>),
+    ReturnResultErr {
+        error: MirExpr,
+        err_ty: TypeId,
+    },
+    Throw {
+        error: MirExpr,
+        error_ty: TypeId,
+    },
+    If {
+        cond: MirExpr,
+        then_block: MirBlock,
+        else_block: Option<MirBlock>,
+    },
+    While {
+        cond: MirExpr,
+        body: MirBlock,
+    },
+    ForOf {
+        item: LocalId,
+        iterable: MirExpr,
+        body: MirBlock,
+    },
+    Break,
+    Continue,
+    Runtime {
+        op: RuntimeOp,
+        args: Vec<MirExpr>,
+        ty: TypeId,
+    },
+    Await {
+        promise: MirExpr,
+        dest: LocalId,
+        next_state: i32,
+        ty: TypeId,
+    },
+    SetState {
+        value: i32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirPlace {
+    Local {
+        id: LocalId,
+    },
+    Field {
+        base: Box<MirPlaceBase>,
+        field: FieldId,
+        ty: TypeId,
+    },
+    Index {
+        base: Box<MirExpr>,
+        index: Box<MirExpr>,
+        ty: TypeId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MirPlaceBase {
+    Local(LocalId),
+    Field {
+        base: Box<MirPlaceBase>,
+        field: FieldId,
+        ty: TypeId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    Neg,
+    Not,
+    BitNot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirExpr {
+    Unit,
+    Bool(bool),
+    Int {
+        value: i128,
+        ty: TypeId,
+    },
+    Float {
+        value: f64,
+        ty: TypeId,
+    },
+    String {
+        id: StringId,
+        ty: TypeId,
+    },
+    Null {
+        ty: TypeId,
+    },
+    Local(LocalId),
+    Global(SymbolId),
+    Field {
+        base: Box<MirExpr>,
+        field: FieldId,
+        ty: TypeId,
+    },
+    Index {
+        base: Box<MirExpr>,
+        index: Box<MirExpr>,
+        ty: TypeId,
+    },
+    Call {
+        callee: FunctionId,
+        args: Vec<MirExpr>,
+        ty: TypeId,
+    },
+    StructLiteral {
+        struct_id: StructId,
+        fields: Vec<(FieldId, MirExpr)>,
+        ty: TypeId,
+    },
+    ResultOk {
+        value: Box<MirExpr>,
+        ty: TypeId,
+    },
+    ResultErr {
+        error: Box<MirExpr>,
+        ty: TypeId,
+    },
+    Binary {
+        op: BinaryOp,
+        left: Box<MirExpr>,
+        right: Box<MirExpr>,
+        ty: TypeId,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeOp {
+    StringConcat,
+    StringEquals,
+    StringLen,
+    ArrayCreate,
+    ArrayGet,
+    ArraySet,
+    ArrayLen,
+    MapGet,
+    MapSet,
+    ResultOk,
+    ResultErr,
+    ResultUnwrapOk,
+    PromiseCreate,
+    PromiseResolve,
+    HostConsoleLog,
+    MathSqrt,
+}
+
+#[cfg(test)]
+mod tests;

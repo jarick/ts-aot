@@ -1,5 +1,7 @@
 use ts2zig_core::{FieldId, FunctionId, LocalId, StructId, SymbolId, TypeId, Visibility};
 
+use crate::body::MirBody;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MirParam {
     pub id: LocalId,
@@ -36,7 +38,7 @@ pub struct FunctionEffects {
     pub is_async: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MirFunctionDecl {
     pub id: FunctionId,
     pub name: SymbolId,
@@ -44,11 +46,12 @@ pub struct MirFunctionDecl {
     pub params: Vec<MirParam>,
     pub ret: TypeId,
     pub throws: Option<TypeId>,
+    pub body: MirBody,
     pub kind: FunctionKind,
     pub effects: FunctionEffects,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MirStructDecl {
     pub id: StructId,
     pub name: SymbolId,
@@ -65,7 +68,7 @@ pub struct MirGlobalDecl {
     pub export_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MirDecl {
     Function(MirFunctionDecl),
     Struct(MirStructDecl),
@@ -157,6 +160,7 @@ mod tests {
             }],
             ret: TypeId::from_raw(0),
             throws: None,
+            body: MirBody::default(),
             kind: FunctionKind::Plain,
             effects: FunctionEffects {
                 can_throw: true,
@@ -166,6 +170,33 @@ mod tests {
         assert_eq!(f.export_name.as_deref(), Some("render"));
         assert_eq!(f.params.len(), 1);
         assert!(f.effects.can_throw);
+        assert!(f.body.block.is_empty());
+        assert!(f.body.locals.is_empty());
+    }
+
+    #[test]
+    fn function_decl_body_carries_locals_and_block() {
+        let f = MirFunctionDecl {
+            id: FunctionId::from_raw(0),
+            name: SymbolId::from_raw(1),
+            export_name: None,
+            params: Vec::new(),
+            ret: TypeId::from_raw(0),
+            throws: None,
+            body: MirBody {
+                locals: vec![crate::body::MirLocalDecl {
+                    id: LocalId::from_raw(0),
+                    name: SymbolId::from_raw(1),
+                    ty: TypeId::from_raw(2),
+                    mutable: false,
+                }],
+                block: crate::body::MirBlock::with(crate::body::MirStmt::Return(None)),
+            },
+            kind: FunctionKind::Plain,
+            effects: FunctionEffects::default(),
+        };
+        assert_eq!(f.body.locals.len(), 1);
+        assert_eq!(f.body.block.len(), 1);
     }
 
     #[test]
@@ -209,6 +240,7 @@ mod tests {
             params: Vec::new(),
             ret: TypeId::from_raw(0),
             throws: None,
+            body: MirBody::default(),
             kind: FunctionKind::Plain,
             effects: FunctionEffects::default(),
         };

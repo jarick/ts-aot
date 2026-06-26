@@ -89,6 +89,7 @@ mod tests {
             params: Vec::new(),
             ret: TypeId::from_raw(0),
             throws: None,
+            body: crate::body::MirBody::default(),
             kind: FunctionKind::Plain,
             effects: FunctionEffects::default(),
         }
@@ -195,6 +196,7 @@ mod tests {
             params: vec![],
             ret: TypeId::from_raw(0),
             throws: None,
+            body: crate::body::MirBody::default(),
             kind: FunctionKind::Plain,
             effects: FunctionEffects::default(),
         };
