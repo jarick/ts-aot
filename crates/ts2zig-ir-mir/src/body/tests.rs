@@ -188,10 +188,11 @@ fn stmt_runtime_carries_op_args_ty() {
     let s = MirStmt::Runtime {
         op: RuntimeOp::StringConcat,
         args: vec![MirExpr::Unit, MirExpr::Unit],
+        dest: None,
         ty: TypeId::from_raw(0),
     };
     match s {
-        MirStmt::Runtime { op, args, ty } => {
+        MirStmt::Runtime { op, args, ty, .. } => {
             assert_eq!(op, RuntimeOp::StringConcat);
             assert_eq!(args.len(), 2);
             assert_eq!(ty, TypeId::from_raw(0));

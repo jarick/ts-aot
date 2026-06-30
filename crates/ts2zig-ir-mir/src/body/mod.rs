@@ -81,11 +81,17 @@ pub enum MirStmt {
         iterable: MirExpr,
         body: MirBlock,
     },
+    ForIn {
+        key: LocalId,
+        object: MirExpr,
+        body: MirBlock,
+    },
     Break,
     Continue,
     Runtime {
         op: RuntimeOp,
         args: Vec<MirExpr>,
+        dest: Option<LocalId>,
         ty: TypeId,
     },
     Await {
@@ -116,12 +122,17 @@ pub enum MirPlace {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MirPlaceBase {
     Local(LocalId),
     Field {
         base: Box<MirPlaceBase>,
         field: FieldId,
+        ty: TypeId,
+    },
+    Index {
+        base: Box<MirExpr>,
+        index: Box<MirExpr>,
         ty: TypeId,
     },
 }

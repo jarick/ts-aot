@@ -45,6 +45,7 @@ pub struct HirFunction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirClass {
     pub name: SymbolId,
+    pub ty: TypeId,
     pub fields: Vec<HirField>,
     pub methods: Vec<HirFunction>,
     pub extends: Option<SymbolId>,

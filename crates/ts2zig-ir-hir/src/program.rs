@@ -69,6 +69,7 @@ mod tests {
         });
         prog.push_decl(HirDecl::Class(HirClass {
             name: SymbolId::from_raw(3),
+            ty: TypeId::from_raw(5),
             fields: vec![HirField {
                 name: StringId::from_raw(4),
                 ty: TypeId::from_raw(5),

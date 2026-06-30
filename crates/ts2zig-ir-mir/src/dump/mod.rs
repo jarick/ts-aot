@@ -341,6 +341,7 @@ mod tests {
         let stmt = MirStmt::Runtime {
             op: RuntimeOp::StringConcat,
             args: vec![MirExpr::Unit, MirExpr::Unit],
+            dest: None,
             ty: TypeId::from_raw(0),
         };
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();

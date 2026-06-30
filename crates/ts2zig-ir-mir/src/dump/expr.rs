@@ -136,9 +136,20 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper<'_>) {
             d.pop();
             d.line("}");
         }
+        MirStmt::ForIn { key, object, body } => {
+            d.write(&format!("for {} in ", key.raw()));
+            dump_expr_inline(object, d);
+            d.write(" {\n");
+            d.push();
+            for s in &body.stmts {
+                dump_stmt(s, d);
+            }
+            d.pop();
+            d.line("}");
+        }
         MirStmt::Break => d.line("break"),
         MirStmt::Continue => d.line("continue"),
-        MirStmt::Runtime { op, args, ty } => {
+        MirStmt::Runtime { op, args, dest, ty } => {
             d.write(&format!("runtime {}(", fmt_op(*op)));
             for (i, arg) in args.iter().enumerate() {
                 if i > 0 {
@@ -147,6 +158,9 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper<'_>) {
                 dump_expr_inline(arg, d);
             }
             d.write(&format!(") -> {}", ty.raw()));
+            if let Some(d2) = dest {
+                d.write(&format!(" dest=local({})", d2.raw()));
+            }
             d.write("\n");
         }
         MirStmt::Await {
@@ -193,6 +207,13 @@ fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper<'_>) {
         MirPlaceBase::Field { base, field, .. } => {
             dump_place_base(base, d);
             d.write(&format!(".{}", field.raw()));
+        }
+        MirPlaceBase::Index { base, index, ty } => {
+            d.write("index(");
+            dump_expr_inline(base, d);
+            d.write("[");
+            dump_expr_inline(index, d);
+            d.write(&format!("]:{})", ty.raw()));
         }
     }
 }
