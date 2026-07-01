@@ -1,6 +1,7 @@
 mod context;
 mod error;
 mod hir_to_mir;
+mod lower_async;
 mod lower_enums;
 mod lower_result;
 mod source_map;
@@ -8,6 +9,7 @@ mod source_map;
 pub use context::PassContext;
 pub use error::{PassError, PassResult};
 pub use hir_to_mir::{ExprConverter, HirBlock, convert_function, convert_program};
+pub use lower_async::{LowerAsyncStats, lower_async};
 pub use lower_enums::lower_enums;
 pub use lower_result::lower_result;
 pub use source_map::{LineCol, SourceMap};

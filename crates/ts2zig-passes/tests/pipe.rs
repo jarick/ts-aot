@@ -1,7 +1,9 @@
 use ts2zig_core::{ModuleId, StringTable, SymbolTable, TypeTable};
-use ts2zig_ir_hir::{HirDecl, HirEnumVariant, HirExpr, HirFunction, HirProgram, HirStmt};
+use ts2zig_ir_hir::{
+    HirCallee, HirDecl, HirEnumVariant, HirExpr, HirFunction, HirProgram, HirStmt,
+};
 use ts2zig_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt};
-use ts2zig_passes::{PassContext, convert_program, lower_enums, lower_result};
+use ts2zig_passes::{PassContext, convert_program, lower_async, lower_enums, lower_result};
 
 fn fixture() -> (StringTable, SymbolTable, TypeTable, PassContext) {
     let strings = StringTable::new();
@@ -52,8 +54,8 @@ fn convert_program_preserves_global_with_int_init() {
         panic!("expected MirDecl::Global");
     };
     assert_eq!(g.name, name_sym);
-    let i64_ty = types.intern(&ts2zig_core::Type::I64);
-    assert_eq!(g.ty, i64_ty, "global.ty must be the i64 from HIR");
+    let typed_id = types.intern(&ts2zig_core::Type::I64);
+    assert_eq!(g.ty, typed_id, "global.ty must be the i64 from HIR");
     let Some(init) = &g.init else {
         panic!("init must be preserved through HIR->MIR");
     };
@@ -278,24 +280,24 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
     );
     hir.declarations.push(enum_decl);
 
-    let i64_ty = types.intern(&ts2zig_core::Type::I64);
+    let typed_id = types.intern(&ts2zig_core::Type::I64);
     let green_name = symbols.intern("Green");
     let fn_name = symbols.intern("pick");
 
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
         params: Vec::new(),
-        ret: i64_ty,
+        ret: typed_id,
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Field {
                 owner: Box::new(HirExpr::Global {
                     name: color_sym,
-                    ty: i64_ty,
+                    ty: typed_id,
                 }),
                 field: ts2zig_core::FieldId::from_raw(0),
                 field_name: green_name,
-                ty: i64_ty,
+                ty: typed_id,
             }),
         }],
         is_async: false,
@@ -335,5 +337,149 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
     assert!(
         text.contains("Color.Green"),
         "dump must show the namespaced global:\n{text}"
+    );
+}
+
+fn await_promise_resolve_call(
+    arg: HirExpr,
+    arg_ty: ts2zig_core::TypeId,
+    symbols: &mut SymbolTable,
+    types: &mut TypeTable,
+) -> HirExpr {
+    let promise_sym = symbols.intern("Promise");
+    let resolve_sym = symbols.intern("resolve");
+    let promise_ty = types.intern(&ts2zig_core::Type::I64);
+    HirExpr::Await {
+        expr: Box::new(HirExpr::Call {
+            callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                owner: Box::new(HirExpr::Global {
+                    name: promise_sym,
+                    ty: promise_ty,
+                }),
+                field: ts2zig_core::FieldId::from_raw(0),
+                field_name: resolve_sym,
+                ty: promise_ty,
+            })),
+            args: vec![arg],
+            ty: promise_ty,
+        }),
+        ty: arg_ty,
+    }
+}
+
+#[test]
+fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
+    let (strings, mut symbols, mut types, mut ctx) = fixture();
+    let typed_id = types.intern(&ts2zig_core::Type::I64);
+    let fn_name = symbols.intern("greet");
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: fn_name,
+        params: Vec::new(),
+        ret: typed_id,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(await_promise_resolve_call(
+                HirExpr::Int(42),
+                typed_id,
+                &mut symbols,
+                &mut types,
+            )),
+        }],
+        is_async: true,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: Some(ts2zig_ir_hir::HirAsyncInfo::Promise {
+            ok_ty: typed_id,
+            err_ty: None,
+            promise_ty: typed_id,
+        }),
+    }));
+
+    let stats = lower_async(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
+    assert_eq!(stats.inlined_promise_resolve, 1);
+    assert_eq!(stats.cleared_async_info, 1);
+
+    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let f = mir.functions().next().expect("one function");
+    let await_count = f
+        .body
+        .block
+        .stmts
+        .iter()
+        .filter(|s| matches!(s, MirStmt::Await { .. }))
+        .count();
+    assert_eq!(
+        await_count, 1,
+        "Await wrapper must be preserved (Promise.resolve call inside it is rewritten, but the await state step stays), got stmts: {:?}",
+        f.body.block.stmts
+    );
+    let MirStmt::Await { promise, .. } = &f.body.block.stmts[0] else {
+        panic!(
+            "expected MirStmt::Await (with rewritten promise = bare arg), got {:?}",
+            f.body.block.stmts[0]
+        );
+    };
+    let MirExpr::Int { value, .. } = promise else {
+        panic!(
+            "MirStmt::Await.promise must now be the bare Int(42) (Promise.resolve call was stripped), got {promise:?}"
+        );
+    };
+    assert_eq!(*value, 42, "bare arg must be preserved through HIR -> MIR");
+}
+
+#[test]
+fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
+    let (strings, mut symbols, mut types, mut ctx) = fixture();
+    let typed_id = types.intern(&ts2zig_core::Type::I64);
+    let fn_name = symbols.intern("waitFor");
+    let callee_sym = symbols.intern("realPromise");
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: fn_name,
+        params: Vec::new(),
+        ret: typed_id,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Await {
+                expr: Box::new(HirExpr::Call {
+                    callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                        name: callee_sym,
+                        ty: typed_id,
+                    })),
+                    args: Vec::new(),
+                    ty: typed_id,
+                }),
+                ty: typed_id,
+            }),
+        }],
+        is_async: true,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: Some(ts2zig_ir_hir::HirAsyncInfo::Promise {
+            ok_ty: typed_id,
+            err_ty: None,
+            promise_ty: typed_id,
+        }),
+    }));
+
+    let stats = lower_async(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
+    assert_eq!(stats.inlined_promise_resolve, 0);
+    assert_eq!(
+        stats.cleared_async_info, 1,
+        "still clears async_info on the function"
+    );
+
+    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let f = mir.functions().next().expect("one function");
+    assert!(
+        f.body
+            .block
+            .stmts
+            .iter()
+            .any(|s| matches!(s, MirStmt::Await { .. })),
+        "non-Promise.resolve await must remain a MirStmt::Await state step"
     );
 }
