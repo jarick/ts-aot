@@ -779,6 +779,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ts-aot-backend"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "ts-aot-core",
+ "ts-aot-ir-mir",
+]
+
+[[package]]
 name = "ts-aot-core"
 version = "0.1.0"
 dependencies = [

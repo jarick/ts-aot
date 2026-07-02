@@ -6,6 +6,7 @@ members = [
     "crates/ts-aot-ir-hir",
     "crates/ts-aot-ir-mir",
     "crates/ts-aot-passes",
+    "crates/ts-aot-backend",
 ]
 
 [workspace.package]
@@ -24,6 +25,8 @@ oxc_semantic = "0.7"
 oxc_span = "0.7"
 oxc_syntax = "0.7"
 proptest = "1"
+proc-macro2 = "1"
+quote = "1"
 
 [profile.release]
 lto = "thin"
