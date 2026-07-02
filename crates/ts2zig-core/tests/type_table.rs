@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use ts2zig_core::{StructId, SymbolId, Type, TypeId, TypeTable};
+use ts2zig_core::{Atom, StructId, Type, TypeId, TypeTable};
 
 #[test]
 fn intern_returns_same_id_for_same_type() {
@@ -119,7 +119,7 @@ fn result_dedups_by_components() {
     let mut table = TypeTable::new();
     let ok = table.intern(&Type::String);
     let err = table.intern(&Type::Named {
-        symbol: SymbolId::from_raw(0),
+        symbol: Atom::new_inline("0"),
     });
     let a = table.intern(&Type::Result { ok, err });
     let b = table.intern(&Type::Result { ok, err });
@@ -142,10 +142,10 @@ fn struct_distinguishes_by_id() {
 fn named_dedups_by_symbol() {
     let mut table = TypeTable::new();
     let a = table.intern(&Type::Named {
-        symbol: SymbolId::from_raw(7),
+        symbol: Atom::new_inline("7"),
     });
     let b = table.intern(&Type::Named {
-        symbol: SymbolId::from_raw(7),
+        symbol: Atom::new_inline("7"),
     });
     assert_eq!(a, b);
 }
@@ -208,8 +208,8 @@ fn arb_simple_type() -> impl Strategy<Value = Type> {
         (0u32..64).prop_map(|id| Type::Struct {
             id: StructId::from_raw(id)
         }),
-        (0u32..64).prop_map(|id| Type::Named {
-            symbol: SymbolId::from_raw(id)
+        (0u32..64).prop_map(|_id| Type::Named {
+            symbol: Atom::new_inline("named")
         }),
     ]
 }

@@ -53,7 +53,7 @@ fn rewrite_stmt(stmt: &mut MirStmt, err_ty: TypeId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ts2zig_core::{FunctionId, LocalId, StringId, SymbolId, TypeId};
+    use ts2zig_core::{Atom, FunctionId, LocalId, TypeId};
     use ts2zig_ir_mir::{
         FunctionEffects, FunctionKind, MirBlock, MirDecl, MirFunctionDecl, MirParam, MirStmt,
     };
@@ -61,7 +61,7 @@ mod tests {
     fn empty_function(id: u32, throws: Option<TypeId>) -> MirFunctionDecl {
         MirFunctionDecl {
             id: FunctionId::from_raw(id),
-            name: SymbolId::from_raw(id + 1),
+            name: Atom::from(format!("fn{}", id)),
             export_name: None,
             params: Vec::<MirParam>::new(),
             ret: TypeId::from_raw(0),
@@ -286,10 +286,10 @@ mod tests {
 
         let s = MirStructDecl {
             id: StructId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             fields: vec![MirFieldDecl {
                 id: FieldId::from_raw(0),
-                name: SymbolId::from_raw(10),
+                name: Atom::new_inline("10"),
                 ty: TypeId::from_raw(0),
                 mutable: false,
                 visibility: Visibility::Public,
@@ -309,7 +309,7 @@ mod tests {
     fn throw_error_expression_is_preserved() {
         let mut f = empty_function(0, Some(throw_err_ty()));
         let payload = MirExpr::String {
-            id: StringId::from_raw(9),
+            id: Atom::new_inline("9"),
             ty: TypeId::from_raw(0),
         };
         f.body.block = MirBlock::with(MirStmt::Throw {
@@ -328,7 +328,7 @@ mod tests {
             MirStmt::ReturnResultErr { error, .. } => {
                 assert!(matches!(
                     error,
-                    MirExpr::String { id, .. } if *id == StringId::from_raw(9)
+                    MirExpr::String { id, .. } if *id == Atom::new_inline("9")
                 ));
             }
             other => panic!("expected ReturnResultErr, got {other:?}"),

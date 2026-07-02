@@ -1,6 +1,6 @@
 use crate::decl::HirDecl;
 use crate::expr::HirExpr;
-use ts2zig_core::{LocalId, SymbolId, TypeId};
+use ts2zig_core::{Atom, LocalId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Completion {
@@ -22,7 +22,7 @@ pub enum HirStmt {
 
     Let {
         id: LocalId,
-        name: SymbolId,
+        name: Atom,
         ty: TypeId,
         init: Option<HirExpr>,
     },
@@ -63,10 +63,10 @@ pub enum HirStmt {
         value: Option<HirExpr>,
     },
     Break {
-        label: Option<SymbolId>,
+        label: Option<Atom>,
     },
     Continue {
-        label: Option<SymbolId>,
+        label: Option<Atom>,
     },
     Throw {
         expr: HirExpr,
@@ -97,7 +97,7 @@ impl HirStmt {
     }
 
     #[must_use]
-    pub fn let_(id: LocalId, name: SymbolId, ty: TypeId, init: Option<HirExpr>) -> Self {
+    pub fn let_(id: LocalId, name: Atom, ty: TypeId, init: Option<HirExpr>) -> Self {
         Self::Let { id, name, ty, init }
     }
 
@@ -267,13 +267,13 @@ fn tail_class(stmts: &[HirStmt]) -> TailClass {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirCatchClause {
-    pub binding: Option<(LocalId, SymbolId)>,
+    pub binding: Option<(LocalId, Atom)>,
     pub body: Box<HirStmt>,
 }
 
 impl HirCatchClause {
     #[must_use]
-    pub const fn new(binding: Option<(LocalId, SymbolId)>, body: Box<HirStmt>) -> Self {
+    pub const fn new(binding: Option<(LocalId, Atom)>, body: Box<HirStmt>) -> Self {
         Self { binding, body }
     }
 }
@@ -296,9 +296,9 @@ mod tests {
     #[test]
     fn let_stmt_preserves_name_and_id() {
         let id = LocalId::from_raw(3);
-        let name = SymbolId::from_raw(7);
+        let name = Atom::new_inline("7");
         let ty = TypeId::from_raw(0);
-        let s = HirStmt::let_(id, name, ty, Some(HirExpr::Int(42)));
+        let s = HirStmt::let_(id, name.clone(), ty, Some(HirExpr::Int(42)));
         match s {
             HirStmt::Let {
                 id: got_id,
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn forof_carries_binding_and_iter() {
         let binding = LocalId::from_raw(2);
-        let iter = HirExpr::String(ts2zig_core::StringId::from_raw(9));
+        let iter = HirExpr::String(ts2zig_core::Atom::new_inline("9"));
         let body = Box::new(HirStmt::expr(HirExpr::Unit));
         let s = HirStmt::ForOf {
             binding,
@@ -392,12 +392,12 @@ mod tests {
     #[test]
     fn break_and_continue_carry_optional_label() {
         let labeled = HirStmt::Break {
-            label: Some(SymbolId::from_raw(1)),
+            label: Some(Atom::new_inline("1")),
         };
         let plain = HirStmt::Break { label: None };
         assert_ne!(labeled, plain);
         let cont = HirStmt::Continue {
-            label: Some(SymbolId::from_raw(1)),
+            label: Some(Atom::new_inline("1")),
         };
         assert_ne!(labeled, cont);
     }
@@ -405,13 +405,13 @@ mod tests {
     #[test]
     fn throw_holds_expression() {
         let s = HirStmt::Throw {
-            expr: HirExpr::String(ts2zig_core::StringId::from_raw(11)),
+            expr: HirExpr::String(ts2zig_core::Atom::new_inline("11")),
         };
         match s {
             HirStmt::Throw {
                 expr: HirExpr::String(id),
             } => {
-                assert_eq!(id, ts2zig_core::StringId::from_raw(11));
+                assert_eq!(id, ts2zig_core::Atom::new_inline("11"));
             }
             _ => panic!("expected Throw with String"),
         }
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn try_with_catch_and_finally() {
         let body = Box::new(HirStmt::expr(HirExpr::Unit));
-        let binding = (LocalId::from_raw(0), SymbolId::from_raw(1));
+        let binding = (LocalId::from_raw(0), Atom::new_inline("1"));
         let catch_body = Box::new(HirStmt::ret(None));
         let catch = HirCatchClause::new(Some(binding), catch_body);
         let finally = Box::new(HirStmt::ret(None));
@@ -468,7 +468,7 @@ mod tests {
         assert!(!HirStmt::Continue { label: None }.is_terminal());
         assert!(
             !HirStmt::Break {
-                label: Some(SymbolId::from_raw(1))
+                label: Some(Atom::new_inline("1"))
             }
             .is_terminal()
         );

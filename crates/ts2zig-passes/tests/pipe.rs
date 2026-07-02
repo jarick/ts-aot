@@ -1,53 +1,46 @@
-use ts2zig_core::{ModuleId, StringTable, SymbolTable, TypeTable};
+use ts2zig_core::{Atom, ModuleId, TypeTable};
 use ts2zig_ir_hir::{
     HirCallee, HirDecl, HirEnumVariant, HirExpr, HirFunction, HirProgram, HirStmt,
 };
 use ts2zig_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt};
 use ts2zig_passes::{PassContext, convert_program, lower_async, lower_enums, lower_result};
 
-fn fixture() -> (StringTable, SymbolTable, TypeTable, PassContext) {
-    let strings = StringTable::new();
-    let symbols = SymbolTable::new();
+fn fixture() -> (TypeTable, PassContext) {
     let types = TypeTable::new();
     let ctx = PassContext::default();
-    (strings, symbols, types, ctx)
+    (types, ctx)
 }
 
 fn unit_ty(types: &mut TypeTable) -> ts2zig_core::TypeId {
     types.intern(&ts2zig_core::Type::Void)
 }
 
-fn build_enum_decl(
-    name: &str,
-    variants: Vec<(&str, Option<i64>)>,
-    strings: &mut StringTable,
-    symbols: &mut SymbolTable,
-) -> HirDecl {
+fn build_enum_decl(name: &str, variants: Vec<(&str, Option<i64>)>) -> HirDecl {
     let variants = variants
         .into_iter()
         .map(|(n, v)| HirEnumVariant {
-            name: strings.intern(n),
+            name: Atom::new_inline(n),
             value: v.map(HirExpr::Int),
         })
         .collect();
     HirDecl::Enum {
-        name: symbols.intern(name),
+        name: Atom::new_inline(name),
         variants,
     }
 }
 
 #[test]
 fn convert_program_preserves_global_with_int_init() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
-    let name_sym = symbols.intern("ANSWER");
+    let (mut types, mut ctx) = fixture();
+    let name_sym = Atom::new_inline("ANSWER");
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Global {
-        name: name_sym,
+        name: name_sym.clone(),
         ty: types.intern(&ts2zig_core::Type::I64),
         init: Some(HirExpr::Int(42)),
     });
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
 
     assert_eq!(mir.declarations.len(), 1);
     let MirDecl::Global(g) = &mir.declarations[0] else {
@@ -68,18 +61,16 @@ fn convert_program_preserves_global_with_int_init() {
 
 #[test]
 fn lower_enums_then_convert_program_emits_globals_with_values() {
-    let (mut strings, mut symbols, mut types, mut ctx) = fixture();
+    let (mut types, mut ctx) = fixture();
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(build_enum_decl(
         "Color",
         vec![("Red", None), ("Green", Some(10)), ("Blue", None)],
-        &mut strings,
-        &mut symbols,
     ));
 
-    lower_enums(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
+    lower_enums(&mut hir, &mut types, &mut ctx);
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
 
     let globals: Vec<&MirGlobalDecl> = mir.globals().collect();
     assert_eq!(
@@ -90,7 +81,7 @@ fn lower_enums_then_convert_program_emits_globals_with_values() {
 
     let mut by_name: Vec<(String, i128)> = Vec::new();
     for g in globals {
-        let raw = symbols.resolve(g.name).unwrap_or("").to_owned();
+        let raw = g.name.as_str().to_owned();
         let val = match &g.init {
             Some(MirExpr::Int { value, .. }) => *value,
             other => panic!("expected Int init for {raw}, got {other:?}"),
@@ -109,8 +100,8 @@ fn lower_enums_then_convert_program_emits_globals_with_values() {
 
 #[test]
 fn convert_function_with_throw_sets_throws() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
-    let name = symbols.intern("oops");
+    let (mut types, mut ctx) = fixture();
+    let name = Atom::new_inline("oops");
 
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
@@ -128,7 +119,7 @@ fn convert_function_with_throw_sets_throws() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
     let fns: Vec<_> = mir.functions().collect();
     assert_eq!(fns.len(), 1);
     let f = fns[0];
@@ -141,8 +132,8 @@ fn convert_function_with_throw_sets_throws() {
 
 #[test]
 fn convert_function_without_throw_leaves_throws_none() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
-    let name = symbols.intern("ok");
+    let (mut types, mut ctx) = fixture();
+    let name = Atom::new_inline("ok");
 
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
@@ -160,7 +151,7 @@ fn convert_function_without_throw_leaves_throws_none() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
     assert!(f.throws.is_none());
     assert!(!f.effects.can_throw);
@@ -168,8 +159,8 @@ fn convert_function_without_throw_leaves_throws_none() {
 
 #[test]
 fn end_to_end_lower_result_rewrites_throw_to_return_result_err() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
-    let name = symbols.intern("oops");
+    let (mut types, mut ctx) = fixture();
+    let name = Atom::new_inline("oops");
 
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
@@ -187,7 +178,7 @@ fn end_to_end_lower_result_rewrites_throw_to_return_result_err() {
         async_info: None,
     }));
 
-    let mut mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mut mir = convert_program(&hir, &mut ctx);
     lower_result(&mut mir);
 
     let f = mir.functions().next().expect("one function");
@@ -202,17 +193,13 @@ fn end_to_end_lower_result_rewrites_throw_to_return_result_err() {
 
 #[test]
 fn end_to_end_enum_through_hir_to_mir_dump_includes_values() {
-    let (mut strings, mut symbols, mut types, mut ctx) = fixture();
+    let (mut types, mut ctx) = fixture();
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
-    hir.declarations.push(build_enum_decl(
-        "E",
-        vec![("A", None), ("B", None)],
-        &mut strings,
-        &mut symbols,
-    ));
+    hir.declarations
+        .push(build_enum_decl("E", vec![("A", None), ("B", None)]));
 
-    lower_enums(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    lower_enums(&mut hir, &mut types, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
     let text = mir.dump_text();
     assert!(text.contains("global"), "expected global in dump:\n{text}");
 
@@ -221,7 +208,7 @@ fn end_to_end_enum_through_hir_to_mir_dump_includes_values() {
     let mut by_name: Vec<(String, i128)> = globals
         .into_iter()
         .map(|g| {
-            let raw = symbols.resolve(g.name).unwrap_or("").to_owned();
+            let raw = g.name.as_str().to_owned();
             let val = match &g.init {
                 Some(MirExpr::Int { value, .. }) => *value,
                 other => panic!("expected Int init for {raw}, got {other:?}"),
@@ -247,20 +234,18 @@ fn end_to_end_enum_through_hir_to_mir_dump_includes_values() {
 fn build_enum_decl_returning_sym(
     name: &str,
     variants: Vec<(&str, Option<i64>)>,
-    strings: &mut StringTable,
-    symbols: &mut SymbolTable,
-) -> (HirDecl, ts2zig_core::SymbolId) {
-    let enum_name = symbols.intern(name);
+) -> (HirDecl, ts2zig_core::Atom) {
+    let enum_name = Atom::new_inline(name);
     let variants = variants
         .into_iter()
         .map(|(n, v)| HirEnumVariant {
-            name: strings.intern(n),
+            name: Atom::new_inline(n),
             value: v.map(HirExpr::Int),
         })
         .collect();
     (
         HirDecl::Enum {
-            name: enum_name,
+            name: enum_name.clone(),
             variants,
         },
         enum_name,
@@ -269,34 +254,30 @@ fn build_enum_decl_returning_sym(
 
 #[test]
 fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
-    let (mut strings, mut symbols, mut types, mut ctx) = fixture();
+    let (mut types, mut ctx) = fixture();
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
 
-    let (enum_decl, color_sym) = build_enum_decl_returning_sym(
-        "Color",
-        vec![("Red", None), ("Green", Some(10))],
-        &mut strings,
-        &mut symbols,
-    );
+    let (enum_decl, color_sym) =
+        build_enum_decl_returning_sym("Color", vec![("Red", None), ("Green", Some(10))]);
     hir.declarations.push(enum_decl);
 
     let typed_id = types.intern(&ts2zig_core::Type::I64);
-    let green_name = symbols.intern("Green");
-    let fn_name = symbols.intern("pick");
+    let green_name = Atom::new_inline("Green");
+    let fn_name = Atom::new_inline("pick");
 
     hir.declarations.push(HirDecl::Function(HirFunction {
-        name: fn_name,
+        name: fn_name.clone(),
         params: Vec::new(),
         ret: typed_id,
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Field {
                 owner: Box::new(HirExpr::Global {
-                    name: color_sym,
+                    name: color_sym.clone(),
                     ty: typed_id,
                 }),
                 field: ts2zig_core::FieldId::from_raw(0),
-                field_name: green_name,
+                field_name: green_name.clone(),
                 ty: typed_id,
             }),
         }],
@@ -307,13 +288,13 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
         async_info: None,
     }));
 
-    lower_enums(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    lower_enums(&mut hir, &mut types, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
 
     let fns: Vec<_> = mir.functions().collect();
     assert_eq!(fns.len(), 1);
     let f = fns[0];
-    assert_eq!(f.name, fn_name);
+    assert_eq!(f.name, fn_name.clone());
 
     let MirStmt::Return(Some(ret_expr)) = &f.body.block.stmts[0] else {
         panic!(
@@ -327,13 +308,13 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
             ret_expr
         );
     };
-    let expected = symbols.intern("Color.Green");
+    let expected = Atom::new_inline("Color.Green");
     assert_eq!(
         *resolved, expected,
         "Field(Global(Color), Green) must rewrite to Global(Color.Green)"
     );
 
-    let text = mir.dump_with_symbols(&symbols);
+    let text = mir.dump_text();
     assert!(
         text.contains("Color.Green"),
         "dump must show the namespaced global:\n{text}"
@@ -343,11 +324,10 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
 fn await_promise_resolve_call(
     arg: HirExpr,
     arg_ty: ts2zig_core::TypeId,
-    symbols: &mut SymbolTable,
     types: &mut TypeTable,
 ) -> HirExpr {
-    let promise_sym = symbols.intern("Promise");
-    let resolve_sym = symbols.intern("resolve");
+    let promise_sym = Atom::new_inline("Promise");
+    let resolve_sym = Atom::new_inline("resolve");
     let promise_ty = types.intern(&ts2zig_core::Type::I64);
     HirExpr::Await {
         expr: Box::new(HirExpr::Call {
@@ -369,9 +349,9 @@ fn await_promise_resolve_call(
 
 #[test]
 fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
+    let (mut types, mut ctx) = fixture();
     let typed_id = types.intern(&ts2zig_core::Type::I64);
-    let fn_name = symbols.intern("greet");
+    let fn_name = Atom::new_inline("greet");
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
@@ -382,7 +362,6 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
             value: Some(await_promise_resolve_call(
                 HirExpr::Int(42),
                 typed_id,
-                &mut symbols,
                 &mut types,
             )),
         }],
@@ -397,11 +376,11 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
         }),
     }));
 
-    let stats = lower_async(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
+    let stats = lower_async(&mut hir, &mut types, &mut ctx);
     assert_eq!(stats.inlined_promise_resolve, 1);
     assert_eq!(stats.cleared_async_info, 1);
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
     let await_count = f
         .body
@@ -431,10 +410,10 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
 
 #[test]
 fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
-    let (strings, mut symbols, mut types, mut ctx) = fixture();
+    let (mut types, mut ctx) = fixture();
     let typed_id = types.intern(&ts2zig_core::Type::I64);
-    let fn_name = symbols.intern("waitFor");
-    let callee_sym = symbols.intern("realPromise");
+    let fn_name = Atom::new_inline("waitFor");
+    let callee_sym = Atom::new_inline("realPromise");
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
@@ -465,14 +444,14 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
         }),
     }));
 
-    let stats = lower_async(&mut hir, &strings, &mut symbols, &mut types, &mut ctx);
+    let stats = lower_async(&mut hir, &mut types, &mut ctx);
     assert_eq!(stats.inlined_promise_resolve, 0);
     assert_eq!(
         stats.cleared_async_info, 1,
         "still clears async_info on the function"
     );
 
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut ctx);
+    let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
     assert!(
         f.body

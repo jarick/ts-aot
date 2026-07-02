@@ -391,12 +391,12 @@ fn expr_unary_carries_op_expr_ty() {
 fn local_decl_carries_id_name_ty_mutable() {
     let d = MirLocalDecl {
         id: LocalId::from_raw(1),
-        name: SymbolId::from_raw(2),
+        name: Atom::new_inline("2"),
         ty: TypeId::from_raw(3),
         mutable: true,
     };
     assert_eq!(d.id, LocalId::from_raw(1));
-    assert_eq!(d.name, SymbolId::from_raw(2));
+    assert_eq!(d.name, Atom::new_inline("2"));
     assert_eq!(d.ty, TypeId::from_raw(3));
     assert!(d.mutable);
 }

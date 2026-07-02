@@ -1,9 +1,9 @@
-use ts2zig_core::{Span, SymbolId, TypeId};
+use ts2zig_core::{Atom, Span, TypeId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PassError {
     UnresolvedSymbol {
-        name: SymbolId,
+        name: Atom,
         span: Span,
     },
     UnresolvedType {
@@ -11,7 +11,7 @@ pub enum PassError {
         span: Span,
     },
     DuplicateDefinition {
-        name: SymbolId,
+        name: Atom,
         first: Span,
         second: Span,
     },
@@ -65,11 +65,11 @@ impl std::fmt::Display for PassError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnresolvedSymbol { name, .. } => {
-                write!(f, "unresolved symbol #{}", name.raw())
+                write!(f, "unresolved symbol {name}")
             }
             Self::UnresolvedType { ty, .. } => write!(f, "unresolved type #{}", ty.raw()),
             Self::DuplicateDefinition { name, .. } => {
-                write!(f, "duplicate definition of symbol #{}", name.raw())
+                write!(f, "duplicate definition of symbol {name}")
             }
             Self::ArityMismatch { expected, got, .. } => {
                 write!(f, "expected {expected} arguments, got {got}")
@@ -94,7 +94,7 @@ mod tests {
     #[test]
     fn unresolved_symbol_carries_span_and_code() {
         let err = PassError::UnresolvedSymbol {
-            name: SymbolId::from_raw(7),
+            name: Atom::new_inline("7"),
             span: Span::new(10, 12),
         };
         assert_eq!(err.span(), Some(Span::new(10, 12)));
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn duplicate_definition_uses_second_span() {
         let err = PassError::DuplicateDefinition {
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             first: Span::new(0, 1),
             second: Span::new(20, 25),
         };
@@ -168,7 +168,7 @@ mod tests {
     fn error_codes_are_distinct() {
         let errs = [
             PassError::UnresolvedSymbol {
-                name: SymbolId::from_raw(0),
+                name: Atom::new_inline("0"),
                 span: Span::new(0, 1),
             },
             PassError::UnresolvedType {
@@ -176,7 +176,7 @@ mod tests {
                 span: Span::new(0, 1),
             },
             PassError::DuplicateDefinition {
-                name: SymbolId::from_raw(0),
+                name: Atom::new_inline("0"),
                 first: Span::new(0, 1),
                 second: Span::new(2, 3),
             },

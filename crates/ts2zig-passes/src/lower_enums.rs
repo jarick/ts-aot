@@ -1,29 +1,23 @@
 use std::collections::HashMap;
 
-use ts2zig_core::{Span, StringTable, SymbolId, SymbolTable, Type, TypeTable};
+use ts2zig_core::{Atom, Span, Type, TypeTable};
 use ts2zig_ir_hir::{HirDecl, HirExpr, HirProgram, HirStmt};
 
 use crate::PassContext;
 
-pub fn lower_enums(
-    program: &mut HirProgram,
-    strings: &StringTable,
-    symbols: &mut SymbolTable,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
-) {
+pub fn lower_enums(program: &mut HirProgram, types: &mut TypeTable, ctx: &mut PassContext) {
     let i64_ty = types.intern(&Type::I64);
     let mut rewritten: Vec<HirDecl> = Vec::with_capacity(program.declarations.len());
-    let mut variant_map: HashMap<(SymbolId, SymbolId), SymbolId> = HashMap::new();
+    let mut variant_map: HashMap<(Atom, Atom), Atom> = HashMap::new();
 
     for decl in program.declarations.drain(..) {
         match decl {
             HirDecl::Enum { name, variants } => {
+                let enum_raw = name.as_str().to_owned();
                 rewritten.push(HirDecl::TypeAlias {
-                    name,
+                    name: name.clone(),
                     target: i64_ty,
                 });
-                let enum_raw = symbols.resolve(name).unwrap_or("").to_owned();
                 let mut next_value: i128 = 0;
                 for variant in variants {
                     let value: i64 = match variant.value {
@@ -49,10 +43,10 @@ pub fn lower_enums(
                             v
                         }
                     };
-                    let raw = strings.resolve(variant.name).unwrap_or("");
+                    let raw = variant.name.as_str();
                     let namespaced = format!("{enum_raw}.{raw}");
-                    let namespaced_sym = symbols.intern(&namespaced);
-                    variant_map.insert((name, symbols.intern(raw)), namespaced_sym);
+                    let namespaced_sym = Atom::from(namespaced);
+                    variant_map.insert((name.clone(), variant.name), namespaced_sym.clone());
                     rewritten.push(HirDecl::Global {
                         name: namespaced_sym,
                         ty: i64_ty,
@@ -73,7 +67,7 @@ pub fn lower_enums(
     }
 }
 
-fn rewrite_decl(decl: &mut HirDecl, map: &HashMap<(SymbolId, SymbolId), SymbolId>) {
+fn rewrite_decl(decl: &mut HirDecl, map: &HashMap<(Atom, Atom), Atom>) {
     match decl {
         HirDecl::Function(f) => rewrite_body(&mut f.body, map),
         HirDecl::Class(c) => {
@@ -93,13 +87,13 @@ fn rewrite_decl(decl: &mut HirDecl, map: &HashMap<(SymbolId, SymbolId), SymbolId
     }
 }
 
-fn rewrite_body(body: &mut [HirStmt], map: &HashMap<(SymbolId, SymbolId), SymbolId>) {
+fn rewrite_body(body: &mut [HirStmt], map: &HashMap<(Atom, Atom), Atom>) {
     for stmt in body.iter_mut() {
         rewrite_stmt(stmt, map);
     }
 }
 
-fn rewrite_stmt(stmt: &mut HirStmt, map: &HashMap<(SymbolId, SymbolId), SymbolId>) {
+fn rewrite_stmt(stmt: &mut HirStmt, map: &HashMap<(Atom, Atom), Atom>) {
     match stmt {
         HirStmt::Block(stmts) => rewrite_body(stmts, map),
         HirStmt::Let { init, .. } => {
@@ -160,7 +154,7 @@ fn rewrite_stmt(stmt: &mut HirStmt, map: &HashMap<(SymbolId, SymbolId), SymbolId
     }
 }
 
-fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(SymbolId, SymbolId), SymbolId>) {
+fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>) {
     match expr {
         HirExpr::Field {
             owner,
@@ -169,14 +163,14 @@ fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(SymbolId, SymbolId), SymbolId
             ..
         } => {
             let enum_name = match owner.as_ref() {
-                HirExpr::Global { name, .. } => Some(*name),
+                HirExpr::Global { name, .. } => Some(name.clone()),
                 _ => None,
             };
             if let Some(enum_name) = enum_name
-                && let Some(&namespaced) = map.get(&(enum_name, *field_name))
+                && let Some(namespaced) = map.get(&(enum_name, field_name.clone()))
             {
                 *expr = HirExpr::Global {
-                    name: namespaced,
+                    name: namespaced.clone(),
                     ty: *ty,
                 };
             } else {
@@ -251,10 +245,7 @@ fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(SymbolId, SymbolId), SymbolId
     }
 }
 
-fn rewrite_callee(
-    callee: &mut ts2zig_ir_hir::HirCallee,
-    map: &HashMap<(SymbolId, SymbolId), SymbolId>,
-) {
+fn rewrite_callee(callee: &mut ts2zig_ir_hir::HirCallee, map: &HashMap<(Atom, Atom), Atom>) {
     match callee {
         ts2zig_ir_hir::HirCallee::Function(_)
         | ts2zig_ir_hir::HirCallee::Closure(_)
@@ -267,31 +258,27 @@ fn rewrite_callee(
 mod tests {
     use super::*;
     use crate::PassContext;
-    use ts2zig_core::{StringId, SymbolId, TypeTable};
+    use ts2zig_core::{Atom, TypeTable};
     use ts2zig_ir_hir::HirEnumVariant;
 
     fn enum_decl(name: u32, variants: Vec<(u32, Option<i64>)>) -> HirDecl {
         HirDecl::Enum {
-            name: SymbolId::from_raw(name),
+            name: Atom::from(format!("e{}", name)),
             variants: variants
                 .into_iter()
                 .map(|(n, v)| HirEnumVariant {
-                    name: StringId::from_raw(n),
+                    name: Atom::from(format!("v{}", n)),
                     value: v.map(HirExpr::Int),
                 })
                 .collect(),
         }
     }
 
-    fn setup() -> (HirProgram, StringTable, SymbolTable, TypeTable, PassContext) {
-        let strings = StringTable::new();
-        let symbols = SymbolTable::new();
+    fn setup() -> (HirProgram, TypeTable, PassContext) {
         let types = TypeTable::new();
         let ctx = PassContext::default();
         (
             HirProgram::new(ts2zig_core::ModuleId::from_raw(0)),
-            strings,
-            symbols,
             types,
             ctx,
         )
@@ -307,10 +294,10 @@ mod tests {
 
     #[test]
     fn enum_with_no_variants_produces_only_typealias() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program.declarations.push(enum_decl(1, vec![]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let out = collect_enum_outputs(&program);
         assert_eq!(out.len(), 1);
@@ -319,12 +306,12 @@ mod tests {
 
     #[test]
     fn variants_get_auto_incremented_values_starting_from_zero() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program
             .declarations
             .push(enum_decl(1, vec![(10, None), (11, None), (12, None)]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let out = collect_enum_outputs(&program);
         assert_eq!(out.len(), 4);
@@ -332,7 +319,7 @@ mod tests {
         let HirDecl::TypeAlias { name, .. } = out[0] else {
             panic!("expected TypeAlias");
         };
-        assert_eq!(*name, SymbolId::from_raw(1));
+        assert_eq!(*name, Atom::new_inline("e1"));
 
         let values: Vec<i64> = out[1..]
             .iter()
@@ -349,13 +336,13 @@ mod tests {
 
     #[test]
     fn explicit_initialiser_advances_the_accumulator() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program.declarations.push(enum_decl(
             1,
             vec![(10, Some(10)), (11, None), (12, Some(20))],
         ));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let values: Vec<i64> = collect_enum_outputs(&program)[1..]
             .iter()
@@ -372,13 +359,13 @@ mod tests {
 
     #[test]
     fn non_enum_declarations_pass_through() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program.declarations.push(HirDecl::Interface {
-            name: SymbolId::from_raw(99),
+            name: Atom::new_inline("99"),
         });
         program.declarations.push(enum_decl(1, vec![(10, None)]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         assert_eq!(program.declarations.len(), 3);
         assert!(matches!(program.declarations[0], HirDecl::Interface { .. }));
@@ -388,7 +375,7 @@ mod tests {
 
     #[test]
     fn multiple_enums_get_independent_accumulators() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program
             .declarations
             .push(enum_decl(1, vec![(10, None), (11, None)]));
@@ -396,7 +383,7 @@ mod tests {
             .declarations
             .push(enum_decl(2, vec![(20, None), (21, Some(100)), (22, None)]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let values: Vec<i64> = program
             .declarations
@@ -414,17 +401,17 @@ mod tests {
 
     #[test]
     fn empty_program_is_a_noop() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let (mut program, mut types, mut ctx) = setup();
+        lower_enums(&mut program, &mut types, &mut ctx);
         assert!(program.declarations.is_empty());
     }
 
     #[test]
     fn variant_name_is_preserved_on_global() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program.declarations.push(enum_decl(1, vec![(42, Some(7))]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let HirDecl::Global { init, .. } = &program.declarations[1] else {
             panic!("expected Global");
@@ -434,20 +421,20 @@ mod tests {
 
     #[test]
     fn float_variant_initialiser_falls_back_to_accumulator() {
-        let (mut program, mut strings, mut symbols, mut types, mut ctx) = setup();
-        let value_str = strings.intern("1.5");
+        let (mut program, mut types, mut ctx) = setup();
+        let value_str = Atom::new_inline("1.5");
         program
             .declarations
             .push(enum_decl(1, vec![(10, None), (11, None)]));
         // Mutate the just-pushed enum to inject a Float initialiser.
         if let HirDecl::Enum { variants, .. } = &mut program.declarations[0] {
             variants.push(HirEnumVariant {
-                name: StringId::from_raw(12),
-                value: Some(HirExpr::Float(u64::from(value_str.raw()))),
+                name: Atom::new_inline("12"),
+                value: Some(HirExpr::Float(value_str.as_str().parse().unwrap_or(0))),
             });
         }
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let values: Vec<i64> = program
             .declarations
@@ -465,12 +452,12 @@ mod tests {
 
     #[test]
     fn i64_type_is_shared_across_all_emitted_decls() {
-        let (mut program, strings, mut symbols, mut types, mut ctx) = setup();
+        let (mut program, mut types, mut ctx) = setup();
         program
             .declarations
             .push(enum_decl(1, vec![(10, None), (11, None)]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let alias_ty = match &program.declarations[0] {
             HirDecl::TypeAlias { target, .. } => *target,
@@ -488,84 +475,71 @@ mod tests {
         assert_eq!(global_ty, global_ty2);
     }
 
-    fn interned_enum_decl(
-        enum_name: &str,
-        variants: Vec<(&str, Option<i64>)>,
-        strings: &mut StringTable,
-        symbols: &mut SymbolTable,
-    ) -> HirDecl {
+    fn interned_enum_decl(enum_name: &str, variants: Vec<(&str, Option<i64>)>) -> HirDecl {
         let variants = variants
             .into_iter()
             .map(|(n, v)| HirEnumVariant {
-                name: strings.intern(n),
+                name: Atom::new_inline(n),
                 value: v.map(HirExpr::Int),
             })
             .collect();
         HirDecl::Enum {
-            name: symbols.intern(enum_name),
+            name: Atom::new_inline(enum_name),
             variants,
         }
     }
 
     #[test]
     fn variant_globals_are_namespaced_by_enum() {
-        let (mut program, mut strings, mut symbols, mut types, mut ctx) = setup();
-        program.declarations.push(interned_enum_decl(
-            "Color",
-            vec![("Red", None)],
-            &mut strings,
-            &mut symbols,
-        ));
-        program.declarations.push(interned_enum_decl(
-            "Shape",
-            vec![("Red", None)],
-            &mut strings,
-            &mut symbols,
-        ));
+        let (mut program, mut types, mut ctx) = setup();
+        program
+            .declarations
+            .push(interned_enum_decl("Color", vec![("Red", None)]));
+        program
+            .declarations
+            .push(interned_enum_decl("Shape", vec![("Red", None)]));
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let names: Vec<String> = program
             .declarations
             .iter()
             .filter_map(|d| match d {
-                HirDecl::Global { name, .. } => {
-                    Some(symbols.resolve(*name).unwrap_or("").to_owned())
-                }
+                HirDecl::Global { name, .. } => Some(name.as_str().to_owned()),
                 _ => None,
             })
             .collect();
         assert_eq!(
             names,
             vec!["Color.Red".to_owned(), "Shape.Red".to_owned()],
-            "variant globals must be namespaced to avoid SymbolId collisions"
+            "variant globals must be namespaced to avoid Atom collisions"
         );
     }
 
     #[test]
     fn accumulator_overflow_emits_diagnostic_and_saturates() {
-        let (mut program, mut strings, mut symbols, mut types, mut ctx) = setup();
-        let overflow_name = strings.intern("MAX_VARIANT");
+        let (mut program, mut types, mut ctx) = setup();
+        let overflow_name = Atom::new_inline("MAX_VARIANT");
         let variants = vec![
             HirEnumVariant {
-                name: overflow_name,
+                name: overflow_name.clone(),
                 value: Some(HirExpr::Int(i64::MAX - 1)),
             },
             HirEnumVariant {
-                name: overflow_name,
+                name: overflow_name.clone(),
                 value: None,
             },
             HirEnumVariant {
-                name: overflow_name,
+                name: overflow_name.clone(),
                 value: None,
             },
         ];
         program.declarations.push(HirDecl::Enum {
-            name: symbols.intern("O"),
+            name: Atom::new_inline("O"),
             variants,
         });
 
-        lower_enums(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        lower_enums(&mut program, &mut types, &mut ctx);
 
         let values: Vec<i64> = program
             .declarations

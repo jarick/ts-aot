@@ -1,4 +1,4 @@
-use ts2zig_core::{FieldId, FunctionId, LocalId, StringId, SymbolId, TypeId};
+use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HirBinaryOp {
@@ -40,7 +40,7 @@ pub enum HirCallee {
     Function(FunctionId),
     Indirect(Box<HirExpr>),
     Closure(LocalId),
-    Runtime { name: StringId, ty: TypeId },
+    Runtime { name: Atom, ty: TypeId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,7 +49,7 @@ pub enum HirExpr {
     Bool(bool),
     Int(i64),
     Float(u64),
-    String(StringId),
+    String(Atom),
     Null,
     Undefined,
 
@@ -58,13 +58,13 @@ pub enum HirExpr {
         ty: TypeId,
     },
     Global {
-        name: SymbolId,
+        name: Atom,
         ty: TypeId,
     },
     Field {
         owner: Box<HirExpr>,
         field: FieldId,
-        field_name: SymbolId,
+        field_name: Atom,
         ty: TypeId,
     },
     Index {

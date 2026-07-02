@@ -1,3 +1,5 @@
+pub use oxc_span::Atom;
+
 macro_rules! define_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -34,8 +36,6 @@ define_id!(StructId);
 define_id!(FunctionId);
 define_id!(FieldId);
 define_id!(LocalId);
-define_id!(SymbolId);
-define_id!(StringId);
 define_id!(UnionId);
 define_id!(EnumId);
 define_id!(VariantId);
@@ -71,5 +71,13 @@ mod tests {
         let id = TypeId::from_raw(123);
         let raw: u32 = id.into();
         assert_eq!(raw, 123);
+    }
+
+    #[test]
+    fn atom_dedup() {
+        let a: Atom = Atom::from("Promise");
+        let b: Atom = Atom::from("Promise");
+        assert_eq!(a, b);
+        assert_eq!(a.as_str(), "Promise");
     }
 }

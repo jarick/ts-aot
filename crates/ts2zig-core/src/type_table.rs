@@ -1,44 +1,48 @@
+use std::collections::HashMap;
+
 use crate::ids::TypeId;
-use crate::interner::Interner;
 use crate::ty::Type;
 
-#[derive(Debug, Clone)]
-pub struct TypeTable(Interner<Type, TypeId>);
-
-impl Default for TypeTable {
-    fn default() -> Self {
-        Self(Interner::new())
-    }
+#[derive(Debug, Clone, Default)]
+pub struct TypeTable {
+    types: Vec<Type>,
+    index: HashMap<Type, TypeId>,
 }
 
 impl TypeTable {
     #[must_use]
     pub fn new() -> Self {
-        Self(Interner::new())
+        Self::default()
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.types.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.types.is_empty()
     }
 
     pub fn intern(&mut self, ty: &Type) -> TypeId {
-        self.0.intern(ty)
+        if let Some(&id) = self.index.get(ty) {
+            return id;
+        }
+        let id = TypeId::from_raw(u32::try_from(self.types.len()).expect("type table overflow"));
+        self.types.push(ty.clone());
+        self.index.insert(ty.clone(), id);
+        id
     }
 
     #[must_use]
     pub fn resolve(&self, id: TypeId) -> Option<&Type> {
-        self.0.resolve(id)
+        self.types.get(id.raw() as usize)
     }
 
     #[must_use]
     pub fn types(&self) -> &[Type] {
-        self.0.values()
+        &self.types
     }
 }
 
@@ -63,6 +67,15 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(table.resolve(a), Some(&Type::I32));
         assert_eq!(table.resolve(b), Some(&Type::String));
+    }
+
+    #[test]
+    fn intern_dedupes_equal_types() {
+        let mut table = TypeTable::new();
+        let a = table.intern(&Type::I32);
+        let b = table.intern(&Type::I32);
+        assert_eq!(a, b);
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

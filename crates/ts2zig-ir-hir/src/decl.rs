@@ -1,6 +1,6 @@
 use crate::expr::HirExpr;
 use crate::stmt::HirStmt;
-use ts2zig_core::{GenericParamId, StringId, SymbolId, TypeId};
+use ts2zig_core::{Atom, GenericParamId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HirAsyncInfo {
@@ -11,27 +11,27 @@ pub enum HirAsyncInfo {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirParam {
-    pub name: StringId,
+    pub name: Atom,
     pub ty: TypeId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirField {
-    pub name: StringId,
+    pub name: Atom,
     pub ty: TypeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirEnumVariant {
-    pub name: StringId,
+    pub name: Atom,
     pub value: Option<HirExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirFunction {
-    pub name: SymbolId,
+    pub name: Atom,
     pub params: Vec<HirParam>,
     pub ret: TypeId,
     pub throws: Option<TypeId>,
@@ -46,7 +46,7 @@ pub struct HirFunction {
 impl Default for HirFunction {
     fn default() -> Self {
         Self {
-            name: SymbolId::from_raw(0),
+            name: Atom::from(""),
             params: Vec::new(),
             ret: TypeId::from_raw(0),
             throws: None,
@@ -62,11 +62,11 @@ impl Default for HirFunction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirClass {
-    pub name: SymbolId,
+    pub name: Atom,
     pub ty: TypeId,
     pub fields: Vec<HirField>,
     pub methods: Vec<HirFunction>,
-    pub extends: Option<SymbolId>,
+    pub extends: Option<Atom>,
     pub type_params: Vec<GenericParamId>,
 }
 
@@ -75,23 +75,23 @@ pub enum HirDecl {
     Function(HirFunction),
     Class(HirClass),
     TypeAlias {
-        name: SymbolId,
+        name: Atom,
         target: TypeId,
     },
     Enum {
-        name: SymbolId,
+        name: Atom,
         variants: Vec<HirEnumVariant>,
     },
     Global {
-        name: SymbolId,
+        name: Atom,
         ty: TypeId,
         init: Option<HirExpr>,
     },
     Interface {
-        name: SymbolId,
+        name: Atom,
     },
     Namespace {
-        name: SymbolId,
+        name: Atom,
         members: Vec<HirDecl>,
     },
 }
