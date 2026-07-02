@@ -1,4 +1,4 @@
-use ts2zig_core::{FieldId, FunctionId, LocalId, StringId, StructId, SymbolId, TypeId};
+use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, StructId, TypeId};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MirBlock {
@@ -40,7 +40,7 @@ pub struct MirBody {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MirLocalDecl {
     pub id: LocalId,
-    pub name: SymbolId,
+    pub name: Atom,
     pub ty: TypeId,
     pub mutable: bool,
 }
@@ -179,14 +179,14 @@ pub enum MirExpr {
         ty: TypeId,
     },
     String {
-        id: StringId,
+        id: Atom,
         ty: TypeId,
     },
     Null {
         ty: TypeId,
     },
     Local(LocalId),
-    Global(SymbolId),
+    Global(Atom),
     Field {
         base: Box<MirExpr>,
         field: FieldId,

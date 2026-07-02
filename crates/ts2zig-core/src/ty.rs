@@ -1,4 +1,4 @@
-use crate::ids::{StructId, SymbolId, TypeId};
+use crate::ids::{Atom, StructId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryKind {
@@ -49,7 +49,7 @@ pub enum Type {
         err: TypeId,
     },
     Named {
-        symbol: SymbolId,
+        symbol: Atom,
     },
     Error,
 }
@@ -164,12 +164,16 @@ mod tests {
     #[test]
     fn named_equality_depends_only_on_symbol() {
         let a = Type::Named {
-            symbol: SymbolId::from_raw(11),
+            symbol: Atom::from("Foo"),
         };
         let b = Type::Named {
-            symbol: SymbolId::from_raw(11),
+            symbol: Atom::from("Foo"),
+        };
+        let c = Type::Named {
+            symbol: Atom::from("Bar"),
         };
         assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

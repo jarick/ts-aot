@@ -1,4 +1,4 @@
-use ts2zig_core::{StringTable, SymbolId, SymbolTable, TypeTable};
+use ts2zig_core::{Atom, TypeTable};
 use ts2zig_ir_hir::{HirCallee, HirDecl, HirExpr, HirProgram, HirStmt};
 
 use crate::PassContext;
@@ -11,13 +11,11 @@ pub struct LowerAsyncStats {
 
 pub fn lower_async(
     program: &mut HirProgram,
-    _strings: &StringTable,
-    symbols: &mut SymbolTable,
     _types: &mut TypeTable,
     _ctx: &mut PassContext,
 ) -> LowerAsyncStats {
-    let promise_sym = symbols.intern("Promise");
-    let resolve_sym = symbols.intern("resolve");
+    let promise_sym = Atom::from("Promise");
+    let resolve_sym = Atom::from("resolve");
 
     let decl_shadows_promise = |d: &HirDecl| -> bool {
         match d {
@@ -34,7 +32,7 @@ pub fn lower_async(
         || program
             .imports
             .iter()
-            .any(|imp| imp.alias.unwrap_or(imp.name) == promise_sym);
+            .any(|imp| imp.alias.clone().unwrap_or_else(|| imp.name.clone()) == promise_sym);
     let can_rewrite_promise_resolve = !user_shadows_promise_builtin;
 
     let mut stats = LowerAsyncStats::default();
@@ -42,8 +40,8 @@ pub fn lower_async(
     for decl in &mut program.declarations {
         rewrite_decl(
             decl,
-            promise_sym,
-            resolve_sym,
+            &promise_sym,
+            &resolve_sym,
             can_rewrite_promise_resolve,
             &mut stats,
         );
@@ -54,8 +52,8 @@ pub fn lower_async(
 
 fn rewrite_decl(
     decl: &mut HirDecl,
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) {
@@ -110,8 +108,8 @@ fn rewrite_decl(
 
 fn rewrite_body(
     body: &mut [HirStmt],
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) {
@@ -128,8 +126,8 @@ fn rewrite_body(
 
 fn rewrite_stmt(
     stmt: &mut HirStmt,
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) {
@@ -344,8 +342,8 @@ fn rewrite_stmt(
 
 fn rewrite_expr(
     expr: &mut HirExpr,
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) {
@@ -372,8 +370,8 @@ fn rewrite_expr(
 
 fn try_inline_promise_resolve(
     expr: &mut HirExpr,
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) -> bool {
@@ -424,8 +422,8 @@ fn try_inline_promise_resolve(
 
 fn recurse_subexprs(
     expr: &mut HirExpr,
-    promise_sym: SymbolId,
-    resolve_sym: SymbolId,
+    promise_sym: &Atom,
+    resolve_sym: &Atom,
     can_rewrite_promise_resolve: bool,
     stats: &mut LowerAsyncStats,
 ) {
@@ -642,30 +640,20 @@ fn recurse_subexprs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ts2zig_core::{LocalId, ModuleId, StringTable, SymbolTable, TypeId};
+    use ts2zig_core::{Atom, LocalId, ModuleId, TypeId};
     use ts2zig_ir_hir::{HirFunction, HirParam};
 
-    fn fixture() -> (StringTable, SymbolTable, TypeTable, PassContext) {
-        (
-            StringTable::new(),
-            SymbolTable::new(),
-            TypeTable::new(),
-            PassContext::new(),
-        )
+    fn fixture() -> (TypeTable, PassContext) {
+        (TypeTable::new(), PassContext::new())
     }
 
     fn i64_type_id(types: &mut TypeTable) -> TypeId {
         types.intern(&ts2zig_core::Type::I64)
     }
 
-    fn promise_resolve_call(
-        arg: HirExpr,
-        arg_ty: TypeId,
-        symbols: &mut SymbolTable,
-        types: &mut TypeTable,
-    ) -> HirExpr {
-        let promise_sym = symbols.intern("Promise");
-        let resolve_sym = symbols.intern("resolve");
+    fn promise_resolve_call(arg: HirExpr, arg_ty: TypeId, types: &mut TypeTable) -> HirExpr {
+        let promise_sym = Atom::new_inline("Promise");
+        let resolve_sym = Atom::new_inline("resolve");
         let promise_ty = types.intern(&ts2zig_core::Type::Promise {
             ok: arg_ty,
             err: None,
@@ -685,21 +673,16 @@ mod tests {
         }
     }
 
-    fn await_promise_resolve(
-        arg: HirExpr,
-        arg_ty: TypeId,
-        symbols: &mut SymbolTable,
-        types: &mut TypeTable,
-    ) -> HirExpr {
+    fn await_promise_resolve(arg: HirExpr, arg_ty: TypeId, types: &mut TypeTable) -> HirExpr {
         HirExpr::Await {
-            expr: Box::new(promise_resolve_call(arg, arg_ty, symbols, types)),
+            expr: Box::new(promise_resolve_call(arg, arg_ty, types)),
             ty: arg_ty,
         }
     }
 
     fn body_returning(expr: HirExpr) -> HirFunction {
         HirFunction {
-            name: SymbolId::from_raw(u32::MAX),
+            name: Atom::new_inline("u32::MAX"),
             params: Vec::<HirParam>::new(),
             ret: TypeId::from_raw(0),
             throws: None,
@@ -727,17 +710,16 @@ mod tests {
 
     #[test]
     fn rewrites_await_promise_resolve_literal_to_await_arg() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let f = body_returning(await_promise_resolve(
             HirExpr::Int(42),
             typed_id,
-            &mut symbols,
             &mut types,
         ));
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
         assert_eq!(stats.cleared_async_info, 0);
@@ -758,7 +740,7 @@ mod tests {
 
     #[test]
     fn rewrites_await_promise_resolve_binary_expr_to_await_arg() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let inner = HirExpr::Binary {
             op: ts2zig_ir_hir::HirBinaryOp::Add,
@@ -766,15 +748,10 @@ mod tests {
             rhs: Box::new(HirExpr::Int(2)),
             ty: typed_id,
         };
-        let f = body_returning(await_promise_resolve(
-            inner,
-            typed_id,
-            &mut symbols,
-            &mut types,
-        ));
+        let f = body_returning(await_promise_resolve(inner, typed_id, &mut types));
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
         let HirDecl::Function(f) = &program.declarations[0] else {
@@ -791,9 +768,9 @@ mod tests {
 
     #[test]
     fn does_not_inline_await_of_other_call() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let callee_sym = symbols.intern("otherFn");
+        let callee_sym = Atom::new_inline("otherFn");
         let callee = HirExpr::Global {
             name: callee_sym,
             ty: typed_id,
@@ -810,7 +787,7 @@ mod tests {
         let f = body_returning(await_other);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
         let HirDecl::Function(f) = &program.declarations[0] else {
@@ -821,10 +798,10 @@ mod tests {
 
     #[test]
     fn does_not_inline_promise_reject_or_then() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let promise_sym = symbols.intern("Promise");
-        let reject_sym = symbols.intern("reject");
+        let promise_sym = Atom::new_inline("Promise");
+        let reject_sym = Atom::new_inline("reject");
         let promise_ty = typed_id;
         let reject_call = HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
@@ -846,17 +823,17 @@ mod tests {
         let f = body_returning(await_reject);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
     }
 
     #[test]
     fn does_not_inline_await_promise_resolve_without_args() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let promise_sym = symbols.intern("Promise");
-        let resolve_sym = symbols.intern("resolve");
+        let promise_sym = Atom::new_inline("Promise");
+        let resolve_sym = Atom::new_inline("resolve");
         let promise_ty = typed_id;
         let zero_args = HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
@@ -878,17 +855,16 @@ mod tests {
         let f = body_returning(await_zero_args);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
     }
 
     #[test]
     fn does_not_inline_await_promise_resolve_with_two_args() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let two_args_call =
-            promise_resolve_call(HirExpr::Int(1), typed_id, &mut symbols, &mut types);
+        let two_args_call = promise_resolve_call(HirExpr::Int(1), typed_id, &mut types);
         let extra_arg = HirExpr::Int(2);
         let augmented = match two_args_call {
             HirExpr::Call {
@@ -908,24 +884,23 @@ mod tests {
         let f = body_returning(await_two);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
     }
 
     #[test]
     fn pass_is_idempotent() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = build_program(HirDecl::Function(body_returning(await_promise_resolve(
             HirExpr::Int(99),
             typed_id,
-            &mut symbols,
             &mut types,
         ))));
 
-        let stats_first = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
-        let stats_second = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats_first = lower_async(&mut program, &mut types, &mut ctx);
+        let stats_second = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats_first.inlined_promise_resolve, 1);
         assert_eq!(stats_second.inlined_promise_resolve, 0);
@@ -933,22 +908,17 @@ mod tests {
 
     #[test]
     fn nested_await_promise_resolve_keeps_both_awaits() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let inner_await = HirExpr::Await {
-            expr: Box::new(promise_resolve_call(
-                HirExpr::Int(7),
-                typed_id,
-                &mut symbols,
-                &mut types,
-            )),
+            expr: Box::new(promise_resolve_call(HirExpr::Int(7), typed_id, &mut types)),
             ty: typed_id,
         };
-        let outer = await_promise_resolve(inner_await, typed_id, &mut symbols, &mut types);
+        let outer = await_promise_resolve(inner_await, typed_id, &mut types);
         let f = body_returning(outer);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 2,
@@ -979,33 +949,28 @@ mod tests {
 
     #[test]
     fn preserves_await_when_arg_is_promise_typed_local() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let type_id = i64_type_id(&mut types);
         let promise_string_ty = types.intern(&ts2zig_core::Type::Promise {
             ok: type_id,
             err: None,
         });
         let local_id = LocalId::from_raw(0);
-        let _ = symbols.intern("p");
+        let _ = Atom::new_inline("p");
         let p_local = HirExpr::Local {
             id: local_id,
             ty: promise_string_ty,
         };
         let f = HirFunction {
-            name: symbols.intern("__test_fn__"),
+            name: Atom::new_inline("__test_fn__"),
             params: Vec::<HirParam>::new(),
             ret: type_id,
             throws: None,
             body: vec![HirStmt::Let {
                 id: LocalId::from_raw(1),
-                name: symbols.intern("x"),
+                name: Atom::new_inline("x"),
                 ty: type_id,
-                init: Some(await_promise_resolve(
-                    p_local,
-                    type_id,
-                    &mut symbols,
-                    &mut types,
-                )),
+                init: Some(await_promise_resolve(p_local, type_id, &mut types)),
             }],
             is_async: true,
             is_generator: false,
@@ -1015,7 +980,7 @@ mod tests {
         };
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
@@ -1045,14 +1010,9 @@ mod tests {
 
     #[test]
     fn clears_async_info_on_function_with_async_info() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let mut f = body_returning(await_promise_resolve(
-            HirExpr::Int(5),
-            typed_id,
-            &mut symbols,
-            &mut types,
-        ));
+        let mut f = body_returning(await_promise_resolve(HirExpr::Int(5), typed_id, &mut types));
         f.async_info = Some(ts2zig_ir_hir::HirAsyncInfo::Promise {
             ok_ty: typed_id,
             err_ty: None,
@@ -1060,7 +1020,7 @@ mod tests {
         });
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.cleared_async_info, 1);
         let HirDecl::Function(f) = &program.declarations[0] else {
@@ -1071,12 +1031,11 @@ mod tests {
 
     #[test]
     fn clears_async_info_on_class_method() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut method = body_returning(await_promise_resolve(
             HirExpr::Int(11),
             typed_id,
-            &mut symbols,
             &mut types,
         ));
         method.async_info = Some(ts2zig_ir_hir::HirAsyncInfo::Promise {
@@ -1085,7 +1044,7 @@ mod tests {
             promise_ty: typed_id,
         });
         let class = ts2zig_ir_hir::HirClass {
-            name: symbols.intern("C"),
+            name: Atom::new_inline("C"),
             ty: types.intern(&ts2zig_core::Type::I64),
             fields: Vec::new(),
             methods: vec![method],
@@ -1094,7 +1053,7 @@ mod tests {
         };
         let mut program = build_program(HirDecl::Class(class));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
         assert_eq!(stats.cleared_async_info, 1);
@@ -1106,17 +1065,17 @@ mod tests {
 
     #[test]
     fn walks_let_init_expr() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let init = await_promise_resolve(HirExpr::Int(3), typed_id, &mut symbols, &mut types);
+        let init = await_promise_resolve(HirExpr::Int(3), typed_id, &mut types);
         let f = HirFunction {
-            name: symbols.intern("__test_fn__"),
+            name: Atom::new_inline("__test_fn__"),
             params: Vec::<HirParam>::new(),
             ret: typed_id,
             throws: None,
             body: vec![HirStmt::Let {
                 id: LocalId::from_raw(0),
-                name: symbols.intern("v"),
+                name: Atom::new_inline("v"),
                 ty: typed_id,
                 init: Some(init),
             }],
@@ -1128,18 +1087,18 @@ mod tests {
         };
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
     }
 
     #[test]
     fn walks_for_in_iter_expr() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let iter = await_promise_resolve(HirExpr::Int(1), typed_id, &mut symbols, &mut types);
+        let iter = await_promise_resolve(HirExpr::Int(1), typed_id, &mut types);
         let f = HirFunction {
-            name: symbols.intern("__test_fn__"),
+            name: Atom::new_inline("__test_fn__"),
             params: Vec::<HirParam>::new(),
             ret: typed_id,
             throws: None,
@@ -1158,7 +1117,7 @@ mod tests {
         };
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
@@ -1185,29 +1144,28 @@ mod tests {
 
     #[test]
     fn walks_global_init_expr() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let init = await_promise_resolve(HirExpr::Int(13), typed_id, &mut symbols, &mut types);
+        let init = await_promise_resolve(HirExpr::Int(13), typed_id, &mut types);
         let global = HirDecl::Global {
-            name: symbols.intern("G"),
+            name: Atom::new_inline("G"),
             ty: typed_id,
             init: Some(init),
         };
         let mut program = build_program(global);
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
     }
 
     #[test]
     fn walks_into_namespace_members() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let inner_init =
-            await_promise_resolve(HirExpr::Int(17), typed_id, &mut symbols, &mut types);
+        let inner_init = await_promise_resolve(HirExpr::Int(17), typed_id, &mut types);
         let inner_fn = HirDecl::Function(HirFunction {
-            name: symbols.intern("inner"),
+            name: Atom::new_inline("inner"),
             params: Vec::new(),
             ret: typed_id,
             throws: None,
@@ -1221,22 +1179,22 @@ mod tests {
             async_info: None,
         });
         let ns = HirDecl::Namespace {
-            name: symbols.intern("ns"),
+            name: Atom::new_inline("ns"),
             members: vec![inner_fn],
         };
         let mut program = build_program(ns);
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 1);
     }
 
     #[test]
     fn does_not_inline_when_owner_is_not_promise_global() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let other_global_sym = symbols.intern("MaybePromise");
-        let resolve_sym = symbols.intern("resolve");
+        let other_global_sym = Atom::new_inline("MaybePromise");
+        let resolve_sym = Atom::new_inline("resolve");
         let promise_ty = typed_id;
         let not_promise_call = HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
@@ -1258,17 +1216,17 @@ mod tests {
         let f = body_returning(await_other);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
     }
 
     #[test]
     fn does_not_inline_when_field_name_is_other_method() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let promise_sym = symbols.intern("Promise");
-        let then_sym = symbols.intern("then");
+        let promise_sym = Atom::new_inline("Promise");
+        let then_sym = Atom::new_inline("then");
         let promise_ty = typed_id;
         let call = HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
@@ -1290,18 +1248,18 @@ mod tests {
         let f = body_returning(await_then);
         let mut program = build_program(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(stats.inlined_promise_resolve, 0);
     }
 
     #[test]
     fn skips_when_user_declares_top_level_var_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Global {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             ty: typed_id,
             init: Some(HirExpr::Int(99)),
         });
@@ -1310,11 +1268,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(1),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1331,11 +1288,11 @@ mod tests {
 
     #[test]
     fn unrelated_top_level_var_does_not_block_rewrite() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Global {
-            name: symbols.intern("Counter"),
+            name: Atom::new_inline("Counter"),
             ty: typed_id,
             init: Some(HirExpr::Int(0)),
         });
@@ -1344,11 +1301,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(13),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
@@ -1358,12 +1314,12 @@ mod tests {
 
     #[test]
     fn skips_when_user_imports_promise() {
-        let (mut strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.imports.push(ts2zig_ir_hir::HirImport {
-            module: strings.intern("my-promise-lib"),
-            name: symbols.intern("Promise"),
+            module: Atom::new_inline("my-promise-lib"),
+            name: Atom::new_inline("Promise"),
             alias: None,
         });
         program
@@ -1371,11 +1327,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(11),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1385,13 +1340,13 @@ mod tests {
 
     #[test]
     fn skips_when_user_imports_promise_via_alias() {
-        let (mut strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.imports.push(ts2zig_ir_hir::HirImport {
-            module: strings.intern("my-promise-lib"),
-            name: symbols.intern("Promise"),
-            alias: Some(symbols.intern("P")),
+            module: Atom::new_inline("my-promise-lib"),
+            name: Atom::new_inline("Promise"),
+            alias: Some(Atom::new_inline("P")),
         });
         program
             .declarations
@@ -1399,11 +1354,11 @@ mod tests {
                 expr: Box::new(HirExpr::Call {
                     callee: ts2zig_ir_hir::HirCallee::Indirect(Box::new(HirExpr::Field {
                         owner: Box::new(HirExpr::Global {
-                            name: symbols.intern("P"),
+                            name: Atom::new_inline("P"),
                             ty: typed_id,
                         }),
                         field: ts2zig_core::FieldId::from_raw(0),
-                        field_name: symbols.intern("resolve"),
+                        field_name: Atom::new_inline("resolve"),
                         ty: typed_id,
                     })),
                     args: vec![HirExpr::Int(7)],
@@ -1412,7 +1367,7 @@ mod tests {
                 ty: typed_id,
             })));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1422,14 +1377,9 @@ mod tests {
 
     #[test]
     fn still_clears_async_info_when_promise_globally_shadowed() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let mut f = body_returning(await_promise_resolve(
-            HirExpr::Int(5),
-            typed_id,
-            &mut symbols,
-            &mut types,
-        ));
+        let mut f = body_returning(await_promise_resolve(HirExpr::Int(5), typed_id, &mut types));
         f.is_async = true;
         f.async_info = Some(ts2zig_ir_hir::HirAsyncInfo::Promise {
             ok_ty: typed_id,
@@ -1438,13 +1388,13 @@ mod tests {
         });
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Global {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             ty: typed_id,
             init: Some(HirExpr::Int(7)),
         });
         program.declarations.push(HirDecl::Function(f));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1466,11 +1416,11 @@ mod tests {
 
     #[test]
     fn skips_when_user_declares_top_level_function_named_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Function(HirFunction {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             params: Vec::new(),
             ret: typed_id,
             throws: None,
@@ -1486,11 +1436,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(5),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1500,13 +1449,13 @@ mod tests {
 
     #[test]
     fn skips_when_user_declares_top_level_class_named_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program
             .declarations
             .push(HirDecl::Class(ts2zig_ir_hir::HirClass {
-                name: symbols.intern("Promise"),
+                name: Atom::new_inline("Promise"),
                 ty: typed_id,
                 fields: Vec::new(),
                 methods: Vec::new(),
@@ -1518,11 +1467,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(7),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1532,11 +1480,11 @@ mod tests {
 
     #[test]
     fn skips_when_user_declares_top_level_namespace_named_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Namespace {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             members: Vec::new(),
         });
         program
@@ -1544,11 +1492,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(11),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1558,11 +1505,11 @@ mod tests {
 
     #[test]
     fn skips_when_user_declares_top_level_enum_named_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Enum {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             variants: Vec::new(),
         });
         program
@@ -1570,11 +1517,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(3),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 0,
@@ -1584,11 +1530,11 @@ mod tests {
 
     #[test]
     fn does_not_skip_for_top_level_type_alias_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::TypeAlias {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
             target: typed_id,
         });
         program
@@ -1596,11 +1542,10 @@ mod tests {
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(13),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
@@ -1610,22 +1555,21 @@ mod tests {
 
     #[test]
     fn does_not_skip_for_top_level_interface_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Interface {
-            name: symbols.intern("Promise"),
+            name: Atom::new_inline("Promise"),
         });
         program
             .declarations
             .push(HirDecl::Function(body_returning(await_promise_resolve(
                 HirExpr::Int(17),
                 typed_id,
-                &mut symbols,
                 &mut types,
             ))));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
@@ -1635,11 +1579,11 @@ mod tests {
 
     #[test]
     fn skips_when_nested_function_declares_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
-        let promise_sym_inner = symbols.intern("Promise");
+        let promise_sym_inner = Atom::new_inline("Promise");
         let outer = HirFunction {
-            name: symbols.intern("__test_fn_outer__"),
+            name: Atom::new_inline("__test_fn_outer__"),
             params: Vec::<HirParam>::new(),
             ret: typed_id,
             throws: None,
@@ -1649,12 +1593,7 @@ mod tests {
                 ret: typed_id,
                 throws: None,
                 body: vec![HirStmt::Return {
-                    value: Some(await_promise_resolve(
-                        HirExpr::Int(7),
-                        typed_id,
-                        &mut symbols,
-                        &mut types,
-                    )),
+                    value: Some(await_promise_resolve(HirExpr::Int(7), typed_id, &mut types)),
                 }],
                 is_async: false,
                 is_generator: false,
@@ -1671,7 +1610,7 @@ mod tests {
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Function(outer));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         let HirDecl::Function(f) = &program.declarations[0] else {
             panic!("expected outer Function");
@@ -1688,15 +1627,15 @@ mod tests {
 
     #[test]
     fn does_not_skip_when_inner_function_does_not_shadow_promise() {
-        let (strings, mut symbols, mut types, mut ctx) = fixture();
+        let (mut types, mut ctx) = fixture();
         let typed_id = i64_type_id(&mut types);
         let outer = HirFunction {
-            name: symbols.intern("__test_fn_outer__"),
+            name: Atom::new_inline("__test_fn_outer__"),
             params: Vec::<HirParam>::new(),
             ret: typed_id,
             throws: None,
             body: vec![HirStmt::Decl(HirDecl::Function(HirFunction {
-                name: symbols.intern("__test_fn_helper__"),
+                name: Atom::new_inline("__test_fn_helper__"),
                 params: Vec::<HirParam>::new(),
                 ret: typed_id,
                 throws: None,
@@ -1704,7 +1643,6 @@ mod tests {
                     value: Some(await_promise_resolve(
                         HirExpr::Int(11),
                         typed_id,
-                        &mut symbols,
                         &mut types,
                     )),
                 }],
@@ -1723,7 +1661,7 @@ mod tests {
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         program.declarations.push(HirDecl::Function(outer));
 
-        let stats = lower_async(&mut program, &strings, &mut symbols, &mut types, &mut ctx);
+        let stats = lower_async(&mut program, &mut types, &mut ctx);
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,

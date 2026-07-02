@@ -1,18 +1,18 @@
-use ts2zig_core::{ModuleId, SymbolId};
+use ts2zig_core::{Atom, ModuleId};
 
 use crate::decl::{MirDecl, MirFunctionDecl, MirGlobalDecl, MirStructDecl};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MirImport {
     pub module: String,
-    pub symbol: SymbolId,
-    pub alias: Option<SymbolId>,
+    pub symbol: Atom,
+    pub alias: Option<Atom>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MirExport {
-    pub symbol: SymbolId,
-    pub alias: Option<SymbolId>,
+    pub symbol: Atom,
+    pub alias: Option<Atom>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,12 +79,12 @@ mod tests {
     use crate::decl::{
         FunctionEffects, FunctionKind, MirDecl, MirFieldDecl, MirFunctionDecl, MirStructDecl,
     };
-    use ts2zig_core::{FieldId, FunctionId, LocalId, StructId, SymbolId, TypeId, Visibility};
+    use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, StructId, TypeId, Visibility};
 
     fn empty_function(id: u32) -> MirFunctionDecl {
         MirFunctionDecl {
             id: FunctionId::from_raw(id),
-            name: SymbolId::from_raw(id + 1),
+            name: Atom::from(format!("fn{}", id)),
             export_name: None,
             params: Vec::new(),
             ret: TypeId::from_raw(0),
@@ -98,7 +98,7 @@ mod tests {
     fn empty_struct(id: u32) -> MirStructDecl {
         MirStructDecl {
             id: StructId::from_raw(id),
-            name: SymbolId::from_raw(id + 1),
+            name: Atom::from(format!("s{}", id)),
             fields: Vec::new(),
             methods: Vec::new(),
         }
@@ -133,19 +133,19 @@ mod tests {
     fn import_carries_module_symbol_alias() {
         let import = MirImport {
             module: "./other".to_owned(),
-            symbol: SymbolId::from_raw(1),
-            alias: Some(SymbolId::from_raw(2)),
+            symbol: Atom::new_inline("1"),
+            alias: Some(Atom::new_inline("2")),
         };
         assert_eq!(import.module, "./other");
-        assert_eq!(import.symbol, SymbolId::from_raw(1));
-        assert_eq!(import.alias, Some(SymbolId::from_raw(2)));
+        assert_eq!(import.symbol, Atom::new_inline("1"));
+        assert_eq!(import.alias, Some(Atom::new_inline("2")));
     }
 
     #[test]
     fn import_without_alias_is_none() {
         let import = MirImport {
             module: "./a".to_owned(),
-            symbol: SymbolId::from_raw(3),
+            symbol: Atom::new_inline("3"),
             alias: None,
         };
         assert!(import.alias.is_none());
@@ -154,15 +154,15 @@ mod tests {
     #[test]
     fn export_with_and_without_alias() {
         let plain = MirExport {
-            symbol: SymbolId::from_raw(1),
+            symbol: Atom::new_inline("1"),
             alias: None,
         };
         let renamed = MirExport {
-            symbol: SymbolId::from_raw(2),
-            alias: Some(SymbolId::from_raw(3)),
+            symbol: Atom::new_inline("2"),
+            alias: Some(Atom::new_inline("3")),
         };
         assert!(plain.alias.is_none());
-        assert_eq!(renamed.alias, Some(SymbolId::from_raw(3)));
+        assert_eq!(renamed.alias, Some(Atom::new_inline("3")));
     }
 
     #[test]
@@ -171,10 +171,10 @@ mod tests {
         prog.push_decl(MirDecl::Function(empty_function(0)));
         prog.push_decl(MirDecl::Struct(MirStructDecl {
             id: StructId::from_raw(2),
-            name: SymbolId::from_raw(3),
+            name: Atom::new_inline("3"),
             fields: vec![MirFieldDecl {
                 id: FieldId::from_raw(0),
-                name: SymbolId::from_raw(10),
+                name: Atom::new_inline("10"),
                 ty: TypeId::from_raw(0),
                 mutable: false,
                 visibility: Visibility::Public,
@@ -191,7 +191,7 @@ mod tests {
     fn function_local_id_roundtrip() {
         let f = MirFunctionDecl {
             id: FunctionId::from_raw(42),
-            name: SymbolId::from_raw(7),
+            name: Atom::new_inline("7"),
             export_name: Some("render".to_owned()),
             params: vec![],
             ret: TypeId::from_raw(0),

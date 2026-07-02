@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts2zig_core::{FunctionId, LocalId, Span, StructId, SymbolId, TypeId};
+use ts2zig_core::{Atom, FunctionId, LocalId, Span, StructId, TypeId};
 use ts2zig_ir_hir::HirCallee;
 use ts2zig_ir_mir::{MirExpr, MirLocalDecl};
 
@@ -9,7 +9,7 @@ use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
 
 pub struct ExprConverter {
     pub(super) local_map: HashMap<LocalId, LocalId>,
-    pub(super) local_names: HashMap<LocalId, SymbolId>,
+    pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) next_local: u32,
     pub(super) next_state: i32,
@@ -53,7 +53,7 @@ impl ExprConverter {
     pub(super) fn push_temp_local(&mut self, id: LocalId, ty: TypeId) {
         self.temp_locals.push(MirLocalDecl {
             id,
-            name: SymbolId::from_raw(0),
+            name: Atom::from(""),
             ty,
             mutable: true,
         });
@@ -91,7 +91,7 @@ impl ExprConverter {
         }
     }
 
-    pub fn register_local_name(&mut self, id: LocalId, name: SymbolId) {
+    pub fn register_local_name(&mut self, id: LocalId, name: Atom) {
         self.local_names.insert(id, name);
     }
 

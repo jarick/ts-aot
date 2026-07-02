@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 
-use ts2zig_core::{
-    FieldId, FunctionId, LocalId, ModuleId, Span, StringId, StringTable, SymbolId, SymbolTable,
-    TypeId,
-};
+use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, Visibility};
 use ts2zig_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
-    HirUnaryOp,
+    HirSwitchCase, HirUnaryOp,
 };
 use ts2zig_ir_mir::{BinaryOp, FunctionKind, MirExpr, MirPlace, MirStmt, RuntimeOp, UnaryOp};
 
@@ -98,7 +95,7 @@ fn map_local_id_returns_local_id() {
 fn register_local_name_does_not_panic() {
     let mut c = ExprConverter::new();
     let id = LocalId::from_raw(0);
-    c.register_local_name(id, SymbolId::from_raw(11));
+    c.register_local_name(id, Atom::new_inline("11"));
 }
 
 #[test]
@@ -153,7 +150,7 @@ fn resolve_callee_runtime_is_placeholder_and_diagnostics() {
     let mut cx = ctx();
     let fid = c.resolve_callee(
         &HirCallee::Runtime {
-            name: StringId::from_raw(0),
+            name: Atom::new_inline("0"),
             ty: TypeId::from_raw(0),
         },
         &mut cx,
@@ -222,14 +219,14 @@ fn convert_expr_string_emits_string() {
     let out = &mut Vec::new();
     let mut cx = ctx();
     let mir = c.convert_expr(
-        &HirExpr::String(StringId::from_raw(5)),
+        &HirExpr::String(Atom::new_inline("5")),
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
     );
     match mir {
-        MirExpr::String { id, .. } => assert_eq!(id, StringId::from_raw(5)),
+        MirExpr::String { id, .. } => assert_eq!(id, Atom::new_inline("5")),
         other => panic!("expected String, got {other:?}"),
     }
 }
@@ -296,7 +293,7 @@ fn convert_expr_global_passes_through() {
     let out = &mut Vec::new();
     let mut cx = ctx();
     let expr = HirExpr::Global {
-        name: SymbolId::from_raw(13),
+        name: Atom::new_inline("13"),
         ty: unit_ty(),
     };
     let mir = c.convert_expr(
@@ -306,7 +303,7 @@ fn convert_expr_global_passes_through() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(mir, MirExpr::Global(SymbolId::from_raw(13)));
+    assert_eq!(mir, MirExpr::Global(Atom::new_inline("13")));
 }
 
 #[test]
@@ -370,7 +367,7 @@ fn convert_expr_field_converts_owner() {
     let expr = HirExpr::Field {
         owner: Box::new(int_lit(0)),
         field: FieldId::from_raw(3),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let mir = c.convert_expr(
@@ -767,7 +764,7 @@ fn convert_expr_assignment_to_field_emits_field_place() {
     let field = HirExpr::Field {
         owner: Box::new(base),
         field: FieldId::from_raw(2),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -814,7 +811,7 @@ fn convert_expr_assignment_to_indexed_field_emits_field_with_index_base() {
     let field = HirExpr::Field {
         owner: Box::new(indexed),
         field: FieldId::from_raw(3),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -913,7 +910,7 @@ fn convert_block_direct_drains_new_alloc_temp_local() {
     let block = HirBlock(vec![HirStmt::Return {
         value: Some(HirExpr::New {
             callee: Box::new(HirExpr::Global {
-                name: SymbolId::from_raw(99),
+                name: Atom::new_inline("99"),
                 ty: unit_ty(),
             }),
             args: Vec::new(),
@@ -934,14 +931,14 @@ fn convert_block_let_creates_local_and_let_stmt() {
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Let {
         id: LocalId::from_raw(0),
-        name: SymbolId::from_raw(11),
+        name: Atom::new_inline("11"),
         ty: unit_ty(),
         init: Some(int_lit(5)),
     }]);
     let (mir_block, locals) = c.convert_block(&block, &mut cx);
     assert_eq!(mir_block.len(), 1);
     assert_eq!(locals.len(), 1);
-    assert_eq!(locals[0].name, SymbolId::from_raw(11));
+    assert_eq!(locals[0].name, Atom::new_inline("11"));
 }
 
 #[test]
@@ -980,7 +977,7 @@ fn convert_block_if_emits_if_stmt() {
 #[test]
 fn convert_function_nested_let_in_if_appears_in_body_locals() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -988,7 +985,7 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
             cond: HirExpr::Bool(true),
             then: Box::new(HirStmt::Let {
                 id: LocalId::from_raw(7),
-                name: SymbolId::from_raw(99),
+                name: Atom::new_inline("99"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
             }),
@@ -1001,15 +998,11 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -1019,13 +1012,13 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
         1,
         "nested let must surface in body.locals"
     );
-    assert_eq!(mir.body.locals[0].name, SymbolId::from_raw(99));
+    assert_eq!(mir.body.locals[0].name, Atom::new_inline("99"));
 }
 
 #[test]
 fn convert_function_nested_let_in_while_appears_in_body_locals() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -1033,7 +1026,7 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
             cond: HirExpr::Bool(true),
             body: Box::new(HirStmt::Let {
                 id: LocalId::from_raw(11),
-                name: SymbolId::from_raw(33),
+                name: Atom::new_inline("33"),
                 ty: unit_ty(),
                 init: Some(int_lit(0)),
             }),
@@ -1045,22 +1038,23 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
     );
-    let names: Vec<u32> = mir.body.locals.iter().map(|l| l.name.raw()).collect();
+    let names: Vec<String> = mir
+        .body
+        .locals
+        .iter()
+        .map(|l| l.name.as_str().to_owned())
+        .collect();
     assert!(
-        names.contains(&33),
+        names.contains(&"33".to_owned()),
         "while-body let must surface in body.locals (got {names:?})"
     );
 }
@@ -1068,7 +1062,7 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
 #[test]
 fn convert_function_nested_let_in_forof_appears_in_body_locals() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -1077,7 +1071,7 @@ fn convert_function_nested_let_in_forof_appears_in_body_locals() {
             iter: int_lit(0),
             body: Box::new(HirStmt::Let {
                 id: LocalId::from_raw(21),
-                name: SymbolId::from_raw(77),
+                name: Atom::new_inline("77"),
                 ty: unit_ty(),
                 init: Some(int_lit(0)),
             }),
@@ -1089,23 +1083,27 @@ fn convert_function_nested_let_in_forof_appears_in_body_locals() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
     );
-    let names: Vec<u32> = mir.body.locals.iter().map(|l| l.name.raw()).collect();
+    let names: Vec<String> = mir
+        .body
+        .locals
+        .iter()
+        .map(|l| l.name.as_str().to_owned())
+        .collect();
     assert_eq!(mir.body.locals.len(), 2, "for-of binding + nested let");
-    assert!(names.contains(&0), "for-of binding synth name");
-    assert!(names.contains(&77), "nested let name");
+    assert!(
+        names.contains(&"for_of_binding".to_owned()),
+        "for-of binding synth name"
+    );
+    assert!(names.contains(&"77".to_owned()), "nested let name");
 }
 
 #[test]
@@ -1672,9 +1670,9 @@ fn convert_block_try_emits_diagnostic_no_stmts() {
 #[test]
 fn convert_function_basic_shape() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: vec![HirParam {
-            name: StringId::from_raw(10),
+            name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
         ret: unit_ty(),
@@ -1687,15 +1685,11 @@ fn convert_function_basic_shape() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         Some("f".to_owned()),
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -1708,14 +1702,14 @@ fn convert_function_basic_shape() {
 #[test]
 fn convert_function_let_after_params_gets_fresh_id() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: vec![
             HirParam {
-                name: StringId::from_raw(10),
+                name: Atom::new_inline("10"),
                 ty: unit_ty(),
             },
             HirParam {
-                name: StringId::from_raw(11),
+                name: Atom::new_inline("11"),
                 ty: unit_ty(),
             },
         ],
@@ -1723,7 +1717,7 @@ fn convert_function_let_after_params_gets_fresh_id() {
         throws: None,
         body: vec![HirStmt::Let {
             id: LocalId::from_raw(5),
-            name: SymbolId::from_raw(99),
+            name: Atom::new_inline("99"),
             ty: unit_ty(),
             init: Some(int_lit(0)),
         }],
@@ -1734,15 +1728,11 @@ fn convert_function_let_after_params_gets_fresh_id() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -1763,7 +1753,7 @@ fn convert_function_let_after_params_gets_fresh_id() {
 #[test]
 fn convert_function_marks_async_effect() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -1775,15 +1765,11 @@ fn convert_function_marks_async_effect() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -1794,9 +1780,9 @@ fn convert_function_marks_async_effect() {
 #[test]
 fn convert_function_body_references_param_id_resolves_to_param() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: vec![HirParam {
-            name: StringId::from_raw(10),
+            name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
         ret: unit_ty(),
@@ -1814,15 +1800,11 @@ fn convert_function_body_references_param_id_resolves_to_param() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -1846,9 +1828,7 @@ fn convert_function_body_references_param_id_resolves_to_param() {
 fn convert_program_empty_keeps_module() {
     let hir = empty_hir();
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&hir, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&hir, &mut cx);
     assert_eq!(mir.module, hir.module);
     assert_eq!(mir.decl_count(), 0);
 }
@@ -1858,7 +1838,7 @@ fn convert_program_assigns_distinct_function_ids() {
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     for i in 0..3 {
         prog.push_decl(HirDecl::Function(HirFunction {
-            name: SymbolId::from_raw(i + 1),
+            name: Atom::from(format!("fn{}", i)),
             params: Vec::new(),
             ret: unit_ty(),
             throws: None,
@@ -1871,9 +1851,7 @@ fn convert_program_assigns_distinct_function_ids() {
         }));
     }
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let functions: Vec<_> = mir.functions().collect();
     assert_eq!(functions.len(), 3);
     let ids: std::collections::HashSet<_> = functions.iter().map(|f| f.id).collect();
@@ -1890,10 +1868,10 @@ fn convert_program_assigns_distinct_struct_ids() {
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     for i in 0..2 {
         prog.push_decl(HirDecl::Class(HirClass {
-            name: SymbolId::from_raw(i + 1),
+            name: Atom::from(format!("cls{}", i)),
             ty: TypeId::from_raw(100 + i),
             fields: vec![HirField {
-                name: StringId::from_raw(i),
+                name: Atom::from(format!("f{}", i)),
                 ty: unit_ty(),
             }],
             methods: Vec::new(),
@@ -1902,9 +1880,7 @@ fn convert_program_assigns_distinct_struct_ids() {
         }));
     }
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let structs: Vec<_> = mir.structs().collect();
     assert_eq!(structs.len(), 2);
     let ids: std::collections::HashSet<_> = structs.iter().map(|s| s.id).collect();
@@ -1916,7 +1892,7 @@ fn convert_program_struct_id_consistent_across_functions_for_same_type() {
     let shared_ty = TypeId::from_raw(99);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     let make_fn = |name: u32, ty: TypeId| HirFunction {
-        name: SymbolId::from_raw(name),
+        name: Atom::from(format!("f{}", name)),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -1935,9 +1911,7 @@ fn convert_program_struct_id_consistent_across_functions_for_same_type() {
     prog.push_decl(HirDecl::Function(make_fn(1, shared_ty)));
     prog.push_decl(HirDecl::Function(make_fn(2, shared_ty)));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let mut struct_literal_ids: Vec<ts2zig_core::StructId> = Vec::new();
     for func in mir.functions() {
         for s in &func.body.block.stmts {
@@ -1968,13 +1942,13 @@ fn convert_program_class_methods_use_method_function_kind() {
     use ts2zig_ir_hir::{HirClass, HirField, HirParam};
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Class(HirClass {
-        name: SymbolId::from_raw(42),
+        name: Atom::new_inline("42"),
         ty: TypeId::from_raw(4242),
         fields: Vec::new(),
         methods: vec![HirFunction {
-            name: SymbolId::from_raw(100),
+            name: Atom::new_inline("100"),
             params: vec![HirParam {
-                name: StringId::from_raw(200),
+                name: Atom::new_inline("200"),
                 ty: unit_ty(),
             }],
             ret: unit_ty(),
@@ -1990,13 +1964,11 @@ fn convert_program_class_methods_use_method_function_kind() {
         type_params: Vec::new(),
     }));
     let _ = HirField {
-        name: StringId::from_raw(0),
+        name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let expected_owner = struct_decl.id;
     assert_eq!(struct_decl.methods.len(), 1);
@@ -2021,10 +1993,10 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
     let class_ty = TypeId::from_raw(7777);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Class(HirClass {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         ty: class_ty,
         fields: vec![HirField {
-            name: StringId::from_raw(10),
+            name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
         methods: Vec::new(),
@@ -2032,7 +2004,7 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
         type_params: Vec::new(),
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
-        name: SymbolId::from_raw(2),
+        name: Atom::new_inline("2"),
         params: Vec::new(),
         ret: class_ty,
         throws: None,
@@ -2040,7 +2012,7 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
             HirStmt::Expr {
                 expr: HirExpr::New {
                     callee: Box::new(HirExpr::Global {
-                        name: SymbolId::from_raw(1),
+                        name: Atom::new_inline("1"),
                         ty: class_ty,
                     }),
                     args: Vec::new(),
@@ -2061,9 +2033,7 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let class_struct_id = struct_decl.id;
     let mut new_id: Option<ts2zig_core::StructId> = None;
@@ -2103,14 +2073,14 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
     let class_ty = TypeId::from_raw(8888);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Function(HirFunction {
-        name: SymbolId::from_raw(2),
+        name: Atom::new_inline("2"),
         params: Vec::new(),
         ret: class_ty,
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::New {
                 callee: Box::new(HirExpr::Global {
-                    name: SymbolId::from_raw(1),
+                    name: Atom::new_inline("1"),
                     ty: class_ty,
                 }),
                 args: Vec::new(),
@@ -2124,10 +2094,10 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
         async_info: None,
     }));
     prog.push_decl(HirDecl::Class(HirClass {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         ty: class_ty,
         fields: vec![HirField {
-            name: StringId::from_raw(10),
+            name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
         methods: Vec::new(),
@@ -2135,9 +2105,7 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
         type_params: Vec::new(),
     }));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let class_struct_id = struct_decl.id;
     let func = mir.functions().next().expect("expected one function");
@@ -2173,7 +2141,7 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         }),
     }];
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2185,8 +2153,6 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mut struct_id_map: HashMap<TypeId, ts2zig_core::StructId> = HashMap::new();
     let mut next_struct_id: u32 = 0;
     let mir = convert_function(
@@ -2194,8 +2160,6 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut struct_id_map,
         &mut next_struct_id,
         &mut cx,
@@ -2215,7 +2179,7 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         }),
     }];
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2227,8 +2191,6 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mut struct_id_map: HashMap<TypeId, ts2zig_core::StructId> = HashMap::new();
     let mut next_struct_id: u32 = 0;
     let mir = convert_function(
@@ -2236,8 +2198,6 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut struct_id_map,
         &mut next_struct_id,
         &mut cx,
@@ -2259,7 +2219,7 @@ fn body_can_throw_propagates_through_assignment_target() {
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: throwing_call_ty,
     };
     let body = vec![HirStmt::Expr {
@@ -2270,7 +2230,7 @@ fn body_can_throw_propagates_through_assignment_target() {
         },
     }];
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2282,8 +2242,6 @@ fn body_can_throw_propagates_through_assignment_target() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mut struct_id_map: HashMap<TypeId, ts2zig_core::StructId> = HashMap::new();
     let mut next_struct_id: u32 = 0;
     let mir = convert_function(
@@ -2291,8 +2249,6 @@ fn body_can_throw_propagates_through_assignment_target() {
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut struct_id_map,
         &mut next_struct_id,
         &mut cx,
@@ -2329,7 +2285,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         },
     }];
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2341,8 +2297,6 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mut struct_id_map: HashMap<TypeId, ts2zig_core::StructId> = HashMap::new();
     let mut next_struct_id: u32 = 0;
     let mir = convert_function(
@@ -2350,8 +2304,6 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut struct_id_map,
         &mut next_struct_id,
         &mut cx,
@@ -2363,34 +2315,32 @@ fn body_can_throw_propagates_through_assignment_target_index() {
 }
 
 #[test]
-fn convert_program_resolves_import_module_via_string_table() {
+fn convert_program_preserves_import_module_path_from_atom() {
     use ts2zig_ir_hir::{HirExport, HirImport};
-    let mut strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let module_id = strings.intern("./other");
+    let module_id = Atom::new_inline("./other");
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.imports.push(HirImport {
         module: module_id,
-        name: SymbolId::from_raw(7),
+        name: Atom::new_inline("7"),
         alias: None,
     });
     prog.exports.push(HirExport {
-        name: SymbolId::from_raw(9),
+        name: Atom::new_inline("9"),
         alias: None,
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     assert_eq!(mir.imports.len(), 1);
     assert_eq!(mir.imports[0].module, "./other");
-    assert_eq!(mir.imports[0].symbol, SymbolId::from_raw(7));
+    assert_eq!(mir.imports[0].symbol, Atom::new_inline("7"));
     assert_eq!(mir.exports.len(), 1);
-    assert_eq!(mir.exports[0].symbol, SymbolId::from_raw(9));
+    assert_eq!(mir.exports[0].symbol, Atom::new_inline("9"));
 }
 
 #[test]
 fn convert_function_await_dest_appears_in_body_locals() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2407,15 +2357,11 @@ fn convert_function_await_dest_appears_in_body_locals() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2433,14 +2379,14 @@ fn convert_function_await_dest_appears_in_body_locals() {
 #[test]
 fn convert_function_new_alloc_appears_in_body_locals() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::New {
                 callee: Box::new(HirExpr::Global {
-                    name: SymbolId::from_raw(99),
+                    name: Atom::new_inline("99"),
                     ty: unit_ty(),
                 }),
                 args: Vec::new(),
@@ -2454,15 +2400,11 @@ fn convert_function_new_alloc_appears_in_body_locals() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2480,7 +2422,7 @@ fn convert_function_new_alloc_appears_in_body_locals() {
 #[test]
 fn convert_function_temp_locals_drained_only_once() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2497,15 +2439,11 @@ fn convert_function_temp_locals_drained_only_once() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2522,7 +2460,7 @@ fn convert_function_temp_locals_drained_only_once() {
 #[test]
 fn convert_function_can_throw_true_when_body_has_throw_stmt() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2534,15 +2472,11 @@ fn convert_function_can_throw_true_when_body_has_throw_stmt() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2556,7 +2490,7 @@ fn convert_function_can_throw_true_when_body_has_throw_stmt() {
 #[test]
 fn convert_function_can_throw_false_when_body_has_no_throw_stmt() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2568,15 +2502,11 @@ fn convert_function_can_throw_false_when_body_has_no_throw_stmt() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2590,7 +2520,7 @@ fn convert_function_can_throw_false_when_body_has_no_throw_stmt() {
 #[test]
 fn convert_function_can_throw_recurses_into_nested_blocks() {
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2606,15 +2536,11 @@ fn convert_function_can_throw_recurses_into_nested_blocks() {
         async_info: None,
     };
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2626,22 +2552,20 @@ fn convert_function_can_throw_recurses_into_nested_blocks() {
 }
 
 #[test]
-fn convert_function_build_params_resolves_through_symbol_table() {
+fn convert_function_build_params_preserves_param_atom_name() {
     use ts2zig_ir_hir::HirParam;
-    let mut strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let sentinel_symbol = symbols.intern("__sentinel__");
-    let first_id = strings.intern("first");
-    let second_id = strings.intern("second");
+    let sentinel_symbol = Atom::new_inline("__sentinel__");
+    let first_id = Atom::new_inline("first");
+    let second_id = Atom::new_inline("second");
     let f = HirFunction {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         params: vec![
             HirParam {
-                name: first_id,
+                name: first_id.clone(),
                 ty: unit_ty(),
             },
             HirParam {
-                name: second_id,
+                name: second_id.clone(),
                 ty: unit_ty(),
             },
         ],
@@ -2660,36 +2584,34 @@ fn convert_function_build_params_resolves_through_symbol_table() {
         FunctionId::from_raw(0),
         None,
         HashMap::new(),
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
     );
-    let first_name = mir.params[0].name;
-    let second_name = mir.params[1].name;
+    let first_name = mir.params[0].name.clone();
+    let second_name = mir.params[1].name.clone();
     assert_ne!(
         first_name, second_name,
-        "distinct param names must yield distinct SymbolIds"
+        "distinct param names must yield distinct Atoms"
     );
     assert_ne!(
         first_name, sentinel_symbol,
-        "MirParam.name must be a freshly-interned SymbolId (not coincidentally equal to a pre-existing entry); got {:?}",
+        "MirParam.name must be the source Atom (not coincidentally equal to a pre-existing entry); got {:?}",
         first_name
     );
-    assert_ne!(
-        first_name.raw(),
-        first_id.raw(),
-        "MirParam.name raw value must differ from source StringId raw value (different namespaces); got {:?} vs StringId({})",
+    assert_eq!(
+        first_name.as_str(),
+        first_id.as_str(),
+        "MirParam.name must equal the source Atom (content-equivalent Atom); got {:?} vs {}",
         first_name,
-        first_id.raw()
+        first_id
     );
 }
 
 #[test]
 fn convert_function_with_remap_uses_remap_only_for_call_sites() {
     let f = HirFunction {
-        name: SymbolId::from_raw(7),
+        name: Atom::new_inline("7"),
         params: Vec::new(),
         ret: unit_ty(),
         throws: None,
@@ -2709,15 +2631,11 @@ fn convert_function_with_remap_uses_remap_only_for_call_sites() {
     let mut remap = HashMap::new();
     remap.insert(FunctionId::from_raw(0), FunctionId::from_raw(42));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
     let mir = convert_function(
         &f,
         FunctionId::from_raw(5),
         None,
         remap,
-        &strings,
-        &mut symbols,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut cx,
@@ -2858,11 +2776,11 @@ fn convert_program_class_method_with_no_params_is_skipped() {
     let class_ty = TypeId::from_raw(5555);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Class(HirClass {
-        name: SymbolId::from_raw(1),
+        name: Atom::new_inline("1"),
         ty: class_ty,
         fields: Vec::new(),
         methods: vec![HirFunction {
-            name: SymbolId::from_raw(100),
+            name: Atom::new_inline("100"),
             params: Vec::new(),
             ret: unit_ty(),
             throws: None,
@@ -2877,9 +2795,7 @@ fn convert_program_class_method_with_no_params_is_skipped() {
         type_params: Vec::new(),
     }));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mut symbols = SymbolTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     assert!(
         struct_decl.methods.is_empty(),
@@ -2888,9 +2804,8 @@ fn convert_program_class_method_with_no_params_is_skipped() {
 }
 
 #[test]
-fn convert_program_exported_function_resolves_name_through_symbol_table() {
-    let mut symbols = SymbolTable::new();
-    let name_id = symbols.intern("render");
+fn convert_program_exported_function_uses_atom_name_as_export_name() {
+    let name_id = Atom::new_inline("render");
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: name_id,
@@ -2905,13 +2820,12 @@ fn convert_program_exported_function_resolves_name_through_symbol_table() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let strings = StringTable::new();
-    let mir = convert_program(&prog, &strings, &mut symbols, &mut cx);
+    let mir = convert_program(&prog, &mut cx);
     let func = mir.functions().next().expect("expected one function");
     assert_eq!(
         func.export_name.as_deref(),
         Some("render"),
-        "export_name must come from SymbolTable, not f.name.raw()"
+        "export_name must come from the function name (Atom), not FunctionId"
     );
 }
 
@@ -2968,7 +2882,7 @@ fn convert_expr_assignment_to_field_with_call_base_materializes_call() {
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(7),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -3025,7 +2939,7 @@ fn convert_expr_assignment_to_field_with_call_base_keeps_call_in_order() {
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -3072,7 +2986,7 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
-        field_name: SymbolId::from_raw(0),
+        field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
     let value_expr = HirExpr::Template {
@@ -3122,4 +3036,638 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
 #[test]
 fn span_does_not_block_compile() {
     let _ = Span::new(0, 0);
+}
+
+#[test]
+fn body_can_throw_propagates_through_if_condition_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::If {
+            cond: call,
+            then: Box::new(HirStmt::Return { value: None }),
+            otherwise: None,
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "If with throwing cond must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_propagates_through_while_condition_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::While {
+            cond: call,
+            body: Box::new(HirStmt::Return { value: None }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "While with throwing cond must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_propagates_through_for_of_iter_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::ForOf {
+            binding: LocalId::from_raw(0),
+            iter: call,
+            body: Box::new(HirStmt::Return { value: None }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "ForOf with throwing iter must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_propagates_through_switch_discriminant_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Switch {
+            disc: call,
+            cases: vec![HirSwitchCase::new(
+                Some(int_lit(1)),
+                vec![HirStmt::Return { value: None }],
+            )],
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Switch with throwing discriminant must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_propagates_through_catch_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Try {
+            body: Box::new(HirStmt::Return { value: None }),
+            catch: Some(ts2zig_ir_hir::HirCatchClause::new(
+                None,
+                Box::new(HirStmt::Expr { expr: call }),
+            )),
+            finally: None,
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Try with throwing catch body must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_propagates_through_finally_call() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Try {
+            body: Box::new(HirStmt::Return { value: None }),
+            catch: None,
+            finally: Some(Box::new(HirStmt::Expr { expr: call })),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Try with throwing finally body must propagate can_throw"
+    );
+}
+
+#[test]
+fn body_can_throw_await_alone_is_throwing() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Await {
+                expr: Box::new(int_lit(0)),
+                ty: unit_ty(),
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Await must be considered throwing (rejection)"
+    );
+}
+
+#[test]
+fn body_can_throw_new_alone_is_throwing() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::New {
+                callee: Box::new(HirExpr::Global {
+                    name: Atom::new_inline("Ctor"),
+                    ty: unit_ty(),
+                }),
+                args: Vec::new(),
+                ty: unit_ty(),
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "New (constructor invocation) must be considered throwing"
+    );
+}
+
+#[test]
+fn body_can_throw_yield_alone_is_throwing() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Yield {
+                expr: Some(Box::new(int_lit(0))),
+                ty: unit_ty(),
+            },
+        }],
+        is_async: false,
+        is_generator: true,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Yield must be considered throwing (delegated generator may throw)"
+    );
+}
+
+#[test]
+fn convert_global_with_int_init_lowers_to_int() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("MAX"),
+        ty: unit_ty(),
+        init: Some(int_lit(42)),
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx);
+    let g = mir.globals().next().expect("one global");
+    assert!(matches!(g.init, Some(MirExpr::Int { value: 42, .. })));
+    assert!(!cx.has_errors(), "constant init must not error");
+}
+
+#[test]
+fn convert_global_with_string_init_lowers_to_string() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("GREETING"),
+        ty: unit_ty(),
+        init: Some(HirExpr::String(Atom::new_inline("hi"))),
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx);
+    let g = mir.globals().next().expect("one global");
+    assert!(matches!(g.init, Some(MirExpr::String { .. })));
+}
+
+#[test]
+fn convert_global_with_complex_init_emits_warning_and_drops_init() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("X"),
+        ty: unit_ty(),
+        init: Some(HirExpr::Call {
+            callee: HirCallee::Function(FunctionId::from_raw(0)),
+            args: Vec::new(),
+            ty: unit_ty(),
+        }),
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx);
+    let g = mir.globals().next().expect("one global");
+    assert!(
+        g.init.is_none(),
+        "non-constant global init must be dropped, got {:?}",
+        g.init
+    );
+    assert!(
+        cx.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("constant")),
+        "expected P0006 warning for non-constant global init, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn convert_global_does_not_consume_function_id() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("X"),
+        ty: unit_ty(),
+        init: Some(int_lit(0)),
+    });
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("main"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Return { value: None }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx);
+    let f = mir.functions().next().expect("one function");
+    assert_eq!(
+        f.id,
+        FunctionId::from_raw(0),
+        "Global decl must not shift next_function_id; main must remain at #0"
+    );
+}
+
+#[test]
+fn convert_global_visibility_defaults_to_public() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("X"),
+        ty: unit_ty(),
+        init: Some(int_lit(0)),
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx);
+    let g = mir.globals().next().expect("one global");
+    assert_eq!(
+        g.visibility,
+        Visibility::Public,
+        "Global visibility must default to Public (per prior behavior, not Private)"
+    );
+}
+
+#[test]
+fn infer_throws_is_none_for_call_only_function() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Function(FunctionId::from_raw(0)),
+                args: Vec::new(),
+                ty: unit_ty(),
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "function with a Call expr must surface can_throw=true (call may throw at runtime)"
+    );
+    assert!(
+        mir.throws.is_none(),
+        "function without a Throw statement must NOT be a throwing function; got throws={:?}",
+        mir.throws
+    );
+}
+
+#[test]
+fn infer_throws_is_none_for_if_with_throwing_cond_only() {
+    let call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::If {
+            cond: call,
+            then: Box::new(HirStmt::Return { value: None }),
+            otherwise: None,
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(mir.effects.can_throw);
+    assert!(
+        mir.throws.is_none(),
+        "If with throwing cond (no Throw) must NOT be a throwing function"
+    );
+}
+
+#[test]
+fn infer_throws_uses_real_source_when_throwing_typed_expr() {
+    let custom_err_ty = TypeId::from_raw(99);
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Throw {
+            expr: HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: custom_err_ty,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert_eq!(
+        mir.throws,
+        Some(custom_err_ty),
+        "throws must be derived from the thrown expression's type, not a sentinel"
+    );
+}
+
+#[test]
+fn infer_throws_respects_declared_over_inferred() {
+    let declared_ty = TypeId::from_raw(7);
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: Some(declared_ty),
+        body: vec![HirStmt::Return { value: None }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert_eq!(
+        mir.throws,
+        Some(declared_ty),
+        "declared throws must win over inferred (TS spec: explicit annotation wins)"
+    );
+}
+
+#[test]
+fn infer_throws_uses_sentinel_for_primitive_thrown_expr() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Throw { expr: int_lit(0) }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert_eq!(
+        mir.throws,
+        Some(TypeId::from_raw(0)),
+        "primitive throw (no real source type) must fall back to TypeId(0) sentinel"
+    );
 }

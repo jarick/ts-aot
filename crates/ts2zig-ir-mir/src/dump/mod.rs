@@ -3,23 +3,21 @@ mod expr;
 
 use std::fmt;
 
-use ts2zig_core::{SymbolId, SymbolTable};
+use ts2zig_core::Atom;
 
 use crate::program::{MirExport, MirImport, MirProgram};
 use crate::runtime::RuntimeRequirements;
 
-pub(crate) struct Dumper<'a> {
+pub(crate) struct Dumper {
     indent: usize,
     pub(crate) buf: String,
-    pub(crate) symbols: Option<&'a SymbolTable>,
 }
 
-impl<'a> Dumper<'a> {
-    pub(crate) fn new(symbols: Option<&'a SymbolTable>) -> Self {
+impl Dumper {
+    pub(crate) fn new() -> Self {
         Self {
             indent: 0,
             buf: String::new(),
-            symbols,
         }
     }
 
@@ -49,19 +47,13 @@ impl<'a> Dumper<'a> {
 
 impl MirProgram {
     pub fn dump_text(&self) -> String {
-        let mut d = Dumper::new(None);
-        dump_program(self, &mut d);
-        d.buf
-    }
-
-    pub fn dump_with_symbols(&self, symbols: &SymbolTable) -> String {
-        let mut d = Dumper::new(Some(symbols));
+        let mut d = Dumper::new();
         dump_program(self, &mut d);
         d.buf
     }
 }
 
-fn dump_program(prog: &MirProgram, d: &mut Dumper<'_>) {
+fn dump_program(prog: &MirProgram, d: &mut Dumper) {
     d.line(&format!("MirProgram(module={}) {{", prog.module.raw()));
     d.push();
     d.line("imports: [");
@@ -97,34 +89,28 @@ fn dump_program(prog: &MirProgram, d: &mut Dumper<'_>) {
     d.line("}");
 }
 
-fn dump_import(imp: &MirImport, d: &mut Dumper<'_>) {
+fn dump_import(imp: &MirImport, d: &mut Dumper) {
     d.write(&format!(
         "import {} from {:?}",
-        dump_sym(imp.symbol, d),
+        dump_sym(&imp.symbol, d),
         imp.module,
     ));
-    if let Some(alias) = imp.alias {
+    if let Some(alias) = &imp.alias {
         d.write(&format!(" as {}", dump_sym(alias, d)));
     }
     d.write("\n");
 }
 
-fn dump_export(exp: &MirExport, d: &mut Dumper<'_>) {
-    d.write(&format!("export {}", dump_sym(exp.symbol, d)));
-    if let Some(alias) = exp.alias {
+fn dump_export(exp: &MirExport, d: &mut Dumper) {
+    d.write(&format!("export {}", dump_sym(&exp.symbol, d)));
+    if let Some(alias) = &exp.alias {
         d.write(&format!(" as {}", dump_sym(alias, d)));
     }
     d.write("\n");
 }
 
-pub(crate) fn dump_sym(id: impl Into<u32>, d: &Dumper<'_>) -> String {
-    let raw = id.into();
-    if let Some(symbols) = d.symbols
-        && let Some(name) = symbols.resolve(SymbolId::from_raw(raw))
-    {
-        return format!("#{raw}({name})");
-    }
-    format!("#{raw}")
+pub(crate) fn dump_sym(id: &Atom, _d: &Dumper) -> String {
+    id.as_str().to_owned()
 }
 
 impl fmt::Display for RuntimeRequirements {
@@ -176,19 +162,19 @@ mod tests {
         RuntimeOp, UnaryOp,
     };
     use crate::decl::{FunctionEffects, FunctionKind, MirDecl, MirFunctionDecl, MirStructDecl};
-    use ts2zig_core::{FieldId, FunctionId, LocalId, ModuleId, StructId, SymbolId, TypeId};
+    use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, StructId, TypeId};
 
     fn make_import(module: &str, symbol: u32) -> MirImport {
         MirImport {
             module: module.to_owned(),
-            symbol: SymbolId::from_raw(symbol),
+            symbol: Atom::from(format!("sym{}", symbol)),
             alias: None,
         }
     }
 
     fn make_export(symbol: u32) -> MirExport {
         MirExport {
-            symbol: SymbolId::from_raw(symbol),
+            symbol: Atom::from(format!("sym{}", symbol)),
             alias: None,
         }
     }
@@ -196,7 +182,7 @@ mod tests {
     fn empty_func(id: u32) -> MirFunctionDecl {
         MirFunctionDecl {
             id: FunctionId::from_raw(id),
-            name: SymbolId::from_raw(id + 1),
+            name: Atom::from(format!("fn{}", id)),
             export_name: None,
             params: Vec::new(),
             ret: TypeId::from_raw(0),
@@ -210,7 +196,7 @@ mod tests {
     fn empty_struct(id: u32) -> MirStructDecl {
         MirStructDecl {
             id: StructId::from_raw(id),
-            name: SymbolId::from_raw(id + 1),
+            name: Atom::from(format!("s{}", id)),
             fields: Vec::new(),
             methods: Vec::new(),
         }
@@ -273,7 +259,7 @@ mod tests {
         let body = MirBody {
             locals: vec![MirLocalDecl {
                 id: LocalId::from_raw(0),
-                name: SymbolId::from_raw(2),
+                name: Atom::new_inline("2"),
                 ty: TypeId::from_raw(1),
                 mutable: false,
             }],
@@ -541,11 +527,11 @@ mod tests {
     #[test]
     fn dump_expr_string() {
         let stmt = MirStmt::Return(Some(MirExpr::String {
-            id: ts2zig_core::StringId::from_raw(11),
+            id: ts2zig_core::Atom::new_inline("hello"),
             ty: TypeId::from_raw(2),
         }));
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
-        assert!(text.contains("return string(11)(:2)"));
+        assert!(text.contains("return string(\"hello\")(:2)"));
     }
 
     #[test]
@@ -559,9 +545,9 @@ mod tests {
 
     #[test]
     fn dump_expr_global() {
-        let stmt = MirStmt::Return(Some(MirExpr::Global(SymbolId::from_raw(9))));
+        let stmt = MirStmt::Return(Some(MirExpr::Global(Atom::new_inline("myglobal"))));
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
-        assert!(text.contains("return #9"));
+        assert!(text.contains("return myglobal"));
     }
 
     #[test]
@@ -677,7 +663,7 @@ mod tests {
     fn dump_program_with_global() {
         let mut prog = MirProgram::new(ModuleId::from_raw(0));
         prog.push_decl(MirDecl::Global(crate::decl::MirGlobalDecl {
-            name: SymbolId::from_raw(5),
+            name: Atom::new_inline("myglobal"),
             ty: TypeId::from_raw(0),
             mutable: true,
             visibility: ts2zig_core::Visibility::Public,
@@ -686,7 +672,7 @@ mod tests {
         }));
         let text = prog.dump_text();
         assert!(text.contains("global"));
-        assert!(text.contains("#5"));
+        assert!(text.contains("myglobal"));
         assert!(text.contains("mut: true"));
     }
 }

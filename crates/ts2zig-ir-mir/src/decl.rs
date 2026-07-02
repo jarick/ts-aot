@@ -1,19 +1,19 @@
-use ts2zig_core::{FieldId, FunctionId, LocalId, StructId, SymbolId, TypeId, Visibility};
+use ts2zig_core::{Atom, FieldId, FunctionId, LocalId, StructId, TypeId, Visibility};
 
 use crate::body::MirBody;
 use crate::body::MirExpr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MirParam {
     pub id: LocalId,
-    pub name: SymbolId,
+    pub name: Atom,
     pub ty: TypeId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MirFieldDecl {
     pub id: FieldId,
-    pub name: SymbolId,
+    pub name: Atom,
     pub ty: TypeId,
     pub mutable: bool,
     pub visibility: Visibility,
@@ -42,7 +42,7 @@ pub struct FunctionEffects {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirFunctionDecl {
     pub id: FunctionId,
-    pub name: SymbolId,
+    pub name: Atom,
     pub export_name: Option<String>,
     pub params: Vec<MirParam>,
     pub ret: TypeId,
@@ -55,14 +55,14 @@ pub struct MirFunctionDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirStructDecl {
     pub id: StructId,
-    pub name: SymbolId,
+    pub name: Atom,
     pub fields: Vec<MirFieldDecl>,
     pub methods: Vec<MirFunctionDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MirGlobalDecl {
-    pub name: SymbolId,
+    pub name: Atom,
     pub ty: TypeId,
     pub mutable: bool,
     pub visibility: Visibility,
@@ -98,24 +98,24 @@ impl From<MirGlobalDecl> for MirDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ts2zig_core::{StructId, SymbolId, TypeId};
+    use ts2zig_core::{Atom, StructId, TypeId};
 
     #[test]
     fn param_roundtrip() {
         let p = MirParam {
             id: LocalId::from_raw(3),
-            name: SymbolId::from_raw(7),
+            name: Atom::new_inline("7"),
             ty: TypeId::from_raw(0),
         };
         assert_eq!(p.id, LocalId::from_raw(3));
-        assert_eq!(p.name, SymbolId::from_raw(7));
+        assert_eq!(p.name, Atom::new_inline("7"));
     }
 
     #[test]
     fn field_visibility_roundtrip() {
         let f = MirFieldDecl {
             id: FieldId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             ty: TypeId::from_raw(0),
             mutable: false,
             visibility: Visibility::Private,
@@ -153,11 +153,11 @@ mod tests {
     fn function_decl_carries_metadata() {
         let f = MirFunctionDecl {
             id: FunctionId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             export_name: Some("render".to_owned()),
             params: vec![MirParam {
                 id: LocalId::from_raw(0),
-                name: SymbolId::from_raw(10),
+                name: Atom::new_inline("10"),
                 ty: TypeId::from_raw(0),
             }],
             ret: TypeId::from_raw(0),
@@ -180,7 +180,7 @@ mod tests {
     fn function_decl_body_carries_locals_and_block() {
         let f = MirFunctionDecl {
             id: FunctionId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             export_name: None,
             params: Vec::new(),
             ret: TypeId::from_raw(0),
@@ -188,7 +188,7 @@ mod tests {
             body: MirBody {
                 locals: vec![crate::body::MirLocalDecl {
                     id: LocalId::from_raw(0),
-                    name: SymbolId::from_raw(1),
+                    name: Atom::new_inline("1"),
                     ty: TypeId::from_raw(2),
                     mutable: false,
                 }],
@@ -205,10 +205,10 @@ mod tests {
     fn struct_decl_carries_fields_and_methods() {
         let s = MirStructDecl {
             id: StructId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             fields: vec![MirFieldDecl {
                 id: FieldId::from_raw(0),
-                name: SymbolId::from_raw(10),
+                name: Atom::new_inline("10"),
                 ty: TypeId::from_raw(0),
                 mutable: true,
                 visibility: Visibility::Public,
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn global_decl_carries_visibility_and_mutation() {
         let g = MirGlobalDecl {
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             ty: TypeId::from_raw(0),
             mutable: false,
             visibility: Visibility::Public,
@@ -238,7 +238,7 @@ mod tests {
     fn decl_from_impls_work_for_all_variants() {
         let f = MirFunctionDecl {
             id: FunctionId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             export_name: None,
             params: Vec::new(),
             ret: TypeId::from_raw(0),
@@ -249,12 +249,12 @@ mod tests {
         };
         let s = MirStructDecl {
             id: StructId::from_raw(0),
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             fields: Vec::new(),
             methods: Vec::new(),
         };
         let g = MirGlobalDecl {
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             ty: TypeId::from_raw(0),
             mutable: false,
             visibility: Visibility::Private,

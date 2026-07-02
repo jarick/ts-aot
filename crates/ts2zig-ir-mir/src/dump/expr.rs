@@ -5,14 +5,14 @@ use crate::body::{
     BinaryOp, MirBody, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
-pub(crate) fn dump_body(body: &MirBody, d: &mut Dumper<'_>) {
+pub(crate) fn dump_body(body: &MirBody, d: &mut Dumper) {
     d.push();
     d.line("locals: [");
     d.push();
     for local in &body.locals {
         d.line(&format!(
             "{}: {}{} = {}",
-            dump_sym(local.name, d),
+            dump_sym(&local.name, d),
             if local.mutable { "var " } else { "" },
             local.ty.raw(),
             local.id.raw(),
@@ -36,7 +36,7 @@ pub(crate) fn dump_body(body: &MirBody, d: &mut Dumper<'_>) {
     d.pop();
 }
 
-pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper<'_>) {
+pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
     match stmt {
         MirStmt::Let {
             local,
@@ -183,7 +183,7 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper<'_>) {
     }
 }
 
-pub(crate) fn dump_place(place: &MirPlace, d: &mut Dumper<'_>) {
+pub(crate) fn dump_place(place: &MirPlace, d: &mut Dumper) {
     match place {
         MirPlace::Local { id } => d.write(&format!("local({})", id.raw())),
         MirPlace::Field { base, field, ty } => {
@@ -201,7 +201,7 @@ pub(crate) fn dump_place(place: &MirPlace, d: &mut Dumper<'_>) {
     }
 }
 
-fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper<'_>) {
+fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper) {
     match base {
         MirPlaceBase::Local(id) => d.write(&format!("local({})", id.raw())),
         MirPlaceBase::Field { base, field, .. } => {
@@ -218,16 +218,16 @@ fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper<'_>) {
     }
 }
 
-pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper<'_>) {
+pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
     match expr {
         MirExpr::Unit => d.write("()"),
         MirExpr::Bool(v) => d.write(if *v { "true" } else { "false" }),
         MirExpr::Int { value, ty } => d.write(&format!("{}(:{})", value, ty.raw())),
         MirExpr::Float { value, ty } => d.write(&format!("{}(:{})", value, ty.raw())),
-        MirExpr::String { id, ty } => d.write(&format!("string({})(:{})", id.raw(), ty.raw())),
+        MirExpr::String { id, ty } => d.write(&format!("string({:?})(:{})", id, ty.raw())),
         MirExpr::Null { ty } => d.write(&format!("null(:{})", ty.raw())),
         MirExpr::Local(id) => d.write(&format!("local({})", id.raw())),
-        MirExpr::Global(sym) => d.write(&dump_sym(*sym, d)),
+        MirExpr::Global(sym) => d.write(&dump_sym(sym, d)),
         MirExpr::Field { base, field, ty } => {
             dump_expr_inline(base, d);
             d.write(&format!(".{}:{}", field.raw(), ty.raw()));

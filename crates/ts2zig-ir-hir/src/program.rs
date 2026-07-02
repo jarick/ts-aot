@@ -1,18 +1,18 @@
-use ts2zig_core::{DiagnosticBag, ModuleId, StringId, SymbolId};
+use ts2zig_core::{Atom, DiagnosticBag, ModuleId};
 
 use crate::decl::HirDecl;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirImport {
-    pub module: StringId,
-    pub name: SymbolId,
-    pub alias: Option<SymbolId>,
+    pub module: Atom,
+    pub name: Atom,
+    pub alias: Option<Atom>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirExport {
-    pub name: SymbolId,
-    pub alias: Option<StringId>,
+    pub name: Atom,
+    pub alias: Option<Atom>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ impl HirProgram {
 mod tests {
     use super::*;
     use crate::decl::{HirClass, HirDecl, HirField, HirFunction};
-    use ts2zig_core::{StringId, SymbolId, TypeId};
+    use ts2zig_core::{Atom, TypeId};
 
     #[test]
     fn empty_program_has_no_decls() {
@@ -63,15 +63,15 @@ mod tests {
     fn push_decl_increments_count() {
         let mut prog = HirProgram::new(ModuleId::from_raw(7));
         prog.push_decl(HirDecl::Global {
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             ty: TypeId::from_raw(2),
             init: None,
         });
         prog.push_decl(HirDecl::Class(HirClass {
-            name: SymbolId::from_raw(3),
+            name: Atom::new_inline("3"),
             ty: TypeId::from_raw(5),
             fields: vec![HirField {
-                name: StringId::from_raw(4),
+                name: Atom::new_inline("4"),
                 ty: TypeId::from_raw(5),
             }],
             methods: vec![],
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn hir_function_minimal_construction() {
         let f = HirFunction {
-            name: SymbolId::from_raw(1),
+            name: Atom::new_inline("1"),
             params: vec![],
             ret: TypeId::from_raw(2),
             throws: None,

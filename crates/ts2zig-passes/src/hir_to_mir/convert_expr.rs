@@ -30,7 +30,7 @@ impl ExprConverter {
                 ty: TypeId::from_raw(0),
             },
             HirExpr::String(id) => MirExpr::String {
-                id: *id,
+                id: id.clone(),
                 ty: TypeId::from_raw(0),
             },
             HirExpr::Null => MirExpr::Null {
@@ -38,7 +38,7 @@ impl ExprConverter {
             },
             HirExpr::Undefined => MirExpr::Unit,
             HirExpr::Local { id, .. } => self.map_local(*id),
-            HirExpr::Global { name, .. } => MirExpr::Global(*name),
+            HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),
             HirExpr::Field {
                 owner, field, ty, ..
             } => MirExpr::Field {

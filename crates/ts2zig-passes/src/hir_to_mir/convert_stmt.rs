@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts2zig_core::{LocalId, Span, StructId, SymbolId, TypeId};
+use ts2zig_core::{Atom, LocalId, Span, StructId, TypeId};
 use ts2zig_ir_hir::HirStmt;
 use ts2zig_ir_mir::{BinaryOp, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt};
 
@@ -82,10 +82,11 @@ impl ExprConverter {
             }
             HirStmt::Let { id, name, ty, init } => {
                 let new_id = self.map_local_id(*id);
-                self.register_local_name(new_id, *name);
+                let name = name.clone();
+                self.register_local_name(new_id, name.clone());
                 final_locals.push(MirLocalDecl {
                     id: new_id,
-                    name: *name,
+                    name,
                     ty: *ty,
                     mutable: false,
                 });
@@ -142,7 +143,7 @@ impl ExprConverter {
                 let is_break = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: is_break,
-                    name: SymbolId::from_raw(0),
+                    name: Atom::from(""),
                     ty: TypeId::from_raw(0),
                     mutable: true,
                 });
@@ -189,14 +190,14 @@ impl ExprConverter {
                 let first_id = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: first_id,
-                    name: SymbolId::from_raw(0),
+                    name: Atom::from(""),
                     ty: TypeId::from_raw(0),
                     mutable: true,
                 });
                 let is_break = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: is_break,
-                    name: SymbolId::from_raw(0),
+                    name: Atom::from(""),
                     ty: TypeId::from_raw(0),
                     mutable: true,
                 });
@@ -254,7 +255,7 @@ impl ExprConverter {
                 let new_binding = self.map_local_id(*binding);
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
-                    name: SymbolId::from_raw(0),
+                    name: Atom::from("for_of_binding"),
                     ty: TypeId::from_raw(0),
                     mutable: false,
                 });
@@ -277,7 +278,7 @@ impl ExprConverter {
                 let new_binding = self.map_local_id(*binding);
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
-                    name: SymbolId::from_raw(0),
+                    name: Atom::from(""),
                     ty: TypeId::from_raw(0),
                     mutable: false,
                 });
