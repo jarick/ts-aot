@@ -99,16 +99,6 @@ fn register_local_name_does_not_panic() {
 }
 
 #[test]
-fn push_await_increments_state() {
-    let mut c = ExprConverter::new();
-    let (d1, s1) = c.push_await();
-    let (d2, s2) = c.push_await();
-    assert_ne!(d1, d2);
-    assert_eq!(s1, 1);
-    assert_eq!(s2, 2);
-}
-
-#[test]
 fn resolve_callee_function_uses_remap() {
     let mut remap = HashMap::new();
     remap.insert(FunctionId::from_raw(3), FunctionId::from_raw(99));
@@ -581,7 +571,7 @@ fn convert_expr_template_returns_local_to_dest() {
 }
 
 #[test]
-fn convert_expr_await_emits_await_stmt() {
+fn convert_expr_await_emits_mir_await_expr() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -596,9 +586,8 @@ fn convert_expr_await_emits_await_stmt() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(out.len(), 1);
-    assert!(matches!(out[0], MirStmt::Await { next_state: 1, .. }));
-    assert!(matches!(mir, MirExpr::Local(_)));
+    assert_eq!(out.len(), 0);
+    assert!(matches!(mir, MirExpr::Await { expr: _, ty: _ }));
 }
 
 #[test]
@@ -879,7 +868,7 @@ fn convert_block_empty_produces_empty() {
 }
 
 #[test]
-fn convert_block_direct_drains_await_temp_locals() {
+fn convert_block_await_emits_mir_await_expr_without_temp_local() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Return {
@@ -888,17 +877,18 @@ fn convert_block_direct_drains_await_temp_locals() {
             ty: unit_ty(),
         }),
     }]);
-    let (_, locals) = c.convert_block(&block, &mut cx);
-    let await_dest = match locals.as_slice() {
-        [single] => single.id,
-        _ => panic!(
-            "expected exactly 1 local from await, got {}: {locals:?}",
-            locals.len()
-        ),
-    };
+    let (mir, locals) = c.convert_block(&block, &mut cx);
     assert!(
-        locals.iter().any(|l| l.id == await_dest && l.mutable),
-        "await dest {await_dest:?} must be in convert_block's locals (mutable)"
+        locals.is_empty(),
+        "await no longer needs a temp local (no state machine), got: {locals:?}"
+    );
+    assert!(
+        matches!(
+            &mir.stmts.as_slice(),
+            [MirStmt::Return(Some(MirExpr::Await { expr: _, ty: _ }))],
+        ),
+        "expected Return(MirExpr::Await), got: {:?}",
+        mir.stmts
     );
     assert!(!cx.has_errors());
 }
@@ -2338,7 +2328,7 @@ fn convert_program_preserves_import_module_path_from_atom() {
 }
 
 #[test]
-fn convert_function_await_dest_appears_in_body_locals() {
+fn convert_function_await_emits_mir_await_expr_without_body_locals() {
     let f = HirFunction {
         name: Atom::new_inline("1"),
         params: Vec::new(),
@@ -2366,13 +2356,14 @@ fn convert_function_await_dest_appears_in_body_locals() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    let await_dest = match mir.body.block.stmts.last().expect("non-empty body") {
-        MirStmt::Return(Some(MirExpr::Local(lid))) => *lid,
-        other => panic!("expected last stmt Return(Some(Local)), got {other:?}"),
+    match mir.body.block.stmts.last().expect("non-empty body") {
+        MirStmt::Return(Some(MirExpr::Await { .. })) => {}
+        other => panic!("expected last stmt Return(Some(MirExpr::Await)), got {other:?}"),
     };
     assert!(
-        mir.body.locals.iter().any(|l| l.id == await_dest),
-        "await dest {await_dest:?} must be in body.locals"
+        mir.body.locals.is_empty(),
+        "await no longer needs a temp local (no state machine), got: {:?}",
+        mir.body.locals
     );
 }
 

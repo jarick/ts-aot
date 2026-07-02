@@ -40,9 +40,7 @@ define_id!(UnionId);
 define_id!(EnumId);
 define_id!(VariantId);
 define_id!(ModuleId);
-define_id!(AwaitPointId);
 define_id!(ClosureId);
-define_id!(AsyncTaskId);
 define_id!(ErrorId);
 define_id!(GenericParamId);
 

@@ -163,23 +163,6 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
             }
             d.write("\n");
         }
-        MirStmt::Await {
-            promise,
-            dest,
-            next_state,
-            ty,
-        } => {
-            d.write("await (");
-            dump_expr_inline(promise, d);
-            d.write(&format!(
-                ") -> local({}) state({}) ty({})",
-                dest.raw(),
-                next_state,
-                ty.raw()
-            ));
-            d.write("\n");
-        }
-        MirStmt::SetState { value } => d.line(&format!("set_state({})", value)),
     }
 }
 
@@ -289,6 +272,20 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             d.write(fmt_unary(*op));
             d.write("(");
             dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
+        MirExpr::Await { expr, ty } => {
+            d.write("await(");
+            dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
+        MirExpr::Yield { expr, ty } => {
+            d.write("yield(");
+            if let Some(e) = expr {
+                dump_expr_inline(e, d);
+            } else {
+                d.write("()");
+            }
             d.write(&format!("):{}", ty.raw()));
         }
     }

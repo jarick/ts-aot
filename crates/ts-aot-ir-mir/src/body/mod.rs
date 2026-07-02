@@ -94,15 +94,6 @@ pub enum MirStmt {
         dest: Option<LocalId>,
         ty: TypeId,
     },
-    Await {
-        promise: MirExpr,
-        dest: LocalId,
-        next_state: i32,
-        ty: TypeId,
-    },
-    SetState {
-        value: i32,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -224,6 +215,14 @@ pub enum MirExpr {
     Unary {
         op: UnaryOp,
         expr: Box<MirExpr>,
+        ty: TypeId,
+    },
+    Await {
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
+    Yield {
+        expr: Option<Box<MirExpr>>,
         ty: TypeId,
     },
 }

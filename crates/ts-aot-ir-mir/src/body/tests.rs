@@ -202,39 +202,45 @@ fn stmt_runtime_carries_op_args_ty() {
 }
 
 #[test]
-fn stmt_await_carries_promise_dest_state_ty() {
-    let s = MirStmt::Await {
-        promise: MirExpr::Unit,
-        dest: LocalId::from_raw(3),
-        next_state: 7,
-        ty: TypeId::from_raw(0),
+fn expr_await_carries_inner_and_ty() {
+    let e = MirExpr::Await {
+        expr: Box::new(MirExpr::Int {
+            value: 42,
+            ty: TypeId::from_raw(0),
+        }),
+        ty: TypeId::from_raw(1),
     };
-    match s {
-        MirStmt::Await {
-            promise,
-            dest,
-            next_state,
-            ty,
-        } => {
-            assert!(matches!(promise, MirExpr::Unit));
-            assert_eq!(dest, LocalId::from_raw(3));
-            assert_eq!(next_state, 7);
-            assert_eq!(ty, TypeId::from_raw(0));
+    match e {
+        MirExpr::Await { expr, ty } => {
+            assert!(matches!(*expr, MirExpr::Int { value: 42, .. }));
+            assert_eq!(ty, TypeId::from_raw(1));
         }
         _ => panic!("expected Await"),
     }
 }
 
 #[test]
-fn stmt_set_state_carries_int_value() {
-    assert!(matches!(
-        MirStmt::SetState { value: 0 },
-        MirStmt::SetState { value: 0 }
-    ));
-    assert!(matches!(
-        MirStmt::SetState { value: -1 },
-        MirStmt::SetState { value: -1 }
-    ));
+fn expr_yield_with_value_carries_inner_and_ty() {
+    let e = MirExpr::Yield {
+        expr: Some(Box::new(MirExpr::Unit)),
+        ty: TypeId::from_raw(2),
+    };
+    match e {
+        MirExpr::Yield { expr, ty } => {
+            assert!(matches!(*expr.unwrap(), MirExpr::Unit));
+            assert_eq!(ty, TypeId::from_raw(2));
+        }
+        _ => panic!("expected Yield"),
+    }
+}
+
+#[test]
+fn expr_yield_without_value_is_unit_typed() {
+    let e = MirExpr::Yield {
+        expr: None,
+        ty: TypeId::from_raw(0),
+    };
+    assert!(matches!(e, MirExpr::Yield { expr: None, .. }));
 }
 
 #[test]

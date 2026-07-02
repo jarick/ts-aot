@@ -12,8 +12,6 @@ pub struct ExprConverter {
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) next_local: u32,
-    pub(super) next_state: i32,
-    pub(super) next_await: u32,
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
 }
@@ -39,8 +37,6 @@ impl ExprConverter {
             local_names: HashMap::new(),
             function_remap: remap,
             next_local,
-            next_state: 0,
-            next_await: 0,
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
         }
@@ -103,17 +99,6 @@ impl ExprConverter {
         if count > self.next_local {
             self.next_local = count;
         }
-    }
-
-    pub(super) fn fresh_await_dest(&mut self) -> LocalId {
-        self.fresh_local()
-    }
-
-    pub(super) fn push_await(&mut self) -> (LocalId, i32) {
-        let next_state = self.next_state + 1;
-        let dest = self.fresh_await_dest();
-        self.next_state = next_state;
-        (dest, next_state)
     }
 
     pub(super) fn resolve_callee(

@@ -1121,7 +1121,7 @@ mod tests {
 
         assert_eq!(
             stats.inlined_promise_resolve, 1,
-            "ForIn.iter must be rewritten even when iter is a Promise.resolve call, otherwise HIR->MIR still emits MirStmt::Await"
+            "ForIn.iter must be rewritten even when iter is a Promise.resolve call, otherwise HIR->MIR still emits MirExpr::Await (no state-machine lowering)"
         );
         let HirDecl::Function(f) = &program.declarations[0] else {
             panic!("expected Function");

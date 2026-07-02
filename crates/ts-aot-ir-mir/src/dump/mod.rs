@@ -356,25 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn dump_await_stmt() {
-        let stmt = MirStmt::Await {
-            promise: MirExpr::Unit,
-            dest: LocalId::from_raw(0),
-            next_state: 1,
-            ty: TypeId::from_raw(0),
-        };
-        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
-        assert!(text.contains("await"));
-    }
-
-    #[test]
-    fn dump_set_state() {
-        let stmt = MirStmt::SetState { value: 0 };
-        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
-        assert!(text.contains("set_state"));
-    }
-
-    #[test]
     fn dump_runtime_requirements_with_ops() {
         let mut r = RuntimeRequirements::default();
         r.require(RuntimeOp::StringConcat);

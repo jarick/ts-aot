@@ -382,27 +382,15 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
 
     let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
-    let await_count = f
-        .body
-        .block
-        .stmts
-        .iter()
-        .filter(|s| matches!(s, MirStmt::Await { .. }))
-        .count();
-    assert_eq!(
-        await_count, 1,
-        "Await wrapper must be preserved (Promise.resolve call inside it is rewritten, but the await state step stays), got stmts: {:?}",
-        f.body.block.stmts
-    );
-    let MirStmt::Await { promise, .. } = &f.body.block.stmts[0] else {
+    let MirStmt::Return(Some(MirExpr::Await { expr: promise, .. })) = &f.body.block.stmts[0] else {
         panic!(
-            "expected MirStmt::Await (with rewritten promise = bare arg), got {:?}",
-            f.body.block.stmts[0]
+            "expected Return(Some(MirExpr::Await)) at stmts[0], got stmts: {:?}",
+            f.body.block.stmts
         );
     };
-    let MirExpr::Int { value, .. } = promise else {
+    let MirExpr::Int { value, .. } = promise.as_ref() else {
         panic!(
-            "MirStmt::Await.promise must now be the bare Int(42) (Promise.resolve call was stripped), got {promise:?}"
+            "MirExpr::Await.expr must now be the bare Int(42) (Promise.resolve call was stripped), got {promise:?}"
         );
     };
     assert_eq!(*value, 42, "bare arg must be preserved through HIR -> MIR");
@@ -453,12 +441,10 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
 
     let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
-    assert!(
-        f.body
-            .block
-            .stmts
-            .iter()
-            .any(|s| matches!(s, MirStmt::Await { .. })),
-        "non-Promise.resolve await must remain a MirStmt::Await state step"
-    );
+    let MirStmt::Return(Some(MirExpr::Await { .. })) = &f.body.block.stmts[0] else {
+        panic!(
+            "expected Return(Some(MirExpr::Await)) at stmts[0], got stmts: {:?}",
+            f.body.block.stmts
+        );
+    };
 }

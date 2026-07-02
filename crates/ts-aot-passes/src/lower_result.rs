@@ -44,9 +44,7 @@ fn rewrite_stmt(stmt: &mut MirStmt, err_ty: TypeId) {
         | MirStmt::ReturnResultErr { .. }
         | MirStmt::Break
         | MirStmt::Continue
-        | MirStmt::Runtime { .. }
-        | MirStmt::Await { .. }
-        | MirStmt::SetState { .. } => {}
+        | MirStmt::Runtime { .. } => {}
     }
 }
 

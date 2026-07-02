@@ -160,38 +160,22 @@ impl ExprConverter {
                 MirExpr::Unit
             }
             HirExpr::Await { expr, ty } => {
-                let (dest, next_state) = self.push_await();
-                self.push_temp_local(dest, *ty);
-                let promise =
+                let inner =
                     self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, ctx);
-                out.push(MirStmt::Await {
-                    promise,
-                    dest,
-                    next_state,
+                MirExpr::Await {
+                    expr: Box::new(inner),
                     ty: *ty,
-                });
-                MirExpr::Local(dest)
+                }
             }
             HirExpr::Yield { expr, ty } => {
-                let dest = self.fresh_local();
-                self.push_temp_local(dest, *ty);
-                let value_expr = expr
+                let inner = expr
                     .as_ref()
                     .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, ctx))
-                    .unwrap_or(MirExpr::Unit);
-                out.push(MirStmt::Let {
-                    local: dest,
+                    .map(Box::new);
+                MirExpr::Yield {
+                    expr: inner,
                     ty: *ty,
-                    init: None,
-                    mutable: true,
-                });
-                out.push(MirStmt::Assign {
-                    target: MirPlace::Local { id: dest },
-                    value: value_expr,
-                });
-                out.push(MirStmt::SetState { value: -1 });
-                out.push(MirStmt::Expr(MirExpr::Local(dest)));
-                MirExpr::Local(dest)
+                }
             }
             HirExpr::Template { parts, ty, .. } => {
                 let mut args: Vec<MirExpr> = Vec::with_capacity(parts.len());
