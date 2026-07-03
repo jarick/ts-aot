@@ -6,6 +6,7 @@ mod lower_classes;
 mod lower_closures;
 mod lower_enums;
 mod lower_result;
+mod monomorphize;
 mod source_map;
 
 pub use context::PassContext;
@@ -16,4 +17,5 @@ pub use lower_classes::{LowerClassesStats, lower_classes};
 pub use lower_closures::{LowerClosuresResult, LowerClosuresStats, lower_closures};
 pub use lower_enums::lower_enums;
 pub use lower_result::lower_result;
+pub use monomorphize::{MonomorphizeStats, monomorphize};
 pub use source_map::{LineCol, SourceMap};

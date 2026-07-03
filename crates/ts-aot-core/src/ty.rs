@@ -1,4 +1,4 @@
-use crate::ids::{Atom, StructId, TypeId};
+use crate::ids::{Atom, GenericParamId, StructId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryKind {
@@ -50,6 +50,9 @@ pub enum Type {
     },
     Named {
         symbol: Atom,
+    },
+    GenericParam {
+        id: GenericParamId,
     },
     Error,
 }
