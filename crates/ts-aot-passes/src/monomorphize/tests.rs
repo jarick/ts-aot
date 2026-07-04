@@ -3,7 +3,10 @@ use crate::PassContext;
 use crate::hir_to_mir::convert_program;
 use std::collections::HashSet;
 use ts_aot_core::{Atom, FunctionId, GenericParamId, LocalId, ModuleId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
+use ts_aot_ir_hir::{
+    HirCallee, HirCatchClause, HirClass, HirDecl, HirExpr, HirFunction, HirParam, HirProgram,
+    HirStmt,
+};
 use ts_aot_ir_mir::MirDecl;
 
 fn setup() -> (HirProgram, TypeTable, PassContext) {
@@ -1077,5 +1080,250 @@ fn closure_params_in_mono_copy_are_type_substituted() {
         closure_param_ty,
         Some(i64_ty),
         "closure param ty must be substituted from T (GenericParam) to i64"
+    );
+}
+
+#[test]
+fn throw_stmt_with_generic_call_triggers_specialization() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    program.push_decl(HirDecl::Function(generic_fn(
+        "g",
+        vec![GenericParamId::from_raw(0)],
+        vec![HirStmt::Return { value: None }],
+    )));
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![HirStmt::Throw {
+            expr: HirExpr::Call {
+                callee: HirCallee::Function(FunctionId::from_raw(0)),
+                args: vec![HirExpr::Int(42)],
+                ty: TypeId::from_raw(0),
+            },
+        }],
+    )));
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+
+    assert_eq!(
+        stats.monomorphized, 1,
+        "Call inside HirStmt::Throw must be visited"
+    );
+    assert_eq!(stats.calls_rewritten, 1);
+}
+
+#[test]
+fn try_catch_finally_with_call_in_each_branch_is_visited() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    program.push_decl(HirDecl::Function(generic_fn(
+        "g",
+        vec![GenericParamId::from_raw(0)],
+        vec![HirStmt::Return { value: None }],
+    )));
+
+    let call = |fid: u32, ty: TypeId| HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(fid)),
+        args: vec![HirExpr::Int(1)],
+        ty,
+    };
+
+    let try_body = HirStmt::Expr {
+        expr: call(0, TypeId::from_raw(0)),
+    };
+    let catch_body = HirStmt::Expr {
+        expr: call(0, TypeId::from_raw(0)),
+    };
+    let finally_body = HirStmt::Expr {
+        expr: call(0, TypeId::from_raw(0)),
+    };
+
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![HirStmt::Try {
+            body: Box::new(try_body),
+            catch: Some(HirCatchClause {
+                binding: None,
+                body: Box::new(catch_body),
+            }),
+            finally: Some(Box::new(finally_body)),
+        }],
+    )));
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+
+    assert_eq!(
+        stats.monomorphized, 1,
+        "Calls in try/catch/finally must all be visited (dedup to 1 mono)"
+    );
+    assert_eq!(stats.calls_rewritten, 3);
+}
+
+#[test]
+fn new_expression_with_generic_call_callee_is_visited() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    program.push_decl(HirDecl::Function(generic_fn(
+        "ctor",
+        vec![GenericParamId::from_raw(0)],
+        vec![HirStmt::Return { value: None }],
+    )));
+
+    let new_expr = HirExpr::New {
+        callee: Box::new(HirExpr::Call {
+            callee: HirCallee::Function(FunctionId::from_raw(0)),
+            args: vec![HirExpr::Int(7)],
+            ty: TypeId::from_raw(0),
+        }),
+        args: vec![],
+        ty: TypeId::from_raw(0),
+    };
+
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![HirStmt::Expr { expr: new_expr }],
+    )));
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+
+    assert_eq!(
+        stats.monomorphized, 1,
+        "Call wrapped in HirExpr::New must be visited via visit_expr_callees"
+    );
+}
+
+#[test]
+fn class_method_body_types_are_substituted_in_mono_copy() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    let t_ty = types.intern(&Type::GenericParam {
+        id: GenericParamId::from_raw(0),
+    });
+
+    let method = HirFunction {
+        name: Atom::from("wrap"),
+        params: vec![HirParam {
+            name: Atom::from("x"),
+            ty: t_ty,
+        }],
+        ret: t_ty,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: t_ty,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: vec![GenericParamId::from_raw(0)],
+        async_info: None,
+    };
+    let class = HirClass {
+        name: Atom::from("Box"),
+        ty: TypeId::from_raw(0),
+        fields: vec![],
+        methods: vec![method],
+        extends: None,
+        type_params: vec![],
+    };
+    program.push_decl(HirDecl::Class(class));
+
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Function(FunctionId::from_raw(0)),
+                args: vec![HirExpr::Int(7)],
+                ty: t_ty,
+            },
+        }],
+    )));
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+    assert_eq!(stats.monomorphized, 1);
+
+    let mono_fn = find_mono_for(&program, "wrap").expect("wrap mono copy");
+    assert!(
+        mono_fn.type_params.is_empty(),
+        "mono copy must have no type_params"
+    );
+
+    let i64_ty = types.intern(&Type::I64);
+    let mut found_local_ty: Option<TypeId> = None;
+    for stmt in &mono_fn.body {
+        if let HirStmt::Return {
+            value: Some(HirExpr::Local { ty, .. }),
+        } = stmt
+        {
+            found_local_ty = Some(*ty);
+        }
+    }
+    assert_eq!(
+        found_local_ty,
+        Some(i64_ty),
+        "Local.ty in class method mono copy must be substituted from T to i64"
+    );
+}
+
+#[test]
+fn global_init_with_call_is_visited() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    program.push_decl(HirDecl::Function(generic_fn(
+        "init",
+        vec![GenericParamId::from_raw(0)],
+        vec![HirStmt::Return { value: None }],
+    )));
+
+    let init_expr = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: vec![HirExpr::Int(5)],
+        ty: TypeId::from_raw(0),
+    };
+
+    program.push_decl(HirDecl::Global {
+        name: Atom::from("CACHE"),
+        ty: TypeId::from_raw(0),
+        init: Some(init_expr),
+    });
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+
+    assert_eq!(
+        stats.monomorphized, 1,
+        "Call inside HirDecl::Global init must be visited"
+    );
+}
+
+#[test]
+fn enum_decl_is_skipped_from_callee_visit() {
+    let (mut program, mut types, mut ctx) = setup();
+
+    program.push_decl(HirDecl::Function(generic_fn(
+        "g",
+        vec![GenericParamId::from_raw(0)],
+        vec![HirStmt::Return { value: None }],
+    )));
+
+    let enum_decl = HirDecl::Enum {
+        name: Atom::from("Color"),
+        variants: vec![ts_aot_ir_hir::HirEnumVariant {
+            name: Atom::from("Red"),
+            value: Some(HirExpr::Call {
+                callee: HirCallee::Function(FunctionId::from_raw(0)),
+                args: vec![HirExpr::Int(0)],
+                ty: TypeId::from_raw(0),
+            }),
+        }],
+    };
+    program.push_decl(enum_decl);
+
+    let stats = monomorphize(&mut program, &mut types, &mut ctx);
+
+    assert_eq!(
+        stats.monomorphized, 0,
+        "HirDecl::Enum variant value must not be traversed: a Call inside it would otherwise specialize the generic"
     );
 }

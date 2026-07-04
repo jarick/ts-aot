@@ -1,9 +1,13 @@
 mod core;
+mod infer;
 mod substitute;
 mod substitute_decl;
 mod substitute_expr;
 mod substitute_stmt;
 mod substitute_ty;
+
+#[cfg(test)]
+mod infer_tests;
 
 #[cfg(test)]
 mod tests;
