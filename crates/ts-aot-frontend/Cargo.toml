@@ -1,0 +1,33 @@
+[package]
+name = "ts-aot-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Phase 1 frontend foundation: OXC AST -> HIR skeleton for the supported TS subset"
+
+[dependencies]
+ts-aot-core = { path = "../ts-aot-core" }
+ts-aot-ir-hir = { path = "../ts-aot-ir-hir" }
+
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_diagnostics.workspace = true
+oxc_parser.workspace = true
+oxc_semantic.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[dev-dependencies]
+proptest.workspace = true
