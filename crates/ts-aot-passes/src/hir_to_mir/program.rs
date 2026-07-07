@@ -19,12 +19,14 @@ pub fn convert_function(
     name_to_function: &HashMap<Atom, FunctionId>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
+    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
     ctx: &mut PassContext,
 ) -> MirFunctionDecl {
     let param_count = f.params.len();
     let mut converter =
         ExprConverter::with_function_remap_and_offset(function_remap, param_count as u32);
     converter.closure_name_to_function = name_to_function.clone();
+    converter.set_field_id_lookup(field_id_lookup.clone());
     converter.seed_params(param_count as u32);
     let (block, locals) =
         converter.convert_block_with_shared_struct_ids(&f.body, struct_id_map, next_struct_id, ctx);
@@ -116,6 +118,16 @@ pub fn convert_program(
             | HirDecl::Namespace { .. } => {}
         }
     }
+    let mut field_id_lookup: HashMap<(StructId, Atom), FieldId> = HashMap::new();
+    for decl in &hir.declarations {
+        if let HirDecl::Class(c) = decl
+            && let Some(&sid) = struct_id_map.get(&c.ty)
+        {
+            for (i, f) in c.fields.iter().enumerate() {
+                field_id_lookup.insert((sid, f.name.clone()), FieldId::from_raw(i as u32));
+            }
+        }
+    }
     for decl in &hir.declarations {
         if let Some(mir_decl) = convert_decl(
             decl,
@@ -123,6 +135,7 @@ pub fn convert_program(
             &closure_name_to_function,
             &mut struct_id_map,
             &mut next_struct_id,
+            &field_id_lookup,
             ctx,
         ) {
             mir.push_decl(mir_decl);
@@ -138,6 +151,7 @@ fn convert_decl(
     closure_name_to_function: &HashMap<Atom, FunctionId>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
+    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
     ctx: &mut PassContext,
 ) -> Option<MirDecl> {
     match decl {
@@ -157,6 +171,7 @@ fn convert_decl(
                 closure_name_to_function,
                 struct_id_map,
                 next_struct_id,
+                field_id_lookup,
                 ctx,
             )))
         }
@@ -166,6 +181,7 @@ fn convert_decl(
             closure_name_to_function,
             struct_id_map,
             next_struct_id,
+            field_id_lookup,
             ctx,
         ))),
         HirDecl::TypeAlias { .. } | HirDecl::Interface { .. } => None,
@@ -192,6 +208,7 @@ fn convert_struct(
     closure_name_to_function: &HashMap<Atom, FunctionId>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
+    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
     ctx: &mut PassContext,
 ) -> MirStructDecl {
     let sid = struct_id_map[&c.ty];
@@ -230,6 +247,7 @@ fn convert_struct(
             closure_name_to_function,
             struct_id_map,
             next_struct_id,
+            field_id_lookup,
             ctx,
         );
         let mut m = m;
@@ -257,6 +275,9 @@ fn body_can_throw(body: &[HirStmt]) -> bool {
             HirExpr::StructLiteral { fields, .. } => fields.iter().any(|(_, e)| expr_can_throw(e)),
             HirExpr::Assignment { target, value, .. } => {
                 expr_can_throw(target) || expr_can_throw(value)
+            }
+            HirExpr::CompoundUpdate { target, rhs, .. } => {
+                expr_can_throw(target) || expr_can_throw(rhs)
             }
             HirExpr::Index { owner, index, .. } => expr_can_throw(owner) || expr_can_throw(index),
             HirExpr::Field { owner, .. } => expr_can_throw(owner),
@@ -364,7 +385,8 @@ fn throw_expr_type(expr: &HirExpr) -> TypeId {
         | HirExpr::Template { ty, .. }
         | HirExpr::New { ty, .. }
         | HirExpr::OptionalChain { ty, .. }
-        | HirExpr::Assignment { ty, .. } => *ty,
+        | HirExpr::Assignment { ty, .. }
+        | HirExpr::CompoundUpdate { ty, .. } => *ty,
         HirExpr::TypeAssertion { target, .. } => *target,
         _ => TypeId::from_raw(0),
     }

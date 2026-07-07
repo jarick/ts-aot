@@ -45,6 +45,10 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
             rewrite_expr(target, map);
             rewrite_expr(value, map);
         }
+        HirExpr::CompoundUpdate { target, rhs, .. } => {
+            rewrite_expr(target, map);
+            rewrite_expr(rhs, map);
+        }
         HirExpr::StructLiteral { fields, .. } => {
             for (_, e) in fields {
                 rewrite_expr(e, map);

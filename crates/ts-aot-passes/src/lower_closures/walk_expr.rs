@@ -283,6 +283,28 @@ pub(super) fn walk_expr(
                 ctx,
             );
         }
+        HirExpr::CompoundUpdate { target, rhs, .. } => {
+            walk_expr(
+                target,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+            walk_expr(
+                rhs,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+        }
         HirExpr::Unit
         | HirExpr::Bool(_)
         | HirExpr::Int(_)

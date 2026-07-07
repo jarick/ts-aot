@@ -40,18 +40,26 @@ impl ExprConverter {
             HirExpr::Local { id, .. } => self.map_local(*id),
             HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),
             HirExpr::Field {
-                owner, field, ty, ..
-            } => MirExpr::Field {
-                base: Box::new(self.convert_expr(
-                    owner,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    ctx,
-                )),
-                field: *field,
-                ty: *ty,
-            },
+                owner,
+                field,
+                field_name,
+                ty,
+                ..
+            } => {
+                let resolved_field =
+                    self.resolve_field_id(owner, field_name, *field, shared_struct_ids, ctx);
+                MirExpr::Field {
+                    base: Box::new(self.convert_expr(
+                        owner,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        ctx,
+                    )),
+                    field: resolved_field,
+                    ty: *ty,
+                }
+            }
             HirExpr::Index {
                 owner, index, ty, ..
             } => MirExpr::Index {
@@ -257,10 +265,11 @@ impl ExprConverter {
                     self.convert_expr(target, out, shared_struct_ids, shared_next_struct, ctx);
                 let target_place = mir_expr_to_place(target_mir, ctx, |non_place_mir| {
                     let temp = self.fresh_local();
-                    self.push_temp_local(temp, TypeId::from_raw(0));
+                    let temp_ty = mir_expr_ty(&non_place_mir);
+                    self.push_temp_local(temp, temp_ty);
                     out.push(MirStmt::Let {
                         local: temp,
-                        ty: TypeId::from_raw(0),
+                        ty: temp_ty,
                         init: Some(non_place_mir),
                         mutable: false,
                     });
@@ -268,16 +277,123 @@ impl ExprConverter {
                 });
                 let value_mir =
                     self.convert_expr(value, out, shared_struct_ids, shared_next_struct, ctx);
+                let value_temp = self.fresh_local();
+                self.push_temp_local(value_temp, *ty);
+                out.push(MirStmt::Let {
+                    local: value_temp,
+                    ty: *ty,
+                    init: Some(value_mir),
+                    mutable: false,
+                });
                 if let Some(place) = target_place {
                     out.push(MirStmt::Assign {
                         target: place,
-                        value: value_mir.clone(),
+                        value: MirExpr::Local(value_temp),
                     });
                 }
                 let _ = ty;
-                value_mir
+                MirExpr::Local(value_temp)
+            }
+            HirExpr::CompoundUpdate {
+                target,
+                op,
+                rhs,
+                post,
+                ty,
+            } => {
+                let target_mir =
+                    self.convert_expr(target, out, shared_struct_ids, shared_next_struct, ctx);
+                let target_place = mir_expr_to_place(target_mir, ctx, |non_place_mir| {
+                    let temp = self.fresh_local();
+                    let temp_ty = mir_expr_ty(&non_place_mir);
+                    self.push_temp_local(temp, temp_ty);
+                    out.push(MirStmt::Let {
+                        local: temp,
+                        ty: temp_ty,
+                        init: Some(non_place_mir),
+                        mutable: false,
+                    });
+                    temp
+                });
+
+                let Some(place) = target_place else {
+                    return MirExpr::Unit;
+                };
+
+                let place = self.ensure_place_pure_components(place, out);
+
+                let old_temp = self.fresh_local();
+                self.push_temp_local(old_temp, *ty);
+                let load_expr = mir_place_to_expr(place.clone());
+                out.push(MirStmt::Let {
+                    local: old_temp,
+                    ty: *ty,
+                    init: Some(load_expr),
+                    mutable: false,
+                });
+
+                let rhs_mir =
+                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, ctx);
+
+                if *post {
+                    let post_new_value = MirExpr::Binary {
+                        op: convert_binop(*op, ctx),
+                        left: Box::new(MirExpr::Local(old_temp)),
+                        right: Box::new(rhs_mir),
+                        ty: *ty,
+                    };
+                    out.push(MirStmt::Assign {
+                        target: place,
+                        value: post_new_value,
+                    });
+                    MirExpr::Local(old_temp)
+                } else {
+                    let new_temp = self.fresh_local();
+                    self.push_temp_local(new_temp, *ty);
+                    let new_value = MirExpr::Binary {
+                        op: convert_binop(*op, ctx),
+                        left: Box::new(MirExpr::Local(old_temp)),
+                        right: Box::new(rhs_mir),
+                        ty: *ty,
+                    };
+                    out.push(MirStmt::Let {
+                        local: new_temp,
+                        ty: *ty,
+                        init: Some(new_value),
+                        mutable: false,
+                    });
+                    out.push(MirStmt::Assign {
+                        target: place,
+                        value: MirExpr::Local(new_temp),
+                    });
+                    MirExpr::Local(new_temp)
+                }
             }
         }
+    }
+}
+
+fn mir_place_to_expr(p: MirPlace) -> MirExpr {
+    match p {
+        MirPlace::Local { id } => MirExpr::Local(id),
+        MirPlace::Field { base, field, ty } => MirExpr::Field {
+            base: Box::new(mir_place_base_to_expr(*base)),
+            field,
+            ty,
+        },
+        MirPlace::Index { base, index, ty } => MirExpr::Index { base, index, ty },
+    }
+}
+
+fn mir_place_base_to_expr(b: MirPlaceBase) -> MirExpr {
+    match b {
+        MirPlaceBase::Local(id) => MirExpr::Local(id),
+        MirPlaceBase::Field { base, field, ty } => MirExpr::Field {
+            base: Box::new(mir_place_base_to_expr(*base)),
+            field,
+            ty,
+        },
+        MirPlaceBase::Index { base, index, ty } => MirExpr::Index { base, index, ty },
     }
 }
 
@@ -340,5 +456,122 @@ where
         }
         MirExpr::Index { base, index, ty } => Some(MirPlaceBase::Index { base, index, ty }),
         non_place => Some(MirPlaceBase::Local(materialize(non_place))),
+    }
+}
+
+impl ExprConverter {
+    pub(super) fn ensure_place_pure_components(
+        &mut self,
+        place: MirPlace,
+        out: &mut Vec<MirStmt>,
+    ) -> MirPlace {
+        match place {
+            MirPlace::Local { id } => MirPlace::Local { id },
+            MirPlace::Field { base, field, ty } => {
+                let new_base = self.ensure_place_base_pure_components(*base, out);
+                MirPlace::Field {
+                    base: Box::new(new_base),
+                    field,
+                    ty,
+                }
+            }
+            MirPlace::Index { base, index, ty } => {
+                let new_base = self.ensure_mir_expr_pure_components(*base, out);
+                let new_index = self.ensure_mir_expr_pure_components(*index, out);
+                MirPlace::Index {
+                    base: Box::new(new_base),
+                    index: Box::new(new_index),
+                    ty,
+                }
+            }
+        }
+    }
+
+    fn ensure_place_base_pure_components(
+        &mut self,
+        base: MirPlaceBase,
+        out: &mut Vec<MirStmt>,
+    ) -> MirPlaceBase {
+        match base {
+            MirPlaceBase::Local(id) => MirPlaceBase::Local(id),
+            MirPlaceBase::Field { base, field, ty } => {
+                let inner = self.ensure_place_base_pure_components(*base, out);
+                MirPlaceBase::Field {
+                    base: Box::new(inner),
+                    field,
+                    ty,
+                }
+            }
+            MirPlaceBase::Index { base, index, ty } => {
+                let new_base = self.ensure_mir_expr_pure_components(*base, out);
+                let new_index = self.ensure_mir_expr_pure_components(*index, out);
+                MirPlaceBase::Index {
+                    base: Box::new(new_base),
+                    index: Box::new(new_index),
+                    ty,
+                }
+            }
+        }
+    }
+
+    fn ensure_mir_expr_pure_components(
+        &mut self,
+        expr: MirExpr,
+        out: &mut Vec<MirStmt>,
+    ) -> MirExpr {
+        match expr {
+            MirExpr::Local(id) => MirExpr::Local(id),
+            MirExpr::Field { base, field, ty } => {
+                let new_base = self.ensure_mir_expr_pure_components(*base, out);
+                MirExpr::Field {
+                    base: Box::new(new_base),
+                    field,
+                    ty,
+                }
+            }
+            MirExpr::Index { base, index, ty } => {
+                let new_base = self.ensure_mir_expr_pure_components(*base, out);
+                let new_index = self.ensure_mir_expr_pure_components(*index, out);
+                MirExpr::Index {
+                    base: Box::new(new_base),
+                    index: Box::new(new_index),
+                    ty,
+                }
+            }
+            other => {
+                let local = self.fresh_local();
+                let local_ty = mir_expr_ty(&other);
+                self.push_temp_local(local, local_ty);
+                out.push(MirStmt::Let {
+                    local,
+                    ty: local_ty,
+                    init: Some(other),
+                    mutable: false,
+                });
+                MirExpr::Local(local)
+            }
+        }
+    }
+}
+
+fn mir_expr_ty(e: &MirExpr) -> TypeId {
+    match e {
+        MirExpr::Int { ty, .. }
+        | MirExpr::Float { ty, .. }
+        | MirExpr::String { ty, .. }
+        | MirExpr::Null { ty }
+        | MirExpr::Field { ty, .. }
+        | MirExpr::Index { ty, .. }
+        | MirExpr::Call { ty, .. }
+        | MirExpr::StructLiteral { ty, .. }
+        | MirExpr::ResultOk { ty, .. }
+        | MirExpr::ResultErr { ty, .. }
+        | MirExpr::Binary { ty, .. }
+        | MirExpr::Unary { ty, .. }
+        | MirExpr::Await { ty, .. }
+        | MirExpr::Yield { ty, .. } => *ty,
+        MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => {
+            TypeId::from_raw(0)
+        }
     }
 }

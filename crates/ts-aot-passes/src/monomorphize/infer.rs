@@ -215,7 +215,8 @@ pub fn hir_expr_ty(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         | HirExpr::Template { ty, .. }
         | HirExpr::New { ty, .. }
         | HirExpr::OptionalChain { ty, .. }
-        | HirExpr::Assignment { ty, .. } => Some(*ty),
+        | HirExpr::Assignment { ty, .. }
+        | HirExpr::CompoundUpdate { ty, .. } => Some(*ty),
         HirExpr::TypeAssertion { target, .. } => Some(*target),
         HirExpr::Int(_) => Some(types.intern(&Type::I64)),
         HirExpr::Float(_) => Some(types.intern(&Type::F64)),

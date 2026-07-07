@@ -288,6 +288,22 @@ fn recurse_subexprs(
                 stats,
             );
         }
+        HirExpr::CompoundUpdate { target, rhs, .. } => {
+            rewrite_expr(
+                target.as_mut(),
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+            rewrite_expr(
+                rhs.as_mut(),
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+        }
         HirExpr::Unit
         | HirExpr::Bool(_)
         | HirExpr::Int(_)

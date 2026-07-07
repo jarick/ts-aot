@@ -9,6 +9,7 @@ use ts_aot_ir_hir::HirProgram;
 use skeleton::SkeletonBuilder;
 use util::source_type_for;
 
+mod body;
 mod decl;
 mod module;
 mod skeleton;

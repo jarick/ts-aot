@@ -139,6 +139,13 @@ pub enum HirExpr {
         value: Box<HirExpr>,
         ty: TypeId,
     },
+    CompoundUpdate {
+        target: Box<HirExpr>,
+        op: HirBinaryOp,
+        rhs: Box<HirExpr>,
+        post: bool,
+        ty: TypeId,
+    },
 }
 
 #[cfg(test)]
