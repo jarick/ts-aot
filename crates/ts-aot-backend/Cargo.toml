@@ -1,0 +1,26 @@
+[package]
+name = "ts-aot-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Rust code emitter for ts-aot: MIR → Rust source via quote! macro"
+
+[dependencies]
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
+
+[dev-dependencies]
+ts-aot-core = { path = "../ts-aot-core" }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
