@@ -1,4 +1,5 @@
 mod decl;
+mod dump;
 mod expr;
 mod program;
 mod stmt;
