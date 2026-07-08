@@ -5,10 +5,13 @@ use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
     HirSwitchCase, HirUnaryOp,
 };
-use ts_aot_ir_mir::{BinaryOp, FunctionKind, MirExpr, MirPlace, MirStmt, RuntimeOp, UnaryOp};
+use ts_aot_ir_mir::{
+    BinaryOp, FunctionKind, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
+};
 
 use super::{ExprConverter, HirBlock, PLACEHOLDER_FUNCTION, convert_function, convert_program};
 use crate::PassContext;
+use crate::lower_classes;
 
 fn ctx() -> PassContext {
     PassContext::new()
@@ -32,6 +35,10 @@ fn empty_struct_ids() -> std::collections::HashMap<ts_aot_core::TypeId, ts_aot_c
 
 fn empty_next_struct() -> u32 {
     0
+}
+
+fn empty_field_id_lookup() -> HashMap<(ts_aot_core::StructId, Atom), FieldId> {
+    HashMap::new()
 }
 
 #[test]
@@ -642,14 +649,47 @@ fn convert_expr_assignment_to_local_emits_local_place() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(out.len(), 1);
+    assert_eq!(
+        out.len(),
+        2,
+        "Assignment must emit Let value + Assign (no return-clone), got {out:?}"
+    );
+    let MirStmt::Let {
+        init: Some(value_init),
+        local: value_temp,
+        ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let init=value, got {:?}", out[0]);
+    };
+    assert!(
+        matches!(value_init, MirExpr::Int { value: 7, .. }),
+        "Let init must capture the original RHS expression, got {value_init:?}"
+    );
     assert!(matches!(
-        out[0],
+        out[1],
         MirStmt::Assign {
             target: ts_aot_ir_mir::MirPlace::Local { .. },
+            value: MirExpr::Local(_),
             ..
         }
     ));
+    let MirStmt::Assign {
+        value: assign_value,
+        ..
+    } = &out[1]
+    else {
+        panic!("expected Assign, got {:?}", out[1]);
+    };
+    let MirExpr::Local(assign_src) = assign_value else {
+        panic!(
+            "Assign value must load from the materialized value temp (no value.clone), got {assign_value:?}"
+        );
+    };
+    assert_eq!(
+        *assign_src, *value_temp,
+        "Assign value must point at the same temp as the Let init"
+    );
     assert!(!cx.has_errors());
 }
 
@@ -674,9 +714,18 @@ fn convert_expr_assignment_returns_assigned_value() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert!(
-        matches!(mir, MirExpr::Int { value: 7, .. }),
-        "assignment must yield the assigned value, got {mir:?}"
+    let MirExpr::Local(returned) = mir else {
+        panic!("assignment must yield MirExpr::Local(value_temp), got {mir:?}");
+    };
+    let MirStmt::Let {
+        local: value_temp, ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let init=value, got {:?}", out[0]);
+    };
+    assert_eq!(
+        returned, *value_temp,
+        "assignment must yield the same temp that holds the assigned value"
     );
 }
 
@@ -706,9 +755,34 @@ fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(out.len(), 2);
+    assert_eq!(out.len(), 3);
     assert!(matches!(out[0], MirStmt::Runtime { .. }));
-    assert!(matches!(out[1], MirStmt::Assign { .. }));
+    let MirStmt::Let {
+        local: value_temp,
+        init: Some(value_init),
+        ..
+    } = &out[1]
+    else {
+        panic!("expected out[1] = Let init=RHS-result, got {:?}", out[1]);
+    };
+    assert!(
+        matches!(value_init, MirExpr::Local(_)),
+        "Let init must capture the RHS value (e.g. Template's runtime dest temp), got {value_init:?}"
+    );
+    let MirStmt::Assign {
+        value: assign_value,
+        ..
+    } = &out[2]
+    else {
+        panic!("expected out[2] = Assign, got {:?}", out[2]);
+    };
+    let MirExpr::Local(assign_src) = assign_value else {
+        panic!("Assign value must be Local (load of value_temp), got {assign_value:?}");
+    };
+    assert_eq!(
+        *assign_src, *value_temp,
+        "Assign value must be MirExpr::Local(value_temp) — NOT a clone of the RHS expression (which would re-run side effects in a statement-context Expr)"
+    );
 }
 
 #[test]
@@ -734,7 +808,10 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         &mut cx,
     );
     assert!(cx.has_errors());
-    assert!(out.is_empty());
+    assert!(
+        !out.iter().any(|s| matches!(s, MirStmt::Assign { .. })),
+        "no Assign must be emitted for invalid target, got {out:?}"
+    );
     let diag = cx
         .diagnostics()
         .iter()
@@ -770,15 +847,21 @@ fn convert_expr_assignment_to_field_emits_field_place() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(out.len(), 1);
+    assert_eq!(out.len(), 2);
+    assert!(matches!(&out[0], MirStmt::Let { init: Some(_), .. }));
     assert!(matches!(
-        out[0],
+        &out[1],
         MirStmt::Assign {
             target: ts_aot_ir_mir::MirPlace::Field { .. },
+            value: MirExpr::Local(_),
             ..
         }
     ));
-    assert!(!cx.has_errors());
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "Local-owner field access with no struct id registered for unit_ty() must surface P0012 (missing struct id) instead of silently dropping to placeholder; got {:?}",
+        cx.diagnostics()
+    );
 }
 
 #[test]
@@ -817,18 +900,22 @@ fn convert_expr_assignment_to_indexed_field_emits_field_with_index_base() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert_eq!(out.len(), 1);
-    match &out[0] {
-        MirStmt::Assign { target, .. } => match target {
-            ts_aot_ir_mir::MirPlace::Field { base, field, .. } => {
-                assert_eq!(*field, FieldId::from_raw(3));
-                assert!(matches!(**base, ts_aot_ir_mir::MirPlaceBase::Index { .. }));
-            }
-            other => panic!("expected Field place with Index base, got {other:?}"),
-        },
-        other => panic!("expected Assign, got {other:?}"),
+    assert_eq!(out.len(), 2);
+    let MirStmt::Assign { target, .. } = &out[1] else {
+        panic!("expected out[1] = Assign, got {:?}", out[1]);
+    };
+    match target {
+        ts_aot_ir_mir::MirPlace::Field { base, field, .. } => {
+            assert_eq!(*field, FieldId::from_raw(3));
+            assert!(matches!(**base, ts_aot_ir_mir::MirPlaceBase::Index { .. }));
+        }
+        other => panic!("expected Field place with Index base, got {other:?}"),
     }
-    assert!(!cx.has_errors());
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "Index-owner field access with no struct id registered must surface P0012; got {:?}",
+        cx.diagnostics()
+    );
 }
 
 #[test]
@@ -998,6 +1085,7 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(
@@ -1039,6 +1127,7 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let names: Vec<String> = mir
@@ -1085,6 +1174,7 @@ fn convert_function_nested_let_in_forof_appears_in_body_locals() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let names: Vec<String> = mir
@@ -1688,6 +1778,7 @@ fn convert_function_basic_shape() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(mir.id, FunctionId::from_raw(0));
@@ -1732,6 +1823,7 @@ fn convert_function_let_after_params_gets_fresh_id() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(mir.params.len(), 2);
@@ -1770,6 +1862,7 @@ fn convert_function_marks_async_effect() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(mir.effects.is_async);
@@ -1806,6 +1899,7 @@ fn convert_function_body_references_param_id_resolves_to_param() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let param_id = mir.params[0].id;
@@ -2162,6 +2256,7 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         &HashMap::new(),
         &mut struct_id_map,
         &mut next_struct_id,
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2201,6 +2296,7 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         &HashMap::new(),
         &mut struct_id_map,
         &mut next_struct_id,
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2253,6 +2349,7 @@ fn body_can_throw_propagates_through_assignment_target() {
         &HashMap::new(),
         &mut struct_id_map,
         &mut next_struct_id,
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2309,6 +2406,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         &HashMap::new(),
         &mut struct_id_map,
         &mut next_struct_id,
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2368,6 +2466,7 @@ fn convert_function_await_emits_mir_await_expr_without_body_locals() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     match mir.body.block.stmts.last().expect("non-empty body") {
@@ -2413,6 +2512,7 @@ fn convert_function_new_alloc_appears_in_body_locals() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let alloc = match mir.body.block.stmts.last().expect("non-empty body") {
@@ -2453,6 +2553,7 @@ fn convert_function_temp_locals_drained_only_once() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let local_ids: Vec<u32> = mir.body.locals.iter().map(|l| l.id.raw()).collect();
@@ -2487,6 +2588,7 @@ fn convert_function_can_throw_true_when_body_has_throw_stmt() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2518,6 +2620,7 @@ fn convert_function_can_throw_false_when_body_has_no_throw_stmt() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2553,6 +2656,7 @@ fn convert_function_can_throw_recurses_into_nested_blocks() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -2597,6 +2701,7 @@ fn convert_function_build_params_preserves_param_atom_name() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     let first_name = mir.params[0].name.clone();
@@ -2650,6 +2755,7 @@ fn convert_function_with_remap_uses_remap_only_for_call_sites() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(
@@ -2909,7 +3015,11 @@ fn convert_expr_assignment_to_field_with_call_base_materializes_call() {
         &mut empty_next_struct(),
         &mut cx,
     );
-    assert!(!cx.has_errors(), "obj().x = v must not error");
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "Call-owner field access with no struct id registered must surface P0012 (missing struct id); got {:?}",
+        cx.diagnostics()
+    );
     let has_let_for_call = out.iter().any(|s| {
         matches!(
             s,
@@ -3082,6 +3192,7 @@ fn body_can_throw_propagates_through_if_condition_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3121,6 +3232,7 @@ fn body_can_throw_propagates_through_while_condition_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3161,6 +3273,7 @@ fn body_can_throw_propagates_through_for_of_iter_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3203,6 +3316,7 @@ fn body_can_throw_propagates_through_switch_discriminant_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3246,6 +3360,7 @@ fn body_can_throw_propagates_through_catch_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3286,6 +3401,7 @@ fn body_can_throw_propagates_through_finally_call() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3322,6 +3438,7 @@ fn body_can_throw_await_alone_is_throwing() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3362,6 +3479,7 @@ fn body_can_throw_new_alone_is_throwing() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3398,6 +3516,7 @@ fn body_can_throw_yield_alone_is_throwing() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3541,6 +3660,7 @@ fn infer_throws_is_none_for_call_only_function() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(
@@ -3586,6 +3706,7 @@ fn infer_throws_is_none_for_if_with_throwing_cond_only() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert!(mir.effects.can_throw);
@@ -3624,6 +3745,7 @@ fn infer_throws_uses_real_source_when_throwing_typed_expr() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(
@@ -3657,6 +3779,7 @@ fn infer_throws_respects_declared_over_inferred() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(
@@ -3689,11 +3812,1547 @@ fn infer_throws_uses_sentinel_for_primitive_thrown_expr() {
         &HashMap::new(),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &empty_field_id_lookup(),
         &mut cx,
     );
     assert_eq!(
         mir.throws,
         Some(TypeId::from_raw(0)),
         "primitive throw (no real source type) must fall back to TypeId(0) sentinel"
+    );
+}
+
+#[test]
+fn convert_program_resolves_field_id_for_non_first_field() {
+    use ts_aot_ir_hir::{HirClass, HirField};
+    let class_ty = TypeId::from_raw(7777);
+    let field_a_ty = TypeId::from_raw(8888);
+    let field_b_ty = TypeId::from_raw(8889);
+    let field_c_ty = TypeId::from_raw(8890);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("Foo"),
+        ty: class_ty,
+        fields: vec![
+            HirField {
+                name: Atom::new_inline("a"),
+                ty: field_a_ty,
+            },
+            HirField {
+                name: Atom::new_inline("b"),
+                ty: field_b_ty,
+            },
+            HirField {
+                name: Atom::new_inline("c"),
+                ty: field_c_ty,
+            },
+        ],
+        methods: Vec::new(),
+        extends: None,
+        type_params: Vec::new(),
+    }));
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("getB"),
+        params: vec![HirParam {
+            name: Atom::new_inline("o"),
+            ty: class_ty,
+        }],
+        ret: field_b_ty,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Field {
+                owner: Box::new(HirExpr::Local {
+                    id: LocalId::from_raw(0),
+                    ty: class_ty,
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::new_inline("b"),
+                ty: field_b_ty,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx, &HashSet::new());
+    let func = mir.functions().next().expect("expected one function");
+    let ret = match &func.body.block.stmts[0] {
+        MirStmt::Return(Some(v)) => v,
+        other => panic!("expected Return, got {other:?}"),
+    };
+    let MirExpr::Field { field, .. } = ret else {
+        panic!("expected MirExpr::Field, got {ret:?}");
+    };
+    assert_eq!(
+        *field,
+        FieldId::from_raw(1),
+        "field `b` must resolve to its post-flatten index in the class, not the placeholder 0"
+    );
+}
+
+#[test]
+fn convert_program_resolves_field_id_after_lower_classes_flatten() {
+    use ts_aot_ir_hir::{HirClass, HirField};
+    let parent_ty = TypeId::from_raw(100);
+    let child_ty = TypeId::from_raw(200);
+    let parent_field_ty = TypeId::from_raw(101);
+    let child_field_ty = TypeId::from_raw(201);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("Parent"),
+        ty: parent_ty,
+        fields: vec![HirField {
+            name: Atom::new_inline("p"),
+            ty: parent_field_ty,
+        }],
+        methods: Vec::new(),
+        extends: None,
+        type_params: Vec::new(),
+    }));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("Child"),
+        ty: child_ty,
+        fields: vec![HirField {
+            name: Atom::new_inline("c"),
+            ty: child_field_ty,
+        }],
+        methods: Vec::new(),
+        extends: Some(Atom::new_inline("Parent")),
+        type_params: Vec::new(),
+    }));
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("getC"),
+        params: vec![HirParam {
+            name: Atom::new_inline("o"),
+            ty: child_ty,
+        }],
+        ret: child_field_ty,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Field {
+                owner: Box::new(HirExpr::Local {
+                    id: LocalId::from_raw(0),
+                    ty: child_ty,
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::new_inline("c"),
+                ty: child_field_ty,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+
+    let mut cx = ctx();
+    lower_classes(&mut prog, &mut ts_aot_core::TypeTable::new(), &mut cx);
+    let mir = convert_program(&prog, &mut cx, &HashSet::new());
+    let func = mir.functions().next().expect("expected one function");
+    let ret = match &func.body.block.stmts[0] {
+        MirStmt::Return(Some(v)) => v,
+        other => panic!("expected Return, got {other:?}"),
+    };
+    let MirExpr::Field { field, .. } = ret else {
+        panic!("expected MirExpr::Field, got {ret:?}");
+    };
+    assert_eq!(
+        *field,
+        FieldId::from_raw(1),
+        "post-lower_classes, Child's `c` lives at index 1 (after inherited `p`)"
+    );
+}
+
+#[test]
+fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
+    use ts_aot_ir_hir::{HirClass, HirField};
+    let class_ty = TypeId::from_raw(300);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("OnlyA"),
+        ty: class_ty,
+        fields: vec![HirField {
+            name: Atom::new_inline("a"),
+            ty: TypeId::from_raw(0),
+        }],
+        methods: Vec::new(),
+        extends: None,
+        type_params: Vec::new(),
+    }));
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("getMissing"),
+        params: vec![HirParam {
+            name: Atom::new_inline("o"),
+            ty: class_ty,
+        }],
+        ret: TypeId::from_raw(0),
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Field {
+                owner: Box::new(HirExpr::Local {
+                    id: LocalId::from_raw(0),
+                    ty: class_ty,
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::new_inline("missing"),
+                ty: TypeId::from_raw(0),
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut cx, &HashSet::new());
+    let func = mir.functions().next().expect("expected one function");
+    let ret = match &func.body.block.stmts[0] {
+        MirStmt::Return(Some(v)) => v,
+        other => panic!("expected Return, got {other:?}"),
+    };
+    let MirExpr::Field { field, .. } = ret else {
+        panic!("expected MirExpr::Field, got {ret:?}");
+    };
+    assert_eq!(
+        *field,
+        FieldId::from_raw(0),
+        "unknown field keeps the placeholder and a diagnostic is emitted, not a wrong resolve"
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0010"),
+        "P0010 must be reported for an unknown field, diagnostics: {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(1)),
+        post: true,
+        ty: unit_ty(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+    assert_eq!(
+        out.len(),
+        2,
+        "postfix must emit Let then Assign, got {out:?}"
+    );
+
+    let MirStmt::Let {
+        local: old_temp,
+        init: Some(init),
+        ..
+    } = &out[0]
+    else {
+        panic!("expected Let init=load(target), got {:?}", out[0]);
+    };
+    let init_local = match init {
+        MirExpr::Local(id) => *id,
+        other => panic!("postfix Let init must be a load of the target local, got {other:?}"),
+    };
+    assert_eq!(
+        init_local,
+        LocalId::from_raw(0),
+        "postfix Let must capture the target's value before assignment"
+    );
+
+    let MirStmt::Assign {
+        target: place,
+        value,
+    } = &out[1]
+    else {
+        panic!("expected Assign, got {:?}", out[1]);
+    };
+    let MirExpr::Binary { left, right, .. } = value else {
+        panic!("postfix Assign value must be Binary(old + rhs), got {value:?}");
+    };
+    let MirExpr::Local(left_id) = left.as_ref() else {
+        panic!("postfix Binary.left must reuse the old temp, got {left:?}");
+    };
+    assert_eq!(
+        *left_id, *old_temp,
+        "postfix Binary.left must reference the old temp captured before the Assign"
+    );
+    let MirExpr::Int { value: rhs_val, .. } = right.as_ref() else {
+        panic!("postfix Binary.right must be rhs MirExpr, got {right:?}");
+    };
+    assert_eq!(*rhs_val, 1);
+    assert!(
+        matches!(place, ts_aot_ir_mir::MirPlace::Local { id } if *id == LocalId::from_raw(0)),
+        "postfix Assign target must be the original target local, got {place:?}"
+    );
+
+    let MirExpr::Local(returned) = mir else {
+        panic!("postfix CompoundUpdate must return MirExpr::Local(old_temp), got {mir:?}");
+    };
+    assert_eq!(
+        returned, *old_temp,
+        "postfix must return the OLD value, not the new value"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_prefix_returns_new_value_via_local() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(2)),
+        post: false,
+        ty: unit_ty(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+    assert_eq!(
+        out.len(),
+        3,
+        "prefix must emit Let(old)=target, Let(new)=Binary(old+rhs), Assign, got {out:?}"
+    );
+
+    let MirStmt::Let {
+        local: old_temp,
+        init: Some(old_init),
+        ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let init=load(target), got {:?}", out[0]);
+    };
+    let MirExpr::Local(old_init_id) = old_init else {
+        panic!("prefix must load old value via MirExpr::Local(target), got {old_init:?}");
+    };
+    assert_eq!(
+        *old_init_id,
+        LocalId::from_raw(0),
+        "old temp must be initialized by reading the target local"
+    );
+
+    let MirStmt::Let {
+        local: new_temp,
+        init: Some(new_init),
+        ..
+    } = &out[1]
+    else {
+        panic!(
+            "expected out[1] = Let init=Binary(old + rhs), got {:?}",
+            out[1]
+        );
+    };
+    let MirExpr::Binary { left, right, .. } = new_init else {
+        panic!("prefix Let init must be Binary(old + rhs), got {new_init:?}");
+    };
+    let MirExpr::Local(left_id) = left.as_ref() else {
+        panic!("prefix Binary.left must reuse the old temp, got {left:?}");
+    };
+    assert_eq!(
+        *left_id, *old_temp,
+        "prefix Binary.left must reference the old temp captured before RHS side effects"
+    );
+    let MirExpr::Int { value: rhs_val, .. } = right.as_ref() else {
+        panic!("prefix Binary.right must be rhs MirExpr, got {right:?}");
+    };
+    assert_eq!(*rhs_val, 2);
+
+    let MirStmt::Assign {
+        target: place,
+        value,
+    } = &out[2]
+    else {
+        panic!("expected out[2] = Assign, got {:?}", out[2]);
+    };
+    let MirExpr::Local(assign_src) = value else {
+        panic!("prefix Assign value must be MirExpr::Local(new_temp), got {value:?}");
+    };
+    assert_eq!(
+        *assign_src, *new_temp,
+        "prefix Assign must write from the materialized new-value temp"
+    );
+    assert!(
+        matches!(place, ts_aot_ir_mir::MirPlace::Local { id } if *id == LocalId::from_raw(0)),
+        "prefix Assign target must be the original target local, got {place:?}"
+    );
+
+    let MirExpr::Local(returned) = mir else {
+        panic!("prefix CompoundUpdate must return MirExpr::Local(new_temp), got {mir:?}");
+    };
+    assert_eq!(
+        returned, *new_temp,
+        "prefix must return the materialized NEW value"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_rhs_call_evaluated_only_once() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(rhs_call),
+        post: false,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let mut call_in_init_count = 0;
+    let mut assign_value_is_binary = false;
+    for stmt in out.iter() {
+        match stmt {
+            MirStmt::Let {
+                init: Some(init), ..
+            } if expr_contains_call(init) => {
+                call_in_init_count += 1;
+            }
+            MirStmt::Assign {
+                value: MirExpr::Binary { .. },
+                ..
+            } => assign_value_is_binary = true,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        call_in_init_count, 1,
+        "rhs Call must appear in exactly one Let init (the materialized new value), got {out:?}"
+    );
+    assert!(
+        !assign_value_is_binary,
+        "Assign value must not be a Binary (which would re-run rhs on every place eval), got {out:?}"
+    );
+
+    let MirStmt::Assign { value, .. } = &out[2] else {
+        panic!("expected Assign at index 2, got {:?}", out[2]);
+    };
+    let MirStmt::Let {
+        local: new_temp, ..
+    } = &out[1]
+    else {
+        panic!("expected Let new_temp at index 1, got {:?}", out[1]);
+    };
+    let MirExpr::Local(assign_src) = value else {
+        panic!(
+            "Assign value must be MirExpr::Local pointing at the materialized new temp, got {value:?}"
+        );
+    };
+    assert_eq!(
+        *assign_src, *new_temp,
+        "Assign must write from the materialized new-value temp"
+    );
+}
+
+fn expr_contains_call(e: &MirExpr) -> bool {
+    match e {
+        MirExpr::Call { .. } => true,
+        MirExpr::Binary { left, right, .. } => {
+            expr_contains_call(left) || expr_contains_call(right)
+        }
+        MirExpr::Unary { expr, .. } => expr_contains_call(expr),
+        MirExpr::Field { base, .. } => expr_contains_call(base),
+        MirExpr::Index { base, index, .. } => expr_contains_call(base) || expr_contains_call(index),
+        MirExpr::Await { expr, .. } => expr_contains_call(expr),
+        MirExpr::Yield { expr, .. } => expr.as_ref().is_some_and(|e| expr_contains_call(e)),
+        _ => false,
+    }
+}
+
+#[test]
+fn convert_block_expr_compound_update_emits_local_expr_stmt_not_binary() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Expr {
+        expr: HirExpr::CompoundUpdate {
+            target: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: unit_ty(),
+            }),
+            op: HirBinaryOp::Add,
+            rhs: Box::new(int_lit(1)),
+            post: true,
+            ty: unit_ty(),
+        },
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(!cx.has_errors());
+
+    let trailing = mir_block
+        .stmts
+        .iter()
+        .rev()
+        .find_map(|s| match s {
+            MirStmt::Expr(e) => Some(e),
+            _ => None,
+        })
+        .expect("expression statement must emit MirStmt::Expr");
+    assert!(
+        matches!(trailing, MirExpr::Local(_)),
+        "statement-level compound update must end in a load of the materialized temp, not a Binary that re-runs rhs, got {trailing:?}"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let arr_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let i_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(9)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Index {
+        owner: Box::new(arr_call),
+        index: Box::new(i_call),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(1)),
+        post: true,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let mut arr_call_inits = 0;
+    let mut i_call_inits = 0;
+    for stmt in out.iter() {
+        if let MirStmt::Let {
+            init: Some(MirExpr::Call { callee, .. }),
+            ..
+        } = stmt
+        {
+            if *callee == FunctionId::from_raw(7) {
+                arr_call_inits += 1;
+            } else if *callee == FunctionId::from_raw(9) {
+                i_call_inits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        arr_call_inits, 1,
+        "arr() must be materialized exactly once (in target base), got {out:?}"
+    );
+    assert_eq!(
+        i_call_inits, 1,
+        "i() must be materialized exactly once (in target index), got {out:?}"
+    );
+
+    let assign_target = match out.last() {
+        Some(MirStmt::Assign { target, .. }) => target,
+        other => panic!("expected last stmt to be Assign, got {other:?}"),
+    };
+    fn assert_place_is_pure(place: &MirPlace, path: &str, out: &[MirStmt]) {
+        match place {
+            MirPlace::Local { .. } => {}
+            MirPlace::Field { base, .. } => {
+                assert_place_base_is_pure(base, &format!("{path}.field-base"), out);
+            }
+            MirPlace::Index { base, index, .. } => {
+                assert_mir_expr_is_pure(base, &format!("{path}.base"), out);
+                assert_mir_expr_is_pure(index, &format!("{path}.index"), out);
+            }
+        }
+    }
+    fn assert_place_base_is_pure(base: &MirPlaceBase, path: &str, out: &[MirStmt]) {
+        match base {
+            MirPlaceBase::Local(_) => {}
+            MirPlaceBase::Field { base, .. } => {
+                assert_place_base_is_pure(base, &format!("{path}.field-base"), out);
+            }
+            MirPlaceBase::Index { base, index, .. } => {
+                assert_mir_expr_is_pure(base, &format!("{path}.base"), out);
+                assert_mir_expr_is_pure(index, &format!("{path}.index"), out);
+            }
+        }
+    }
+    fn assert_mir_expr_is_pure(expr: &MirExpr, path: &str, out: &[MirStmt]) {
+        match expr {
+            MirExpr::Local(_) => {}
+            MirExpr::Field { base, .. } => {
+                assert_mir_expr_is_pure(base, &format!("{path}.field-base"), out);
+            }
+            MirExpr::Index { base, index, .. } => {
+                assert_mir_expr_is_pure(base, &format!("{path}.base"), out);
+                assert_mir_expr_is_pure(index, &format!("{path}.index"), out);
+            }
+            other => panic!(
+                "Assign target subtree at {path} must be a pure Local/Field/Index, got {other:?}; full out: {out:?}"
+            ),
+        }
+    }
+    assert_place_is_pure(assign_target, "Assign.target", out);
+}
+
+#[test]
+fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let arr_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(11)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let i_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(13)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Index {
+        owner: Box::new(arr_call),
+        index: Box::new(i_call),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(1)),
+        post: false,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let mut arr_inits = 0;
+    let mut i_inits = 0;
+    for stmt in out.iter() {
+        if let MirStmt::Let {
+            init: Some(MirExpr::Call { callee, .. }),
+            ..
+        } = stmt
+        {
+            if *callee == FunctionId::from_raw(11) {
+                arr_inits += 1;
+            } else if *callee == FunctionId::from_raw(13) {
+                i_inits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        arr_inits, 1,
+        "arr() in prefix ++ must also be materialized once, got {out:?}"
+    );
+    assert_eq!(
+        i_inits, 1,
+        "i() in prefix ++ must also be materialized once, got {out:?}"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let arr_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(17)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let i_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(19)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let index_target = HirExpr::Index {
+        owner: Box::new(arr_call),
+        index: Box::new(i_call),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Field {
+        owner: Box::new(index_target),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("0"),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(1)),
+        post: true,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "Field-owner for arr()[i()].field++ with no struct id registered must surface P0012; got {:?}",
+        cx.diagnostics()
+    );
+
+    let mut arr_inits = 0;
+    let mut i_inits = 0;
+    for stmt in out.iter() {
+        if let MirStmt::Let {
+            init: Some(MirExpr::Call { callee, .. }),
+            ..
+        } = stmt
+        {
+            if *callee == FunctionId::from_raw(17) {
+                arr_inits += 1;
+            } else if *callee == FunctionId::from_raw(19) {
+                i_inits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        arr_inits, 1,
+        "nested arr()[i()].field++ must materialize arr() once, got {out:?}"
+    );
+    assert_eq!(
+        i_inits, 1,
+        "nested arr()[i()].field++ must materialize i() once, got {out:?}"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let arr_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(21)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let i_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(23)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(25)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Index {
+        owner: Box::new(arr_call),
+        index: Box::new(i_call),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(rhs_call),
+        post: false,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let mut counts: HashMap<u32, usize> = HashMap::new();
+    fn visit(e: &MirExpr, counts: &mut HashMap<u32, usize>) {
+        if let MirExpr::Call { callee, .. } = e {
+            let key = callee.raw();
+            counts.entry(key).and_modify(|c| *c += 1).or_insert(1);
+        }
+        match e {
+            MirExpr::Binary { left, right, .. } => {
+                visit(left, counts);
+                visit(right, counts);
+            }
+            MirExpr::Field { base, .. } => visit(base, counts),
+            MirExpr::Index { base, index, .. } => {
+                visit(base, counts);
+                visit(index, counts);
+            }
+            MirExpr::Unary { expr, .. } => visit(expr, counts),
+            MirExpr::Call { args, .. } => {
+                for a in args {
+                    visit(a, counts);
+                }
+            }
+            MirExpr::Await { expr, .. } => visit(expr, counts),
+            MirExpr::Yield { expr, .. } => {
+                if let Some(e) = expr.as_ref() {
+                    visit(e, counts);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn visit_place(p: &MirPlace, counts: &mut HashMap<u32, usize>) {
+        match p {
+            MirPlace::Local { .. } => {}
+            MirPlace::Field { base, .. } => visit_place_base(base, counts),
+            MirPlace::Index { base, index, .. } => {
+                visit(base, counts);
+                visit(index, counts);
+            }
+        }
+    }
+    fn visit_place_base(b: &MirPlaceBase, counts: &mut HashMap<u32, usize>) {
+        match b {
+            MirPlaceBase::Local(_) => {}
+            MirPlaceBase::Field { base, .. } => visit_place_base(base, counts),
+            MirPlaceBase::Index { base, index, .. } => {
+                visit(base, counts);
+                visit(index, counts);
+            }
+        }
+    }
+    for stmt in out.iter() {
+        match stmt {
+            MirStmt::Let {
+                init: Some(init), ..
+            } => visit(init, &mut counts),
+            MirStmt::Assign { target, value } => {
+                visit_place(target, &mut counts);
+                visit(value, &mut counts);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        counts.get(&21).copied().unwrap_or(0),
+        1,
+        "arr() must run once, got {:?}; out: {out:?}",
+        counts
+    );
+    assert_eq!(
+        counts.get(&23).copied().unwrap_or(0),
+        1,
+        "i() must run once, got {:?}; out: {out:?}",
+        counts
+    );
+    assert_eq!(
+        counts.get(&25).copied().unwrap_or(0),
+        1,
+        "rhs f() must run once, got {:?}; out: {out:?}",
+        counts
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let f_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(101)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let rhs_template = HirExpr::Template {
+        tag: None,
+        parts: vec![f_call],
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(rhs_template),
+        post: false,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let old_let_idx = out.iter().position(|s| {
+        matches!(
+            s,
+            MirStmt::Let {
+                init: Some(MirExpr::Local(id)),
+                ..
+            } if *id == LocalId::from_raw(0)
+        )
+    });
+    let rhs_runtime_idx = out.iter().position(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::StringConcat,
+                ..
+            }
+        )
+    });
+    let (Some(li), Some(ri)) = (old_let_idx, rhs_runtime_idx) else {
+        panic!(
+            "expected both `Let old=target` and `MirStmt::Runtime(StringConcat)` to be emitted, got {out:?}"
+        );
+    };
+    assert!(
+        li < ri,
+        "JS/TS compound assignment must read LHS (Let old=target) BEFORE evaluating the RHS (MirStmt::Runtime for template); otherwise an RHS that mutates the target would corrupt `old`. got let@{li}, rhs_runtime@{ri}; out: {out:?}"
+    );
+
+    let f_call_in_runtime_args = out.iter().any(|s| {
+        if let MirStmt::Runtime {
+            args,
+            op: RuntimeOp::StringConcat,
+            ..
+        } = s
+        {
+            args.iter()
+                .any(|a| matches!(a, MirExpr::Call { callee, .. } if callee.raw() == 101))
+        } else {
+            false
+        }
+    });
+    assert!(
+        f_call_in_runtime_args,
+        "the RHS `f()` must end up inside the StringConcat Runtime stmt (i.e. as an arg), not duplicated elsewhere; got {out:?}"
+    );
+
+    let binary_left_uses_old_temp = out.iter().any(|s| {
+        if let MirStmt::Let {
+            init: Some(MirExpr::Binary { left, .. }),
+            ..
+        } = s
+        {
+            matches!(left.as_ref(), MirExpr::Local(_))
+        } else {
+            false
+        }
+    });
+    assert!(
+        binary_left_uses_old_temp,
+        "the new-value Binary.left must reference the old temp (so the computed value uses the value read BEFORE the RHS mutation), not the live target; got {out:?}"
+    );
+}
+
+#[test]
+fn convert_expr_assignment_value_temp_carries_rhs_ty_not_type_zero() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let rhs_ty = TypeId::from_raw(17);
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(505)),
+        args: Vec::new(),
+        ty: rhs_ty,
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs_call),
+        ty: rhs_ty,
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let MirStmt::Let {
+        local: value_temp,
+        ty: let_ty,
+        ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let init=rhs, got {:?}", out[0]);
+    };
+    assert_eq!(
+        *let_ty, rhs_ty,
+        "Let init for value_temp must declare the RHS type ({rhs_ty:?}), not TypeId(0) — the prior code used TypeId(0) which silently mis-typed the materialized local"
+    );
+
+    let MirStmt::Assign {
+        value: assign_value,
+        ..
+    } = &out[1]
+    else {
+        panic!("expected out[1] = Assign, got {:?}", out[1]);
+    };
+    let MirExpr::Local(assign_src) = assign_value else {
+        panic!("Assign value must be MirExpr::Local(value_temp), got {assign_value:?}");
+    };
+    assert_eq!(
+        *assign_src, *value_temp,
+        "Assign must read from the same value_temp declared with the correct ty"
+    );
+}
+
+#[test]
+fn convert_expr_assignment_rhs_call_materialized_once_for_statement_and_return() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(303)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs_call),
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let rhs_call_in_let_inits = out
+        .iter()
+        .filter(|s| {
+            if let MirStmt::Let {
+                init: Some(MirExpr::Call { callee, .. }),
+                ..
+            } = s
+            {
+                callee.raw() == 303
+            } else {
+                false
+            }
+        })
+        .count();
+    assert_eq!(
+        rhs_call_in_let_inits, 1,
+        "rhs Call must appear in exactly one Let init (the materialized value temp), got {out:?}"
+    );
+
+    let rhs_call_in_assign_values = out
+        .iter()
+        .filter(|s| {
+            if let MirStmt::Assign {
+                value: MirExpr::Call { callee, .. },
+                ..
+            } = s
+            {
+                callee.raw() == 303
+            } else {
+                false
+            }
+        })
+        .count();
+    assert_eq!(
+        rhs_call_in_assign_values, 0,
+        "Assign value must NOT be a Call (would re-run rhs in statement-context Expr), got {out:?}"
+    );
+}
+
+#[test]
+fn convert_block_expr_plain_assignment_returns_local_not_rhs() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(404)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let block = HirBlock(vec![HirStmt::Expr {
+        expr: HirExpr::Assignment {
+            target: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: unit_ty(),
+            }),
+            value: Box::new(rhs_call),
+            ty: unit_ty(),
+        },
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(!cx.has_errors());
+
+    let rhs_call_count: usize = mir_block
+        .stmts
+        .iter()
+        .map(|s| count_calls_in_stmt(s, 404))
+        .sum();
+    assert_eq!(
+        rhs_call_count, 1,
+        "statement-level `a = sideEffect()` must invoke sideEffect exactly once across the whole block (Assign + Expr trailing), got {mir_block:?}"
+    );
+
+    let trailing = mir_block
+        .stmts
+        .iter()
+        .rev()
+        .find_map(|s| match s {
+            MirStmt::Expr(e) => Some(e),
+            _ => None,
+        })
+        .expect("expression statement must emit MirStmt::Expr");
+    assert!(
+        matches!(trailing, MirExpr::Local(_)),
+        "statement-level plain assignment must end in MirStmt::Expr(Local(value_temp)), not a re-evaluation of the RHS expression, got {trailing:?}"
+    );
+}
+
+fn count_calls_in_stmt(s: &MirStmt, target: u32) -> usize {
+    fn visit_expr(e: &MirExpr, target: u32) -> usize {
+        let mut count = 0;
+        if let MirExpr::Call { callee, .. } = e
+            && callee.raw() == target
+        {
+            count += 1;
+        }
+        match e {
+            MirExpr::Binary { left, right, .. } => {
+                count += visit_expr(left, target);
+                count += visit_expr(right, target);
+            }
+            MirExpr::Field { base, .. } => count += visit_expr(base, target),
+            MirExpr::Index { base, index, .. } => {
+                count += visit_expr(base, target);
+                count += visit_expr(index, target);
+            }
+            MirExpr::Unary { expr, .. } => count += visit_expr(expr, target),
+            MirExpr::Call { args, .. } => {
+                for a in args {
+                    count += visit_expr(a, target);
+                }
+            }
+            MirExpr::Await { expr, .. } => count += visit_expr(expr, target),
+            MirExpr::Yield { expr, .. } => {
+                if let Some(inner) = expr.as_ref() {
+                    count += visit_expr(inner, target);
+                }
+            }
+            _ => {}
+        }
+        count
+    }
+    match s {
+        MirStmt::Let {
+            init: Some(init), ..
+        } => visit_expr(init, target),
+        MirStmt::Assign { value, .. } => visit_expr(value, target),
+        MirStmt::Return(Some(e)) => visit_expr(e, target),
+        MirStmt::ReturnResultErr { error, .. } => visit_expr(error, target),
+        MirStmt::Throw { error, .. } => visit_expr(error, target),
+        MirStmt::If { cond, .. } => visit_expr(cond, target),
+        MirStmt::While { cond, .. } => visit_expr(cond, target),
+        MirStmt::ForOf { iterable, .. } => visit_expr(iterable, target),
+        MirStmt::ForIn { object, .. } => visit_expr(object, target),
+        MirStmt::Runtime { args, .. } => args.iter().map(|a| visit_expr(a, target)).sum(),
+        MirStmt::Expr(e) => visit_expr(e, target),
+        _ => 0,
+    }
+}
+
+#[test]
+fn convert_expr_assignment_field_target_with_call_base_materializes_call_with_call_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let obj_ty = TypeId::from_raw(31);
+    let obj_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(606)),
+        args: Vec::new(),
+        ty: obj_ty,
+    };
+    let field_target = HirExpr::Field {
+        owner: Box::new(obj_call),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("x"),
+        ty: obj_ty,
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(field_target),
+        value: Box::new(int_lit(7)),
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "non-registered struct id for Call-owner with ty {obj_ty:?} must surface P0012; got {:?}",
+        cx.diagnostics()
+    );
+
+    let materialize_let = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Let {
+                init: Some(MirExpr::Call { callee, .. }),
+                ty,
+                ..
+            } if callee.raw() == 606 => Some(*ty),
+            _ => None,
+        })
+        .expect("expected Let init=Call(obj) from materialize callback");
+    assert_eq!(
+        materialize_let, obj_ty,
+        "MirStmt::Let for materialized obj() must declare the Call's ty ({obj_ty:?}), not TypeId(0) — downstream consumers see the wrong type otherwise"
+    );
+}
+
+#[test]
+fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let arr_ty = TypeId::from_raw(53);
+    let arr_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(707)),
+        args: Vec::new(),
+        ty: arr_ty,
+    };
+    let i_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(709)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Index {
+        owner: Box::new(arr_call),
+        index: Box::new(i_call),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::CompoundUpdate {
+        target: Box::new(target),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(int_lit(1)),
+        post: false,
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut cx,
+    );
+    assert!(!cx.has_errors(), "arr()[i()]++ must not error");
+
+    let arr_materialize_let_ty = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Let {
+                init: Some(MirExpr::Call { callee, .. }),
+                ty,
+                ..
+            } if callee.raw() == 707 => Some(*ty),
+            _ => None,
+        })
+        .expect("expected Let init=Call(arr) from ensure_place_pure_components");
+    assert_eq!(
+        arr_materialize_let_ty, arr_ty,
+        "MirStmt::Let for materialized arr() must declare the Call's ty ({arr_ty:?}), not TypeId(0)"
+    );
+}
+
+#[test]
+fn resolve_field_id_call_owner_with_registered_struct_id_resolves_field() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let call_ret_ty = TypeId::from_raw(91);
+    let sid = ts_aot_core::StructId::from_raw(0);
+    let mut struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    struct_ids.insert(call_ret_ty, sid);
+    let mut field_id_lookup: HashMap<(ts_aot_core::StructId, Atom), FieldId> = HashMap::new();
+    let field_name = Atom::new_inline("answer");
+    field_id_lookup.insert((sid, field_name.clone()), FieldId::from_raw(42));
+    c.set_field_id_lookup(field_id_lookup);
+
+    let owner = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(0)),
+        args: Vec::new(),
+        ty: call_ret_ty,
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &field_name,
+        FieldId::from_raw(u32::MAX),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(42),
+        "Call-owner with a registered struct id must resolve the field id by looking up (sid, field_name); got placeholder instead"
+    );
+    assert!(
+        !cx.has_errors(),
+        "a registered struct id + present field must not emit any diagnostic, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn resolve_field_id_non_typed_owner_emits_p0011() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    c.set_field_id_lookup(HashMap::new());
+
+    let owner = HirExpr::Int(0);
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("x"),
+        FieldId::from_raw(99),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(99),
+        "non-typed owner must fall back to placeholder after emitting P0011"
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0011"),
+        "non-typed owner (Int) must surface P0011; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        !cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "P0012 must not be reported when the failure is the owner type, not the missing struct id"
+    );
+}
+
+#[test]
+fn resolve_field_id_type_assertion_owner_with_registered_target_resolves_field() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let target_ty = TypeId::from_raw(101);
+    let sid = ts_aot_core::StructId::from_raw(1);
+    let mut struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    struct_ids.insert(target_ty, sid);
+    let mut field_id_lookup: HashMap<(ts_aot_core::StructId, Atom), FieldId> = HashMap::new();
+    let field_name = Atom::new_inline("tag");
+    field_id_lookup.insert((sid, field_name.clone()), FieldId::from_raw(7));
+    c.set_field_id_lookup(field_id_lookup);
+
+    let owner = HirExpr::TypeAssertion {
+        expr: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        }),
+        target: target_ty,
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &field_name,
+        FieldId::from_raw(u32::MAX),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(7),
+        "(obj as T).field must resolve via TypeAssertion's target type when the struct id is registered; got placeholder instead"
+    );
+    assert!(
+        !cx.has_errors(),
+        "TypeAssertion owner with registered target struct id + present field must not emit any diagnostic, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn resolve_field_id_type_assertion_owner_without_registered_target_emits_p0012() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    c.set_field_id_lookup(HashMap::new());
+
+    let owner = HirExpr::TypeAssertion {
+        expr: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        }),
+        target: TypeId::from_raw(202),
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("x"),
+        FieldId::from_raw(99),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(99),
+        "TypeAssertion owner with unregistered target must fall back to placeholder after emitting P0012"
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0012"),
+        "TypeAssertion owner whose target type has no registered struct id must surface P0012, not P0011; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        !cx.diagnostics().iter().any(|d| d.code.as_str() == "P0011"),
+        "P0011 must not be reported when the owner is typed but the target struct id is missing"
+    );
+}
+
+#[test]
+fn resolve_field_id_assignment_owner_with_registered_ty_resolves_field() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let assign_ty = TypeId::from_raw(103);
+    let sid = ts_aot_core::StructId::from_raw(2);
+    let mut struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    struct_ids.insert(assign_ty, sid);
+    let mut field_id_lookup: HashMap<(ts_aot_core::StructId, Atom), FieldId> = HashMap::new();
+    let field_name = Atom::new_inline("payload");
+    field_id_lookup.insert((sid, field_name.clone()), FieldId::from_raw(13));
+    c.set_field_id_lookup(field_id_lookup);
+
+    let owner = HirExpr::Assignment {
+        target: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        }),
+        value: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(1),
+            ty: assign_ty,
+        }),
+        ty: assign_ty,
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &field_name,
+        FieldId::from_raw(u32::MAX),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(13),
+        "(obj = makeC()).field must resolve via Assignment's ty when the struct id is registered; got placeholder instead"
+    );
+    assert!(
+        !cx.has_errors(),
+        "Assignment owner with registered ty struct id + present field must not emit any diagnostic, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn resolve_field_id_compound_update_owner_with_registered_ty_resolves_field() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let target_ty = TypeId::from_raw(104);
+    let sid = ts_aot_core::StructId::from_raw(3);
+    let mut struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    struct_ids.insert(target_ty, sid);
+    let mut field_id_lookup: HashMap<(ts_aot_core::StructId, Atom), FieldId> = HashMap::new();
+    let field_name = Atom::new_inline("count");
+    field_id_lookup.insert((sid, field_name.clone()), FieldId::from_raw(21));
+    c.set_field_id_lookup(field_id_lookup);
+
+    let owner = HirExpr::CompoundUpdate {
+        target: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: target_ty,
+        }),
+        op: HirBinaryOp::Add,
+        rhs: Box::new(HirExpr::Int(1)),
+        post: false,
+        ty: target_ty,
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &field_name,
+        FieldId::from_raw(u32::MAX),
+        &struct_ids,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(21),
+        "(obj += 1).field must resolve via CompoundUpdate's ty when the struct id is registered; got placeholder instead"
+    );
+    assert!(
+        !cx.has_errors(),
+        "CompoundUpdate owner with registered ty struct id + present field must not emit any diagnostic, got {:?}",
+        cx.diagnostics()
     );
 }

@@ -136,6 +136,19 @@ pub fn substitute_expr(
             value: Box::new(substitute_expr(value, mapping, types, result)),
             ty: substitute_type(*ty, mapping, types, result),
         },
+        HirExpr::CompoundUpdate {
+            target,
+            op,
+            rhs,
+            post,
+            ty,
+        } => HirExpr::CompoundUpdate {
+            target: Box::new(substitute_expr(target, mapping, types, result)),
+            op: *op,
+            rhs: Box::new(substitute_expr(rhs, mapping, types, result)),
+            post: *post,
+            ty: substitute_type(*ty, mapping, types, result),
+        },
     }
 }
 

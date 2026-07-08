@@ -37,7 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn frontend_pass_emits_function_signature_only() {
+    fn frontend_pass_walks_function_body() {
         let output = FrontendPass::new().run(
             "test.ts",
             "function greet(name: string): string { return name; }",
@@ -48,7 +48,18 @@ mod tests {
             ts_aot_ir_hir::HirDecl::Function(f) => {
                 assert_eq!(f.name, ts_aot_core::Atom::from("greet"));
                 assert_eq!(f.params.len(), 1);
-                assert!(f.body.is_empty(), "foundation does not walk bodies");
+                match f.body.as_slice() {
+                    [
+                        ts_aot_ir_hir::HirStmt::Return {
+                            value: Some(ts_aot_ir_hir::HirExpr::Local { id, .. }),
+                        },
+                    ] => assert_eq!(
+                        *id,
+                        ts_aot_core::LocalId::from_raw(0),
+                        "param `name` is Local(0)"
+                    ),
+                    other => panic!("expected body `return name;`, got {other:?}"),
+                }
             }
             other => panic!("expected Function, got {other:?}"),
         }

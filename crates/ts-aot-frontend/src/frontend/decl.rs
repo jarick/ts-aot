@@ -1,4 +1,6 @@
-use oxc_ast::ast::{Class, Declaration, Expression, Function, MemberExpression};
+use oxc_ast::ast::{
+    Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind,
+};
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirClass, HirEnumVariant, HirField, HirFunction, HirParam};
@@ -148,12 +150,14 @@ impl SkeletonBuilder<'_, '_> {
             Some(&type_param_map),
         );
 
+        let body = self.walk_function_body(func.body.as_deref(), &params);
+
         HirFunction {
             name,
             params,
             ret,
             throws: None,
-            body: Vec::new(),
+            body,
             is_async: func.r#async,
             is_generator: func.generator,
             is_exported,
@@ -205,54 +209,7 @@ impl SkeletonBuilder<'_, '_> {
             .iter()
             .filter_map(|m| match m {
                 oxc_ast::ast::ClassElement::MethodDefinition(md) => {
-                    let value = &*md.value;
-                    let method_name = md
-                        .key
-                        .static_name()
-                        .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_str()));
-
-                    let (method_type_param_ids, method_param_map) = build_type_param_context(
-                        self.types,
-                        &mut self.next_generic_param,
-                        value.type_parameters.as_deref(),
-                    );
-                    let mut combined_map = TypeParamMap::new();
-                    for (k, v) in class_type_param_map
-                        .iter_bindings()
-                        .chain(method_param_map.iter_bindings())
-                    {
-                        combined_map.bind(k, v);
-                    }
-
-                    let mut params = Vec::with_capacity(value.params.items.len());
-                    for param in &value.params.items {
-                        let param_name = binding_pattern_name(&param.pattern)
-                            .map_or_else(|| Atom::from("_"), Atom::from);
-                        let param_ty = self.resolve_ts_type_from_annotation_with_params(
-                            param.pattern.type_annotation.as_deref(),
-                            Some(&combined_map),
-                        );
-                        params.push(HirParam {
-                            name: param_name,
-                            ty: param_ty,
-                        });
-                    }
-                    let ret = self.resolve_ts_type_from_annotation_with_params(
-                        value.return_type.as_deref(),
-                        Some(&combined_map),
-                    );
-                    Some(HirFunction {
-                        name: method_name,
-                        params,
-                        ret,
-                        throws: None,
-                        body: Vec::new(),
-                        is_async: value.r#async,
-                        is_generator: value.generator,
-                        is_exported: false,
-                        type_params: method_type_param_ids,
-                        async_info: None,
-                    })
+                    self.build_method(md, ty, &class_type_param_map)
                 }
                 _ => None,
             })
@@ -271,6 +228,91 @@ impl SkeletonBuilder<'_, '_> {
             extends,
             type_params: class_type_param_ids,
         }
+    }
+
+    fn build_method(
+        &mut self,
+        md: &oxc_ast::ast::MethodDefinition<'_>,
+        class_ty: TypeId,
+        class_type_param_map: &TypeParamMap,
+    ) -> Option<HirFunction> {
+        if md.r#static {
+            self.report_unsupported(
+                UNSUPPORTED_DECL_CODE,
+                "static class methods are not supported by the foundation pass",
+                md.span,
+            );
+            return None;
+        }
+
+        if md.kind == MethodDefinitionKind::Get || md.kind == MethodDefinitionKind::Set {
+            self.report_unsupported(
+                UNSUPPORTED_DECL_CODE,
+                "accessor class methods (get/set) are not supported by the foundation pass",
+                md.span,
+            );
+            return None;
+        }
+
+        let value = &*md.value;
+        let method_name = md
+            .key
+            .static_name()
+            .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_str()));
+
+        let (method_type_param_ids, method_param_map) = build_type_param_context(
+            self.types,
+            &mut self.next_generic_param,
+            value.type_parameters.as_deref(),
+        );
+        let mut combined_map = TypeParamMap::new();
+        for (k, v) in class_type_param_map
+            .iter_bindings()
+            .chain(method_param_map.iter_bindings())
+        {
+            combined_map.bind(k, v);
+        }
+
+        let mut params = Vec::with_capacity(value.params.items.len() + 1);
+        let needs_synthetic_this = matches!(
+            md.kind,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor
+        );
+        if needs_synthetic_this {
+            params.push(HirParam {
+                name: Atom::from("this"),
+                ty: class_ty,
+            });
+        }
+        for param in &value.params.items {
+            let param_name =
+                binding_pattern_name(&param.pattern).map_or_else(|| Atom::from("_"), Atom::from);
+            let param_ty = self.resolve_ts_type_from_annotation_with_params(
+                param.pattern.type_annotation.as_deref(),
+                Some(&combined_map),
+            );
+            params.push(HirParam {
+                name: param_name,
+                ty: param_ty,
+            });
+        }
+        let ret = self.resolve_ts_type_from_annotation_with_params(
+            value.return_type.as_deref(),
+            Some(&combined_map),
+        );
+        let body = self.walk_function_body(value.body.as_deref(), &params);
+        Some(HirFunction {
+            name: method_name,
+            params,
+            ret,
+            throws: None,
+            body,
+            is_async: value.r#async,
+            is_generator: value.generator,
+            is_exported: false,
+            type_params: method_type_param_ids,
+            async_info: None,
+        })
     }
 
     fn resolve_superclass_name(&mut self, expr: &Expression<'_>) -> Option<Atom> {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Atom, FunctionId, LocalId, Span, StructId, TypeId};
+use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 
@@ -15,6 +15,7 @@ pub struct ExprConverter {
     pub(super) next_local: u32,
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
+    pub(super) field_id_lookup: HashMap<(StructId, Atom), FieldId>,
 }
 
 impl ExprConverter {
@@ -41,7 +42,12 @@ impl ExprConverter {
             next_local,
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
+            field_id_lookup: HashMap::new(),
         }
+    }
+
+    pub fn set_field_id_lookup(&mut self, lookup: HashMap<(StructId, Atom), FieldId>) {
+        self.field_id_lookup = lookup;
     }
 
     pub(super) fn take_temp_locals(&mut self) -> Vec<MirLocalDecl> {
@@ -160,6 +166,73 @@ impl ExprConverter {
         shared_ids.insert(ty, id);
         self.struct_ids.insert(ty, id);
         id
+    }
+
+    pub(super) fn resolve_field_id(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        placeholder: FieldId,
+        shared_ids: &HashMap<TypeId, StructId>,
+        ctx: &mut PassContext,
+    ) -> FieldId {
+        let owner_ty = match owner {
+            HirExpr::Local { ty, .. }
+            | HirExpr::Global { ty, .. }
+            | HirExpr::Field { ty, .. }
+            | HirExpr::Index { ty, .. }
+            | HirExpr::Call { ty, .. }
+            | HirExpr::Binary { ty, .. }
+            | HirExpr::Unary { ty, .. }
+            | HirExpr::StructLiteral { ty, .. }
+            | HirExpr::ArrayLiteral { ty, .. }
+            | HirExpr::Closure { ty, .. }
+            | HirExpr::Await { ty, .. }
+            | HirExpr::Yield { ty, .. }
+            | HirExpr::Template { ty, .. }
+            | HirExpr::New { ty, .. }
+            | HirExpr::OptionalChain { ty, .. }
+            | HirExpr::Assignment { ty, .. }
+            | HirExpr::CompoundUpdate { ty, .. } => Some(*ty),
+            HirExpr::TypeAssertion { target, .. } => Some(*target),
+            _ => None,
+        };
+        let Some(ty) = owner_ty else {
+            ctx.error(
+                "P0011",
+                format!(
+                    "owner expression has no static type for field access `{}`",
+                    field_name.as_str()
+                ),
+                Span::new(0, 0),
+            );
+            return placeholder;
+        };
+        let Some(&sid) = self.struct_ids.get(&ty).or_else(|| shared_ids.get(&ty)) else {
+            ctx.error(
+                "P0012",
+                format!(
+                    "owner type {:?} has no registered struct id; the class must be lowered before field access on it",
+                    ty
+                ),
+                Span::new(0, 0),
+            );
+            return placeholder;
+        };
+        match self.field_id_lookup.get(&(sid, field_name.clone())) {
+            Some(id) => *id,
+            None => {
+                ctx.error(
+                    "P0010",
+                    format!(
+                        "field `{}` is not declared on the static type of the owner",
+                        field_name.as_str()
+                    ),
+                    Span::new(0, 0),
+                );
+                placeholder
+            }
+        }
     }
 }
 

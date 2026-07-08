@@ -185,6 +185,10 @@ pub(super) fn rewrite_in_expr(
             rewrite_in_expr(target, closure_names, ctx);
             rewrite_in_expr(value, closure_names, ctx);
         }
+        HirExpr::CompoundUpdate { target, rhs, .. } => {
+            rewrite_in_expr(target, closure_names, ctx);
+            rewrite_in_expr(rhs, closure_names, ctx);
+        }
         HirExpr::Unit
         | HirExpr::Bool(_)
         | HirExpr::Int(_)
