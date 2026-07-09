@@ -1,6 +1,18 @@
+mod body;
+mod decl;
+mod expr;
 mod frontend;
+mod module;
+mod ops;
+mod scope;
 mod semantic_analyze;
+mod skeleton;
+mod stmt;
 mod type_resolver;
+mod util;
+
+#[cfg(test)]
+mod walker_tests;
 
 pub use frontend::{FrontendOutput, FrontendPass};
 pub use semantic_analyze::{analyze_semantic, with_semantic};

@@ -6,16 +6,8 @@ use oxc_parser::Parser;
 use ts_aot_core::{Diagnostic, DiagnosticBag, ModuleId, Span as CoreSpan, TypeTable};
 use ts_aot_ir_hir::HirProgram;
 
-use skeleton::SkeletonBuilder;
-use util::source_type_for;
-
-mod body;
-mod decl;
-mod module;
-mod skeleton;
-#[cfg(test)]
-mod tests;
-mod util;
+use crate::skeleton::SkeletonBuilder;
+use crate::util::source_type_for;
 
 const PARSE_PANIC_CODE: &str = "E0100";
 const PARSE_ERROR_CODE: &str = "E0200";

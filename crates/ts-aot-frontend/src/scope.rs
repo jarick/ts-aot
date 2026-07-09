@@ -8,24 +8,24 @@ struct LocalEntry {
     ty: TypeId,
 }
 
-pub(super) struct BodyScope {
+pub(crate) struct BodyScope {
     next_local: u32,
     scopes: Vec<HashMap<String, LocalEntry>>,
 }
 
 impl BodyScope {
-    pub(super) fn new(param_count: u32) -> Self {
+    pub(crate) fn new(param_count: u32) -> Self {
         Self {
             next_local: param_count,
             scopes: vec![HashMap::new()],
         }
     }
 
-    pub(super) fn push(&mut self) {
+    pub(crate) fn push(&mut self) {
         self.scopes.push(HashMap::new());
     }
 
-    pub(super) fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.scopes.pop();
     }
 
@@ -35,18 +35,18 @@ impl BodyScope {
         }
     }
 
-    pub(super) fn declare(&mut self, name: &str, ty: TypeId) -> LocalId {
+    pub(crate) fn declare(&mut self, name: &str, ty: TypeId) -> LocalId {
         let id = LocalId::from_raw(self.next_local);
         self.next_local = self.next_local.saturating_add(1);
         self.insert(name, LocalEntry { id, ty });
         id
     }
 
-    pub(super) fn declare_param(&mut self, name: &str, id: LocalId, ty: TypeId) {
+    pub(crate) fn declare_param(&mut self, name: &str, id: LocalId, ty: TypeId) {
         self.insert(name, LocalEntry { id, ty });
     }
 
-    pub(super) fn lookup(&self, name: &str) -> Option<(LocalId, TypeId)> {
+    pub(crate) fn lookup(&self, name: &str) -> Option<(LocalId, TypeId)> {
         self.scopes
             .iter()
             .rev()

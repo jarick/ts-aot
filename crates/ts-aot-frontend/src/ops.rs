@@ -6,11 +6,11 @@ use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_992.0;
 
-pub(super) fn label_atom(label: Option<&str>) -> Option<Atom> {
+pub(crate) fn label_atom(label: Option<&str>) -> Option<Atom> {
     label.map(Atom::from)
 }
 
-pub(super) fn left_span(left: &ForStatementLeft<'_>) -> oxc_span::Span {
+pub(crate) fn left_span(left: &ForStatementLeft<'_>) -> oxc_span::Span {
     match left {
         ForStatementLeft::VariableDeclaration(v) => v.span,
         ForStatementLeft::AssignmentTarget(t) => t.span(),
@@ -19,7 +19,7 @@ pub(super) fn left_span(left: &ForStatementLeft<'_>) -> oxc_span::Span {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub(super) fn number_to_hir(value: f64) -> HirExpr {
+pub(crate) fn number_to_hir(value: f64) -> HirExpr {
     if value.is_finite() && value.fract() == 0.0 && value.abs() < MAX_SAFE_INTEGER {
         HirExpr::Int(value as i64)
     } else {
@@ -27,7 +27,7 @@ pub(super) fn number_to_hir(value: f64) -> HirExpr {
     }
 }
 
-pub(super) fn map_binary_op(op: BinaryOperator) -> Option<HirBinaryOp> {
+pub(crate) fn map_binary_op(op: BinaryOperator) -> Option<HirBinaryOp> {
     Some(match op {
         BinaryOperator::Addition => HirBinaryOp::Add,
         BinaryOperator::Subtraction => HirBinaryOp::Sub,
@@ -52,14 +52,14 @@ pub(super) fn map_binary_op(op: BinaryOperator) -> Option<HirBinaryOp> {
     })
 }
 
-pub(super) fn map_logical_op(op: LogicalOperator) -> HirBinaryOp {
+pub(crate) fn map_logical_op(op: LogicalOperator) -> HirBinaryOp {
     match op {
         LogicalOperator::And => HirBinaryOp::And,
         LogicalOperator::Or | LogicalOperator::Coalesce => HirBinaryOp::Or,
     }
 }
 
-pub(super) fn map_unary_op(op: UnaryOperator) -> Option<HirUnaryOp> {
+pub(crate) fn map_unary_op(op: UnaryOperator) -> Option<HirUnaryOp> {
     match op {
         UnaryOperator::UnaryNegation => Some(HirUnaryOp::Neg),
         UnaryOperator::LogicalNot => Some(HirUnaryOp::Not),
@@ -71,13 +71,13 @@ pub(super) fn map_unary_op(op: UnaryOperator) -> Option<HirUnaryOp> {
     }
 }
 
-pub(super) enum CompoundOp {
+pub(crate) enum CompoundOp {
     Assign,
     Binary(HirBinaryOp),
     Unsupported,
 }
 
-pub(super) fn compound_op(op: AssignmentOperator) -> CompoundOp {
+pub(crate) fn compound_op(op: AssignmentOperator) -> CompoundOp {
     match op {
         AssignmentOperator::Assign => CompoundOp::Assign,
         AssignmentOperator::Addition => CompoundOp::Binary(HirBinaryOp::Add),

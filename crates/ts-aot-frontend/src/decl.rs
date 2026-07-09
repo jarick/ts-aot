@@ -5,15 +5,15 @@ use oxc_span::GetSpan;
 use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirClass, HirEnumVariant, HirField, HirFunction, HirParam};
 
-use super::skeleton::SkeletonBuilder;
-use crate::frontend::util::{binding_pattern_name, core_span_from_oxc};
+use crate::skeleton::SkeletonBuilder;
 use crate::type_resolver::{TypeParamMap, resolve_simple_type};
+use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 const TYPE_RESOLUTION_FAILURE_CODE: &str = "E0400";
 const UNSUPPORTED_DECL_CODE: &str = "E0300";
 
 impl SkeletonBuilder<'_, '_> {
-    pub(super) fn walk_declaration(&mut self, decl: &Declaration<'_>) {
+    pub(crate) fn walk_declaration(&mut self, decl: &Declaration<'_>) {
         match decl {
             Declaration::FunctionDeclaration(f) => {
                 let hir_fn = self.build_function(f, false);
@@ -54,7 +54,7 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    pub(super) fn handle_export_named_declaration(&mut self, decl: &Declaration<'_>) {
+    pub(crate) fn handle_export_named_declaration(&mut self, decl: &Declaration<'_>) {
         match decl {
             Declaration::FunctionDeclaration(f) => {
                 let name = Atom::from(f.id.as_ref().map_or("", |id| id.name.as_str()));
@@ -400,18 +400,18 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    pub(super) fn resolve_ts_type(&mut self, ty: Option<&oxc_ast::ast::TSType<'_>>) -> TypeId {
+    pub(crate) fn resolve_ts_type(&mut self, ty: Option<&oxc_ast::ast::TSType<'_>>) -> TypeId {
         self.resolve_ts_type_with_params(ty, None)
     }
 
-    pub(super) fn resolve_ts_type_from_annotation(
+    pub(crate) fn resolve_ts_type_from_annotation(
         &mut self,
         ann: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
     ) -> TypeId {
         self.resolve_ts_type(ann.map(|a| &a.type_annotation))
     }
 
-    pub(super) fn resolve_ts_type_with_params(
+    pub(crate) fn resolve_ts_type_with_params(
         &mut self,
         ty: Option<&oxc_ast::ast::TSType<'_>>,
         type_params: Option<&TypeParamMap>,
@@ -434,7 +434,7 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    pub(super) fn resolve_ts_type_from_annotation_with_params(
+    pub(crate) fn resolve_ts_type_from_annotation_with_params(
         &mut self,
         ann: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
         type_params: Option<&TypeParamMap>,
@@ -442,7 +442,7 @@ impl SkeletonBuilder<'_, '_> {
         self.resolve_ts_type_with_params(ann.map(|a| &a.type_annotation), type_params)
     }
 
-    pub(super) fn report_unsupported(
+    pub(crate) fn report_unsupported(
         &mut self,
         code: &'static str,
         message: &str,
