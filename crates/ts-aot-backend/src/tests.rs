@@ -1,10 +1,9 @@
 use proc_macro2::TokenStream;
-use ts_aot_core::ModuleId;
+use ts_aot_core::{ModuleId, TypeId, TypeTable};
 use ts_aot_ir_mir::MirProgram;
 
-use crate::error::BackendError;
 use crate::render::{RenderConfig, render_tokens};
-use crate::{compile_program, compile_to_string};
+use crate::{compile_program, compile_to_string, compile_with_types};
 
 #[test]
 fn compile_empty_program_emits_empty_token_stream() {
@@ -42,7 +41,7 @@ fn render_tokens_uses_token_stream_to_string() {
 }
 
 #[test]
-fn compile_non_empty_program_returns_not_implemented() {
+fn compile_non_empty_program_emits_decl_token() {
     use ts_aot_core::{Atom, TypeId};
     use ts_aot_ir_mir::{FunctionKind, MirDecl, MirFunctionDecl, MirParam};
 
@@ -60,9 +59,91 @@ fn compile_non_empty_program_returns_not_implemented() {
     }));
 
     let result = compile_program(&program);
-    assert_eq!(
-        result.err(),
-        Some(BackendError::NotImplemented),
-        "non-empty MIR must surface NotImplemented, not silently emit empty tokens"
+    assert!(
+        result.is_ok(),
+        "non-empty MIR with empty body must compile to tokens, got: {:?}",
+        result.err()
+    );
+    let s = result.unwrap().to_string();
+    assert!(
+        s.contains("fn greet"),
+        "expected `fn greet` in output, got: {s}"
+    );
+}
+
+#[test]
+fn compile_with_types_propagates_type_table() {
+    use ts_aot_core::{Atom, Type};
+    use ts_aot_ir_mir::MirDecl;
+    use ts_aot_ir_mir::MirFunctionDecl;
+    use ts_aot_ir_mir::MirParam;
+
+    let mut program = MirProgram::new(ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(MirFunctionDecl {
+        id: ts_aot_core::FunctionId::from_raw(0),
+        name: Atom::from("answer"),
+        export_name: None,
+        params: Vec::<MirParam>::new(),
+        ret: TypeId::from_raw(0),
+        throws: None,
+        body: ts_aot_ir_mir::MirBody::default(),
+        kind: ts_aot_ir_mir::FunctionKind::Plain,
+        effects: ts_aot_ir_mir::FunctionEffects::default(),
+    }));
+
+    let mut types = TypeTable::new();
+    let i32_id = types.intern(&Type::I32);
+    let mut f = MirFunctionDecl {
+        id: ts_aot_core::FunctionId::from_raw(0),
+        name: Atom::from("answer2"),
+        export_name: None,
+        params: Vec::<MirParam>::new(),
+        ret: i32_id,
+        throws: None,
+        body: ts_aot_ir_mir::MirBody::default(),
+        kind: ts_aot_ir_mir::FunctionKind::Plain,
+        effects: ts_aot_ir_mir::FunctionEffects::default(),
+    };
+    f.ret = i32_id;
+    program.push_decl(MirDecl::Function(f));
+
+    let tokens = compile_with_types(&program, &types, &RenderConfig::default())
+        .expect("compile_with_types should emit tokens");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("fn answer"),
+        "expected fn answer in output, got: {s}"
+    );
+    assert!(
+        s.contains("fn answer2"),
+        "expected fn answer2 in output, got: {s}"
+    );
+    assert!(s.contains("-> i32"), "expected ret type i32, got: {s}");
+}
+
+#[test]
+fn compile_to_string_includes_decl_tokens() {
+    use ts_aot_core::Atom;
+    use ts_aot_ir_mir::MirDecl;
+    use ts_aot_ir_mir::MirFunctionDecl;
+    use ts_aot_ir_mir::MirParam;
+
+    let mut program = MirProgram::new(ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(MirFunctionDecl {
+        id: ts_aot_core::FunctionId::from_raw(0),
+        name: Atom::from("visible_fn"),
+        export_name: None,
+        params: Vec::<MirParam>::new(),
+        ret: TypeId::from_raw(0),
+        throws: None,
+        body: ts_aot_ir_mir::MirBody::default(),
+        kind: ts_aot_ir_mir::FunctionKind::Plain,
+        effects: ts_aot_ir_mir::FunctionEffects::default(),
+    }));
+
+    let s = compile_to_string(&program).expect("compile_to_string should succeed");
+    assert!(
+        s.contains("fn visible_fn"),
+        "expected fn in output, got: {s}"
     );
 }

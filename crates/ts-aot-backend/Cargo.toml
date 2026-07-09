@@ -10,10 +10,10 @@ description = "Rust code emitter for ts-aot: MIR → Rust source via quote! macr
 [dependencies]
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
+ts-aot-core = { path = "../ts-aot-core" }
 ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
 
 [dev-dependencies]
-ts-aot-core = { path = "../ts-aot-core" }
 
 [lints.rust]
 unsafe_code = "forbid"
