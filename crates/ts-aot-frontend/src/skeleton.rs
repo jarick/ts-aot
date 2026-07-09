@@ -7,17 +7,17 @@ use ts_aot_ir_hir::HirProgram;
 
 const ALIAS_CYCLE_CODE: &str = "E0401";
 
-pub(super) struct SkeletonBuilder<'a, 'b> {
-    pub(super) source: &'a str,
-    pub(super) types: &'b mut ts_aot_core::TypeTable,
-    pub(super) diagnostics: &'b mut DiagnosticBag,
-    pub(super) program: &'b mut HirProgram,
-    pub(super) next_generic_param: u32,
-    pub(super) resolved_aliases: HashMap<String, TypeId>,
+pub(crate) struct SkeletonBuilder<'a, 'b> {
+    pub(crate) source: &'a str,
+    pub(crate) types: &'b mut ts_aot_core::TypeTable,
+    pub(crate) diagnostics: &'b mut DiagnosticBag,
+    pub(crate) program: &'b mut HirProgram,
+    pub(crate) next_generic_param: u32,
+    pub(crate) resolved_aliases: HashMap<String, TypeId>,
 }
 
 impl SkeletonBuilder<'_, '_> {
-    pub(super) fn build(mut self, program: &Program<'_>) {
+    pub(crate) fn build(mut self, program: &Program<'_>) {
         self.pre_resolve_all_aliases(program);
         for stmt in &program.body {
             self.walk_top_level(stmt);
@@ -144,7 +144,7 @@ impl SkeletonBuilder<'_, '_> {
         None
     }
 
-    pub(super) fn walk_top_level(&mut self, stmt: &Statement<'_>) {
+    pub(crate) fn walk_top_level(&mut self, stmt: &Statement<'_>) {
         match stmt {
             Statement::Declaration(decl) => self.walk_declaration(decl),
             Statement::ModuleDeclaration(m) => {

@@ -7,14 +7,14 @@ use oxc_syntax::operator::UpdateOperator;
 use ts_aot_core::{Atom, FieldId};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr};
 
-use super::ops::{
+use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
-use super::scope::BodyScope;
-use crate::frontend::skeleton::SkeletonBuilder;
+use crate::scope::BodyScope;
+use crate::skeleton::SkeletonBuilder;
 
 impl SkeletonBuilder<'_, '_> {
-    pub(super) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
+    pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
         match e {
             Expression::BooleanLiteral(b) => HirExpr::Bool(b.value),
             Expression::NumberLiteral(n) => number_to_hir(n.value),

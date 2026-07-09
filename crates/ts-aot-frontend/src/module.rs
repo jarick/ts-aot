@@ -4,12 +4,12 @@ use oxc_span::GetSpan;
 use ts_aot_core::Atom;
 use ts_aot_ir_hir::{HirExport, HirImport};
 
-use super::skeleton::SkeletonBuilder;
+use crate::skeleton::SkeletonBuilder;
 
 const UNSUPPORTED_MODULE_CODE: &str = "E0300";
 
 impl SkeletonBuilder<'_, '_> {
-    pub(super) fn walk_module_declaration(&mut self, m: &ModuleDeclaration<'_>) {
+    pub(crate) fn walk_module_declaration(&mut self, m: &ModuleDeclaration<'_>) {
         match m {
             ModuleDeclaration::ExportNamedDeclaration(e) => {
                 self.handle_export_named_declaration_full(m.span(), e);

@@ -6,13 +6,13 @@ use oxc_span::GetSpan;
 use ts_aot_core::{Atom, LocalId};
 use ts_aot_ir_hir::{HirExpr, HirStmt, HirSwitchCase};
 
-use super::ops::{label_atom, left_span};
-use super::scope::BodyScope;
-use crate::frontend::skeleton::SkeletonBuilder;
-use crate::frontend::util::binding_pattern_name;
+use crate::ops::{label_atom, left_span};
+use crate::scope::BodyScope;
+use crate::skeleton::SkeletonBuilder;
+use crate::util::binding_pattern_name;
 
 impl SkeletonBuilder<'_, '_> {
-    pub(super) fn walk_stmts(
+    pub(crate) fn walk_stmts(
         &mut self,
         stmts: &[Statement<'_>],
         scope: &mut BodyScope,
