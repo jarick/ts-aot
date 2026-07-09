@@ -1,5 +1,6 @@
 mod body;
 mod decl;
+mod dump;
 mod expr;
 mod frontend;
 mod module;
