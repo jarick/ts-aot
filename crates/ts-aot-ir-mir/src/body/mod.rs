@@ -128,6 +128,26 @@ pub enum MirPlaceBase {
     },
 }
 
+impl MirPlace {
+    #[must_use]
+    pub fn ty(&self) -> Option<TypeId> {
+        match self {
+            MirPlace::Local { .. } => None,
+            MirPlace::Field { ty, .. } | MirPlace::Index { ty, .. } => Some(*ty),
+        }
+    }
+}
+
+impl MirPlaceBase {
+    #[must_use]
+    pub fn ty(&self) -> Option<TypeId> {
+        match self {
+            MirPlaceBase::Local(_) => None,
+            MirPlaceBase::Field { ty, .. } | MirPlaceBase::Index { ty, .. } => Some(*ty),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
@@ -225,6 +245,29 @@ pub enum MirExpr {
         expr: Option<Box<MirExpr>>,
         ty: TypeId,
     },
+}
+
+impl MirExpr {
+    #[must_use]
+    pub fn ty(&self) -> Option<TypeId> {
+        match self {
+            MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => None,
+            MirExpr::Int { ty, .. }
+            | MirExpr::Float { ty, .. }
+            | MirExpr::String { ty, .. }
+            | MirExpr::Null { ty }
+            | MirExpr::Field { ty, .. }
+            | MirExpr::Index { ty, .. }
+            | MirExpr::Call { ty, .. }
+            | MirExpr::StructLiteral { ty, .. }
+            | MirExpr::ResultOk { ty, .. }
+            | MirExpr::ResultErr { ty, .. }
+            | MirExpr::Binary { ty, .. }
+            | MirExpr::Unary { ty, .. }
+            | MirExpr::Await { ty, .. }
+            | MirExpr::Yield { ty, .. } => Some(*ty),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
