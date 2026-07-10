@@ -11,3 +11,6 @@ description = "Transformation passes for ts-aot (HIR→HIR lowers, HIR→MIR, mo
 ts-aot-core = { path = "../ts-aot-core" }
 ts-aot-ir-hir = { path = "../ts-aot-ir-hir" }
 ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
+
+[dev-dependencies]
+ts-aot-backend = { path = "../ts-aot-backend" }

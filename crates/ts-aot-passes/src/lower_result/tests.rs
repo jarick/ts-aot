@@ -1,5 +1,5 @@
 use super::*;
-use ts_aot_core::{Atom, FunctionId, LocalId, TypeId};
+use ts_aot_core::{Atom, FunctionId, LocalId, Type, TypeId, TypeTable};
 use ts_aot_ir_mir::{FunctionEffects, FunctionKind, MirBlock, MirDecl, MirFunctionDecl, MirParam};
 
 fn empty_function(id: u32, throws: Option<TypeId>) -> MirFunctionDecl {
@@ -37,7 +37,8 @@ fn function_without_throws_is_left_alone() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -55,7 +56,8 @@ fn throw_in_throwing_function_becomes_return_result_err() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -78,7 +80,8 @@ fn throw_inside_if_branch_is_rewritten() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -102,7 +105,8 @@ fn throw_inside_while_body_is_rewritten() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -124,7 +128,8 @@ fn throw_in_for_of_body_is_rewritten() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -147,7 +152,8 @@ fn multiple_decls_are_processed_independently() {
     program.push_decl(MirDecl::Function(throwing));
     program.push_decl(MirDecl::Function(plain));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(t) = &program.declarations[0] else {
         panic!()
@@ -169,7 +175,8 @@ fn non_throwing_function_body_is_unchanged_when_no_throws_present() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -188,7 +195,8 @@ fn throw_inside_if_else_both_branches_are_rewritten() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -217,7 +225,8 @@ fn throw_inside_if_else_both_branches_are_rewritten() {
 #[test]
 fn empty_program_is_a_noop() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
     assert_eq!(program.decl_count(), 0);
 }
 
@@ -241,7 +250,8 @@ fn struct_decl_is_skipped() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Struct(s));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     assert_eq!(program.decl_count(), 1);
     assert!(program.structs().next().is_some());
@@ -261,7 +271,8 @@ fn throw_error_expression_is_preserved() {
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
     program.push_decl(MirDecl::Function(f));
 
-    lower_result(&mut program);
+    let mut types = TypeTable::new();
+    lower_result(&mut program, &mut types);
 
     let MirDecl::Function(after) = &program.declarations[0] else {
         panic!("expected function");
@@ -274,5 +285,269 @@ fn throw_error_expression_is_preserved() {
             ));
         }
         other => panic!("expected ReturnResultErr, got {other:?}"),
+    }
+}
+
+#[test]
+fn throws_wraps_ret_in_result() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = ok_ty;
+    f.body.block = MirBlock::with(MirStmt::Return(Some(MirExpr::Int {
+        value: 7,
+        ty: ok_ty,
+    })));
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    match types.resolve(after.ret) {
+        Some(Type::Result { ok, err }) => {
+            assert_eq!(*ok, ok_ty);
+            assert_eq!(*err, err_ty);
+        }
+        other => panic!("expected Result<i32, String>, got {other:?}"),
+    }
+}
+
+#[test]
+fn throws_already_result_ret_is_left_alone() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+    let existing = types.intern(&Type::Result {
+        ok: ok_ty,
+        err: err_ty,
+    });
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = existing;
+    f.body.block = MirBlock::with(MirStmt::Return(Some(MirExpr::Int {
+        value: 7,
+        ty: ok_ty,
+    })));
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(after.ret, existing, "ret must not be re-wrapped");
+}
+
+#[test]
+fn success_return_in_throwing_function_is_wrapped_in_result_ok() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = ok_ty;
+    f.body.block = MirBlock::with(MirStmt::Return(Some(MirExpr::Int {
+        value: 42,
+        ty: ok_ty,
+    })));
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    let Some(Type::Result { ok, err }) = types.resolve(after.ret) else {
+        panic!("f.ret must be Result after lower_result");
+    };
+    assert_eq!(*ok, ok_ty);
+    assert_eq!(*err, err_ty);
+    match &after.body.block.stmts[0] {
+        MirStmt::Return(Some(MirExpr::ResultOk { value, ty })) => {
+            assert_eq!(*ty, after.ret, "ResultOk.ty must be f.ret");
+            match value.as_ref() {
+                MirExpr::Int {
+                    value: 42,
+                    ty: inner_ty,
+                } => {
+                    assert_eq!(*inner_ty, ok_ty, "wrapped value ty must be ok_ty");
+                }
+                other => panic!("expected Int(42), got {other:?}"),
+            }
+        }
+        other => panic!("expected Return(Some(ResultOk)), got {other:?}"),
+    }
+}
+
+#[test]
+fn success_return_already_wrapped_is_not_double_wrapped() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+    let res_ty = types.intern(&Type::Result {
+        ok: ok_ty,
+        err: err_ty,
+    });
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = ok_ty;
+    f.body.block = MirBlock::with(MirStmt::Return(Some(MirExpr::ResultOk {
+        value: Box::new(MirExpr::Int {
+            value: 42,
+            ty: ok_ty,
+        }),
+        ty: res_ty,
+    })));
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    match &after.body.block.stmts[0] {
+        MirStmt::Return(Some(MirExpr::ResultOk { value, ty })) => {
+            assert_eq!(*ty, after.ret, "ResultOk.ty must be f.ret");
+            assert!(
+                matches!(value.as_ref(), MirExpr::Int { value: 42, .. }),
+                "value must NOT be re-wrapped (no nested ResultOk), got {:?}",
+                value.as_ref()
+            );
+        }
+        other => panic!("expected Return(Some(ResultOk)), got {other:?}"),
+    }
+}
+
+#[test]
+fn success_return_in_nested_if_block_is_wrapped() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = ok_ty;
+    f.body.block = MirBlock::with(MirStmt::If {
+        cond: MirExpr::Bool(true),
+        then_block: MirBlock::with(MirStmt::Return(Some(MirExpr::Int {
+            value: 7,
+            ty: ok_ty,
+        }))),
+        else_block: None,
+    });
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    let MirStmt::If { then_block, .. } = &after.body.block.stmts[0] else {
+        panic!("expected If");
+    };
+    assert!(
+        matches!(
+            then_block.stmts[0],
+            MirStmt::Return(Some(MirExpr::ResultOk { .. }))
+        ),
+        "nested return must be wrapped, got {:?}",
+        then_block.stmts[0]
+    );
+}
+
+#[test]
+fn throws_with_already_result_ret_still_rewrites_body() {
+    let mut types = TypeTable::new();
+    let ok_ty = types.intern(&Type::I32);
+    let err_ty = types.intern(&Type::String);
+    let existing = types.intern(&Type::Result {
+        ok: ok_ty,
+        err: err_ty,
+    });
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = existing;
+    f.body.block = MirBlock {
+        stmts: vec![
+            MirStmt::Throw {
+                error: MirExpr::Int {
+                    value: 7,
+                    ty: ok_ty,
+                },
+                error_ty: TypeId::from_raw(0),
+            },
+            MirStmt::Return(Some(MirExpr::Int {
+                value: 42,
+                ty: ok_ty,
+            })),
+        ],
+    };
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    assert_eq!(
+        after.ret, existing,
+        "f.ret must NOT be re-wrapped when already Result"
+    );
+    assert!(
+        matches!(after.body.block.stmts[0], MirStmt::ReturnResultErr { .. }),
+        "Throw must be rewritten to ReturnResultErr even when ret is already Result, got {:?}",
+        after.body.block.stmts[0]
+    );
+    assert!(
+        matches!(
+            after.body.block.stmts[1],
+            MirStmt::Return(Some(MirExpr::ResultOk { .. }))
+        ),
+        "Success return must be wrapped in ResultOk even when ret is already Result, got {:?}",
+        after.body.block.stmts[1]
+    );
+}
+
+#[test]
+fn bare_return_in_throwing_function_becomes_ok_unit() {
+    let mut types = TypeTable::new();
+    let unit_ty = types.intern(&Type::Void);
+    let err_ty = types.intern(&Type::String);
+
+    let mut f = empty_function(0, Some(err_ty));
+    f.ret = unit_ty;
+    f.body.block = MirBlock::with(MirStmt::Return(None));
+    let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));
+    program.push_decl(MirDecl::Function(f));
+
+    lower_result(&mut program, &mut types);
+
+    let MirDecl::Function(after) = &program.declarations[0] else {
+        panic!("expected function");
+    };
+    let Some(Type::Result { ok, err }) = types.resolve(after.ret) else {
+        panic!("f.ret must be Result after lower_result");
+    };
+    assert_eq!(*ok, unit_ty);
+    assert_eq!(*err, err_ty);
+    match &after.body.block.stmts[0] {
+        MirStmt::Return(Some(MirExpr::ResultOk { value, ty })) => {
+            assert_eq!(*ty, after.ret, "ResultOk.ty must be f.ret");
+            assert!(
+                matches!(value.as_ref(), MirExpr::Unit),
+                "wrapped value must be Unit, got {:?}",
+                value.as_ref()
+            );
+        }
+        other => panic!("expected Return(Some(ResultOk {{ Unit, .. }})), got {other:?}"),
     }
 }

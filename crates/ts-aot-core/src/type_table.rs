@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ids::TypeId;
+use crate::ids::{StructId, TypeId};
 use crate::ty::Type;
 
 #[derive(Debug, Clone, Default)]
@@ -38,6 +38,14 @@ impl TypeTable {
     #[must_use]
     pub fn resolve(&self, id: TypeId) -> Option<&Type> {
         self.types.get(id.raw() as usize)
+    }
+
+    #[must_use]
+    pub fn struct_id(&self, id: TypeId) -> Option<StructId> {
+        match self.resolve(id)? {
+            Type::Struct { id } => Some(*id),
+            _ => None,
+        }
     }
 
     #[must_use]

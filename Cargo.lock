@@ -830,6 +830,7 @@ dependencies = [
 name = "ts-aot-passes"
 version = "0.1.0"
 dependencies = [
+ "ts-aot-backend",
  "ts-aot-core",
  "ts-aot-ir-hir",
  "ts-aot-ir-mir",
