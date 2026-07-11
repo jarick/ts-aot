@@ -19,6 +19,7 @@ repository = "https://example.invalid/ts-aot"
 publish = false
 
 [workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
 oxc_allocator = "0.7"
 oxc_ast = "0.7"
 oxc_diagnostics = "0.7"
