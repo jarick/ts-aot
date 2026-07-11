@@ -8,6 +8,7 @@ members = [
     "crates/ts-aot-passes",
     "crates/ts-aot-backend",
     "crates/ts-aot-runtime",
+    "crates/ts-aot-driver",
 ]
 
 [workspace.package]
