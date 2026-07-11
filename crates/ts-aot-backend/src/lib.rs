@@ -32,5 +32,14 @@ pub fn compile_to_string(program: &MirProgram) -> Result<String, BackendError> {
     Ok(render_tokens(&tokens, &cfg))
 }
 
+pub fn compile_to_string_with_types(
+    program: &MirProgram,
+    types: &TypeTable,
+) -> Result<String, BackendError> {
+    let cfg = RenderConfig::default();
+    let tokens = compile_with_types(program, types, &cfg)?;
+    Ok(render_tokens(&tokens, &cfg))
+}
+
 #[cfg(test)]
 mod tests;
