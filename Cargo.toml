@@ -20,13 +20,15 @@ publish = false
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
-oxc_allocator = "0.7"
-oxc_ast = "0.7"
-oxc_diagnostics = "0.7"
-oxc_parser = "0.7"
-oxc_semantic = "0.7"
-oxc_span = "0.7"
-oxc_syntax = "0.7"
+oxc_allocator = "0.139"
+oxc_ast = "0.139"
+oxc_diagnostics = "0.139"
+oxc-miette = "3"
+oxc_parser = "0.139"
+oxc_semantic = "0.139"
+oxc_span = "0.139"
+oxc_str = "0.139"
+oxc_syntax = "0.139"
 proptest = "1"
 proc-macro2 = "1"
 quote = "1"

@@ -1,4 +1,65 @@
-pub use oxc_span::Atom;
+#[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Atom(pub oxc_str::CompactStr);
+
+impl Atom {
+    #[must_use]
+    pub fn new_inline(s: &str) -> Self {
+        Self(oxc_str::CompactStr::from(s))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<&str> for Atom {
+    fn from(s: &str) -> Self {
+        Self(oxc_str::CompactStr::from(s))
+    }
+}
+
+impl From<String> for Atom {
+    fn from(s: String) -> Self {
+        Self(oxc_str::CompactStr::from(s))
+    }
+}
+
+impl From<oxc_str::CompactStr> for Atom {
+    fn from(s: oxc_str::CompactStr) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&Atom> for Atom {
+    fn from(a: &Atom) -> Self {
+        a.clone()
+    }
+}
+
+impl std::fmt::Display for Atom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for Atom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq<&Atom> for Atom {
+    fn eq(&self, other: &&Atom) -> bool {
+        self == *other
+    }
+}
+
+impl PartialEq<Atom> for &Atom {
+    fn eq(&self, other: &Atom) -> bool {
+        *self == other
+    }
+}
 
 macro_rules! define_id {
     ($name:ident) => {

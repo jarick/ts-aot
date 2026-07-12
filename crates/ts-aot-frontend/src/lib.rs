@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn with_semantic_yields_semantic_handle_for_valid_source() {
         let src = "const x: i32 = 1;";
-        let found = with_semantic("test.ts", src, |sem| sem.symbols().len());
+        let found = with_semantic("test.ts", src, |sem| sem.scoping().symbols_len());
         assert!(found.is_some());
     }
 

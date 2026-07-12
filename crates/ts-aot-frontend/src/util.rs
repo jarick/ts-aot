@@ -1,12 +1,12 @@
-use oxc_ast::ast::BindingPatternKind;
-use oxc_span::{Atom as OxcAtom, SourceType, Span as OxcSpan};
+use oxc_ast::ast::BindingPattern;
+use oxc_span::{SourceType, Span as OxcSpan};
 use ts_aot_core::Span as CoreSpan;
 
-pub(crate) fn binding_pattern_name(pattern: &oxc_ast::ast::BindingPattern<'_>) -> Option<OxcAtom> {
-    match &pattern.kind {
-        BindingPatternKind::BindingIdentifier(id) => Some(id.name.clone()),
-        BindingPatternKind::AssignmentPattern(ap) => binding_pattern_name(&ap.left),
-        BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => None,
+pub(crate) fn binding_pattern_name(pattern: &BindingPattern<'_>) -> Option<oxc_str::CompactStr> {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => Some(id.name.to_compact_str()),
+        BindingPattern::AssignmentPattern(ap) => binding_pattern_name(&ap.left),
+        BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => None,
     }
 }
 

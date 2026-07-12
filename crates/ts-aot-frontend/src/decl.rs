@@ -1,5 +1,6 @@
 use oxc_ast::ast::{
     Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind,
+    match_member_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
@@ -37,7 +38,7 @@ impl SkeletonBuilder<'_, '_> {
             Declaration::VariableDeclaration(v) => {
                 self.handle_variable_declaration(v);
             }
-            Declaration::UsingDeclaration(_) | Declaration::TSModuleDeclaration(_) => {
+            Declaration::TSModuleDeclaration(_) | Declaration::TSGlobalDeclaration(_) => {
                 self.report_unsupported(
                     UNSUPPORTED_DECL_CODE,
                     "declaration form is not supported by foundation pass",
@@ -136,7 +137,7 @@ impl SkeletonBuilder<'_, '_> {
             let param_name =
                 binding_pattern_name(&param.pattern).map_or_else(|| Atom::from("_"), Atom::from);
             let param_ty = self.resolve_ts_type_from_annotation_with_params(
-                param.pattern.type_annotation.as_deref(),
+                param.type_annotation.as_deref(),
                 Some(&type_param_map),
             );
             params.push(HirParam {
@@ -189,7 +190,7 @@ impl SkeletonBuilder<'_, '_> {
                     let field_name = p
                         .key
                         .static_name()
-                        .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_str()));
+                        .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
                     let field_ty = self.resolve_ts_type_from_annotation_with_params(
                         p.type_annotation.as_deref(),
                         Some(&class_type_param_map),
@@ -258,7 +259,7 @@ impl SkeletonBuilder<'_, '_> {
         let method_name = md
             .key
             .static_name()
-            .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_str()));
+            .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
 
         let (method_type_param_ids, method_param_map) = build_type_param_context(
             self.types,
@@ -288,7 +289,7 @@ impl SkeletonBuilder<'_, '_> {
             let param_name =
                 binding_pattern_name(&param.pattern).map_or_else(|| Atom::from("_"), Atom::from);
             let param_ty = self.resolve_ts_type_from_annotation_with_params(
-                param.pattern.type_annotation.as_deref(),
+                param.type_annotation.as_deref(),
                 Some(&combined_map),
             );
             params.push(HirParam {
@@ -318,12 +319,13 @@ impl SkeletonBuilder<'_, '_> {
     fn resolve_superclass_name(&mut self, expr: &Expression<'_>) -> Option<Atom> {
         match expr {
             Expression::Identifier(id) => Some(Atom::from(id.name.as_str())),
-            Expression::MemberExpression(m) => match &**m {
-                MemberExpression::StaticMemberExpression(s) => {
+            match_member_expression!(Expression) => {
+                if let Some(s) = expr.as_member_expression().and_then(|m| match m {
+                    MemberExpression::StaticMemberExpression(s) => Some(s),
+                    _ => None,
+                }) {
                     Some(Atom::from(s.property.name.as_str()))
-                }
-                MemberExpression::ComputedMemberExpression(_)
-                | MemberExpression::PrivateFieldExpression(_) => {
+                } else {
                     self.report_unsupported(
                         UNSUPPORTED_DECL_CODE,
                         "extends must be an identifier or member access expression",
@@ -331,7 +333,7 @@ impl SkeletonBuilder<'_, '_> {
                     );
                     None
                 }
-            },
+            }
             other => {
                 self.report_unsupported(
                     UNSUPPORTED_DECL_CODE,
@@ -361,11 +363,9 @@ impl SkeletonBuilder<'_, '_> {
                     oxc_ast::ast::TSEnumMemberName::Identifier(ident) => {
                         Atom::from(ident.name.as_str())
                     }
-                    oxc_ast::ast::TSEnumMemberName::StringLiteral(lit) => {
-                        Atom::from(lit.value.as_str())
-                    }
-                    oxc_ast::ast::TSEnumMemberName::ComputedPropertyName(_)
-                    | oxc_ast::ast::TSEnumMemberName::NumberLiteral(_) => Atom::from(""),
+                    oxc_ast::ast::TSEnumMemberName::String(lit) => Atom::from(lit.value.as_str()),
+                    oxc_ast::ast::TSEnumMemberName::ComputedString(_)
+                    | oxc_ast::ast::TSEnumMemberName::ComputedTemplateString(_) => Atom::from(""),
                 },
                 value: None,
             })
@@ -391,7 +391,7 @@ impl SkeletonBuilder<'_, '_> {
                 continue;
             };
             let name = Atom::from(ident.as_str());
-            let ty = self.resolve_ts_type_from_annotation(declarator.id.type_annotation.as_deref());
+            let ty = self.resolve_ts_type_from_annotation(declarator.type_annotation.as_deref());
             self.program.push_decl(ts_aot_ir_hir::HirDecl::Global {
                 name,
                 ty,

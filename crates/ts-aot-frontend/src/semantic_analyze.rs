@@ -1,7 +1,7 @@
+use miette::Diagnostic as OxcDiagnostic;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
-use oxc_diagnostics::Error as OxcError;
-use oxc_diagnostics::miette::Diagnostic as OxcDiagnostic;
+use oxc_diagnostics::OxcDiagnostic as OxcError;
 use oxc_parser::Parser;
 use oxc_semantic::{Semantic, SemanticBuilder};
 use oxc_span::SourceType;
@@ -12,12 +12,14 @@ const SEMANTIC_ERROR_CODE: &str = "S0001";
 const DEFAULT_SPAN: Span = Span::new(0, 0);
 
 fn error_span(err: &OxcError) -> Span {
-    let diag: &dyn OxcDiagnostic = &**err;
+    let diag: &dyn OxcDiagnostic = err;
     diag.labels()
-        .and_then(|mut it| it.next())
+        .as_slice()
+        .first()
         .map_or(DEFAULT_SPAN, |label| {
-            let start = u32::try_from(label.offset()).unwrap_or(u32::MAX);
-            let end = u32::try_from(label.offset() + label.len()).unwrap_or(u32::MAX);
+            let start = u32::try_from(u64::from(label.offset())).unwrap_or(u32::MAX);
+            let end = u32::try_from(u64::from(label.offset()) + u64::from(label.len()))
+                .unwrap_or(u32::MAX);
             Span::new(start, end)
         })
 }
@@ -31,23 +33,24 @@ pub fn analyze_semantic(name: &str, source: &str) -> DiagnosticBag {
 
     let parser = Parser::new(&allocator, source, source_type);
     let ret = parser.parse();
-    for err in ret.errors {
+    for err in &ret.diagnostics {
         let short = short_message(&err.to_string(), "parse error");
-        bag.push(Diagnostic::error(PARSE_ERROR_CODE, short, error_span(&err)));
+        bag.push(Diagnostic::error(PARSE_ERROR_CODE, short, error_span(err)));
     }
-
     if ret.panicked {
         return bag;
     }
 
     let program: &Program<'_> = &ret.program;
-    let semantic_ret = SemanticBuilder::new(source, source_type).build(program);
-    for err in semantic_ret.errors {
+    let semantic_ret = SemanticBuilder::new()
+        .with_check_syntax_error(true)
+        .build(program);
+    for err in &semantic_ret.diagnostics {
         let short = short_message(&err.to_string(), "semantic error");
         bag.push(Diagnostic::error(
             SEMANTIC_ERROR_CODE,
             short,
-            error_span(&err),
+            error_span(err),
         ));
     }
 
@@ -61,13 +64,15 @@ pub fn with_semantic<R>(name: &str, source: &str, f: impl FnOnce(&Semantic<'_>) 
 
     let parser = Parser::new(&allocator, source, source_type);
     let ret = parser.parse();
-    if !ret.errors.is_empty() || ret.panicked {
+    if !ret.diagnostics.is_empty() || ret.panicked {
         return None;
     }
 
     let program: &Program<'_> = &ret.program;
-    let semantic_ret = SemanticBuilder::new(source, source_type).build(program);
-    if !semantic_ret.errors.is_empty() {
+    let semantic_ret = SemanticBuilder::new()
+        .with_check_syntax_error(true)
+        .build(program);
+    if !semantic_ret.diagnostics.is_empty() {
         return None;
     }
 
