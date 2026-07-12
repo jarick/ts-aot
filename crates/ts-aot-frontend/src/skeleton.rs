@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use oxc_ast::ast::{Declaration, ModuleDeclaration, Program, Statement, TSType, TSTypeName};
+use oxc_ast::ast::{Declaration, Program, Statement, TSType, TSTypeName};
 use oxc_span::GetSpan;
 use ts_aot_core::{Diagnostic, DiagnosticBag, Span as CoreSpan, Type, TypeId};
 use ts_aot_ir_hir::HirProgram;
@@ -36,18 +36,15 @@ impl SkeletonBuilder<'_, '_> {
     fn collect_alias_names(stmts: &[Statement<'_>]) -> Vec<String> {
         let mut names = Vec::new();
         for stmt in stmts {
-            match stmt {
-                Statement::Declaration(Declaration::TSTypeAliasDeclaration(a)) => {
-                    names.push(a.id.name.as_str().to_string());
-                }
-                Statement::ModuleDeclaration(m) => {
-                    if let ModuleDeclaration::ExportNamedDeclaration(e) = &**m
-                        && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
-                    {
-                        names.push(a.id.name.as_str().to_string());
-                    }
-                }
-                _ => {}
+            if let Some(decl) = stmt.as_declaration()
+                && let Declaration::TSTypeAliasDeclaration(a) = decl
+            {
+                names.push(a.id.name.to_string());
+            } else if let Some(m) = stmt.as_module_declaration()
+                && let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
+                && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
+            {
+                names.push(a.id.name.to_string());
             }
         }
         names
@@ -70,25 +67,25 @@ impl SkeletonBuilder<'_, '_> {
             return;
         }
         for stmt in &program.body {
-            let annotation_opt: Option<&TSType<'_>> = match stmt {
-                Statement::Declaration(Declaration::TSTypeAliasDeclaration(a)) => {
-                    if a.id.name.as_str() == name {
-                        Some(&a.type_annotation)
-                    } else {
-                        None
-                    }
+            let annotation_opt: Option<&TSType<'_>> = if let Some(decl) = stmt.as_declaration() {
+                if let Declaration::TSTypeAliasDeclaration(a) = decl
+                    && a.id.name == name
+                {
+                    Some(&a.type_annotation)
+                } else {
+                    None
                 }
-                Statement::ModuleDeclaration(m) => {
-                    if let ModuleDeclaration::ExportNamedDeclaration(e) = &**m
-                        && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
-                        && a.id.name.as_str() == name
-                    {
-                        Some(&a.type_annotation)
-                    } else {
-                        None
-                    }
+            } else if let Some(m) = stmt.as_module_declaration() {
+                if let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
+                    && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
+                    && a.id.name == name
+                {
+                    Some(&a.type_annotation)
+                } else {
+                    None
                 }
-                _ => None,
+            } else {
+                None
             };
             if let Some(rhs) = annotation_opt {
                 if let TSType::TSTypeReference(r) = rhs
@@ -124,39 +121,37 @@ impl SkeletonBuilder<'_, '_> {
     fn find_alias_span(name: &str, program: &Program<'_>) -> Option<CoreSpan> {
         for stmt in &program.body {
             let span = stmt.span();
-            match stmt {
-                Statement::Declaration(Declaration::TSTypeAliasDeclaration(a))
-                    if a.id.name.as_str() == name =>
-                {
-                    return Some(CoreSpan::new(span.start, span.end));
-                }
-                Statement::ModuleDeclaration(m) => {
-                    if let ModuleDeclaration::ExportNamedDeclaration(e) = &**m
-                        && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
-                        && a.id.name.as_str() == name
-                    {
-                        return Some(CoreSpan::new(span.start, span.end));
-                    }
-                }
-                _ => {}
+            if let Some(decl) = stmt.as_declaration()
+                && let Declaration::TSTypeAliasDeclaration(a) = decl
+                && a.id.name == name
+            {
+                return Some(CoreSpan::new(span.start, span.end));
+            }
+            if let Some(m) = stmt.as_module_declaration()
+                && let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
+                && let Some(Declaration::TSTypeAliasDeclaration(a)) = e.declaration.as_ref()
+                && a.id.name == name
+            {
+                return Some(CoreSpan::new(span.start, span.end));
             }
         }
         None
     }
 
     pub(crate) fn walk_top_level(&mut self, stmt: &Statement<'_>) {
-        match stmt {
-            Statement::Declaration(decl) => self.walk_declaration(decl),
-            Statement::ModuleDeclaration(m) => {
-                let module_decl: &ModuleDeclaration<'_> = m;
-                self.walk_module_declaration(module_decl);
-            }
-            Statement::ExpressionStatement(_) | Statement::EmptyStatement(_) => {}
-            _ => self.report_unsupported(
+        if let Some(decl) = stmt.as_declaration() {
+            self.walk_declaration(decl);
+        } else if let Some(m) = stmt.as_module_declaration() {
+            self.walk_module_declaration(m);
+        } else if !matches!(
+            stmt,
+            Statement::ExpressionStatement(_) | Statement::EmptyStatement(_)
+        ) {
+            self.report_unsupported(
                 "E0300",
                 "top-level statement is not supported by foundation pass",
                 stmt.span(),
-            ),
+            );
         }
     }
 }

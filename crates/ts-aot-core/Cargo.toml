@@ -9,6 +9,7 @@ description = "Shared core types for the ts-aot compiler: type system, IDs, diag
 
 [dependencies]
 oxc_span.workspace = true
+oxc_str.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -88,7 +88,9 @@ pub(crate) fn resolve_simple_type(
                         None => types.intern(&Type::Error),
                     })
             }
-            TSTypeName::QualifiedName(_) => types.intern(&Type::Error),
+            TSTypeName::QualifiedName(_) | TSTypeName::ThisExpression(_) => {
+                types.intern(&Type::Error)
+            }
         },
         _ => types.intern(&Type::Error),
     })

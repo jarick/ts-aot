@@ -1,6 +1,8 @@
 use oxc_ast::ast::{
     Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression, Expression,
-    LogicalExpression, MemberExpression, SimpleAssignmentTarget, UnaryExpression, UpdateExpression,
+    LogicalExpression, SimpleAssignmentTarget, UnaryExpression, UpdateExpression,
+    match_assignment_target, match_assignment_target_pattern, match_expression,
+    match_member_expression,
 };
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
@@ -17,7 +19,7 @@ impl SkeletonBuilder<'_, '_> {
     pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
         match e {
             Expression::BooleanLiteral(b) => HirExpr::Bool(b.value),
-            Expression::NumberLiteral(n) => number_to_hir(n.value),
+            Expression::NumericLiteral(n) => number_to_hir(n.value),
             Expression::StringLiteral(s) => HirExpr::String(Atom::from(s.value.as_str())),
             Expression::NullLiteral(_) => HirExpr::Null,
             Expression::Identifier(id) => self.ident_to_expr(id.name.as_str(), scope),
@@ -38,7 +40,9 @@ impl SkeletonBuilder<'_, '_> {
             Expression::UnaryExpression(unary) => self.walk_unary(unary, scope),
             Expression::UpdateExpression(update) => self.walk_update(update, scope),
             Expression::CallExpression(call) => self.walk_call(call, scope),
-            Expression::MemberExpression(m) => self.walk_member(m, scope),
+            other @ match_member_expression!(Expression) => {
+                self.walk_member(other.to_member_expression(), scope)
+            }
             Expression::AssignmentExpression(a) => self.walk_assignment(a, scope),
             Expression::AwaitExpression(a) => {
                 let inner = self.walk_expr(&a.argument, scope);
@@ -141,9 +145,11 @@ impl SkeletonBuilder<'_, '_> {
         let mut args = Vec::with_capacity(call.arguments.len());
         for arg in &call.arguments {
             match arg {
-                Argument::Expression(e) => args.push(self.walk_expr(e, scope)),
-                Argument::SpreadElement(s) => {
-                    self.report_unwalked("spread argument is not supported", s.span);
+                arg @ match_expression!(Argument) => {
+                    args.push(self.walk_expr(arg.to_expression(), scope));
+                }
+                _ => {
+                    self.report_unwalked("spread argument is not supported", arg.span());
                 }
             }
         }
@@ -155,9 +161,14 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    fn walk_member(&mut self, m: &MemberExpression<'_>, scope: &mut BodyScope) -> HirExpr {
+    fn walk_member(
+        &mut self,
+        m: &oxc_ast::ast::MemberExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        use oxc_ast::ast::MemberExpression as ME;
         match m {
-            MemberExpression::StaticMemberExpression(s) => {
+            ME::StaticMemberExpression(s) => {
                 let owner = self.walk_expr(&s.object, scope);
                 let ty = self.error_ty();
                 HirExpr::Field {
@@ -167,7 +178,7 @@ impl SkeletonBuilder<'_, '_> {
                     ty,
                 }
             }
-            MemberExpression::ComputedMemberExpression(computed) => {
+            ME::ComputedMemberExpression(computed) => {
                 let owner = self.walk_expr(&computed.object, scope);
                 let index = self.walk_expr(&computed.expression, scope);
                 let ty = self.error_ty();
@@ -177,7 +188,7 @@ impl SkeletonBuilder<'_, '_> {
                     ty,
                 }
             }
-            MemberExpression::PrivateFieldExpression(p) => {
+            ME::PrivateFieldExpression(p) => {
                 self.report_unwalked("private field access is not supported", p.span);
                 HirExpr::Unit
             }
@@ -208,11 +219,17 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    fn walk_assign_target(&mut self, t: &AssignmentTarget<'_>, scope: &mut BodyScope) -> HirExpr {
+    fn walk_assign_target(
+        &mut self,
+        t: &oxc_ast::ast::AssignmentTarget<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
         match t {
-            AssignmentTarget::SimpleAssignmentTarget(s) => self.walk_simple_target(s, scope),
-            AssignmentTarget::AssignmentTargetPattern(p) => {
-                self.report_unwalked("destructuring assignment target is not supported", p.span());
+            t @ match_assignment_target!(AssignmentTarget) => {
+                self.walk_simple_target(t.to_simple_assignment_target(), scope)
+            }
+            t @ match_assignment_target_pattern!(AssignmentTarget) => {
+                self.report_unwalked("destructuring assignment target is not supported", t.span());
                 HirExpr::Unit
             }
         }
@@ -220,18 +237,16 @@ impl SkeletonBuilder<'_, '_> {
 
     fn walk_simple_target(
         &mut self,
-        s: &SimpleAssignmentTarget<'_>,
+        s: &oxc_ast::ast::SimpleAssignmentTarget<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
+        use oxc_ast::ast::SimpleAssignmentTarget as SAT;
         match s {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-                self.ident_to_expr(id.name.as_str(), scope)
+            SAT::AssignmentTargetIdentifier(id) => self.ident_to_expr(id.name.as_str(), scope),
+            m @ match_member_expression!(SimpleAssignmentTarget) => {
+                self.walk_member(m.to_member_expression(), scope)
             }
-            SimpleAssignmentTarget::MemberAssignmentTarget(m) => self.walk_member(m, scope),
-            SimpleAssignmentTarget::TSAsExpression(_)
-            | SimpleAssignmentTarget::TSSatisfiesExpression(_)
-            | SimpleAssignmentTarget::TSNonNullExpression(_)
-            | SimpleAssignmentTarget::TSTypeAssertion(_) => match s.get_expression() {
+            _ => match s.get_expression() {
                 Some(inner) => self.walk_expr(inner, scope),
                 None => HirExpr::Unit,
             },

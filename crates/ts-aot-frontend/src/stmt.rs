@@ -1,6 +1,7 @@
 use oxc_ast::ast::{
     Declaration, ForInStatement, ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft,
-    Statement, SwitchStatement, VariableDeclaration,
+    Statement, SwitchStatement, VariableDeclaration, match_assignment_target, match_declaration,
+    match_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, LocalId};
@@ -42,8 +43,19 @@ impl SkeletonBuilder<'_, '_> {
                 scope.pop();
                 out.push(HirStmt::Block(inner));
             }
-            Statement::Declaration(Declaration::VariableDeclaration(v)) => {
-                self.walk_var_decl(v, out, scope);
+            d @ match_declaration!(Statement) => {
+                let decl = d.to_declaration();
+                match decl {
+                    Declaration::VariableDeclaration(v) => {
+                        self.walk_var_decl(v, out, scope);
+                    }
+                    other => {
+                        self.report_unwalked(
+                            "statement form is not supported by the body walker",
+                            other.span(),
+                        );
+                    }
+                }
             }
             Statement::ExpressionStatement(e) => {
                 let expr = self.walk_expr(&e.expression, scope);
@@ -189,7 +201,7 @@ impl SkeletonBuilder<'_, '_> {
                 );
                 continue;
             };
-            let ty = self.resolve_ts_type_from_annotation(d.id.type_annotation.as_deref());
+            let ty = self.resolve_ts_type_from_annotation(d.type_annotation.as_deref());
             let id = scope.declare(name.as_str(), ty);
             out.push(HirStmt::Let {
                 id,
@@ -208,12 +220,9 @@ impl SkeletonBuilder<'_, '_> {
                 ForStatementInit::VariableDeclaration(v) => {
                     self.walk_var_decl(v, &mut block, scope);
                 }
-                ForStatementInit::Expression(e) => {
-                    let expr = self.walk_expr(e, scope);
+                e @ match_expression!(ForStatementInit) => {
+                    let expr = self.walk_expr(e.to_expression(), scope);
                     block.push(HirStmt::Expr { expr });
-                }
-                ForStatementInit::UsingDeclaration(u) => {
-                    self.report_unwalked("`using` declaration is not supported", u.span);
                 }
             }
         }
@@ -241,8 +250,15 @@ impl SkeletonBuilder<'_, '_> {
             && let Some(d) = v.declarations.first()
             && let Some(name) = binding_pattern_name(&d.id)
         {
-            let ty = self.resolve_ts_type_from_annotation(d.id.type_annotation.as_deref());
+            let ty = self.resolve_ts_type_from_annotation(d.type_annotation.as_deref());
             return scope.declare(name.as_str(), ty);
+        }
+        if let t @ match_assignment_target!(ForStatementLeft) = left
+            && let t = t.to_assignment_target()
+            && let Some(name) = extract_simple_target_name(t)
+        {
+            let ty = self.error_ty();
+            return scope.declare(&name, ty);
         }
         self.report_unwalked(
             "loop binding must be a simple `let`/`const` identifier",
@@ -250,6 +266,14 @@ impl SkeletonBuilder<'_, '_> {
         );
         let ty = self.error_ty();
         scope.declare("_", ty)
+    }
+}
+
+fn extract_simple_target_name(t: &oxc_ast::ast::AssignmentTarget<'_>) -> Option<String> {
+    use oxc_ast::ast::SimpleAssignmentTarget;
+    match t.as_simple_assignment_target()? {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.to_string()),
+        _ => None,
     }
 }
 

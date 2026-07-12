@@ -59,7 +59,7 @@ impl FrontendPass {
             };
         }
 
-        for oxc_err in ret.errors {
+        for oxc_err in &ret.diagnostics {
             diagnostics.push(Diagnostic::error(
                 PARSE_ERROR_CODE,
                 format!("parse error: {oxc_err}"),

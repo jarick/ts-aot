@@ -13,8 +13,7 @@ pub(crate) fn label_atom(label: Option<&str>) -> Option<Atom> {
 pub(crate) fn left_span(left: &ForStatementLeft<'_>) -> oxc_span::Span {
     match left {
         ForStatementLeft::VariableDeclaration(v) => v.span,
-        ForStatementLeft::AssignmentTarget(t) => t.span(),
-        ForStatementLeft::UsingDeclaration(u) => u.span,
+        other => other.span(),
     }
 }
 

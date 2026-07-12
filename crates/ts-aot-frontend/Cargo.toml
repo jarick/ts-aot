@@ -14,9 +14,11 @@ ts-aot-ir-hir = { path = "../ts-aot-ir-hir" }
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
 oxc_diagnostics.workspace = true
+oxc-miette.workspace = true
 oxc_parser.workspace = true
 oxc_semantic.workspace = true
 oxc_span.workspace = true
+oxc_str.workspace = true
 oxc_syntax.workspace = true
 
 [lints.rust]
