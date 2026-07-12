@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId, Visibility};
 use ts_aot_ir_hir::{HirClass, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase};
@@ -16,7 +17,7 @@ pub fn convert_function(
     id: FunctionId,
     export_name: Option<String>,
     function_remap: HashMap<FunctionId, FunctionId>,
-    name_to_function: &HashMap<Atom, FunctionId>,
+    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
@@ -25,7 +26,7 @@ pub fn convert_function(
     let param_count = f.params.len();
     let mut converter =
         ExprConverter::with_function_remap_and_offset(function_remap, param_count as u32);
-    converter.closure_name_to_function = name_to_function.clone();
+    converter.name_to_function = Arc::clone(name_to_function);
     converter.set_field_id_lookup(field_id_lookup.clone());
     converter.seed_params(param_count as u32);
     let (block, locals) =
@@ -63,11 +64,7 @@ fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
         .collect()
 }
 
-pub fn convert_program(
-    hir: &HirProgram,
-    ctx: &mut PassContext,
-    closure_names: &HashSet<Atom>,
-) -> MirProgram {
+pub fn convert_program(hir: &HirProgram, ctx: &mut PassContext) -> MirProgram {
     let mut mir = MirProgram::new(hir.module);
     for export in &hir.exports {
         mir.exports.push(ts_aot_ir_mir::MirExport {
@@ -85,15 +82,13 @@ pub fn convert_program(
     let mut next_function_id: u32 = 0;
     let mut struct_id_map: HashMap<TypeId, StructId> = HashMap::new();
     let mut next_struct_id: u32 = 0;
-    let mut closure_name_to_function: HashMap<Atom, FunctionId> = HashMap::new();
+    let mut name_to_function: HashMap<Atom, FunctionId> = HashMap::new();
     let mut pre_id: u32 = 0;
     for decl in &hir.declarations {
         match decl {
             HirDecl::Function(f) => {
                 let id = FunctionId::from_raw(pre_id);
-                if closure_names.contains(&f.name) {
-                    closure_name_to_function.insert(f.name.clone(), id);
-                }
+                name_to_function.insert(f.name.clone(), id);
                 pre_id += 1;
             }
             HirDecl::Class(c) => {
@@ -105,9 +100,7 @@ pub fn convert_program(
                         continue;
                     }
                     let id = FunctionId::from_raw(pre_id);
-                    if closure_names.contains(&method.name) {
-                        closure_name_to_function.insert(method.name.clone(), id);
-                    }
+                    name_to_function.entry(method.name.clone()).or_insert(id);
                     pre_id += 1;
                 }
             }
@@ -128,11 +121,12 @@ pub fn convert_program(
             }
         }
     }
+    let name_to_function = Arc::new(name_to_function);
     for decl in &hir.declarations {
         if let Some(mir_decl) = convert_decl(
             decl,
             &mut next_function_id,
-            &closure_name_to_function,
+            &name_to_function,
             &mut struct_id_map,
             &mut next_struct_id,
             &field_id_lookup,
@@ -141,14 +135,47 @@ pub fn convert_program(
             mir.push_decl(mir_decl);
         }
     }
+    debug_check_name_to_function(&mir, &name_to_function);
     mir
+}
+
+#[cfg(debug_assertions)]
+fn debug_check_name_to_function(
+    mir: &MirProgram,
+    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
+) {
+    use std::collections::HashMap;
+    let mut actual: HashMap<&Atom, FunctionId> = HashMap::new();
+    for f in mir.functions() {
+        actual.insert(&f.name, f.id);
+    }
+    for s in mir.structs() {
+        for m in &s.methods {
+            actual.insert(&m.name, m.id);
+        }
+    }
+    for (name, expected_id) in name_to_function.iter() {
+        if let Some(&actual_id) = actual.get(name) {
+            assert_eq!(
+                actual_id, *expected_id,
+                "name_to_function[{name:?}] = {expected_id:?} but MIR has id {actual_id:?}"
+            );
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn debug_check_name_to_function(
+    _mir: &MirProgram,
+    _name_to_function: &Arc<HashMap<Atom, FunctionId>>,
+) {
 }
 
 #[allow(clippy::too_many_arguments)]
 fn convert_decl(
     decl: &HirDecl,
     next_function_id: &mut u32,
-    closure_name_to_function: &HashMap<Atom, FunctionId>,
+    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
@@ -168,7 +195,7 @@ fn convert_decl(
                 id,
                 export_name,
                 HashMap::new(),
-                closure_name_to_function,
+                name_to_function,
                 struct_id_map,
                 next_struct_id,
                 field_id_lookup,
@@ -178,7 +205,7 @@ fn convert_decl(
         HirDecl::Class(c) => Some(MirDecl::Struct(convert_struct(
             c,
             next_function_id,
-            closure_name_to_function,
+            name_to_function,
             struct_id_map,
             next_struct_id,
             field_id_lookup,
@@ -205,7 +232,7 @@ fn convert_decl(
 fn convert_struct(
     c: &HirClass,
     next_function_id: &mut u32,
-    closure_name_to_function: &HashMap<Atom, FunctionId>,
+    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
@@ -244,7 +271,7 @@ fn convert_struct(
             id,
             export_name,
             method_remap,
-            closure_name_to_function,
+            name_to_function,
             struct_id_map,
             next_struct_id,
             field_id_lookup,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
@@ -11,7 +12,7 @@ pub struct ExprConverter {
     pub(super) local_map: HashMap<LocalId, LocalId>,
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
-    pub(super) closure_name_to_function: HashMap<Atom, FunctionId>,
+    pub(super) name_to_function: Arc<HashMap<Atom, FunctionId>>,
     pub(super) next_local: u32,
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
@@ -38,7 +39,7 @@ impl ExprConverter {
             local_map: HashMap::new(),
             local_names: HashMap::new(),
             function_remap: remap,
-            closure_name_to_function: HashMap::new(),
+            name_to_function: Arc::new(HashMap::new()),
             next_local,
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
@@ -118,7 +119,7 @@ impl ExprConverter {
             HirCallee::Function(fid) => self.function_remap.get(fid).copied().unwrap_or(*fid),
             HirCallee::Indirect(inner) => {
                 if let HirExpr::Global { name, .. } = inner.as_ref()
-                    && let Some(&fid) = self.closure_name_to_function.get(name)
+                    && let Some(&fid) = self.name_to_function.get(name)
                 {
                     return fid;
                 }
