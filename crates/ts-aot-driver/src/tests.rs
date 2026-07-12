@@ -1,4 +1,10 @@
-use crate::{CompileOptions, Driver, DriverOutput, EmitStage};
+use std::io::Write;
+
+use ts_aot_core::Severity;
+
+use crate::{
+    CompileOptions, DiagnosticBag, Driver, DriverError, DriverOutput, EmitStage, severity_label,
+};
 
 fn compile(source: &str) -> DriverOutput {
     Driver::new().compile_source("test.ts", source, &CompileOptions::default())
@@ -138,4 +144,97 @@ fn driver_output_default_is_empty_and_clean() {
     assert!(out.rust_source.is_none());
     assert!(out.hir_text.is_none());
     assert!(out.mir_text.is_none());
+}
+
+#[test]
+fn driver_output_artifact_returns_requested_field() {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function id(x: number): number { return x; }",
+        &CompileOptions {
+            emit: EmitStage::Rust,
+        },
+    );
+    assert!(!out.has_errors());
+    let rust = out
+        .artifact(EmitStage::Rust)
+        .expect("artifact(rust) returns the rust_source field");
+    assert!(!rust.is_empty());
+    assert!(out.artifact(EmitStage::Hir).is_none());
+    assert!(out.artifact(EmitStage::Mir).is_none());
+}
+
+#[test]
+fn driver_output_artifact_returns_none_for_missing_stage() {
+    let out = DriverOutput::default();
+    assert!(out.artifact(EmitStage::Rust).is_none());
+    assert!(out.artifact(EmitStage::Hir).is_none());
+    assert!(out.artifact(EmitStage::Mir).is_none());
+}
+
+#[test]
+fn severity_label_maps_known_variants() {
+    assert_eq!(severity_label(Severity::Error), "error");
+    assert_eq!(severity_label(Severity::Warning), "warning");
+    assert_eq!(severity_label(Severity::Note), "note");
+}
+
+#[test]
+fn core_types_are_reexported_for_embedders() {
+    let _bag: DiagnosticBag = DiagnosticBag::default();
+    let label = severity_label(Severity::Error);
+    assert_eq!(label, "error");
+}
+
+#[test]
+fn compile_file_reads_source_from_disk() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("ts_aot_driver_compile_file_smoke.ts");
+    let mut f = std::fs::File::create(&path).expect("create temp file");
+    write!(
+        f,
+        "export function add(a: number, b: number): number {{ return a + b; }}"
+    )
+    .expect("write temp file");
+
+    let out = Driver::new()
+        .compile_file(&path, &CompileOptions::default())
+        .expect("compile_file reads the file and compiles");
+    assert!(!out.has_errors(), "{:?}", out.diagnostics);
+    let rust = out
+        .rust_source
+        .expect("rust_source must be populated after compile_file");
+    assert!(rust.contains("i32"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn compile_file_returns_io_error_for_missing_path() {
+    let path = std::env::temp_dir().join("ts_aot_driver_does_not_exist_xyz_12345.ts");
+    let err = Driver::new()
+        .compile_file(&path, &CompileOptions::default())
+        .expect_err("missing file must produce DriverError::Io");
+    let display = format!("{err}");
+    assert!(
+        display.contains("read "),
+        "io error should be reported via Display; got: {display}"
+    );
+    let src = std::error::Error::source(&err)
+        .expect("DriverError::Io exposes the source io::Error")
+        .downcast_ref::<std::io::Error>()
+        .expect("source must downcast to std::io::Error");
+    assert_eq!(src.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn driver_error_io_display_includes_path() {
+    let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "nope");
+    let err = DriverError::Io {
+        path: "/some/file.ts".to_owned(),
+        source: inner,
+    };
+    let s = format!("{err}");
+    assert!(s.contains("/some/file.ts"));
+    assert!(s.contains("nope"));
 }

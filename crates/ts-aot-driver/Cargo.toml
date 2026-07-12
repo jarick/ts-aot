@@ -12,6 +12,7 @@ name = "ts-aot"
 path = "src/main.rs"
 
 [dependencies]
+clap = { workspace = true }
 ts-aot-backend = { path = "../ts-aot-backend" }
 ts-aot-core = { path = "../ts-aot-core" }
 ts-aot-frontend = { path = "../ts-aot-frontend" }
