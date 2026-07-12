@@ -17,8 +17,7 @@ target
 tests/harness-out/
 tests/test262-report.json
 
-# test262 — embedded sparse clone, will be added as submodule in PR-23
-tests/test262/
+# tests/test262/
 
 # leftover build artifacts
 *.wasm.o
