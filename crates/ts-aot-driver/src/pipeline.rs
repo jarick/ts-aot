@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use ts_aot_backend::compile_to_string_with_types;
 use ts_aot_core::{Diagnostic, Span, TypeTable};
 use ts_aot_frontend::FrontendPass;
@@ -25,7 +23,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
     lower_enums(&mut hir, &mut types, &mut ctx);
     lower_classes(&mut hir, &mut types, &mut ctx);
     monomorphize(&mut hir, &mut types, &mut ctx);
-    let closures = lower_closures(&mut hir, &mut ctx);
+    lower_closures(&mut hir, &mut ctx);
     let _ = lower_async(&mut hir, &mut types, &mut ctx);
     out.diagnostics
         .extend(ctx.take_diagnostics().iter().cloned());
@@ -38,8 +36,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
         return out;
     }
 
-    let closure_set: HashSet<_> = closures.closure_names.into_iter().collect();
-    let mut mir = convert_program(&hir, &mut ctx, &closure_set);
+    let mut mir = convert_program(&hir, &mut ctx);
     out.diagnostics
         .extend(ctx.take_diagnostics().iter().cloned());
     if out.diagnostics.has_errors() {
