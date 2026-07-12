@@ -13,6 +13,7 @@ pub struct RuntimeRequirements {
     pub needs_host_io: bool,
     pub needs_console: bool,
     pub needs_math: bool,
+    pub needs_call_indirect: bool,
 }
 
 impl RuntimeRequirements {
@@ -45,6 +46,9 @@ impl RuntimeRequirements {
             RuntimeOp::MathSqrt => {
                 self.needs_math = true;
             }
+            RuntimeOp::CallIndirect => {
+                self.needs_call_indirect = true;
+            }
         }
     }
 }
@@ -66,6 +70,7 @@ mod tests {
         assert!(!r.needs_host_io);
         assert!(!r.needs_console);
         assert!(!r.needs_math);
+        assert!(!r.needs_call_indirect);
     }
 
     #[test]
@@ -114,6 +119,18 @@ mod tests {
         assert!(r.needs_math);
         assert!(!r.needs_string);
         assert!(!r.needs_console);
+    }
+
+    #[test]
+    fn require_call_indirect_sets_call_indirect_only() {
+        let mut r = RuntimeRequirements::default();
+        r.require(RuntimeOp::CallIndirect);
+        assert!(r.needs_runtime);
+        assert!(r.needs_call_indirect);
+        assert!(!r.needs_string);
+        assert!(!r.needs_array);
+        assert!(!r.needs_math);
+        assert!(!r.needs_promise);
     }
 
     #[test]

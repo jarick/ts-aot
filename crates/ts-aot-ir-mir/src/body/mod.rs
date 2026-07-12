@@ -288,6 +288,7 @@ pub enum RuntimeOp {
     PromiseResolve,
     HostConsoleLog,
     MathSqrt,
+    CallIndirect,
 }
 
 #[cfg(test)]

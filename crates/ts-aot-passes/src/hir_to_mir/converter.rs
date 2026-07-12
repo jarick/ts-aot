@@ -123,9 +123,12 @@ impl ExprConverter {
                 {
                     return fid;
                 }
-                ctx.error(
+                ctx.warning(
                     "P0005",
-                    "indirect (computed) callee is not yet supported in HIR→MIR",
+                    "indirect (computed) callee is not yet supported in HIR→MIR; \
+                     emitting runtime dispatch via __ts_aot_call_indirect. \
+                     Computed callees (Field, Local, Binary, etc.) will fail during Rust code emission \
+                     (the backend refuses non-Global callees with BackendError::NotImplemented)",
                     Span::new(0, 0),
                 );
                 PLACEHOLDER_FUNCTION
