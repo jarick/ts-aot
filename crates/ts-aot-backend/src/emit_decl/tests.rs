@@ -1033,3 +1033,53 @@ fn call_indirect_runtime_emits_callee_and_slice_of_args() {
          Got: {s}"
     );
 }
+
+#[test]
+fn switch_stmt_emits_not_implemented_in_phase_1_3() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let disc = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: disc,
+            name: Atom::from("x"),
+            ty: int_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Switch {
+                disc: Box::new(MirExpr::Local(disc)),
+                cases: Vec::new(),
+                default: None,
+            }],
+        },
+    };
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let err = emit_decls(&prog, &types).expect_err("Switch backend emit must defer to Phase 2.3");
+    assert_eq!(err, BackendError::NotImplemented);
+}
+
+#[test]
+fn try_stmt_emits_not_implemented_in_phase_1_3() {
+    let types = TypeTable::new();
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let mut f = empty_func("caller");
+    f.body = MirBody {
+        locals: vec![],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: None,
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let err = emit_decls(&prog, &types).expect_err("Try backend emit must defer to Phase 2.3");
+    assert_eq!(err, BackendError::NotImplemented);
+}

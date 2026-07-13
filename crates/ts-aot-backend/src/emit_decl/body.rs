@@ -124,6 +124,7 @@ fn emit_stmt(
                 Ok(quote!(#call;))
             }
         }
+        MirStmt::Switch { .. } | MirStmt::Try { .. } => Err(BackendError::NotImplemented),
     }
 }
 

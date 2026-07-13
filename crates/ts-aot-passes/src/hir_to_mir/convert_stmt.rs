@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use ts_aot_core::{Atom, LocalId, Span, StructId, TypeId};
 use ts_aot_ir_hir::HirStmt;
-use ts_aot_ir_mir::{BinaryOp, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt};
+use ts_aot_ir_mir::{
+    BinaryOp, ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase,
+};
 
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
@@ -53,6 +55,29 @@ impl ExprConverter {
                 ctx,
             );
         }
+        out.stmts.extend(interim);
+        final_locals.extend(self.take_temp_locals());
+        (out, final_locals)
+    }
+
+    pub fn convert_single_stmt_with_shared_struct_ids(
+        &mut self,
+        s: &HirStmt,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        ctx: &mut PassContext,
+    ) -> (MirBlock, Vec<MirLocalDecl>) {
+        let mut out = MirBlock::new();
+        let mut final_locals: Vec<MirLocalDecl> = Vec::new();
+        let mut interim: Vec<MirStmt> = Vec::new();
+        self.convert_stmt_into(
+            s,
+            &mut interim,
+            &mut final_locals,
+            shared_struct_ids,
+            shared_next_struct,
+            ctx,
+        );
         out.stmts.extend(interim);
         final_locals.extend(self.take_temp_locals());
         (out, final_locals)
@@ -292,12 +317,56 @@ impl ExprConverter {
                 });
             }
             HirStmt::Switch { disc, cases } => {
-                let _ = (disc, cases);
-                ctx.error(
-                    "P0005",
-                    "switch statement is not yet implemented in HIR→MIR",
-                    Span::new(0, 0),
-                );
+                let disc = self.convert_expr(disc, out, shared_struct_ids, shared_next_struct, ctx);
+                let mut mir_cases: Vec<SwitchCase> = Vec::new();
+                let mut default_block: Option<MirBlock> = None;
+                for case in cases {
+                    let (mut case_body, body_locals) = self.convert_block_with_shared_struct_ids(
+                        &case.body,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        ctx,
+                    );
+                    final_locals.extend(body_locals);
+                    if !ends_with_terminator(&case_body) {
+                        ctx.warning(
+                            "P0005",
+                            "switch case fall-through is not yet supported, inserting implicit break at end of case body (no control flow into next case)",
+                            Span::new(0, 0),
+                        );
+                        case_body.push(MirStmt::Break);
+                    }
+                    let Some(test) = &case.test else {
+                        default_block = Some(case_body);
+                        continue;
+                    };
+                    let test_mir =
+                        self.convert_expr(test, out, shared_struct_ids, shared_next_struct, ctx);
+                    let const_value = match test_mir {
+                        MirExpr::Int { value, .. } => ConstValue::Int(value),
+                        MirExpr::String { id, .. } => ConstValue::String(id),
+                        other => {
+                            ctx.error(
+                                "P0006",
+                                "switch case value must be a const int or string literal; \
+                                 non-const expressions (Local, Field, Binary, Call, etc.) are not \
+                                 yet supported in HIR→MIR — case body will not be reachable at runtime",
+                                Span::new(0, 0),
+                            );
+                            let _ = other;
+                            continue;
+                        }
+                    };
+                    mir_cases.push(SwitchCase {
+                        value: const_value,
+                        body: case_body,
+                    });
+                }
+                out.push(MirStmt::Switch {
+                    disc: Box::new(disc),
+                    cases: mir_cases,
+                    default: default_block,
+                });
             }
             HirStmt::Return { value } => {
                 let value_mir = value
@@ -315,12 +384,60 @@ impl ExprConverter {
                     error_ty: TypeId::from_raw(0),
                 });
             }
-            HirStmt::Try { .. } => {
-                ctx.error(
-                    "P0005",
-                    "try statement is not yet implemented in HIR→MIR",
-                    Span::new(0, 0),
+            HirStmt::Try {
+                body,
+                catch,
+                finally,
+            } => {
+                let (mir_body, body_locals) = self.convert_single_stmt_with_shared_struct_ids(
+                    body,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    ctx,
                 );
+                final_locals.extend(body_locals);
+                let (catch_param, mir_catch) = if let Some(c) = catch {
+                    let (catch_body, catch_locals) = self
+                        .convert_single_stmt_with_shared_struct_ids(
+                            &c.body,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            ctx,
+                        );
+                    final_locals.extend(catch_locals);
+                    let param = c.binding.as_ref().map(|(local_id, name)| {
+                        let new_id = self.map_local_id(*local_id);
+                        self.register_local_name(new_id, name.clone());
+                        final_locals.push(MirLocalDecl {
+                            id: new_id,
+                            name: name.clone(),
+                            ty: TypeId::from_raw(0),
+                            mutable: false,
+                        });
+                        new_id
+                    });
+                    (param, Some(catch_body))
+                } else {
+                    (None, None)
+                };
+                let mir_finally = if let Some(fin) = finally {
+                    let (fbody, flocals) = self.convert_single_stmt_with_shared_struct_ids(
+                        fin,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        ctx,
+                    );
+                    final_locals.extend(flocals);
+                    Some(fbody)
+                } else {
+                    None
+                };
+                out.push(MirStmt::Try {
+                    body: mir_body,
+                    catch_param,
+                    catch: mir_catch,
+                    finally: mir_finally,
+                });
             }
             HirStmt::Decl(_) => {}
         }
@@ -415,4 +532,19 @@ fn rewrite_break_continue_for_loop(
         }
     }
     out
+}
+
+fn ends_with_terminator(block: &MirBlock) -> bool {
+    block.stmts.last().is_some_and(terminator_stmt)
+}
+
+fn terminator_stmt(stmt: &MirStmt) -> bool {
+    matches!(
+        stmt,
+        MirStmt::Return(_)
+            | MirStmt::ReturnResultErr { .. }
+            | MirStmt::Throw { .. }
+            | MirStmt::Break
+            | MirStmt::Continue
+    )
 }

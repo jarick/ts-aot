@@ -5,8 +5,8 @@ mod program;
 mod runtime;
 
 pub use body::{
-    BinaryOp, MirBlock, MirBody, MirExpr, MirLocalDecl, MirPlace, MirPlaceBase, MirStmt, RuntimeOp,
-    UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirBody, MirExpr, MirLocalDecl, MirPlace, MirPlaceBase,
+    MirStmt, RuntimeOp, SwitchCase, UnaryOp,
 };
 pub use decl::{
     FunctionEffects, FunctionKind, MirDecl, MirFieldDecl, MirFunctionDecl, MirGlobalDecl, MirParam,

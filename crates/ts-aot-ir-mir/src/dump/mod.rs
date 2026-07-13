@@ -161,8 +161,8 @@ impl fmt::Display for RuntimeRequirements {
 mod tests {
     use super::*;
     use crate::body::{
-        BinaryOp, MirBlock, MirBody, MirExpr, MirLocalDecl, MirPlace, MirPlaceBase, MirStmt,
-        RuntimeOp, UnaryOp,
+        BinaryOp, ConstValue, MirBlock, MirBody, MirExpr, MirLocalDecl, MirPlace, MirPlaceBase,
+        MirStmt, RuntimeOp, SwitchCase, UnaryOp,
     };
     use crate::decl::{FunctionEffects, FunctionKind, MirDecl, MirFunctionDecl, MirStructDecl};
     use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, StructId, TypeId};
@@ -356,6 +356,56 @@ mod tests {
         };
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
         assert!(text.contains("throw"));
+    }
+
+    #[test]
+    fn dump_switch_stmt() {
+        let stmt = MirStmt::Switch {
+            disc: Box::new(MirExpr::Int {
+                value: 1,
+                ty: TypeId::from_raw(0),
+            }),
+            cases: vec![SwitchCase {
+                value: ConstValue::Int(1),
+                body: MirBlock::with(MirStmt::Return(Some(MirExpr::Unit))),
+            }],
+            default: Some(MirBlock::with(MirStmt::Return(Some(MirExpr::Unit)))),
+        };
+        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
+        assert!(text.contains("switch"));
+        assert!(text.contains("case"));
+        assert!(text.contains("default"));
+    }
+
+    #[test]
+    fn dump_try_stmt() {
+        let stmt = MirStmt::Try {
+            body: MirBlock::with(MirStmt::Return(Some(MirExpr::Unit))),
+            catch_param: Some(LocalId::from_raw(0)),
+            catch: Some(MirBlock::with(MirStmt::Return(Some(MirExpr::Unit)))),
+            finally: Some(MirBlock::with(MirStmt::Return(Some(MirExpr::Unit)))),
+        };
+        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
+        assert!(text.contains("try"));
+        assert!(text.contains("catch"));
+        assert!(text.contains("finally"));
+    }
+
+    #[test]
+    fn dump_try_finally_without_catch_omits_catch_block() {
+        let stmt = MirStmt::Try {
+            body: MirBlock::with(MirStmt::Return(Some(MirExpr::Unit))),
+            catch_param: None,
+            catch: None,
+            finally: Some(MirBlock::with(MirStmt::Return(Some(MirExpr::Unit)))),
+        };
+        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
+        assert!(text.contains("try"));
+        assert!(
+            !text.contains("catch"),
+            "try-finally without catch must not emit a `catch` line, got: {text}"
+        );
+        assert!(text.contains("finally"));
     }
 
     #[test]

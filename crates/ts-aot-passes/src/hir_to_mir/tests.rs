@@ -6,7 +6,8 @@ use ts_aot_ir_hir::{
     HirSwitchCase, HirUnaryOp,
 };
 use ts_aot_ir_mir::{
-    BinaryOp, FunctionKind, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, FunctionKind, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp,
+    UnaryOp,
 };
 
 use super::{ExprConverter, HirBlock, PLACEHOLDER_FUNCTION, convert_function, convert_program};
@@ -1738,30 +1739,220 @@ fn convert_block_throw_emits_throw() {
 }
 
 #[test]
-fn convert_block_switch_emits_diagnostic_no_stmts() {
+fn convert_block_switch_emits_switch_stmt() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
         disc: HirExpr::Int(0),
-        cases: Vec::new(),
+        cases: vec![
+            ts_aot_ir_hir::HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::ret(None)]),
+            ts_aot_ir_hir::HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
+        ],
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut cx);
-    assert!(mir_block.is_empty());
-    assert!(cx.has_errors());
+    assert!(!cx.has_errors());
+    assert!(matches!(mir_block.stmts[0], MirStmt::Switch { .. }));
+    if let MirStmt::Switch {
+        disc,
+        cases,
+        default,
+    } = &mir_block.stmts[0]
+    {
+        assert!(matches!(disc.as_ref(), MirExpr::Int { .. }));
+        assert_eq!(cases.len(), 1);
+        assert!(matches!(cases[0].value, ConstValue::Int(1)));
+        assert!(default.is_some());
+    } else {
+        panic!("expected MirStmt::Switch");
+    }
 }
 
 #[test]
-fn convert_block_try_emits_diagnostic_no_stmts() {
+fn convert_block_switch_non_terminating_case_inserts_implicit_break() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Switch {
+        disc: HirExpr::Int(0),
+        cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
+            Some(HirExpr::Int(1)),
+            vec![HirStmt::expr(int_lit(0))],
+        )],
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(!cx.has_errors());
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
+        "non-terminating case must emit a fall-through P0005 warning"
+    );
+    let MirStmt::Switch { cases, .. } = &mir_block.stmts[0] else {
+        panic!("expected MirStmt::Switch");
+    };
+    let last_stmt = cases[0]
+        .body
+        .stmts
+        .last()
+        .expect("case body must have at least one stmt");
+    assert!(
+        matches!(last_stmt, MirStmt::Break),
+        "non-terminating case body must end with implicit MirStmt::Break, got {last_stmt:?}"
+    );
+}
+
+#[test]
+fn convert_block_switch_terminating_case_does_not_insert_break() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Switch {
+        disc: HirExpr::Int(0),
+        cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
+            Some(HirExpr::Int(1)),
+            vec![HirStmt::ret(None)],
+        )],
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(
+        !cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
+        "terminating case must not emit P0005 warning"
+    );
+    let MirStmt::Switch { cases, .. } = &mir_block.stmts[0] else {
+        panic!("expected MirStmt::Switch");
+    };
+    let last_stmt = cases[0].body.stmts.last().expect("case body");
+    assert!(
+        matches!(last_stmt, MirStmt::Return(_)),
+        "terminating case must keep its terminator, not get an extra Break, got {last_stmt:?}"
+    );
+}
+
+#[test]
+fn convert_block_switch_case_preserves_full_i128_int_value() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Switch {
+        disc: HirExpr::Int(0),
+        cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
+            Some(HirExpr::Int(7)),
+            vec![HirStmt::ret(None)],
+        )],
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(!cx.has_errors());
+    let MirStmt::Switch { cases, .. } = &mir_block.stmts[0] else {
+        panic!("expected MirStmt::Switch");
+    };
+    let ConstValue::Int(stored) = &cases[0].value else {
+        panic!("expected ConstValue::Int");
+    };
+    assert_eq!(*stored, i128::from(7));
+    assert!(
+        !cx.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("does not fit in i64")),
+        "ConstValue::Int(i128) storage must not emit i64-overflow fallback diagnostic anymore"
+    );
+}
+
+#[test]
+fn convert_block_switch_non_const_case_value_emits_p0006_error() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Switch {
+        disc: HirExpr::Int(0),
+        cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
+            Some(HirExpr::Binary {
+                op: ts_aot_ir_hir::HirBinaryOp::Add,
+                lhs: Box::new(HirExpr::Int(1)),
+                rhs: Box::new(HirExpr::Int(2)),
+                ty: TypeId::from_raw(0),
+            }),
+            vec![HirStmt::ret(None)],
+        )],
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(
+        cx.has_errors(),
+        "non-const case value (Binary expression) must emit a hard error, not a warning, \
+         so compilation fails instead of silently dropping the case"
+    );
+    let p0006 = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "P0006")
+        .expect("expected P0006 diagnostic for non-const case value");
+    assert!(
+        p0006.message.contains("switch case"),
+        "P0006 message must clearly identify switch-case context, got: {}",
+        p0006.message
+    );
+    let MirStmt::Switch { cases, .. } = &mir_block.stmts[0] else {
+        panic!("expected MirStmt::Switch");
+    };
+    assert!(
+        cases.is_empty(),
+        "non-const case value must be skipped (continue), not pushed as a malformed SwitchCase, got {} cases",
+        cases.len()
+    );
+}
+
+#[test]
+fn convert_block_try_emits_try_stmt() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Try {
-        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-        catch: None,
+        body: Box::new(HirStmt::ret(None)),
+        catch: Some(ts_aot_ir_hir::HirCatchClause::new(
+            None,
+            Box::new(HirStmt::ret(None)),
+        )),
         finally: None,
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut cx);
-    assert!(mir_block.is_empty());
-    assert!(cx.has_errors());
+    assert!(!cx.has_errors());
+    assert!(matches!(mir_block.stmts[0], MirStmt::Try { .. }));
+    if let MirStmt::Try {
+        body,
+        catch_param,
+        catch,
+        finally,
+    } = &mir_block.stmts[0]
+    {
+        assert_eq!(body.stmts.len(), 1);
+        assert!(catch_param.is_none());
+        assert!(catch.is_some());
+        assert_eq!(catch.as_ref().unwrap().stmts.len(), 1);
+        assert!(finally.is_none());
+    } else {
+        panic!("expected MirStmt::Try");
+    }
+}
+
+#[test]
+fn convert_block_try_finally_without_catch_emits_optional_catch_none() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let block = HirBlock(vec![HirStmt::Try {
+        body: Box::new(HirStmt::ret(None)),
+        catch: None,
+        finally: Some(Box::new(HirStmt::ret(None))),
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    assert!(!cx.has_errors());
+    let MirStmt::Try {
+        body,
+        catch,
+        catch_param,
+        finally,
+    } = &mir_block.stmts[0]
+    else {
+        panic!("expected MirStmt::Try");
+    };
+    assert_eq!(body.stmts.len(), 1);
+    assert!(
+        catch.is_none(),
+        "try-finally without catch clause must preserve `catch: None`, not encode as empty MirBlock. got: {catch:?}"
+    );
+    assert!(catch_param.is_none());
+    assert!(finally.is_some());
 }
 
 #[test]
