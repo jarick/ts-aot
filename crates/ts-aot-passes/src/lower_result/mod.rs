@@ -73,6 +73,28 @@ fn rewrite_stmt(stmt: &mut MirStmt, result_ty: TypeId, err_ty: TypeId) {
         MirStmt::While { body, .. } | MirStmt::ForOf { body, .. } | MirStmt::ForIn { body, .. } => {
             rewrite_block(body, result_ty, err_ty)
         }
+        MirStmt::Switch { cases, default, .. } => {
+            for case in cases {
+                rewrite_block(&mut case.body, result_ty, err_ty);
+            }
+            if let Some(def) = default {
+                rewrite_block(def, result_ty, err_ty);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            rewrite_block(body, result_ty, err_ty);
+            if let Some(catch_block) = catch {
+                rewrite_block(catch_block, result_ty, err_ty);
+            }
+            if let Some(fin) = finally {
+                rewrite_block(fin, result_ty, err_ty);
+            }
+        }
         MirStmt::Let { .. }
         | MirStmt::Assign { .. }
         | MirStmt::Expr(_)

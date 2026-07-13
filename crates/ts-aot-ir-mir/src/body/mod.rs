@@ -94,6 +94,29 @@ pub enum MirStmt {
         dest: Option<LocalId>,
         ty: TypeId,
     },
+    Switch {
+        disc: Box<MirExpr>,
+        cases: Vec<SwitchCase>,
+        default: Option<MirBlock>,
+    },
+    Try {
+        body: MirBlock,
+        catch_param: Option<LocalId>,
+        catch: Option<MirBlock>,
+        finally: Option<MirBlock>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchCase {
+    pub value: ConstValue,
+    pub body: MirBlock,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstValue {
+    Int(i128),
+    String(Atom),
 }
 
 #[derive(Debug, Clone, PartialEq)]

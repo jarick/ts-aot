@@ -2,7 +2,7 @@ use super::Dumper;
 use super::dump_sym;
 
 use crate::body::{
-    BinaryOp, MirBody, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, MirBody, MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
 pub(crate) fn dump_body(body: &MirBody, d: &mut Dumper) {
@@ -162,6 +162,80 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
                 d.write(&format!(" dest=local({})", d2.raw()));
             }
             d.write("\n");
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            d.write("switch (");
+            dump_expr_inline(disc, d);
+            d.write(") {\n");
+            d.push();
+            for case in cases {
+                d.write("case ");
+                match &case.value {
+                    ConstValue::Int(v) => d.write(&format!("{}:", v)),
+                    ConstValue::String(s) => d.write(&format!("{:?}:", s.as_str())),
+                }
+                d.write("\n");
+                d.push();
+                for s in &case.body.stmts {
+                    dump_stmt(s, d);
+                }
+                d.pop();
+            }
+            if let Some(def) = default {
+                d.line("default:");
+                d.push();
+                for s in &def.stmts {
+                    dump_stmt(s, d);
+                }
+                d.pop();
+            }
+            d.pop();
+            d.line("}");
+        }
+        MirStmt::Try {
+            body,
+            catch_param,
+            catch,
+            finally,
+        } => {
+            d.line("try {");
+            d.push();
+            for s in &body.stmts {
+                dump_stmt(s, d);
+            }
+            d.pop();
+            match (catch, catch_param) {
+                (Some(catch_block), Some(param)) => {
+                    d.line(&format!("}} catch (local({})) {{", param.raw()));
+                    d.push();
+                    for s in &catch_block.stmts {
+                        dump_stmt(s, d);
+                    }
+                    d.pop();
+                }
+                (Some(catch_block), None) => {
+                    d.line("} catch {");
+                    d.push();
+                    for s in &catch_block.stmts {
+                        dump_stmt(s, d);
+                    }
+                    d.pop();
+                }
+                (None, _) => {}
+            }
+            if let Some(fin) = finally {
+                d.line("} finally {");
+                d.push();
+                for s in &fin.stmts {
+                    dump_stmt(s, d);
+                }
+                d.pop();
+            }
+            d.line("}");
         }
     }
 }
