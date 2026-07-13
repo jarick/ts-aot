@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{LocalId, Span, StructId, TypeId};
-use ts_aot_ir_hir::HirExpr;
+use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp};
 
 use crate::PassContext;
@@ -85,6 +85,24 @@ impl ExprConverter {
                     .iter()
                     .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, ctx))
                     .collect();
+                if callee_id == PLACEHOLDER_FUNCTION
+                    && let HirCallee::Indirect(inner) = callee
+                {
+                    let callee_value =
+                        self.convert_expr(inner, out, shared_struct_ids, shared_next_struct, ctx);
+                    let dest = self.fresh_local();
+                    self.push_temp_local(dest, *ty);
+                    let mut runtime_args = Vec::with_capacity(1 + mir_args.len());
+                    runtime_args.push(callee_value);
+                    runtime_args.extend(mir_args);
+                    out.push(MirStmt::Runtime {
+                        op: RuntimeOp::CallIndirect,
+                        args: runtime_args,
+                        dest: Some(dest),
+                        ty: *ty,
+                    });
+                    return MirExpr::Local(dest);
+                }
                 MirExpr::Call {
                     callee: callee_id,
                     args: mir_args,

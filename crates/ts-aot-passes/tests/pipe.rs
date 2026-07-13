@@ -3,7 +3,7 @@ use ts_aot_core::{Atom, LocalId, ModuleId, Type, TypeTable};
 use ts_aot_ir_hir::{
     HirCallee, HirDecl, HirEnumVariant, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
 };
-use ts_aot_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt};
+use ts_aot_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt, RuntimeOp};
 use ts_aot_passes::{
     PassContext, convert_program, lower_async, lower_closures, lower_enums, lower_result,
 };
@@ -617,9 +617,9 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
 
     let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one function");
-    let MirStmt::Return(Some(MirExpr::Await { .. })) = &f.body.block.stmts[0] else {
+    let MirStmt::Return(Some(MirExpr::Await { .. })) = &f.body.block.stmts[1] else {
         panic!(
-            "expected Return(Some(MirExpr::Await)) at stmts[0], got stmts: {:?}",
+            "expected Return(Some(MirExpr::Await)) at stmts[1] (after CallIndirect Runtime at stmts[0]), got stmts: {:?}",
             f.body.block.stmts
         );
     };
@@ -761,17 +761,49 @@ fn convert_program_unresolved_global_name_falls_through_to_placeholder() {
     let mir = convert_program(&hir, &mut ctx);
     let f = mir.functions().next().expect("one fn");
 
-    let MirStmt::Expr(MirExpr::Call { callee, .. }) = &f.body.block.stmts[0] else {
-        panic!("expected Expr(Call), got {:?}", f.body.block.stmts[0]);
+    let MirStmt::Runtime {
+        op: RuntimeOp::CallIndirect,
+        args,
+        dest,
+        ..
+    } = &f.body.block.stmts[0]
+    else {
+        panic!(
+            "expected MirStmt::Runtime::CallIndirect at stmts[0] (PR 1.2 runtime fallback), got {:?}",
+            f.body.block.stmts[0]
+        );
+    };
+    let dest = dest.expect("CallIndirect must allocate a dest local");
+    let MirExpr::Global(callee_name) = &args[0] else {
+        panic!(
+            "first arg of CallIndirect must be the callee value, got {:?}",
+            args[0]
+        );
     };
     assert_eq!(
-        *callee,
-        ts_aot_core::FunctionId::from_raw(u32::MAX),
-        "unresolved global name must fall through to PLACEHOLDER_FUNCTION; got {callee:?}"
+        callee_name.as_str(),
+        user_global_name.as_str(),
+        "callee value must be the unresolved global name; got {callee_name:?}"
     );
+    assert_eq!(
+        args.len(),
+        2,
+        "CallIndirect args must be [callee, ...original_args]; got {} args",
+        args.len()
+    );
+    let _ = dest;
     assert!(
-        ctx.has_errors(),
-        "P0005 must be emitted for user global Indirect(Global(name)) — unresolved global names must not be silently treated as a valid call target"
+        !ctx.has_errors(),
+        "PR 1.2: P0005 for unresolved indirect callee is downgraded to warning (runtime fallback handles it), so has_errors() must be false"
+    );
+    let p0005_count = ctx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "P0005")
+        .count();
+    assert_eq!(
+        p0005_count, 1,
+        "P0005 must still be emitted as a warning, got {p0005_count} diags"
     );
     let diag = ctx
         .diagnostics()
@@ -872,5 +904,128 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
     assert!(
         referenced.as_str().starts_with("__ts_aot_closure_"),
         "MirExpr::Global.name must point at hoisted closure fn, got {referenced:?}"
+    );
+}
+
+#[test]
+fn indirect_call_to_resolved_global_uses_direct_call_not_runtime_fallback() {
+    let (mut types, mut ctx) = fixture();
+    let i64_ty = types.intern(&ts_aot_core::Type::I64);
+    let fn_name = Atom::new_inline("caller");
+    let resolved_name = Atom::new_inline("add");
+
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: resolved_name,
+        params: vec![HirParam {
+            name: Atom::from("x"),
+            ty: i64_ty,
+        }],
+        ret: i64_ty,
+        throws: None,
+        body: vec![HirStmt::Return { value: None }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: fn_name.clone(),
+        params: Vec::new(),
+        ret: i64_ty,
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    name: Atom::new_inline("add"),
+                    ty: i64_ty,
+                })),
+                args: vec![HirExpr::Int(1)],
+                ty: i64_ty,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+
+    let mir = convert_program(&hir, &mut ctx);
+    let f = mir
+        .functions()
+        .find(|f| f.name == fn_name)
+        .expect("caller must exist");
+    let MirStmt::Expr(MirExpr::Call { callee, args, .. }) = &f.body.block.stmts[0] else {
+        panic!(
+            "resolved Indirect(Global) must still produce MirExpr::Call (PR 1.1 path), got {:?}",
+            f.body.block.stmts[0]
+        );
+    };
+    assert_eq!(
+        *callee,
+        ts_aot_core::FunctionId::from_raw(0),
+        "Indirect(Global(\"add\")) must resolve to FunctionId(0); got {callee:?}"
+    );
+    assert_eq!(args.len(), 1, "direct call must preserve original args");
+    assert!(
+        !ctx.has_errors(),
+        "resolved Indirect(Global) must not emit P0005; got {:?}",
+        ctx.diagnostics()
+    );
+}
+
+#[test]
+fn indirect_call_to_non_global_callee_emits_p0005_warning_for_runtime_dispatch_fallback() {
+    let (mut types, mut ctx) = fixture();
+    let i64_ty = types.intern(&ts_aot_core::Type::I64);
+    let fn_name = Atom::new_inline("caller");
+
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: fn_name,
+        params: Vec::new(),
+        ret: i64_ty,
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Binary {
+                    op: ts_aot_ir_hir::HirBinaryOp::Add,
+                    lhs: Box::new(HirExpr::Global {
+                        name: Atom::new_inline("x"),
+                        ty: i64_ty,
+                    }),
+                    rhs: Box::new(HirExpr::Int(1)),
+                    ty: i64_ty,
+                })),
+                args: vec![HirExpr::Int(2)],
+                ty: i64_ty,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+
+    let _ = convert_program(&hir, &mut ctx);
+    assert!(
+        !ctx.has_errors(),
+        "PR 1.2 must keep compilation alive (warning, not error) for non-Global callee; got {:?}",
+        ctx.diagnostics()
+    );
+    let fallback_warnings: Vec<_> = ctx
+        .diagnostics()
+        .iter()
+        .filter(|d| {
+            d.code.as_str() == "P0005" && d.message.contains("will fail during Rust code emission")
+        })
+        .collect();
+    assert_eq!(
+        fallback_warnings.len(),
+        1,
+        "non-Global indirect callee must emit exactly one PR 1.2 fallback warning, got {fallback_warnings:?}"
     );
 }

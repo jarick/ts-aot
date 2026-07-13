@@ -329,6 +329,15 @@ fn emit_runtime_call(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let name = runtime_op_ident(op);
+    if matches!(op, RuntimeOp::CallIndirect) {
+        let Some((MirExpr::Global(callee_name), call_args)) = args.split_first() else {
+            return Err(BackendError::NotImplemented);
+        };
+        let lit = proc_macro2::Literal::string(callee_name.as_str());
+        let callee_tokens = quote!(#lit);
+        let call_args = emit_exprs(call_args, ctx, body_ctx)?;
+        return Ok(quote!(#name(#callee_tokens, &[#(#call_args),*], __TS_AOT_DISPATCH_TABLE)));
+    }
     let args = emit_exprs(args, ctx, body_ctx)?;
     Ok(quote!(#name(#(#args),*)))
 }
@@ -351,5 +360,6 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
         RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
         RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
+        RuntimeOp::CallIndirect => format_ident!("__ts_aot_call_indirect"),
     }
 }

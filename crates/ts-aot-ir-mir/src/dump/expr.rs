@@ -332,6 +332,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::PromiseResolve => "promise_resolve",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
+        RuntimeOp::CallIndirect => "call_indirect",
     }
 }
 

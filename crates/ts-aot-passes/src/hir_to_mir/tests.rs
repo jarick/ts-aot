@@ -124,12 +124,24 @@ fn resolve_callee_function_without_remap_returns_input() {
 }
 
 #[test]
-fn resolve_callee_indirect_is_placeholder_and_diagnostics() {
+fn resolve_callee_indirect_is_placeholder_and_warning() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let fid = c.resolve_callee(&HirCallee::Indirect(Box::new(int_lit(1))), &mut cx);
     assert_eq!(fid, PLACEHOLDER_FUNCTION);
-    assert!(cx.has_errors());
+    assert!(
+        !cx.has_errors(),
+        "PR 1.2: unresolved indirect callee downgrades P0005 to warning (runtime fallback handles it)"
+    );
+    let p0005_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "P0005")
+        .count();
+    assert_eq!(
+        p0005_count, 1,
+        "P0005 must still be emitted as a warning, got {p0005_count} diags"
+    );
 }
 
 #[test]

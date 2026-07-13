@@ -146,6 +146,9 @@ impl fmt::Display for RuntimeRequirements {
         if self.needs_math {
             parts.push("math");
         }
+        if self.needs_call_indirect {
+            parts.push("call_indirect");
+        }
         if parts.is_empty() {
             write!(f, "RuntimeRequirements(none)")
         } else {

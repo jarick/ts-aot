@@ -8,7 +8,7 @@ use ts_aot_core::{
 use ts_aot_ir_mir::{
     BinaryOp, FunctionEffects, FunctionKind, MirBlock, MirBody, MirDecl, MirExpr, MirFieldDecl,
     MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase, MirProgram,
-    MirStmt, MirStructDecl,
+    MirStmt, MirStructDecl, RuntimeOp,
 };
 
 fn empty_func(name: &str) -> MirFunctionDecl {
@@ -31,6 +31,245 @@ fn empty_program_emits_no_decls() {
     let types = TypeTable::new();
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     assert!(tokens.is_empty());
+}
+
+#[test]
+fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("add");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("fn __ts_aot_dispatch_add (args : & [u64]) -> u64"),
+        "dispatch wrapper must be emitted for i64-typed plain function, got: {s}"
+    );
+    assert!(
+        s.contains("let x : i64 = __slot_0 as i64 ;"),
+        "wrapper must unpack i64 arg via `as i64` cast, got: {s}"
+    );
+    assert!(
+        s.contains("__result as u64"),
+        "wrapper must pack i64 return via `as u64`, got: {s}"
+    );
+    assert!(
+        s.contains("const __TS_AOT_DISPATCH_TABLE"),
+        "dispatch table constant must be emitted when any dispatchable function exists, got: {s}"
+    );
+    assert!(
+        s.contains("(\"add\" , __ts_aot_dispatch_add as fn (& [u64]) -> u64)"),
+        "table entry must reference the wrapper with original function name as string, got: {s}"
+    );
+}
+
+#[test]
+fn f64_param_function_emits_wrapper_with_from_bits() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let mut f = empty_func("sqrt_wrap");
+    f.ret = f64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: f64_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("from_bits"),
+        "f64 param must be unpacked via f64::from_bits(u64), got: {s}"
+    );
+    assert!(
+        s.contains("to_bits"),
+        "f64 return must be packed via to_bits(), got: {s}"
+    );
+}
+
+#[test]
+fn non_dispatchable_function_omits_wrapper() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let mut f = empty_func("greet");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("name"),
+        ty: string_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("__ts_aot_dispatch_greet"),
+        "String-typed param is not u64-packable, so no wrapper/entry must be emitted, got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no dispatchable function => no dispatch table emitted, got: {s}"
+    );
+}
+
+#[test]
+fn void_typed_param_excludes_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("weird");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("ghost"),
+        ty: void_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("__ts_aot_dispatch_weird"),
+        "Void-typed param has no `&[u64]` representation (wrapper would `let __slot_N = args[N]` without binding the param name, leaving `ghost` undefined). Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no dispatchable function => no dispatch table, got: {s}"
+    );
+}
+
+#[test]
+fn void_typed_return_is_still_dispatchable() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("log_something");
+    f.ret = void_ty;
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("fn __ts_aot_dispatch_log_something"),
+        "Void return must still be dispatchable (packed as 0), got: {s}"
+    );
+    assert!(
+        s.contains('0'),
+        "Void return must pack as `0` literal, got: {s}"
+    );
+}
+
+#[test]
+fn two_dispatchable_functions_emit_two_separate_table_entries() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+
+    let mut foo = empty_func("foo");
+    foo.ret = i64_ty;
+    foo.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+    foo.body = MirBody {
+        locals: vec![],
+        block: MirBlock { stmts: vec![] },
+    };
+
+    let mut bar = empty_func("bar");
+    bar.id = FunctionId::from_raw(1);
+    bar.ret = i64_ty;
+    bar.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("y"),
+        ty: i64_ty,
+    }];
+    bar.body = MirBody {
+        locals: vec![],
+        block: MirBlock { stmts: vec![] },
+    };
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(foo));
+    prog.push_decl(MirDecl::Function(bar));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("__ts_aot_dispatch_foo"),
+        "function `foo` must get its own dispatch wrapper, got: {s}"
+    );
+    assert!(
+        s.contains("__ts_aot_dispatch_bar"),
+        "function `bar` must get its own dispatch wrapper, got: {s}"
+    );
+
+    let table_str = extract_dispatch_table(&s);
+    assert!(
+        table_str.contains("\"foo\""),
+        "dispatch table must contain entry for `foo`, got: {table_str}"
+    );
+    assert!(
+        table_str.contains("\"bar\""),
+        "dispatch table must contain entry for `bar`, got: {table_str}"
+    );
+    let foo_pos = table_str.find("\"foo\"").expect("foo present");
+    let bar_pos = table_str.find("\"bar\"").expect("bar present");
+    assert!(
+        bar_pos > foo_pos,
+        "`bar` entry must come after `foo` entry (list order), got foo@{foo_pos} bar@{bar_pos}: {table_str}"
+    );
+    let between = &table_str[foo_pos..bar_pos];
+    assert!(
+        between.contains(") ,"),
+        "entries must be separated by `) ,` (close-then-comma) — concatenated entries like `)(\"bar\"` would produce invalid Rust. Got between: {between}"
+    );
+}
+
+fn extract_dispatch_table(s: &str) -> String {
+    let after_table = s.find("__TS_AOT_DISPATCH_TABLE").unwrap_or(0);
+    let from = s[after_table..]
+        .find('&')
+        .map_or(after_table, |i| after_table + i);
+    let to = s[from..].find(';').map_or(s.len(), |i| from + i);
+    s[from..to].to_string()
+}
+
+#[test]
+fn async_function_is_excluded_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("async_add");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+    f.effects.is_async = true;
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("__ts_aot_dispatch_async_add"),
+        "async functions cannot be wrapped in sync fn(&[u64]) -> u64, so they must be excluded from dispatch table. Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function => no dispatch table, got: {s}"
+    );
+    assert!(
+        s.contains("async fn async_add"),
+        "async function itself must still emit with `async fn` keyword, got: {s}"
+    );
 }
 
 #[test]
@@ -742,4 +981,55 @@ fn field_access_on_non_struct_returns_not_implemented() {
 
     let err = emit_decls(&prog, &types).expect_err("field access on non-struct must fail");
     assert_eq!(err, BackendError::NotImplemented);
+}
+
+#[test]
+fn call_indirect_runtime_emits_callee_and_slice_of_args() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let dest = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from("result"),
+            ty: int_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::CallIndirect,
+                args: vec![
+                    MirExpr::Global(Atom::new_inline("callee_ref")),
+                    MirExpr::Int {
+                        value: 1,
+                        ty: int_ty,
+                    },
+                    MirExpr::Int {
+                        value: 2,
+                        ty: int_ty,
+                    },
+                ],
+                dest: Some(dest),
+                ty: int_ty,
+            }],
+        },
+    };
+
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("__ts_aot_call_indirect (\"callee_ref\" , & [1 , 2] , __TS_AOT_DISPATCH_TABLE)"),
+        "CallIndirect emit must render callee as a string literal, args as a slice, and pass the dispatch table as 3rd arg. \
+         `fn __ts_aot_call_indirect(callee: &str, args: &[u64], table: &[(&str, fn(&[u64]) -> u64)]) -> u64`. \
+         Got: {s}"
+    );
+    assert!(
+        s.contains("& [1 , 2]"),
+        "CallIndirect emit must wrap call args in a slice literal `&[..]`. \
+         Positional emit (`__ts_aot_call_indirect(callee, arg0, arg1)`) would NOT compile against the stub signature. \
+         Got: {s}"
+    );
 }
