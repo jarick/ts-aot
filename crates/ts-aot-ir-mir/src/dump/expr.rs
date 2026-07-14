@@ -272,6 +272,11 @@ fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper) {
             dump_expr_inline(index, d);
             d.write(&format!("]:{})", ty.raw()));
         }
+        MirPlaceBase::Chain { base, ty } => {
+            d.write("chain(");
+            dump_expr_inline(base, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
@@ -297,6 +302,18 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
         }
         MirExpr::Call { callee, args, ty } => {
             d.write(&format!("call fn({})(", callee.raw()));
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    d.write(", ");
+                }
+                dump_expr_inline(arg, d);
+            }
+            d.write(&format!("):{}", ty.raw()));
+        }
+        MirExpr::IndirectCall { callee, args, ty } => {
+            d.write("indirect_call(");
+            dump_expr_inline(callee, d);
+            d.write(")(");
             for (i, arg) in args.iter().enumerate() {
                 if i > 0 {
                     d.write(", ");
@@ -362,6 +379,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::OptionalChain { base, ty } => {
+            d.write("opt(");
+            dump_expr_inline(base, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
@@ -406,7 +428,6 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::PromiseResolve => "promise_resolve",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
-        RuntimeOp::CallIndirect => "call_indirect",
     }
 }
 

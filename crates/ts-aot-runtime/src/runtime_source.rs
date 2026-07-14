@@ -61,16 +61,3 @@ pub fn __ts_aot_map_get(map: &HashMap<String, String>, key: &str) -> Option<Stri
 pub fn __ts_aot_map_set(map: &mut HashMap<String, String>, key: String, value: String) {
     map.insert(key, value);
 }
-
-pub fn __ts_aot_call_indirect(
-    callee: &str,
-    args: &[u64],
-    table: &[(&str, fn(&[u64]) -> u64)],
-) -> u64 {
-    for (name, f) in table {
-        if *name == callee {
-            return f(args);
-        }
-    }
-    panic!("__ts_aot_call_indirect: unknown callee {callee:?}")
-}

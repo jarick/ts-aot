@@ -60,6 +60,9 @@ fn emit_stmt(
             }
         }
         MirStmt::Assign { target, value } => {
+            if let Some(chain_assign) = emit_optional_chain_assign(target, value, ctx, body_ctx)? {
+                return Ok(chain_assign);
+            }
             let target = emit_place(target, ctx, body_ctx)?;
             let value = emit_expr(value, ctx, body_ctx)?;
             Ok(quote!(#target = #value;))
@@ -175,6 +178,7 @@ fn emit_place_base(
             let index = emit_expr(index, ctx, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
+        MirPlaceBase::Chain { base, .. } => emit_expr(base, ctx, body_ctx),
     }
 }
 
@@ -190,6 +194,93 @@ fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
         MirExpr::Local(id) => body_ctx.local_ty(*id),
         other => other.ty(),
     }
+}
+
+fn optional_chain_map_arm(
+    base: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let MirExpr::OptionalChain { base: inner, ty } = base else {
+        return Ok(None);
+    };
+    let Some(resolved) = ctx.types.resolve(*ty) else {
+        return Ok(None);
+    };
+    if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
+        return Ok(None);
+    }
+    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
+    Ok(Some(quote!(#inner_tokens.as_ref())))
+}
+
+fn optional_call_map_arm(
+    callee: &MirExpr,
+    args: &[MirExpr],
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let MirExpr::OptionalChain { base: inner, ty } = callee else {
+        return Ok(None);
+    };
+    let Some(resolved) = ctx.types.resolve(*ty) else {
+        return Ok(None);
+    };
+    if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
+        return Ok(None);
+    }
+    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
+    let args_tokens = emit_exprs(args, ctx, body_ctx)?;
+    Ok(Some(
+        quote!(#inner_tokens.as_ref().map(|f| f(#(#args_tokens),*))),
+    ))
+}
+
+fn emit_optional_chain_assign(
+    target: &MirPlace,
+    value: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let MirPlace::Field { base, field, .. } = target else {
+        return Ok(None);
+    };
+    let MirPlaceBase::Chain {
+        base: chain_base, ..
+    } = base.as_ref()
+    else {
+        return Ok(None);
+    };
+    let MirExpr::OptionalChain { base: inner, ty } = chain_base.as_ref() else {
+        return Ok(None);
+    };
+    let Some(resolved) = ctx.types.resolve(*ty) else {
+        return Ok(None);
+    };
+    if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
+        return Ok(None);
+    }
+    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
+    let inner_ty = match ctx.types.resolve(*ty) {
+        Some(ts_aot_core::Type::Optional { inner }) => *inner,
+        _ => return Err(BackendError::NotImplemented),
+    };
+    let field_ident = match ctx.types.resolve(inner_ty) {
+        Some(_) => {
+            let struct_id = ctx
+                .types
+                .struct_id(inner_ty)
+                .ok_or(BackendError::NotImplemented)?;
+            ctx.struct_field_ident(struct_id, *field)
+        }
+        None => return Err(BackendError::NotImplemented),
+    };
+    let value = emit_expr(value, ctx, body_ctx)?;
+    Ok(Some(quote! {
+        if #inner_tokens.is_some() {
+            #inner_tokens.as_mut().unwrap().#field_ident = #value;
+        }
+    }))
 }
 
 fn emit_expr(
@@ -215,22 +306,46 @@ fn emit_expr(
             Ok(quote!(#name))
         }
         MirExpr::Field { base, field, .. } => {
+            if let Some(map) = optional_chain_map_arm(base, ctx, body_ctx)? {
+                let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
+                let inner_ty = match ctx.types.resolve(base_ty) {
+                    Some(ts_aot_core::Type::Optional { inner }) => *inner,
+                    _ => return Err(BackendError::NotImplemented),
+                };
+                let struct_id = ctx
+                    .types
+                    .struct_id(inner_ty)
+                    .ok_or(BackendError::NotImplemented)?;
+                let field = ctx.struct_field_ident(struct_id, *field);
+                return Ok(quote!(#map.map(|o| o.#field)));
+            }
             let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = ctx
                 .types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented)?;
-            let base = emit_expr(base, ctx, body_ctx)?;
             let field = ctx.struct_field_ident(struct_id, *field);
+            let base = emit_expr(base, ctx, body_ctx)?;
             Ok(quote!(#base.#field))
         }
         MirExpr::Index { base, index, .. } => {
-            let base = emit_expr(base, ctx, body_ctx)?;
             let index = emit_expr(index, ctx, body_ctx)?;
+            if let Some(map) = optional_chain_map_arm(base, ctx, body_ctx)? {
+                return Ok(quote!(#map.map(|o| o[#index])));
+            }
+            let base = emit_expr(base, ctx, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
         MirExpr::Call { callee, args, .. } => {
             let callee = ctx.function_ident(*callee);
+            let args = emit_exprs(args, ctx, body_ctx)?;
+            Ok(quote!(#callee(#(#args),*)))
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            if let Some(map) = optional_call_map_arm(callee, args, ctx, body_ctx)? {
+                return Ok(map);
+            }
+            let callee = emit_expr(callee, ctx, body_ctx)?;
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#callee(#(#args),*)))
         }
@@ -264,6 +379,7 @@ fn emit_expr(
             let expr = emit_expr(expr, ctx, body_ctx)?;
             Ok(quote!(#expr.await))
         }
+        MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::Yield { .. } | MirExpr::Float { .. } => Err(BackendError::NotImplemented),
     }
 }
@@ -330,15 +446,6 @@ fn emit_runtime_call(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let name = runtime_op_ident(op);
-    if matches!(op, RuntimeOp::CallIndirect) {
-        let Some((MirExpr::Global(callee_name), call_args)) = args.split_first() else {
-            return Err(BackendError::NotImplemented);
-        };
-        let lit = proc_macro2::Literal::string(callee_name.as_str());
-        let callee_tokens = quote!(#lit);
-        let call_args = emit_exprs(call_args, ctx, body_ctx)?;
-        return Ok(quote!(#name(#callee_tokens, &[#(#call_args),*], __TS_AOT_DISPATCH_TABLE)));
-    }
     let args = emit_exprs(args, ctx, body_ctx)?;
     Ok(quote!(#name(#(#args),*)))
 }
@@ -361,6 +468,5 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
         RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
         RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
-        RuntimeOp::CallIndirect => format_ident!("__ts_aot_call_indirect"),
     }
 }

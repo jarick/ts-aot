@@ -36,7 +36,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
         return out;
     }
 
-    let mut mir = convert_program(&hir, &mut ctx);
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
     out.diagnostics
         .extend(ctx.take_diagnostics().iter().cloned());
     if out.diagnostics.has_errors() {

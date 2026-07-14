@@ -3,7 +3,7 @@ use ts_aot_core::{Atom, LocalId, ModuleId, Type, TypeTable};
 use ts_aot_ir_hir::{
     HirCallee, HirDecl, HirEnumVariant, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
 };
-use ts_aot_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt, RuntimeOp};
+use ts_aot_ir_mir::{MirDecl, MirExpr, MirGlobalDecl, MirStmt};
 use ts_aot_passes::{
     PassContext, convert_program, lower_async, lower_closures, lower_enums, lower_result,
 };
@@ -43,7 +43,7 @@ fn convert_program_preserves_global_with_int_init() {
         init: Some(HirExpr::Int(42)),
     });
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
 
     assert_eq!(mir.declarations.len(), 1);
     let MirDecl::Global(g) = &mir.declarations[0] else {
@@ -73,7 +73,7 @@ fn lower_enums_then_convert_program_emits_globals_with_values() {
 
     lower_enums(&mut hir, &mut types, &mut ctx);
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
 
     let globals: Vec<&MirGlobalDecl> = mir.globals().collect();
     assert_eq!(
@@ -122,7 +122,7 @@ fn convert_function_with_throw_sets_throws() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let fns: Vec<_> = mir.functions().collect();
     assert_eq!(fns.len(), 1);
     let f = fns[0];
@@ -154,7 +154,7 @@ fn convert_function_without_throw_leaves_throws_none() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let f = mir.functions().next().expect("one function");
     assert!(f.throws.is_none());
     assert!(!f.effects.can_throw);
@@ -181,7 +181,7 @@ fn end_to_end_lower_result_rewrites_throw_to_return_result_err() {
         async_info: None,
     }));
 
-    let mut mir = convert_program(&hir, &mut ctx);
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
     lower_result(&mut mir, &mut types);
 
     let f = mir.functions().next().expect("one function");
@@ -216,7 +216,7 @@ fn end_to_end_throwing_function_emits_result_in_rust_signature() {
         async_info: None,
     }));
 
-    let mut mir = convert_program(&hir, &mut ctx);
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
     let pre_throws = mir.functions().next().expect("one function").throws;
     assert!(
         pre_throws.is_some(),
@@ -260,6 +260,78 @@ fn end_to_end_throwing_function_emits_result_in_rust_signature() {
 }
 
 #[test]
+fn end_to_end_optional_chain_field_emit_uses_as_ref_map() {
+    use ts_aot_ir_hir::HirParam;
+    use ts_aot_ir_mir::{MirDecl, MirFieldDecl, MirStructDecl};
+    let (mut types, mut ctx) = fixture();
+    let point = types.intern(&Type::I64);
+    let point_struct_id = ts_aot_core::StructId::from_raw(0);
+    let point_struct = types.intern(&Type::Struct {
+        id: point_struct_id,
+    });
+    let opt_point = types.intern(&Type::Optional {
+        inner: point_struct,
+    });
+    let fn_name = Atom::new_inline("getX");
+    let obj_local = LocalId::from_raw(0);
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: fn_name,
+        params: vec![HirParam {
+            name: Atom::new_inline("obj"),
+            ty: opt_point,
+        }],
+        ret: point,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Field {
+                owner: Box::new(HirExpr::OptionalChain {
+                    base: Box::new(HirExpr::Local {
+                        id: obj_local,
+                        ty: opt_point,
+                    }),
+                    ty: opt_point,
+                }),
+                field: ts_aot_core::FieldId::from_raw(0),
+                field_name: Atom::new_inline("x"),
+                ty: point,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
+    lower_result(&mut mir, &mut types);
+    mir.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point_struct_id,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: ts_aot_core::FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: point,
+            mutable: false,
+            visibility: ts_aot_core::Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let tokens = emit_decls(&mir, &types).expect("end-to-end optional chain field must emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("obj . as_ref () . map (| o | o . x)"),
+        "end-to-end OptionalChain + Field with shared types must emit `obj.as_ref().map(|o| o.x)` \
+         If this fails with `obj . x` (no as_ref), convert and emit are seeing different \
+         TypeTables (PR 1.4: convert interns Type::Optional {{ inner: ... }} via TypeTable, \
+         emit reads from the same table; if they diverge, backend falls back to MVP). \
+         Got: {s}"
+    );
+}
+
+#[test]
 fn end_to_end_throwing_function_with_success_return_emits_ok() {
     let (mut types, mut ctx) = fixture();
     let int_ty = types.intern(&Type::I32);
@@ -290,7 +362,7 @@ fn end_to_end_throwing_function_with_success_return_emits_ok() {
         async_info: None,
     }));
 
-    let mut mir = convert_program(&hir, &mut ctx);
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
     lower_result(&mut mir, &mut types);
 
     let tokens = emit_decls(&mir, &types).expect("decls should emit");
@@ -342,7 +414,7 @@ fn end_to_end_throwing_void_function_bare_return_emits_ok_unit() {
         async_info: None,
     }));
 
-    let mut mir = convert_program(&hir, &mut ctx);
+    let mut mir = convert_program(&hir, &mut types, &mut ctx);
     lower_result(&mut mir, &mut types);
 
     let tokens = emit_decls(&mir, &types).expect("decls should emit");
@@ -375,7 +447,7 @@ fn end_to_end_enum_through_hir_to_mir_dump_includes_values() {
         .push(build_enum_decl("E", vec![("A", None), ("B", None)]));
 
     lower_enums(&mut hir, &mut types, &mut ctx);
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let text = mir.dump_text();
     assert!(text.contains("global"), "expected global in dump:\n{text}");
 
@@ -465,7 +537,7 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
     }));
 
     lower_enums(&mut hir, &mut types, &mut ctx);
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
 
     let fns: Vec<_> = mir.functions().collect();
     assert_eq!(fns.len(), 1);
@@ -556,7 +628,7 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
     assert_eq!(stats.inlined_promise_resolve, 1);
     assert_eq!(stats.cleared_async_info, 1);
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let f = mir.functions().next().expect("one function");
     let MirStmt::Return(Some(MirExpr::Await { expr: promise, .. })) = &f.body.block.stmts[0] else {
         panic!(
@@ -615,14 +687,29 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
         "still clears async_info on the function"
     );
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let f = mir.functions().next().expect("one function");
-    let MirStmt::Return(Some(MirExpr::Await { .. })) = &f.body.block.stmts[1] else {
+    let MirStmt::Return(Some(MirExpr::Await {
+        expr: call_expr, ..
+    })) = &f.body.block.stmts[0]
+    else {
         panic!(
-            "expected Return(Some(MirExpr::Await)) at stmts[1] (after CallIndirect Runtime at stmts[0]), got stmts: {:?}",
+            "expected Return(Some(MirExpr::Await)) at stmts[0] (PR 1.4 expansion: \
+             indirect global callee now lowers to MirExpr::IndirectCall inside Await.expr, \
+             not a separate Runtime::CallIndirect stmt), got stmts: {:?}",
             f.body.block.stmts
         );
     };
+    let MirExpr::IndirectCall { callee, args, .. } = call_expr.as_ref() else {
+        panic!(
+            "Await.expr must now be MirExpr::IndirectCall (PR 1.4 expansion), got {call_expr:?}"
+        );
+    };
+    let MirExpr::Global(callee_sym) = callee.as_ref() else {
+        panic!("IndirectCall.callee must be MirExpr::Global, got {callee:?}");
+    };
+    assert_eq!(callee_sym.as_str(), "realPromise");
+    assert!(args.is_empty());
 }
 
 #[test]
@@ -685,7 +772,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
         "lower_closures must not error on non-capturing closure"
     );
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     assert!(
         !ctx.has_errors(),
         "convert_program must not emit P0005 for rewritten closure call"
@@ -758,26 +845,19 @@ fn convert_program_unresolved_global_name_falls_through_to_placeholder() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let f = mir.functions().next().expect("one fn");
 
-    let MirStmt::Runtime {
-        op: RuntimeOp::CallIndirect,
-        args,
-        dest,
-        ..
-    } = &f.body.block.stmts[0]
-    else {
+    let MirStmt::Expr(MirExpr::IndirectCall { callee, args, .. }) = &f.body.block.stmts[0] else {
         panic!(
-            "expected MirStmt::Runtime::CallIndirect at stmts[0] (PR 1.2 runtime fallback), got {:?}",
+            "expected MirStmt::Expr(MirExpr::IndirectCall) at stmts[0] (PR 1.4 expansion: \
+             unresolved global callee lowers directly to MirExpr::IndirectCall, no Runtime stmt), got {:?}",
             f.body.block.stmts[0]
         );
     };
-    let dest = dest.expect("CallIndirect must allocate a dest local");
-    let MirExpr::Global(callee_name) = &args[0] else {
+    let MirExpr::Global(callee_name) = callee.as_ref() else {
         panic!(
-            "first arg of CallIndirect must be the callee value, got {:?}",
-            args[0]
+            "IndirectCall.callee must be the MirExpr::Global carrying the unresolved name, got {callee:?}"
         );
     };
     assert_eq!(
@@ -787,14 +867,13 @@ fn convert_program_unresolved_global_name_falls_through_to_placeholder() {
     );
     assert_eq!(
         args.len(),
-        2,
-        "CallIndirect args must be [callee, ...original_args]; got {} args",
+        1,
+        "IndirectCall.args must be the original call args; got {} args",
         args.len()
     );
-    let _ = dest;
     assert!(
         !ctx.has_errors(),
-        "PR 1.2: P0005 for unresolved indirect callee is downgraded to warning (runtime fallback handles it), so has_errors() must be false"
+        "PR 1.4: P0005 for unresolved indirect callee is downgraded to warning (IndirectCall emit handles it), so has_errors() must be false"
     );
     let p0005_count = ctx
         .diagnostics()
@@ -871,7 +950,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
         "rewrite must point at __ts_aot_closure_N, got {name:?}"
     );
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     assert!(
         !ctx.has_errors(),
         "convert_program must not emit P0006 for HirExpr::Global global init; diagnostics: {:?}",
@@ -952,7 +1031,7 @@ fn indirect_call_to_resolved_global_uses_direct_call_not_runtime_fallback() {
         async_info: None,
     }));
 
-    let mir = convert_program(&hir, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
     let f = mir
         .functions()
         .find(|f| f.name == fn_name)
@@ -1010,7 +1089,7 @@ fn indirect_call_to_non_global_callee_emits_p0005_warning_for_runtime_dispatch_f
         async_info: None,
     }));
 
-    let _ = convert_program(&hir, &mut ctx);
+    let _ = convert_program(&hir, &mut types, &mut ctx);
     assert!(
         !ctx.has_errors(),
         "PR 1.2 must keep compilation alive (warning, not error) for non-Global callee; got {:?}",
@@ -1019,13 +1098,11 @@ fn indirect_call_to_non_global_callee_emits_p0005_warning_for_runtime_dispatch_f
     let fallback_warnings: Vec<_> = ctx
         .diagnostics()
         .iter()
-        .filter(|d| {
-            d.code.as_str() == "P0005" && d.message.contains("will fail during Rust code emission")
-        })
+        .filter(|d| d.code.as_str() == "P0005" && d.message.contains("MirExpr::IndirectCall"))
         .collect();
     assert_eq!(
         fallback_warnings.len(),
         1,
-        "non-Global indirect callee must emit exactly one PR 1.2 fallback warning, got {fallback_warnings:?}"
+        "non-Global indirect callee must emit exactly one P0005 warning pointing at MirExpr::IndirectCall (PR 1.4 expansion), got {fallback_warnings:?}"
     );
 }

@@ -1,5 +1,5 @@
 mod core;
-mod infer;
+pub mod infer;
 mod substitute;
 mod substitute_decl;
 mod substitute_expr;
@@ -13,6 +13,7 @@ mod infer_tests;
 mod tests;
 
 pub use core::monomorphize;
+pub use infer::hir_expr_ty;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MonomorphizeStats {

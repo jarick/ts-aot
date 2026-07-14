@@ -146,9 +146,6 @@ impl fmt::Display for RuntimeRequirements {
         if self.needs_math {
             parts.push("math");
         }
-        if self.needs_call_indirect {
-            parts.push("call_indirect");
-        }
         if parts.is_empty() {
             write!(f, "RuntimeRequirements(none)")
         } else {
@@ -406,6 +403,18 @@ mod tests {
             "try-finally without catch must not emit a `catch` line, got: {text}"
         );
         assert!(text.contains("finally"));
+    }
+
+    #[test]
+    fn dump_optional_chain_expr() {
+        let stmt = MirStmt::Return(Some(MirExpr::OptionalChain {
+            base: Box::new(MirExpr::Local(LocalId::from_raw(0))),
+            ty: TypeId::from_raw(7),
+        }));
+        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
+        assert!(text.contains("opt("));
+        assert!(text.contains("local(0)"));
+        assert!(text.contains("):7"));
     }
 
     #[test]

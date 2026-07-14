@@ -8,7 +8,7 @@ use ts_aot_core::{
 use ts_aot_ir_mir::{
     BinaryOp, FunctionEffects, FunctionKind, MirBlock, MirBody, MirDecl, MirExpr, MirFieldDecl,
     MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase, MirProgram,
-    MirStmt, MirStructDecl, RuntimeOp,
+    MirStmt, MirStructDecl,
 };
 
 fn empty_func(name: &str) -> MirFunctionDecl {
@@ -984,24 +984,32 @@ fn field_access_on_non_struct_returns_not_implemented() {
 }
 
 #[test]
-fn call_indirect_runtime_emits_callee_and_slice_of_args() {
+fn indirect_call_emits_callee_args_for_known_callee() {
     let mut types = TypeTable::new();
     let int_ty = types.intern(&Type::I32);
-    let dest = LocalId::from_raw(0);
+    let callee_local = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
     let mut f = empty_func("caller");
     f.ret = int_ty;
     f.body = MirBody {
-        locals: vec![MirLocalDecl {
-            id: dest,
-            name: Atom::from("result"),
-            ty: int_ty,
-            mutable: false,
-        }],
+        locals: vec![
+            MirLocalDecl {
+                id: callee_local,
+                name: Atom::from("callee_ref"),
+                ty: int_ty,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: dest,
+                name: Atom::from("result"),
+                ty: int_ty,
+                mutable: false,
+            },
+        ],
         block: MirBlock {
-            stmts: vec![MirStmt::Runtime {
-                op: RuntimeOp::CallIndirect,
+            stmts: vec![MirStmt::Return(Some(MirExpr::IndirectCall {
+                callee: Box::new(MirExpr::Local(callee_local)),
                 args: vec![
-                    MirExpr::Global(Atom::new_inline("callee_ref")),
                     MirExpr::Int {
                         value: 1,
                         ty: int_ty,
@@ -1011,9 +1019,8 @@ fn call_indirect_runtime_emits_callee_and_slice_of_args() {
                         ty: int_ty,
                     },
                 ],
-                dest: Some(dest),
                 ty: int_ty,
-            }],
+            }))],
         },
     };
 
@@ -1021,16 +1028,118 @@ fn call_indirect_runtime_emits_callee_and_slice_of_args() {
     let s = tokens.to_string();
 
     assert!(
-        s.contains("__ts_aot_call_indirect (\"callee_ref\" , & [1 , 2] , __TS_AOT_DISPATCH_TABLE)"),
-        "CallIndirect emit must render callee as a string literal, args as a slice, and pass the dispatch table as 3rd arg. \
-         `fn __ts_aot_call_indirect(callee: &str, args: &[u64], table: &[(&str, fn(&[u64]) -> u64)]) -> u64`. \
+        s.contains("callee_ref (1 , 2)"),
+        "MirExpr::IndirectCall with non-Optional callee must emit a direct Rust call `callee(args)`. \
+         PR 1.4 expansion replaces the old `Runtime::CallIndirect` path that emitted \
+         `__ts_aot_call_indirect(callee_str, args_slice, dispatch_table)`. \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn indirect_call_with_optional_chain_callee_emits_as_ref_map_call() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I64);
+    let opt_int = types.intern(&Type::Optional { inner: int_ty });
+    let obj = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: obj,
+            name: Atom::from("obj"),
+            ty: opt_int,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::IndirectCall {
+                callee: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(obj)),
+                    ty: opt_int,
+                }),
+                args: vec![MirExpr::Int {
+                    value: 7,
+                    ty: int_ty,
+                }],
+                ty: int_ty,
+            }))],
+        },
+    };
+
+    let tokens = emit_function(&f, &types).expect("obj?.() must emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("obj . as_ref () . map (| f | f (7))"),
+        "MirExpr::IndirectCall with OptionalChain callee (obj?.() pattern) must emit \
+         `obj.as_ref().map(|f| f(args))` — Option-aware short-circuit. \
+         Phase 5+ will replace with proper `obj.and_then(|f| Some(f(args))).unwrap_or_default()` etc. \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn assignment_to_optional_chain_field_emits_is_some_branch() {
+    let mut types = TypeTable::new();
+    let point = StructId::from_raw(0);
+    let point_ty = types.intern(&Type::Struct { id: point });
+    let opt = types.intern(&Type::Optional { inner: point_ty });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: types.intern(&Type::I64),
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let obj = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = opt;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: obj,
+            name: Atom::from("obj"),
+            ty: opt,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Field {
+                    base: Box::new(MirPlaceBase::Chain {
+                        base: Box::new(MirExpr::OptionalChain {
+                            base: Box::new(MirExpr::Local(obj)),
+                            ty: opt,
+                        }),
+                        ty: opt,
+                    }),
+                    field: FieldId::from_raw(0),
+                    ty: types.intern(&Type::I64),
+                },
+                value: MirExpr::Int {
+                    value: 42,
+                    ty: types.intern(&Type::I64),
+                },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("obj?.x = y must emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("if obj . is_some ()"),
+        "MirPlace::Field with MirPlaceBase::Chain + OptionalChain base must emit \
+         `if obj.is_some() {{ ... }}` (PR 1.4 out-of-scope closure for obj?.x = y). \
          Got: {s}"
     );
     assert!(
-        s.contains("& [1 , 2]"),
-        "CallIndirect emit must wrap call args in a slice literal `&[..]`. \
-         Positional emit (`__ts_aot_call_indirect(callee, arg0, arg1)`) would NOT compile against the stub signature. \
-         Got: {s}"
+        s.contains("obj . as_mut () . unwrap () . x = 42"),
+        "obj?.x = 42 must unwrap and assign the field. Got: {s}"
     );
 }
 
@@ -1082,4 +1191,176 @@ fn try_stmt_emits_not_implemented_in_phase_1_3() {
     prog.push_decl(MirDecl::Function(f));
     let err = emit_decls(&prog, &types).expect_err("Try backend emit must defer to Phase 2.3");
     assert_eq!(err, BackendError::NotImplemented);
+}
+
+#[test]
+fn optional_chain_expr_emits_base_as_value() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I64);
+    let local = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: local,
+            name: Atom::from("obj"),
+            ty: int_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::OptionalChain {
+                base: Box::new(MirExpr::Local(local)),
+                ty: int_ty,
+            }))],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("OptionalChain must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("return obj ;") || s.contains("return obj;"),
+        "MVP: OptionalChain must emit the base expression directly (treat as non-null). \
+         Phase 5+ will replace this with proper Option<T> short-circuit. Got: {s}"
+    );
+}
+
+#[test]
+fn optional_chain_field_with_optional_base_emits_as_ref_map() {
+    let mut types = TypeTable::new();
+    let point = StructId::from_raw(0);
+    let point_ty = types.intern(&Type::Struct { id: point });
+    let opt = types.intern(&Type::Optional { inner: point_ty });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: types.intern(&Type::I64),
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let local = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = opt;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: local,
+            name: Atom::from("obj"),
+            ty: opt,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Field {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: opt,
+                }),
+                field: FieldId::from_raw(0),
+                ty: opt,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("OptionalChain field must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("obj . as_ref () . map (| o | o . x)"),
+        "Optional base + Field must emit `obj.as_ref().map(|o| o.x)` — access must be inside \
+         the Option::map closure, not on Option<&T> directly (which doesn't compile). \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn optional_chain_index_with_optional_base_emits_as_ref_map() {
+    let mut types = TypeTable::new();
+    let inner = types.intern(&Type::I64);
+    let opt = types.intern(&Type::Optional { inner });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let local = LocalId::from_raw(0);
+    let idx_local = LocalId::from_raw(1);
+    let mut f = empty_func("caller");
+    f.ret = opt;
+    f.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: local,
+                name: Atom::from("arr"),
+                ty: opt,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: idx_local,
+                name: Atom::from("i"),
+                ty: inner,
+                mutable: false,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Index {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: opt,
+                }),
+                index: Box::new(MirExpr::Local(idx_local)),
+                ty: opt,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("OptionalChain index must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("arr . as_ref () . map (| o | o [i])"),
+        "Optional base + Index must emit `arr.as_ref().map(|o| o[i])` — index must be inside \
+         the Option::map closure, not on Option<&T> directly (which doesn't compile). \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn optional_chain_index_with_non_optional_base_falls_back_to_mvp() {
+    let mut types = TypeTable::new();
+    let inner = types.intern(&Type::I64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let local = LocalId::from_raw(0);
+    let idx_local = LocalId::from_raw(1);
+    let mut f = empty_func("caller");
+    f.ret = inner;
+    f.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: local,
+                name: Atom::from("arr"),
+                ty: inner,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: idx_local,
+                name: Atom::from("i"),
+                ty: inner,
+                mutable: false,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Index {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: inner,
+                }),
+                index: Box::new(MirExpr::Local(idx_local)),
+                ty: inner,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("MVP fallback must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("arr [i]") && !s.contains("as_ref"),
+        "Non-Optional base + Index must fall back to MVP rr[i] (no Option machinery). Got: {s}"
+    );
 }

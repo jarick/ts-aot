@@ -149,6 +149,10 @@ pub enum MirPlaceBase {
         index: Box<MirExpr>,
         ty: TypeId,
     },
+    Chain {
+        base: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirPlace {
@@ -166,7 +170,9 @@ impl MirPlaceBase {
     pub fn ty(&self) -> Option<TypeId> {
         match self {
             MirPlaceBase::Local(_) => None,
-            MirPlaceBase::Field { ty, .. } | MirPlaceBase::Index { ty, .. } => Some(*ty),
+            MirPlaceBase::Field { ty, .. }
+            | MirPlaceBase::Index { ty, .. }
+            | MirPlaceBase::Chain { ty, .. } => Some(*ty),
         }
     }
 }
@@ -236,6 +242,11 @@ pub enum MirExpr {
         args: Vec<MirExpr>,
         ty: TypeId,
     },
+    IndirectCall {
+        callee: Box<MirExpr>,
+        args: Vec<MirExpr>,
+        ty: TypeId,
+    },
     StructLiteral {
         struct_id: StructId,
         fields: Vec<(FieldId, MirExpr)>,
@@ -268,6 +279,10 @@ pub enum MirExpr {
         expr: Option<Box<MirExpr>>,
         ty: TypeId,
     },
+    OptionalChain {
+        base: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -282,13 +297,15 @@ impl MirExpr {
             | MirExpr::Field { ty, .. }
             | MirExpr::Index { ty, .. }
             | MirExpr::Call { ty, .. }
+            | MirExpr::IndirectCall { ty, .. }
             | MirExpr::StructLiteral { ty, .. }
             | MirExpr::ResultOk { ty, .. }
             | MirExpr::ResultErr { ty, .. }
             | MirExpr::Binary { ty, .. }
             | MirExpr::Unary { ty, .. }
             | MirExpr::Await { ty, .. }
-            | MirExpr::Yield { ty, .. } => Some(*ty),
+            | MirExpr::Yield { ty, .. }
+            | MirExpr::OptionalChain { ty, .. } => Some(*ty),
         }
     }
 }
@@ -311,7 +328,6 @@ pub enum RuntimeOp {
     PromiseResolve,
     HostConsoleLog,
     MathSqrt,
-    CallIndirect,
 }
 
 #[cfg(test)]

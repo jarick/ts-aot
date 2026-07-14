@@ -46,20 +46,4 @@ mod tests {
         assert!(RUNTIME_SOURCE.contains("__ts_aot_map_get"));
         assert!(RUNTIME_SOURCE.contains("__ts_aot_map_set"));
     }
-
-    #[test]
-    fn runtime_source_contains_call_indirect_helper() {
-        assert!(
-            RUNTIME_SOURCE.contains("__ts_aot_call_indirect"),
-            "runtime must define __ts_aot_call_indirect for PR 1.2"
-        );
-    }
-
-    #[test]
-    fn runtime_source_call_indirect_takes_dispatch_table() {
-        assert!(
-            RUNTIME_SOURCE.contains("table: &[(&str, fn(&[u64]) -> u64)]"),
-            "runtime __ts_aot_call_indirect must take a dispatch table slice (PR 1.2 FP table design)"
-        );
-    }
 }

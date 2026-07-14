@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Atom, LocalId, Span, StructId, TypeId};
+use ts_aot_core::{Atom, LocalId, Span, StructId, TypeId, TypeTable};
 use ts_aot_ir_hir::HirStmt;
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase,
@@ -13,6 +13,7 @@ impl ExprConverter {
     pub fn convert_block(
         &mut self,
         block: &[HirStmt],
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> (MirBlock, Vec<MirLocalDecl>) {
         let mut out = MirBlock::new();
@@ -27,6 +28,7 @@ impl ExprConverter {
                 &mut final_locals,
                 &mut shared_struct_ids,
                 &mut shared_next_struct,
+                types,
                 ctx,
             );
         }
@@ -40,6 +42,7 @@ impl ExprConverter {
         block: &[HirStmt],
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> (MirBlock, Vec<MirLocalDecl>) {
         let mut out = MirBlock::new();
@@ -52,6 +55,7 @@ impl ExprConverter {
                 &mut final_locals,
                 shared_struct_ids,
                 shared_next_struct,
+                types,
                 ctx,
             );
         }
@@ -65,6 +69,7 @@ impl ExprConverter {
         s: &HirStmt,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> (MirBlock, Vec<MirLocalDecl>) {
         let mut out = MirBlock::new();
@@ -76,6 +81,7 @@ impl ExprConverter {
             &mut final_locals,
             shared_struct_ids,
             shared_next_struct,
+            types,
             ctx,
         );
         out.stmts.extend(interim);
@@ -83,6 +89,7 @@ impl ExprConverter {
         (out, final_locals)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_stmt_into(
         &mut self,
         s: &HirStmt,
@@ -90,6 +97,7 @@ impl ExprConverter {
         final_locals: &mut Vec<MirLocalDecl>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) {
         match s {
@@ -101,6 +109,7 @@ impl ExprConverter {
                         final_locals,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     );
                 }
@@ -115,9 +124,9 @@ impl ExprConverter {
                     ty: *ty,
                     mutable: false,
                 });
-                let init_mir = init
-                    .as_ref()
-                    .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, ctx));
+                let init_mir = init.as_ref().map(|e| {
+                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                });
                 out.push(MirStmt::Let {
                     local: new_id,
                     ty: *ty,
@@ -126,7 +135,8 @@ impl ExprConverter {
                 });
             }
             HirStmt::Expr { expr } => {
-                let mir = self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, ctx);
+                let mir =
+                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 out.push(MirStmt::Expr(mir));
             }
             HirStmt::If {
@@ -135,13 +145,23 @@ impl ExprConverter {
                 otherwise,
             } => {
                 let cond_mir =
-                    self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, ctx);
-                let (then_mir, then_locals) =
-                    self.convert_stmt_block(then, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let (then_mir, then_locals) = self.convert_stmt_block(
+                    then,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 final_locals.extend(then_locals);
                 let else_mir = otherwise.as_ref().map(|b| {
-                    let (m, l) =
-                        self.convert_stmt_block(b, shared_struct_ids, shared_next_struct, ctx);
+                    let (m, l) = self.convert_stmt_block(
+                        b,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
                     final_locals.extend(l);
                     m
                 });
@@ -158,11 +178,17 @@ impl ExprConverter {
                     &mut cond_stmts,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 );
                 out.extend(cond_stmts.iter().cloned());
-                let (body_mir, body_locals) =
-                    self.convert_stmt_block(body, shared_struct_ids, shared_next_struct, ctx);
+                let (body_mir, body_locals) = self.convert_stmt_block(
+                    body,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 final_locals.extend(body_locals);
 
                 let is_break = self.fresh_local();
@@ -200,8 +226,13 @@ impl ExprConverter {
                 });
             }
             HirStmt::DoWhile { body, cond } => {
-                let (body_mir, body_locals) =
-                    self.convert_stmt_block(body, shared_struct_ids, shared_next_struct, ctx);
+                let (body_mir, body_locals) = self.convert_stmt_block(
+                    body,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 final_locals.extend(body_locals);
                 let mut cond_stmts: Vec<MirStmt> = Vec::new();
                 let cond_mir = self.convert_expr(
@@ -209,6 +240,7 @@ impl ExprConverter {
                     &mut cond_stmts,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 );
 
@@ -276,7 +308,7 @@ impl ExprConverter {
                 body,
             } => {
                 let iter_mir =
-                    self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let new_binding = self.map_local_id(*binding);
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
@@ -284,8 +316,13 @@ impl ExprConverter {
                     ty: TypeId::from_raw(0),
                     mutable: false,
                 });
-                let (body_mir, body_locals) =
-                    self.convert_stmt_block(body, shared_struct_ids, shared_next_struct, ctx);
+                let (body_mir, body_locals) = self.convert_stmt_block(
+                    body,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 final_locals.extend(body_locals);
                 out.push(MirStmt::ForOf {
                     item: new_binding,
@@ -299,7 +336,7 @@ impl ExprConverter {
                 body,
             } => {
                 let iter_mir =
-                    self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let new_binding = self.map_local_id(*binding);
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
@@ -307,8 +344,13 @@ impl ExprConverter {
                     ty: TypeId::from_raw(0),
                     mutable: false,
                 });
-                let (body_mir, body_locals) =
-                    self.convert_stmt_block(body, shared_struct_ids, shared_next_struct, ctx);
+                let (body_mir, body_locals) = self.convert_stmt_block(
+                    body,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 final_locals.extend(body_locals);
                 out.push(MirStmt::ForIn {
                     key: new_binding,
@@ -317,7 +359,8 @@ impl ExprConverter {
                 });
             }
             HirStmt::Switch { disc, cases } => {
-                let disc = self.convert_expr(disc, out, shared_struct_ids, shared_next_struct, ctx);
+                let disc =
+                    self.convert_expr(disc, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let mut mir_cases: Vec<SwitchCase> = Vec::new();
                 let mut default_block: Option<MirBlock> = None;
                 for case in cases {
@@ -325,6 +368,7 @@ impl ExprConverter {
                         &case.body,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     );
                     final_locals.extend(body_locals);
@@ -340,8 +384,14 @@ impl ExprConverter {
                         default_block = Some(case_body);
                         continue;
                     };
-                    let test_mir =
-                        self.convert_expr(test, out, shared_struct_ids, shared_next_struct, ctx);
+                    let test_mir = self.convert_expr(
+                        test,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
                     let const_value = match test_mir {
                         MirExpr::Int { value, .. } => ConstValue::Int(value),
                         MirExpr::String { id, .. } => ConstValue::String(id),
@@ -369,16 +419,16 @@ impl ExprConverter {
                 });
             }
             HirStmt::Return { value } => {
-                let value_mir = value
-                    .as_ref()
-                    .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, ctx));
+                let value_mir = value.as_ref().map(|e| {
+                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                });
                 out.push(MirStmt::Return(value_mir));
             }
             HirStmt::Break { .. } => out.push(MirStmt::Break),
             HirStmt::Continue { .. } => out.push(MirStmt::Continue),
             HirStmt::Throw { expr } => {
                 let err_mir =
-                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 out.push(MirStmt::Throw {
                     error: err_mir,
                     error_ty: TypeId::from_raw(0),
@@ -393,6 +443,7 @@ impl ExprConverter {
                     body,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 );
                 final_locals.extend(body_locals);
@@ -402,6 +453,7 @@ impl ExprConverter {
                             &c.body,
                             shared_struct_ids,
                             shared_next_struct,
+                            types,
                             ctx,
                         );
                     final_locals.extend(catch_locals);
@@ -425,6 +477,7 @@ impl ExprConverter {
                         fin,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     );
                     final_locals.extend(flocals);
@@ -448,6 +501,7 @@ impl ExprConverter {
         s: &HirStmt,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> (MirBlock, Vec<MirLocalDecl>) {
         let mut out = MirBlock::new();
@@ -458,6 +512,7 @@ impl ExprConverter {
             &mut final_locals,
             shared_struct_ids,
             shared_next_struct,
+            types,
             ctx,
         );
         (out, final_locals)
