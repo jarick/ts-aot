@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{LocalId, Span, StructId, TypeId};
+use ts_aot_core::{LocalId, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirPlace, MirPlaceBase, MirStmt, RuntimeOp};
 
@@ -16,6 +16,7 @@ impl ExprConverter {
         out: &mut Vec<MirStmt>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
+        types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
         match e {
@@ -54,6 +55,7 @@ impl ExprConverter {
                         out,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     )),
                     field: resolved_field,
@@ -68,6 +70,7 @@ impl ExprConverter {
                     out,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 )),
                 index: Box::new(self.convert_expr(
@@ -75,6 +78,7 @@ impl ExprConverter {
                     out,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 )),
                 ty: *ty,
@@ -83,25 +87,26 @@ impl ExprConverter {
                 let callee_id = self.resolve_callee(callee, ctx);
                 let mir_args: Vec<MirExpr> = args
                     .iter()
-                    .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, ctx))
+                    .map(|a| {
+                        self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    })
                     .collect();
                 if callee_id == PLACEHOLDER_FUNCTION
                     && let HirCallee::Indirect(inner) = callee
                 {
-                    let callee_value =
-                        self.convert_expr(inner, out, shared_struct_ids, shared_next_struct, ctx);
-                    let dest = self.fresh_local();
-                    self.push_temp_local(dest, *ty);
-                    let mut runtime_args = Vec::with_capacity(1 + mir_args.len());
-                    runtime_args.push(callee_value);
-                    runtime_args.extend(mir_args);
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::CallIndirect,
-                        args: runtime_args,
-                        dest: Some(dest),
+                    let callee_value = self.convert_expr(
+                        inner,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    return MirExpr::IndirectCall {
+                        callee: Box::new(callee_value),
+                        args: mir_args,
                         ty: *ty,
-                    });
-                    return MirExpr::Local(dest);
+                    };
                 }
                 MirExpr::Call {
                     callee: callee_id,
@@ -116,6 +121,7 @@ impl ExprConverter {
                     out,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 )),
                 right: Box::new(self.convert_expr(
@@ -123,6 +129,7 @@ impl ExprConverter {
                     out,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 )),
                 ty: *ty,
@@ -134,6 +141,7 @@ impl ExprConverter {
                     out,
                     shared_struct_ids,
                     shared_next_struct,
+                    types,
                     ctx,
                 )),
                 ty: *ty,
@@ -153,6 +161,7 @@ impl ExprConverter {
                                     out,
                                     shared_struct_ids,
                                     shared_next_struct,
+                                    types,
                                     ctx,
                                 ),
                             )
@@ -164,7 +173,9 @@ impl ExprConverter {
             HirExpr::ArrayLiteral { elements, ty } => {
                 let args: Vec<MirExpr> = elements
                     .iter()
-                    .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, ctx))
+                    .map(|e| {
+                        self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    })
                     .collect();
                 let dest = self.fresh_local();
                 self.push_temp_local(dest, *ty);
@@ -187,7 +198,7 @@ impl ExprConverter {
             }
             HirExpr::Await { expr, ty } => {
                 let inner =
-                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 MirExpr::Await {
                     expr: Box::new(inner),
                     ty: *ty,
@@ -196,7 +207,9 @@ impl ExprConverter {
             HirExpr::Yield { expr, ty } => {
                 let inner = expr
                     .as_ref()
-                    .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, ctx))
+                    .map(|e| {
+                        self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    })
                     .map(Box::new);
                 MirExpr::Yield {
                     expr: inner,
@@ -211,6 +224,7 @@ impl ExprConverter {
                         out,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     ));
                 }
@@ -225,8 +239,14 @@ impl ExprConverter {
                 MirExpr::Local(dest)
             }
             HirExpr::New { callee, args, ty } => {
-                let callee_mir =
-                    self.convert_expr(callee, out, shared_struct_ids, shared_next_struct, ctx);
+                let callee_mir = self.convert_expr(
+                    callee,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 out.push(MirStmt::Expr(callee_mir));
                 let struct_id =
                     self.lookup_or_alloc_struct_id(*ty, shared_struct_ids, shared_next_struct);
@@ -251,6 +271,7 @@ impl ExprConverter {
                         out,
                         shared_struct_ids,
                         shared_next_struct,
+                        types,
                         ctx,
                     ));
                 }
@@ -261,26 +282,36 @@ impl ExprConverter {
                 }));
                 MirExpr::Local(alloc_id)
             }
-            HirExpr::OptionalChain { base, ty } => {
-                ctx.error(
-                    "P0005",
-                    "optional chaining (?.) is not yet supported in HIR→MIR",
-                    Span::new(0, 0),
-                );
+            HirExpr::OptionalChain { base, ty: _ } => {
                 let inner =
-                    self.convert_expr(base, out, shared_struct_ids, shared_next_struct, ctx);
-                let _ = (ty, inner);
-                MirExpr::Unit
+                    self.convert_expr(base, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let base_ty = crate::monomorphize::hir_expr_ty(base, types)
+                    .unwrap_or_else(|| mir_expr_ty(&inner));
+                let inner_ty = match types.resolve(base_ty) {
+                    Some(ts_aot_core::Type::Optional { inner }) => *inner,
+                    _ => base_ty,
+                };
+                let opt_ty = types.intern(&Type::Optional { inner: inner_ty });
+                MirExpr::OptionalChain {
+                    base: Box::new(inner),
+                    ty: opt_ty,
+                }
             }
             HirExpr::TypeAssertion { expr, target } => {
                 let inner =
-                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let _ = target;
                 inner
             }
             HirExpr::Assignment { target, value, ty } => {
-                let target_mir =
-                    self.convert_expr(target, out, shared_struct_ids, shared_next_struct, ctx);
+                let target_mir = self.convert_expr(
+                    target,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let target_place = mir_expr_to_place(target_mir, ctx, |non_place_mir| {
                     let temp = self.fresh_local();
                     let temp_ty = mir_expr_ty(&non_place_mir);
@@ -293,8 +324,14 @@ impl ExprConverter {
                     });
                     temp
                 });
-                let value_mir =
-                    self.convert_expr(value, out, shared_struct_ids, shared_next_struct, ctx);
+                let value_mir = self.convert_expr(
+                    value,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let value_temp = self.fresh_local();
                 self.push_temp_local(value_temp, *ty);
                 out.push(MirStmt::Let {
@@ -319,8 +356,14 @@ impl ExprConverter {
                 post,
                 ty,
             } => {
-                let target_mir =
-                    self.convert_expr(target, out, shared_struct_ids, shared_next_struct, ctx);
+                let target_mir = self.convert_expr(
+                    target,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let target_place = mir_expr_to_place(target_mir, ctx, |non_place_mir| {
                     let temp = self.fresh_local();
                     let temp_ty = mir_expr_ty(&non_place_mir);
@@ -351,7 +394,7 @@ impl ExprConverter {
                 });
 
                 let rhs_mir =
-                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, ctx);
+                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
 
                 if *post {
                     let post_new_value = MirExpr::Binary {
@@ -412,6 +455,7 @@ fn mir_place_base_to_expr(b: MirPlaceBase) -> MirExpr {
             ty,
         },
         MirPlaceBase::Index { base, index, ty } => MirExpr::Index { base, index, ty },
+        MirPlaceBase::Chain { base, ty } => MirExpr::OptionalChain { base, ty },
     }
 }
 
@@ -473,6 +517,13 @@ where
             })
         }
         MirExpr::Index { base, index, ty } => Some(MirPlaceBase::Index { base, index, ty }),
+        MirExpr::OptionalChain { base, ty } => {
+            let inner = materialize_place_base(*base, ctx, materialize)?;
+            Some(MirPlaceBase::Chain {
+                base: Box::new(mir_place_base_to_expr(inner)),
+                ty,
+            })
+        }
         non_place => Some(MirPlaceBase::Local(materialize(non_place))),
     }
 }
@@ -526,6 +577,13 @@ impl ExprConverter {
                 MirPlaceBase::Index {
                     base: Box::new(new_base),
                     index: Box::new(new_index),
+                    ty,
+                }
+            }
+            MirPlaceBase::Chain { base, ty } => {
+                let new_base = self.ensure_mir_expr_pure_components(*base, out);
+                MirPlaceBase::Chain {
+                    base: Box::new(new_base),
                     ty,
                 }
             }
@@ -587,7 +645,9 @@ fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::Binary { ty, .. }
         | MirExpr::Unary { ty, .. }
         | MirExpr::Await { ty, .. }
-        | MirExpr::Yield { ty, .. } => *ty,
+        | MirExpr::Yield { ty, .. }
+        | MirExpr::OptionalChain { ty, .. }
+        | MirExpr::IndirectCall { ty, .. } => *ty,
         MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => {
             TypeId::from_raw(0)
         }

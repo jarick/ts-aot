@@ -254,7 +254,7 @@ fn generic_calling_generic_rewrites_inner_call_to_inner_mono() {
         stats.calls_rewritten, 3,
         "1 in caller (→A), 1 in A (→B), 1 in A_mono (→B); extend-before-rewrite required to catch A_mono's inner call"
     );
-    let mir = convert_program(&program, &mut ctx);
+    let mir = convert_program(&program, &mut types, &mut ctx);
 
     let (a_mono_id, _) = find_mono_mir_fn(&mir, "A").expect("A_mono must exist in MIR");
     let (b_mono_id, _) = find_mono_mir_fn(&mir, "B").expect("B_mono must exist in MIR");
@@ -431,7 +431,7 @@ fn monomorphize_class_method_with_call_e2e_keeps_function_ids_aligned() {
     let mono_stats = monomorphize(&mut program, &mut types, &mut ctx);
     assert_eq!(mono_stats.monomorphized, 1);
     assert_eq!(mono_stats.calls_rewritten, 1);
-    let mir = convert_program(&program, &mut ctx);
+    let mir = convert_program(&program, &mut types, &mut ctx);
 
     assert!(
         find_mono_mir_fn(&mir, "wrap").is_some(),
@@ -518,7 +518,7 @@ fn monomorphize_then_convert_program_keeps_function_ids_aligned() {
     let mono_stats = monomorphize(&mut program, &mut types, &mut ctx);
     assert_eq!(mono_stats.monomorphized, 1);
     assert_eq!(mono_stats.calls_rewritten, 1);
-    let mir = convert_program(&program, &mut ctx);
+    let mir = convert_program(&program, &mut types, &mut ctx);
 
     let functions: Vec<_> = mir
         .declarations
@@ -588,7 +588,7 @@ fn monomorphize_namespace_skips_does_not_break_convert_program() {
     program.push_decl(HirDecl::Function(simple_fn("caller", caller_body)));
 
     let _ = monomorphize(&mut program, &mut types, &mut ctx);
-    let mir = convert_program(&program, &mut ctx);
+    let mir = convert_program(&program, &mut types, &mut ctx);
 
     let functions: Vec<_> = mir
         .declarations
@@ -910,7 +910,7 @@ fn worklist_creates_transitive_specialization_for_generic_calling_generic() {
         stats.monomorphized, 2,
         "worklist must create both A<i64> and B<i64> (A_mono's inner call exposes B specialization)"
     );
-    let mir = convert_program(&program, &mut ctx);
+    let mir = convert_program(&program, &mut types, &mut ctx);
 
     let (a_mono_id, _) = find_mono_mir_fn(&mir, "A").expect("A mono in MIR");
     let (b_mono_id, _) = find_mono_mir_fn(&mir, "B").expect("B mono in MIR");

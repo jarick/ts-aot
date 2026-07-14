@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId, Visibility};
+use ts_aot_core::{
+    Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId, TypeTable, Visibility,
+};
 use ts_aot_ir_hir::{HirClass, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase};
 use ts_aot_ir_mir::{
     FunctionEffects, FunctionKind, MirBody, MirDecl, MirExpr, MirFieldDecl, MirFunctionDecl,
@@ -21,6 +23,7 @@ pub fn convert_function(
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) -> MirFunctionDecl {
     let param_count = f.params.len();
@@ -29,8 +32,13 @@ pub fn convert_function(
     converter.name_to_function = Arc::clone(name_to_function);
     converter.set_field_id_lookup(field_id_lookup.clone());
     converter.seed_params(param_count as u32);
-    let (block, locals) =
-        converter.convert_block_with_shared_struct_ids(&f.body, struct_id_map, next_struct_id, ctx);
+    let (block, locals) = converter.convert_block_with_shared_struct_ids(
+        &f.body,
+        struct_id_map,
+        next_struct_id,
+        types,
+        ctx,
+    );
 
     let params: Vec<MirParam> = build_params(&f.params);
     let can_throw = body_can_throw(&f.body);
@@ -64,7 +72,11 @@ fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
         .collect()
 }
 
-pub fn convert_program(hir: &HirProgram, ctx: &mut PassContext) -> MirProgram {
+pub fn convert_program(
+    hir: &HirProgram,
+    types: &mut TypeTable,
+    ctx: &mut PassContext,
+) -> MirProgram {
     let mut mir = MirProgram::new(hir.module);
     for export in &hir.exports {
         mir.exports.push(ts_aot_ir_mir::MirExport {
@@ -130,6 +142,7 @@ pub fn convert_program(hir: &HirProgram, ctx: &mut PassContext) -> MirProgram {
             &mut struct_id_map,
             &mut next_struct_id,
             &field_id_lookup,
+            types,
             ctx,
         ) {
             mir.push_decl(mir_decl);
@@ -179,6 +192,7 @@ fn convert_decl(
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) -> Option<MirDecl> {
     match decl {
@@ -199,6 +213,7 @@ fn convert_decl(
                 struct_id_map,
                 next_struct_id,
                 field_id_lookup,
+                types,
                 ctx,
             )))
         }
@@ -209,6 +224,7 @@ fn convert_decl(
             struct_id_map,
             next_struct_id,
             field_id_lookup,
+            types,
             ctx,
         ))),
         HirDecl::TypeAlias { .. } | HirDecl::Interface { .. } => None,
@@ -236,6 +252,7 @@ fn convert_struct(
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) -> MirStructDecl {
     let sid = struct_id_map[&c.ty];
@@ -275,6 +292,7 @@ fn convert_struct(
             struct_id_map,
             next_struct_id,
             field_id_lookup,
+            types,
             ctx,
         );
         let mut m = m;

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, Visibility};
+use ts_aot_core::{
+    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, TypeTable, Visibility,
+};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
     HirSwitchCase, HirUnaryOp,
@@ -36,6 +38,10 @@ fn empty_struct_ids() -> std::collections::HashMap<ts_aot_core::TypeId, ts_aot_c
 
 fn empty_next_struct() -> u32 {
     0
+}
+
+fn empty_types() -> TypeTable {
+    TypeTable::new()
 }
 
 fn empty_field_id_lookup() -> HashMap<(ts_aot_core::StructId, Atom), FieldId> {
@@ -180,6 +186,7 @@ fn convert_expr_unit_passes_through() {
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
+            &mut empty_types(),
             &mut cx
         ),
         MirExpr::Unit
@@ -198,6 +205,7 @@ fn convert_expr_bool_passes_through() {
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
+            &mut empty_types(),
             &mut cx
         ),
         MirExpr::Bool(true)
@@ -214,6 +222,7 @@ fn convert_expr_int_emits_struct_with_value() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     match mir {
@@ -233,6 +242,7 @@ fn convert_expr_string_emits_string() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     match mir {
@@ -251,6 +261,7 @@ fn convert_expr_null_emits_null() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(mir, MirExpr::Null { .. }));
@@ -267,6 +278,7 @@ fn convert_expr_undefined_becomes_unit() {
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
+            &mut empty_types(),
             &mut cx
         ),
         MirExpr::Unit
@@ -288,6 +300,7 @@ fn convert_expr_local_remaps_id() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     match mir {
@@ -311,6 +324,7 @@ fn convert_expr_global_passes_through() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(mir, MirExpr::Global(Atom::new_inline("13")));
@@ -332,6 +346,7 @@ fn convert_expr_binary_converts_op() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(
@@ -358,6 +373,7 @@ fn convert_expr_unary_converts_op() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(
@@ -385,6 +401,7 @@ fn convert_expr_field_converts_owner() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(mir, MirExpr::Field { field, .. } if field == FieldId::from_raw(3)));
@@ -405,6 +422,7 @@ fn convert_expr_index_converts_parts() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(mir, MirExpr::Index { .. }));
@@ -425,6 +443,7 @@ fn convert_expr_call_resolves_callee() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     match mir {
@@ -450,6 +469,7 @@ fn convert_expr_struct_literal_converts_fields() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(matches!(mir, MirExpr::StructLiteral { .. }));
@@ -472,6 +492,7 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         out,
         &mut shared_ids,
         &mut shared_next,
+        &mut empty_types(),
         &mut cx,
     );
     let mir_b = c.convert_expr(
@@ -482,6 +503,7 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         out,
         &mut shared_ids,
         &mut shared_next,
+        &mut empty_types(),
         &mut cx,
     );
     let id_a = match mir_a {
@@ -504,6 +526,7 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         out,
         &mut shared_ids,
         &mut shared_next,
+        &mut empty_types(),
         &mut cx,
     );
     let id_a_again = match mir_a_again {
@@ -530,6 +553,7 @@ fn convert_expr_array_emits_runtime_stmt() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(out.len(), 1);
@@ -557,6 +581,7 @@ fn convert_expr_array_returns_local_to_dest() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let dest_id = match &out[0] {
@@ -581,6 +606,7 @@ fn convert_expr_template_returns_local_to_dest() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let dest_id = match &out[0] {
@@ -604,6 +630,7 @@ fn convert_expr_await_emits_mir_await_expr() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(out.len(), 0);
@@ -628,6 +655,7 @@ fn convert_expr_closure_returns_unit_and_diagnostics() {
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
+            &mut empty_types(),
             &mut cx
         ),
         MirExpr::Unit
@@ -660,6 +688,7 @@ fn convert_expr_assignment_to_local_emits_local_place() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -725,6 +754,7 @@ fn convert_expr_assignment_returns_assigned_value() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let MirExpr::Local(returned) = mir else {
@@ -766,6 +796,7 @@ fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(out.len(), 3);
@@ -818,6 +849,7 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(cx.has_errors());
@@ -858,6 +890,7 @@ fn convert_expr_assignment_to_field_emits_field_place() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(out.len(), 2);
@@ -911,6 +944,7 @@ fn convert_expr_assignment_to_indexed_field_emits_field_with_index_base() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(out.len(), 2);
@@ -932,15 +966,64 @@ fn convert_expr_assignment_to_indexed_field_emits_field_with_index_base() {
 }
 
 #[test]
-fn convert_expr_optional_chain_emits_diagnostic() {
+fn convert_expr_optional_chain_wraps_ty_as_optional_of_inner_ty() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
+    let mut types = empty_types();
     let expr = HirExpr::OptionalChain {
         base: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: unit_ty(),
         }),
+        ty: TypeId::from_raw(7),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+    let MirExpr::OptionalChain { base, ty } = &mir else {
+        panic!("expected MirExpr::OptionalChain, got {mir:?}");
+    };
+    assert!(matches!(base.as_ref(), MirExpr::Local(_)));
+    let expected_opt_ty = types.intern(&ts_aot_core::Type::Optional {
+        inner: TypeId::from_raw(0),
+    });
+    assert_eq!(
+        *ty, expected_opt_ty,
+        "convert_expr must wrap OptionalChain.ty as Type::Optional {{ inner: <base_inner.ty> }} \
+         (PR 1.4 frontend-type-analysis closure). \
+         Frontend sets ty to inner type, backend Optional-aware path needs Type::Optional wrapper."
+    );
+}
+
+#[test]
+fn convert_expr_assignment_to_optional_chain_field_emits_chain_base() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let obj = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: unit_ty(),
+    };
+    let chain_base = HirExpr::OptionalChain {
+        base: Box::new(obj),
+        ty: unit_ty(),
+    };
+    let target = HirExpr::Field {
+        owner: Box::new(chain_base),
+        field: FieldId::from_raw(2),
+        field_name: Atom::new_inline("0"),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(int_lit(7)),
         ty: unit_ty(),
     };
     let _ = c.convert_expr(
@@ -948,22 +1031,82 @@ fn convert_expr_optional_chain_emits_diagnostic() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
-    assert!(cx.has_errors());
-    let diag = cx
-        .diagnostics()
-        .iter()
-        .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 for optional chain");
-    assert!(diag.message.contains("optional chaining"));
+    let MirStmt::Assign { target, .. } = &out[out.len() - 1] else {
+        panic!("expected final stmt to be MirStmt::Assign for obj?.x = y, got {out:?}");
+    };
+    let MirPlace::Field { base, field, .. } = target else {
+        panic!("expected MirPlace::Field, got {target:?}");
+    };
+    assert_eq!(*field, FieldId::from_raw(2));
+    let MirPlaceBase::Chain {
+        base: chain_base_mir,
+        ..
+    } = base.as_ref()
+    else {
+        panic!(
+            "MirPlace::Field.base must be MirPlaceBase::Chain (PR 1.4: obj?.x = y wires Chain through mir_expr_to_place), got {base:?}"
+        );
+    };
+    assert!(
+        matches!(chain_base_mir.as_ref(), MirExpr::Local(_)),
+        "MirPlaceBase::Chain.base must be the materialized inner expression (Local), \
+         not wrapped in MirExpr::OptionalChain (PR 1.4: the inverse mapping \
+         `Chain -> OptionalChain` lives in mir_place_base_to_expr, kept intact). \
+         Got: {chain_base_mir:?}"
+    );
+}
+
+#[test]
+fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = empty_types();
+    let fn_ty = types.intern(&ts_aot_core::Type::I64);
+    let opt_fn_ty = types.intern(&ts_aot_core::Type::Optional { inner: fn_ty });
+    let obj = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: opt_fn_ty,
+    };
+    let optional_chain_callee = HirExpr::OptionalChain {
+        base: Box::new(obj),
+        ty: opt_fn_ty,
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(optional_chain_callee)),
+        args: vec![int_lit(7)],
+        ty: fn_ty,
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let MirExpr::IndirectCall { callee, args, .. } = &mir else {
+        panic!(
+            "expected MirExpr::IndirectCall (PR 1.4: HirCallee::Indirect must always emit IndirectCall, \
+             no Runtime::CallIndirect fallback), got {mir:?}"
+        );
+    };
+    let MirExpr::OptionalChain { .. } = callee.as_ref() else {
+        panic!(
+            "IndirectCall.callee must be the OptionalChain expression (not materialized), got {callee:?}"
+        );
+    };
+    assert_eq!(args.len(), 1, "call args must be preserved");
 }
 
 #[test]
 fn convert_block_empty_produces_empty() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
-    let (block, locals) = c.convert_block(&HirBlock(Vec::new()), &mut cx);
+    let (block, locals) = c.convert_block(&HirBlock(Vec::new()), &mut empty_types(), &mut cx);
     assert!(block.is_empty());
     assert!(locals.is_empty());
     assert!(!cx.has_errors());
@@ -979,7 +1122,7 @@ fn convert_block_await_emits_mir_await_expr_without_temp_local() {
             ty: unit_ty(),
         }),
     }]);
-    let (mir, locals) = c.convert_block(&block, &mut cx);
+    let (mir, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(
         locals.is_empty(),
         "await no longer needs a temp local (no state machine), got: {locals:?}"
@@ -1009,7 +1152,7 @@ fn convert_block_direct_drains_new_alloc_temp_local() {
             ty: unit_ty(),
         }),
     }]);
-    let (_, locals) = c.convert_block(&block, &mut cx);
+    let (_, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(
         locals.iter().any(|l| l.mutable),
         "new alloc must appear as mutable temp local in convert_block's locals"
@@ -1027,7 +1170,7 @@ fn convert_block_let_creates_local_and_let_stmt() {
         ty: unit_ty(),
         init: Some(int_lit(5)),
     }]);
-    let (mir_block, locals) = c.convert_block(&block, &mut cx);
+    let (mir_block, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert_eq!(mir_block.len(), 1);
     assert_eq!(locals.len(), 1);
     assert_eq!(locals[0].name, Atom::new_inline("11"));
@@ -1038,7 +1181,7 @@ fn convert_block_expr_emits_expr_stmt() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Expr { expr: int_lit(0) }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Expr(_)));
 }
 
@@ -1049,7 +1192,7 @@ fn convert_block_return_emits_return() {
     let block = HirBlock(vec![HirStmt::Return {
         value: Some(int_lit(0)),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Return(_)));
 }
 
@@ -1062,7 +1205,7 @@ fn convert_block_if_emits_if_stmt() {
         then: Box::new(HirStmt::Expr { expr: int_lit(1) }),
         otherwise: None,
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::If { .. }));
 }
 
@@ -1099,6 +1242,7 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -1141,6 +1285,7 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let names: Vec<String> = mir
@@ -1188,6 +1333,7 @@ fn convert_function_nested_let_in_forof_appears_in_body_locals() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let names: Vec<String> = mir
@@ -1212,7 +1358,7 @@ fn convert_block_while_emits_while() {
         cond: HirExpr::Bool(true),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
     assert!(matches!(mir_block.stmts[1], MirStmt::While { .. }));
 }
@@ -1230,7 +1376,7 @@ fn convert_block_while_cond_with_side_effects_keeps_cond_as_loop_condition() {
         cond,
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let MirStmt::While { cond, body } = &mir_block.stmts[1] else {
         panic!(
             "expected MirStmt::While at index 1, got {:?}",
@@ -1263,7 +1409,7 @@ fn convert_block_while_false_does_not_loop_forever() {
         cond: HirExpr::Bool(false),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let MirStmt::While { cond, .. } = &mir_block.stmts[1] else {
         panic!("expected MirStmt::While at index 1");
     };
@@ -1284,7 +1430,7 @@ fn convert_block_while_template_cond_runs_template_each_iteration() {
         cond,
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let outer_while_idx = mir_block
         .stmts
         .iter()
@@ -1356,7 +1502,7 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
         cond,
         body: Box::new(HirStmt::Continue { label: None }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let outer_while_idx = mir_block
         .stmts
         .iter()
@@ -1396,7 +1542,7 @@ fn convert_block_while_break_breaks_outer_via_sentinel() {
         cond: HirExpr::Bool(true),
         body: Box::new(HirStmt::Break { label: None }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let outer_while = match &mir_block.stmts[1] {
         MirStmt::While { body, .. } => body,
         other => panic!("expected MirStmt::While at index 1, got {other:?}"),
@@ -1429,7 +1575,7 @@ fn convert_block_dowhile_executes_body_at_least_once() {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
         cond: HirExpr::Bool(false),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
     assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
     let body_stmts = match &mir_block.stmts[2] {
@@ -1457,7 +1603,7 @@ fn convert_block_dowhile_continue_still_evaluates_cond() {
         body: Box::new(HirStmt::Continue { label: None }),
         cond: HirExpr::Bool(false),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
     assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
     let while_stmt = &mir_block.stmts[2];
@@ -1502,7 +1648,7 @@ fn convert_block_dowhile_template_cond_runs_each_iteration() {
             ty: unit_ty(),
         },
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let while_stmt = match &mir_block.stmts[2] {
         MirStmt::While { body, .. } => body,
         other => panic!("expected While at index 2, got {other:?}"),
@@ -1552,7 +1698,7 @@ fn convert_block_while_template_cond_runtime_runs_before_loop() {
         },
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let stmts = &mir_block.stmts;
     let initial_runtime_idx = stmts
         .iter()
@@ -1600,7 +1746,7 @@ fn convert_block_while_call_cond_evaluated_once_per_iteration() {
         },
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let outer_while = mir_block
         .stmts
         .iter()
@@ -1645,7 +1791,7 @@ fn convert_block_dowhile_false_runs_body_exactly_once_not_infinite() {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
         cond: HirExpr::Bool(false),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
     assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
     let outer_while = match &mir_block.stmts[2] {
@@ -1692,7 +1838,7 @@ fn convert_block_forof_emits_forof() {
         iter: int_lit(0),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, locals) = c.convert_block(&block, &mut cx);
+    let (mir_block, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::ForOf { .. }));
     assert_eq!(locals.len(), 1);
 }
@@ -1706,7 +1852,7 @@ fn convert_block_forin_emits_forin_not_forof() {
         iter: int_lit(0),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
-    let (mir_block, locals) = c.convert_block(&block, &mut cx);
+    let (mir_block, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(
         matches!(mir_block.stmts[0], MirStmt::ForIn { .. }),
         "HirStmt::ForIn must lower to MirStmt::ForIn (got {:?})",
@@ -1724,7 +1870,7 @@ fn convert_block_break_continue_pass_through() {
         HirStmt::Break { label: None },
         HirStmt::Continue { label: None },
     ]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Break));
     assert!(matches!(mir_block.stmts[1], MirStmt::Continue));
 }
@@ -1734,7 +1880,7 @@ fn convert_block_throw_emits_throw() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Throw { expr: int_lit(0) }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Throw { .. }));
 }
 
@@ -1749,7 +1895,7 @@ fn convert_block_switch_emits_switch_stmt() {
             ts_aot_ir_hir::HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ],
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
     assert!(matches!(mir_block.stmts[0], MirStmt::Switch { .. }));
     if let MirStmt::Switch {
@@ -1778,7 +1924,7 @@ fn convert_block_switch_non_terminating_case_inserts_implicit_break() {
             vec![HirStmt::expr(int_lit(0))],
         )],
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
     assert!(
         cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
@@ -1809,7 +1955,7 @@ fn convert_block_switch_terminating_case_does_not_insert_break() {
             vec![HirStmt::ret(None)],
         )],
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(
         !cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
         "terminating case must not emit P0005 warning"
@@ -1835,7 +1981,7 @@ fn convert_block_switch_case_preserves_full_i128_int_value() {
             vec![HirStmt::ret(None)],
         )],
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
     let MirStmt::Switch { cases, .. } = &mir_block.stmts[0] else {
         panic!("expected MirStmt::Switch");
@@ -1868,7 +2014,7 @@ fn convert_block_switch_non_const_case_value_emits_p0006_error() {
             vec![HirStmt::ret(None)],
         )],
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(
         cx.has_errors(),
         "non-const case value (Binary expression) must emit a hard error, not a warning, \
@@ -1906,7 +2052,7 @@ fn convert_block_try_emits_try_stmt() {
         )),
         finally: None,
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
     assert!(matches!(mir_block.stmts[0], MirStmt::Try { .. }));
     if let MirStmt::Try {
@@ -1935,7 +2081,7 @@ fn convert_block_try_finally_without_catch_emits_optional_catch_none() {
         catch: None,
         finally: Some(Box::new(HirStmt::ret(None))),
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
     let MirStmt::Try {
         body,
@@ -1982,6 +2128,7 @@ fn convert_function_basic_shape() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(mir.id, FunctionId::from_raw(0));
@@ -2027,6 +2174,7 @@ fn convert_function_let_after_params_gets_fresh_id() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(mir.params.len(), 2);
@@ -2066,6 +2214,7 @@ fn convert_function_marks_async_effect() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(mir.effects.is_async);
@@ -2103,6 +2252,7 @@ fn convert_function_body_references_param_id_resolves_to_param() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let param_id = mir.params[0].id;
@@ -2124,7 +2274,7 @@ fn convert_function_body_references_param_id_resolves_to_param() {
 fn convert_program_empty_keeps_module() {
     let hir = empty_hir();
     let mut cx = ctx();
-    let mir = convert_program(&hir, &mut cx);
+    let mir = convert_program(&hir, &mut empty_types(), &mut cx);
     assert_eq!(mir.module, hir.module);
     assert_eq!(mir.decl_count(), 0);
 }
@@ -2147,7 +2297,7 @@ fn convert_program_assigns_distinct_function_ids() {
         }));
     }
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let functions: Vec<_> = mir.functions().collect();
     assert_eq!(functions.len(), 3);
     let ids: std::collections::HashSet<_> = functions.iter().map(|f| f.id).collect();
@@ -2195,7 +2345,7 @@ fn convert_program_resolves_indirect_global_callee_to_function_id() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let p0005: Vec<_> = cx
         .diagnostics()
         .iter()
@@ -2245,7 +2395,7 @@ fn convert_program_assigns_distinct_struct_ids() {
         }));
     }
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let structs: Vec<_> = mir.structs().collect();
     assert_eq!(structs.len(), 2);
     let ids: std::collections::HashSet<_> = structs.iter().map(|s| s.id).collect();
@@ -2276,7 +2426,7 @@ fn convert_program_struct_id_consistent_across_functions_for_same_type() {
     prog.push_decl(HirDecl::Function(make_fn(1, shared_ty)));
     prog.push_decl(HirDecl::Function(make_fn(2, shared_ty)));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let mut struct_literal_ids: Vec<ts_aot_core::StructId> = Vec::new();
     for func in mir.functions() {
         for s in &func.body.block.stmts {
@@ -2333,7 +2483,7 @@ fn convert_program_class_methods_use_method_function_kind() {
         ty: unit_ty(),
     };
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let expected_owner = struct_decl.id;
     assert_eq!(struct_decl.methods.len(), 1);
@@ -2398,7 +2548,7 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let class_struct_id = struct_decl.id;
     let mut new_id: Option<ts_aot_core::StructId> = None;
@@ -2470,7 +2620,7 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
         type_params: Vec::new(),
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     let class_struct_id = struct_decl.id;
     let func = mir.functions().next().expect("expected one function");
@@ -2529,6 +2679,7 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         &mut struct_id_map,
         &mut next_struct_id,
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2569,6 +2720,7 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         &mut struct_id_map,
         &mut next_struct_id,
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2622,6 +2774,7 @@ fn body_can_throw_propagates_through_assignment_target() {
         &mut struct_id_map,
         &mut next_struct_id,
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2679,6 +2832,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         &mut struct_id_map,
         &mut next_struct_id,
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2702,7 +2856,7 @@ fn convert_program_preserves_import_module_path_from_atom() {
         alias: None,
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     assert_eq!(mir.imports.len(), 1);
     assert_eq!(mir.imports[0].module, "./other");
     assert_eq!(mir.imports[0].symbol, Atom::new_inline("7"));
@@ -2739,6 +2893,7 @@ fn convert_function_await_emits_mir_await_expr_without_body_locals() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     match mir.body.block.stmts.last().expect("non-empty body") {
@@ -2785,6 +2940,7 @@ fn convert_function_new_alloc_appears_in_body_locals() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let alloc = match mir.body.block.stmts.last().expect("non-empty body") {
@@ -2826,6 +2982,7 @@ fn convert_function_temp_locals_drained_only_once() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let local_ids: Vec<u32> = mir.body.locals.iter().map(|l| l.id.raw()).collect();
@@ -2861,6 +3018,7 @@ fn convert_function_can_throw_true_when_body_has_throw_stmt() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2893,6 +3051,7 @@ fn convert_function_can_throw_false_when_body_has_no_throw_stmt() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2929,6 +3088,7 @@ fn convert_function_can_throw_recurses_into_nested_blocks() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -2974,6 +3134,7 @@ fn convert_function_build_params_preserves_param_atom_name() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     let first_name = mir.params[0].name.clone();
@@ -3028,6 +3189,7 @@ fn convert_function_with_remap_uses_remap_only_for_call_sites() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -3104,6 +3266,7 @@ fn convert_binop_unsupported_variants_emit_diagnostic_at_call_site() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let diag = cx
@@ -3150,6 +3313,7 @@ fn convert_unaryop_unsupported_variants_emit_diagnostic_at_call_site() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let diag = cx
@@ -3185,7 +3349,7 @@ fn convert_program_class_method_with_no_params_is_skipped() {
         type_params: Vec::new(),
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
     assert!(
         struct_decl.methods.is_empty(),
@@ -3210,7 +3374,7 @@ fn convert_program_exported_function_uses_atom_name_as_export_name() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let func = mir.functions().next().expect("expected one function");
     assert_eq!(
         func.export_name.as_deref(),
@@ -3237,7 +3401,14 @@ fn convert_expr_new_lowers_callee_for_side_effects() {
         args: Vec::new(),
         ty: global_ty,
     };
-    let _ = c.convert_expr(&expr, out, &mut struct_id_map, &mut next_struct_id, &mut cx);
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut struct_id_map,
+        &mut next_struct_id,
+        &mut empty_types(),
+        &mut cx,
+    );
     let call_callees: Vec<FunctionId> = out
         .iter()
         .filter_map(|s| match s {
@@ -3285,6 +3456,7 @@ fn convert_expr_assignment_to_field_with_call_base_materializes_call() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3346,6 +3518,7 @@ fn convert_expr_assignment_to_field_with_call_base_keeps_call_in_order() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let let_idx = out.iter().position(|s| {
@@ -3398,6 +3571,7 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     let materialize_idx = out.iter().position(|s| {
@@ -3465,6 +3639,7 @@ fn body_can_throw_propagates_through_if_condition_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3505,6 +3680,7 @@ fn body_can_throw_propagates_through_while_condition_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3546,6 +3722,7 @@ fn body_can_throw_propagates_through_for_of_iter_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3589,6 +3766,7 @@ fn body_can_throw_propagates_through_switch_discriminant_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3633,6 +3811,7 @@ fn body_can_throw_propagates_through_catch_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3674,6 +3853,7 @@ fn body_can_throw_propagates_through_finally_call() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3711,6 +3891,7 @@ fn body_can_throw_await_alone_is_throwing() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3752,6 +3933,7 @@ fn body_can_throw_new_alone_is_throwing() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3789,6 +3971,7 @@ fn body_can_throw_yield_alone_is_throwing() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3806,7 +3989,7 @@ fn convert_global_with_int_init_lowers_to_int() {
         init: Some(int_lit(42)),
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let g = mir.globals().next().expect("one global");
     assert!(matches!(g.init, Some(MirExpr::Int { value: 42, .. })));
     assert!(!cx.has_errors(), "constant init must not error");
@@ -3821,7 +4004,7 @@ fn convert_global_with_string_init_lowers_to_string() {
         init: Some(HirExpr::String(Atom::new_inline("hi"))),
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let g = mir.globals().next().expect("one global");
     assert!(matches!(g.init, Some(MirExpr::String { .. })));
 }
@@ -3839,7 +4022,7 @@ fn convert_global_with_complex_init_emits_warning_and_drops_init() {
         }),
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let g = mir.globals().next().expect("one global");
     assert!(
         g.init.is_none(),
@@ -3876,7 +4059,7 @@ fn convert_global_does_not_consume_function_id() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let f = mir.functions().next().expect("one function");
     assert_eq!(
         f.id,
@@ -3894,7 +4077,7 @@ fn convert_global_visibility_defaults_to_public() {
         init: Some(int_lit(0)),
     });
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let g = mir.globals().next().expect("one global");
     assert_eq!(
         g.visibility,
@@ -3933,6 +4116,7 @@ fn infer_throws_is_none_for_call_only_function() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -3979,6 +4163,7 @@ fn infer_throws_is_none_for_if_with_throwing_cond_only() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(mir.effects.can_throw);
@@ -4018,6 +4203,7 @@ fn infer_throws_uses_real_source_when_throwing_typed_expr() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -4052,6 +4238,7 @@ fn infer_throws_respects_declared_over_inferred() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -4085,6 +4272,7 @@ fn infer_throws_uses_sentinel_for_primitive_thrown_expr() {
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &mut empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -4149,7 +4337,7 @@ fn convert_program_resolves_field_id_for_non_first_field() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let func = mir.functions().next().expect("expected one function");
     let ret = match &func.body.block.stmts[0] {
         MirStmt::Return(Some(v)) => v,
@@ -4223,7 +4411,7 @@ fn convert_program_resolves_field_id_after_lower_classes_flatten() {
 
     let mut cx = ctx();
     lower_classes(&mut prog, &mut ts_aot_core::TypeTable::new(), &mut cx);
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let func = mir.functions().next().expect("expected one function");
     let ret = match &func.body.block.stmts[0] {
         MirStmt::Return(Some(v)) => v,
@@ -4281,7 +4469,7 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
         async_info: None,
     }));
     let mut cx = ctx();
-    let mir = convert_program(&prog, &mut cx);
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let func = mir.functions().next().expect("expected one function");
     let ret = match &func.body.block.stmts[0] {
         MirStmt::Return(Some(v)) => v,
@@ -4323,6 +4511,7 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4406,6 +4595,7 @@ fn convert_expr_compound_update_prefix_returns_new_value_via_local() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4512,6 +4702,7 @@ fn convert_expr_compound_update_rhs_call_evaluated_only_once() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4592,7 +4783,7 @@ fn convert_block_expr_compound_update_emits_local_expr_stmt_not_binary() {
             ty: unit_ty(),
         },
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
 
     let trailing = mir_block
@@ -4642,6 +4833,7 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4696,6 +4888,9 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
                 assert_mir_expr_is_pure(base, &format!("{path}.base"), out);
                 assert_mir_expr_is_pure(index, &format!("{path}.index"), out);
             }
+            MirPlaceBase::Chain { base, .. } => {
+                assert_mir_expr_is_pure(base, &format!("{path}.chain-base"), out);
+            }
         }
     }
     fn assert_mir_expr_is_pure(expr: &MirExpr, path: &str, out: &[MirStmt]) {
@@ -4748,6 +4943,7 @@ fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index(
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4815,6 +5011,7 @@ fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -4885,6 +5082,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -4938,6 +5136,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
                 visit(base, counts);
                 visit(index, counts);
             }
+            MirPlaceBase::Chain { base, .. } => visit(base, counts),
         }
     }
     for stmt in out.iter() {
@@ -5003,6 +5202,7 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -5095,6 +5295,7 @@ fn convert_expr_assignment_value_temp_carries_rhs_ty_not_type_zero() {
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -5152,6 +5353,7 @@ fn convert_expr_assignment_rhs_call_materialized_once_for_statement_and_return()
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors());
@@ -5214,7 +5416,7 @@ fn convert_block_expr_plain_assignment_returns_local_not_rhs() {
             ty: unit_ty(),
         },
     }]);
-    let (mir_block, _) = c.convert_block(&block, &mut cx);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
 
     let rhs_call_count: usize = mir_block
@@ -5321,6 +5523,7 @@ fn convert_expr_assignment_field_target_with_call_base_materializes_call_with_ca
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(
@@ -5379,6 +5582,7 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
+        &mut empty_types(),
         &mut cx,
     );
     assert!(!cx.has_errors(), "arr()[i()]++ must not error");
