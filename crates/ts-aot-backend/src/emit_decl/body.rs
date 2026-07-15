@@ -380,6 +380,7 @@ fn emit_expr(
             Ok(quote!(#expr.await))
         }
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
+        MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
         MirExpr::Yield { .. } | MirExpr::Float { .. } => Err(BackendError::NotImplemented),
     }
 }
@@ -426,6 +427,21 @@ fn emit_binary_expr(
     })
 }
 
+fn emit_typeof(
+    expr: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Unit => Ok(quote!(String::from(__ts_aot_typeof_unit()))),
+        MirExpr::Null { .. } => Ok(quote!(String::from(__ts_aot_typeof_null()))),
+        _ => {
+            let inner = emit_expr(expr, ctx, body_ctx)?;
+            Ok(quote!(String::from(__ts_aot_typeof(&#inner))))
+        }
+    }
+}
+
 fn emit_unary_expr(
     op: UnaryOp,
     expr: &MirExpr,
@@ -445,6 +461,17 @@ fn emit_runtime_call(
     ctx: &EmitCtx<'_>,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    if op == RuntimeOp::OpInstanceof {
+        let value = emit_expr(&args[0], ctx, body_ctx)?;
+        let target_type_id: u32 = match args.get(2) {
+            Some(MirExpr::Int { value, .. }) => (*value).try_into().unwrap_or(0),
+            _ => 0,
+        };
+        return Ok(quote!(__ts_aot_op_instanceof(&#value, #target_type_id)));
+    }
+    if op == RuntimeOp::TypeOf {
+        return emit_typeof(&args[0], ctx, body_ctx);
+    }
     let name = runtime_op_ident(op);
     let args = emit_exprs(args, ctx, body_ctx)?;
     Ok(quote!(#name(#(#args),*)))
@@ -468,5 +495,9 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
         RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
         RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
+        RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
+        RuntimeOp::OpDelete => format_ident!("__ts_aot_op_delete"),
+        RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
+        RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
     }
 }

@@ -252,6 +252,7 @@ fn emit_struct_with_ctx(
     ctx: &EmitCtx<'_>,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ctx.struct_ident(s.id);
+    let class_id_raw: u32 = s.id.raw();
     let fields = s.fields.iter().map(|f| emit_field(f, ctx));
     let mut methods = TokenStream::new();
     let mut dispatch_entries: Vec<TokenStream> = Vec::new();
@@ -263,6 +264,12 @@ fn emit_struct_with_ctx(
     let tokens = quote! {
         pub struct #name {
             #(#fields,)*
+        }
+
+        impl TsClassId for #name {
+            fn class_id() -> u32 {
+                #class_id_raw
+            }
         }
 
         impl #name {

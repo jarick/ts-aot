@@ -437,6 +437,32 @@ fn struct_decl_emits_struct_keyword() {
 }
 
 #[test]
+fn struct_decl_emits_ts_class_id_impl_with_struct_id() {
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: StructId::from_raw(42),
+        name: Atom::from("Animal"),
+        fields: Vec::new(),
+        methods: Vec::new(),
+    }));
+    let tokens = emit_decls(&prog, &TypeTable::new()).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("impl TsClassId for Animal"),
+        "struct must emit `impl TsClassId for <name>` so __ts_aot_op_instanceof \
+         trait bound is satisfied; got: {s}"
+    );
+    assert!(
+        s.contains("fn class_id () -> u32"),
+        "TsClassId impl must expose `fn class_id() -> u32`; got: {s}"
+    );
+    assert!(
+        s.contains("42u32") || s.contains("42 u32"),
+        "TsClassId impl must use the struct_id raw value (42) as class_id; got: {s}"
+    );
+}
+
+#[test]
 fn struct_with_fields_emits_field_list() {
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Struct(MirStructDecl {
