@@ -283,6 +283,10 @@ pub enum MirExpr {
         base: Box<MirExpr>,
         ty: TypeId,
     },
+    TypeOf {
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -305,7 +309,8 @@ impl MirExpr {
             | MirExpr::Unary { ty, .. }
             | MirExpr::Await { ty, .. }
             | MirExpr::Yield { ty, .. }
-            | MirExpr::OptionalChain { ty, .. } => Some(*ty),
+            | MirExpr::OptionalChain { ty, .. }
+            | MirExpr::TypeOf { ty, .. } => Some(*ty),
         }
     }
 }
@@ -328,6 +333,10 @@ pub enum RuntimeOp {
     PromiseResolve,
     HostConsoleLog,
     MathSqrt,
+    TypeOf,
+    OpDelete,
+    OpIn,
+    OpInstanceof,
 }
 
 #[cfg(test)]

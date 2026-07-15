@@ -45,6 +45,12 @@ impl RuntimeRequirements {
             RuntimeOp::MathSqrt => {
                 self.needs_math = true;
             }
+            RuntimeOp::OpDelete | RuntimeOp::OpIn | RuntimeOp::OpInstanceof => {
+                self.needs_runtime = true;
+            }
+            RuntimeOp::TypeOf => unreachable!(
+                "TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime"
+            ),
         }
     }
 }

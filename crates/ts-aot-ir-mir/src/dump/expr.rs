@@ -384,6 +384,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(base, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::TypeOf { expr, ty } => {
+            d.write("typeof(");
+            dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
@@ -426,6 +431,12 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ResultUnwrapOk => "result_unwrap_ok",
         RuntimeOp::PromiseCreate => "promise_create",
         RuntimeOp::PromiseResolve => "promise_resolve",
+        RuntimeOp::TypeOf => {
+            unreachable!("TypeOf is not a MirStmt::Runtime; it's a MirExpr::TypeOf")
+        }
+        RuntimeOp::OpDelete => "op_delete",
+        RuntimeOp::OpIn => "op_in",
+        RuntimeOp::OpInstanceof => "op_instanceof",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
     }

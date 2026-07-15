@@ -3299,7 +3299,7 @@ fn convert_unaryop_maps_variants() {
 }
 
 #[test]
-fn convert_unaryop_unsupported_variants_emit_diagnostic_at_call_site() {
+fn convert_expr_typeof_lowers_to_mir_typeof_without_diagnostic() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -3308,7 +3308,7 @@ fn convert_unaryop_unsupported_variants_emit_diagnostic_at_call_site() {
         expr: Box::new(int_lit(1)),
         ty: unit_ty(),
     };
-    let _ = c.convert_expr(
+    let mir = c.convert_expr(
         &expr,
         out,
         &mut empty_struct_ids(),
@@ -3316,12 +3316,15 @@ fn convert_unaryop_unsupported_variants_emit_diagnostic_at_call_site() {
         &mut empty_types(),
         &mut cx,
     );
-    let diag = cx
-        .diagnostics()
-        .iter()
-        .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 for unsupported unary op");
-    assert!(diag.message.contains("TypeOf"));
+    assert!(
+        !cx.has_errors(),
+        "PR 1.6: TypeOf is now a real op (not NotYetImplemented), got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        matches!(mir, MirExpr::TypeOf { .. }),
+        "TypeOf must lower to MirExpr::TypeOf, got {mir:?}"
+    );
 }
 
 #[test]
