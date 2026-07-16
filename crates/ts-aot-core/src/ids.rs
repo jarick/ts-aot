@@ -1,6 +1,8 @@
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Atom(pub oxc_str::CompactStr);
 
+pub const STRUCT_ID_DYNAMIC: u32 = 0xFFFF_FFFE;
+
 impl Atom {
     #[must_use]
     pub fn new_inline(s: &str) -> Self {

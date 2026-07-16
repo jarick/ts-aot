@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ids::{StructId, TypeId};
+use crate::ids::{STRUCT_ID_DYNAMIC, StructId, TypeId};
 use crate::ty::Type;
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +44,7 @@ impl TypeTable {
     pub fn struct_id(&self, id: TypeId) -> Option<StructId> {
         match self.resolve(id)? {
             Type::Struct { id } => Some(*id),
+            Type::Dynamic => Some(StructId::from_raw(STRUCT_ID_DYNAMIC)),
             _ => None,
         }
     }

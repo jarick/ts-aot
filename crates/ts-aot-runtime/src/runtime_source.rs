@@ -12,6 +12,7 @@
 )]
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 pub fn __ts_aot_host_console_log(s: &str) {
     println!("{s}");
@@ -138,6 +139,7 @@ pub trait TsClassId {
 }
 
 const PRIMITIVE_CLASS_ID_BASE: u32 = 0xFFFF_FF00;
+pub const STRUCT_ID_DYNAMIC: u32 = 0xFFFF_FFFE;
 
 impl TsClassId for i8 {
     fn class_id() -> u32 {
@@ -234,6 +236,16 @@ impl<K, V> TsClassId for HashMap<K, V> {
         PRIMITIVE_CLASS_ID_BASE + 18
     }
 }
+impl TsClassId for Dynamic {
+    fn class_id() -> u32 {
+        STRUCT_ID_DYNAMIC
+    }
+}
+impl TsClassId for DynamicValue {
+    fn class_id() -> u32 {
+        STRUCT_ID_DYNAMIC
+    }
+}
 impl<T> TsClassId for Option<T> {
     fn class_id() -> u32 {
         PRIMITIVE_CLASS_ID_BASE + 19
@@ -249,7 +261,7 @@ impl<T> TsClassId for Box<T> {
         PRIMITIVE_CLASS_ID_BASE + 21
     }
 }
-impl<T> TsClassId for std::rc::Rc<T> {
+impl<T> TsClassId for Rc<T> {
     fn class_id() -> u32 {
         PRIMITIVE_CLASS_ID_BASE + 22
     }
@@ -298,4 +310,237 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8> TsClassId for (T1, T2, T3, T4, T5, T6, T7, 
 
 pub fn __ts_aot_op_instanceof<T: TsClassId>(_value: &T, target_type_id: u32) -> bool {
     T::class_id() == target_type_id
+}
+
+#[derive(Clone, Debug)]
+pub enum DynamicValue {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(f64),
+    Integer(i64),
+    String(String),
+    Object(Dynamic),
+}
+
+#[derive(Clone, Debug)]
+pub struct Dynamic {
+    pub fields: Rc<std::cell::RefCell<HashMap<String, DynamicValue>>>,
+}
+
+impl Dynamic {
+    #[must_use]
+    pub fn new() -> Self {
+        Dynamic {
+            fields: Rc::new(std::cell::RefCell::new(HashMap::new())),
+        }
+    }
+}
+
+impl Default for Dynamic {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartialEq for DynamicValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DynamicValue::Undefined, DynamicValue::Undefined)
+            | (DynamicValue::Null, DynamicValue::Null) => true,
+            (DynamicValue::Bool(a), DynamicValue::Bool(b)) => a == b,
+            (DynamicValue::Number(a), DynamicValue::Number(b)) => {
+                a == b || (a.is_nan() && b.is_nan())
+            }
+            (DynamicValue::Integer(a), DynamicValue::Integer(b)) => a == b,
+            (DynamicValue::String(a), DynamicValue::String(b)) => a == b,
+            (DynamicValue::Object(a), DynamicValue::Object(b)) => Rc::ptr_eq(&a.fields, &b.fields),
+            _ => false,
+        }
+    }
+}
+
+impl PartialEq for Dynamic {
+    fn eq(&self, other: &Self) -> bool {
+        *self.fields.borrow() == *other.fields.borrow()
+    }
+}
+
+pub fn __ts_aot_dynamic_get(value: &DynamicValue, field_name: &str) -> DynamicValue {
+    match value {
+        DynamicValue::Object(dyn_obj) => dyn_obj
+            .fields
+            .borrow()
+            .get(field_name)
+            .cloned()
+            .unwrap_or(DynamicValue::Undefined),
+        _ => DynamicValue::Undefined,
+    }
+}
+
+pub fn __ts_aot_dynamic_unwrap(value: Option<DynamicValue>) -> DynamicValue {
+    value.unwrap_or(DynamicValue::Undefined)
+}
+
+pub fn __ts_aot_dynamic_set(target: &mut DynamicValue, field_name: &str, value: DynamicValue) {
+    if !matches!(target, DynamicValue::Object(_)) {
+        *target = DynamicValue::Object(Dynamic::new());
+    }
+    if let DynamicValue::Object(dyn_obj) = target {
+        dyn_obj
+            .fields
+            .borrow_mut()
+            .insert(field_name.to_owned(), value);
+    }
+}
+
+pub fn __ts_aot_dynamic_key(s: &str) -> DynamicValue {
+    DynamicValue::String(s.to_owned())
+}
+
+impl From<i64> for DynamicValue {
+    fn from(v: i64) -> Self {
+        DynamicValue::Integer(v)
+    }
+}
+
+impl From<f64> for DynamicValue {
+    fn from(v: f64) -> Self {
+        DynamicValue::Number(v)
+    }
+}
+
+impl From<bool> for DynamicValue {
+    fn from(v: bool) -> Self {
+        DynamicValue::Bool(v)
+    }
+}
+
+impl From<String> for DynamicValue {
+    fn from(v: String) -> Self {
+        DynamicValue::String(v)
+    }
+}
+
+impl From<&str> for DynamicValue {
+    fn from(v: &str) -> Self {
+        DynamicValue::String(v.to_owned())
+    }
+}
+
+pub fn __ts_aot_dynamic_has(value: &DynamicValue, key: &DynamicValue) -> bool {
+    let DynamicValue::String(field_name) = key else {
+        return false;
+    };
+    match value {
+        DynamicValue::Object(dyn_obj) => dyn_obj.fields.borrow().contains_key(field_name),
+        _ => false,
+    }
+}
+
+pub fn __ts_aot_dynamic_delete(target: &mut DynamicValue, field_name: &str) {
+    if let DynamicValue::Object(dyn_obj) = target {
+        dyn_obj.fields.borrow_mut().remove(field_name);
+    }
+}
+
+pub const DYNAMIC_OP_ADD: u8 = 0;
+pub const DYNAMIC_OP_SUB: u8 = 1;
+pub const DYNAMIC_OP_MUL: u8 = 2;
+pub const DYNAMIC_OP_DIV: u8 = 3;
+pub const DYNAMIC_OP_MOD: u8 = 4;
+
+#[allow(clippy::cast_precision_loss)]
+pub fn __ts_aot_dynamic_op(op: u8, left: &DynamicValue, right: &DynamicValue) -> DynamicValue {
+    let numeric = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
+        match (a, b) {
+            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Integer(x.wrapping_add(*y)))
+            }
+            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x + y)),
+            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
+                Some(DynamicValue::Number(*x as f64 + y))
+            }
+            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Number(x + *y as f64))
+            }
+            _ => None,
+        }
+    };
+    let numeric_sub = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
+        match (a, b) {
+            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Integer(x.wrapping_sub(*y)))
+            }
+            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x - y)),
+            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
+                Some(DynamicValue::Number(*x as f64 - y))
+            }
+            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Number(x - *y as f64))
+            }
+            _ => None,
+        }
+    };
+    let numeric_mul = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
+        match (a, b) {
+            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Integer(x.wrapping_mul(*y)))
+            }
+            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x * y)),
+            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
+                Some(DynamicValue::Number(*x as f64 * y))
+            }
+            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Number(x * *y as f64))
+            }
+            _ => None,
+        }
+    };
+    let numeric_div = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
+        let to_f64 = |v: &DynamicValue| -> Option<f64> {
+            match v {
+                DynamicValue::Integer(x) => Some(*x as f64),
+                DynamicValue::Number(x) => Some(*x),
+                _ => None,
+            }
+        };
+        match (to_f64(a), to_f64(b)) {
+            (Some(x), Some(y)) if y != 0.0 => Some(DynamicValue::Number(x / y)),
+            (Some(x), Some(0.0)) => Some(DynamicValue::Number(x / 0.0)),
+            _ => None,
+        }
+    };
+    let numeric_mod = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
+        match (a, b) {
+            (DynamicValue::Integer(x), DynamicValue::Integer(y)) if *y != 0 => {
+                Some(DynamicValue::Integer(x.wrapping_rem(*y)))
+            }
+            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
+                Some(DynamicValue::Number(*x as f64 % *y))
+            }
+            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
+                Some(DynamicValue::Number(*x % *y as f64))
+            }
+            (DynamicValue::Number(x), DynamicValue::Number(y)) => {
+                Some(DynamicValue::Number(*x % *y))
+            }
+            _ => None,
+        }
+    };
+    match op {
+        DYNAMIC_OP_ADD => {
+            if let (DynamicValue::String(a), DynamicValue::String(b)) = (left, right) {
+                let mut s = a.clone();
+                s.push_str(b);
+                return DynamicValue::String(s);
+            }
+            numeric(left, right).unwrap_or(DynamicValue::Undefined)
+        }
+        DYNAMIC_OP_SUB => numeric_sub(left, right).unwrap_or(DynamicValue::Undefined),
+        DYNAMIC_OP_MUL => numeric_mul(left, right).unwrap_or(DynamicValue::Undefined),
+        DYNAMIC_OP_DIV => numeric_div(left, right).unwrap_or(DynamicValue::Undefined),
+        DYNAMIC_OP_MOD => numeric_mod(left, right).unwrap_or(DynamicValue::Undefined),
+        _ => DynamicValue::Undefined,
+    }
 }

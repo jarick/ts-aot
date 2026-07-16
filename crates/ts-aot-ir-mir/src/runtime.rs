@@ -48,6 +48,12 @@ impl RuntimeRequirements {
             RuntimeOp::OpDelete | RuntimeOp::OpIn | RuntimeOp::OpInstanceof => {
                 self.needs_runtime = true;
             }
+            RuntimeOp::OpObjectGet | RuntimeOp::OpObjectSet | RuntimeOp::OpObjectHas => {
+                self.needs_runtime = true;
+            }
+            RuntimeOp::OpObjectDelete | RuntimeOp::OpObjectUnwrap | RuntimeOp::OpDynamicBinary => {
+                self.needs_runtime = true;
+            }
             RuntimeOp::TypeOf => unreachable!(
                 "TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime"
             ),
