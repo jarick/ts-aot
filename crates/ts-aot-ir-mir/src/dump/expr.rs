@@ -121,6 +121,17 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
             d.pop();
             d.line("}");
         }
+        MirStmt::DoWhile { body, cond } => {
+            d.line("do {");
+            d.push();
+            for s in &body.stmts {
+                dump_stmt(s, d);
+            }
+            d.pop();
+            d.write("} while (");
+            dump_expr_inline(cond, d);
+            d.write(")\n");
+        }
         MirStmt::ForOf {
             item,
             iterable,

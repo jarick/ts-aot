@@ -11,11 +11,17 @@
     clippy::missing_panics_doc
 )]
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::rc::Rc;
 
 pub fn __ts_aot_host_console_log(s: &str) {
     println!("{s}");
+}
+
+pub fn __ts_aot_throw<T: Any + Send + 'static>(value: T) -> ! {
+    std::panic::panic_any(value)
 }
 
 pub fn __ts_aot_math_sqrt(x: f64) -> f64 {

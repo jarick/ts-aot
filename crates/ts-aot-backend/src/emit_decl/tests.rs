@@ -6,9 +6,9 @@ use ts_aot_core::{
     Atom, FieldId, FunctionId, LocalId, ModuleId, StructId, Type, TypeId, TypeTable, Visibility,
 };
 use ts_aot_ir_mir::{
-    BinaryOp, FunctionEffects, FunctionKind, MirBlock, MirBody, MirDecl, MirExpr, MirFieldDecl,
-    MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase, MirProgram,
-    MirStmt, MirStructDecl,
+    BinaryOp, ConstValue, FunctionEffects, FunctionKind, MirBlock, MirBody, MirDecl, MirExpr,
+    MirFieldDecl, MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase,
+    MirProgram, MirStmt, MirStructDecl, SwitchCase,
 };
 
 fn empty_func(name: &str) -> MirFunctionDecl {
@@ -1170,56 +1170,6 @@ fn assignment_to_optional_chain_field_emits_is_some_branch() {
 }
 
 #[test]
-fn switch_stmt_emits_not_implemented_in_phase_1_3() {
-    let mut types = TypeTable::new();
-    let int_ty = types.intern(&Type::I32);
-    let disc = LocalId::from_raw(0);
-    let mut f = empty_func("caller");
-    f.ret = int_ty;
-    f.body = MirBody {
-        locals: vec![MirLocalDecl {
-            id: disc,
-            name: Atom::from("x"),
-            ty: int_ty,
-            mutable: false,
-        }],
-        block: MirBlock {
-            stmts: vec![MirStmt::Switch {
-                disc: Box::new(MirExpr::Local(disc)),
-                cases: Vec::new(),
-                default: None,
-            }],
-        },
-    };
-
-    let mut prog = MirProgram::new(ModuleId::from_raw(0));
-    prog.push_decl(MirDecl::Function(f));
-    let err = emit_decls(&prog, &types).expect_err("Switch backend emit must defer to Phase 2.3");
-    assert_eq!(err, BackendError::NotImplemented);
-}
-
-#[test]
-fn try_stmt_emits_not_implemented_in_phase_1_3() {
-    let types = TypeTable::new();
-    let mut prog = MirProgram::new(ModuleId::from_raw(0));
-    let mut f = empty_func("caller");
-    f.body = MirBody {
-        locals: vec![],
-        block: MirBlock {
-            stmts: vec![MirStmt::Try {
-                body: MirBlock::new(),
-                catch_param: None,
-                catch: Some(MirBlock::new()),
-                finally: None,
-            }],
-        },
-    };
-    prog.push_decl(MirDecl::Function(f));
-    let err = emit_decls(&prog, &types).expect_err("Try backend emit must defer to Phase 2.3");
-    assert_eq!(err, BackendError::NotImplemented);
-}
-
-#[test]
 fn optional_chain_expr_emits_base_as_value() {
     let mut types = TypeTable::new();
     let int_ty = types.intern(&Type::I64);
@@ -1537,5 +1487,821 @@ fn yield_without_value_emits_unit() {
     assert!(
         s.contains("()") || s.contains("( )"),
         "Yield(None) must emit unit `()` (placeholder), got: {s}"
+    );
+}
+
+#[test]
+fn switch_with_int_cases_emits_match() {
+    let mut func = empty_func("switch_int");
+    let i64_ty = TypeId::from_raw(7);
+    let disc = LocalId::from_raw(0);
+    let a = LocalId::from_raw(1);
+    let b = LocalId::from_raw(2);
+    func.ret = i64_ty;
+    func.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: disc,
+                name: Atom::from("x"),
+                ty: i64_ty,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: a,
+                name: Atom::from("a"),
+                ty: i64_ty,
+                mutable: true,
+            },
+            MirLocalDecl {
+                id: b,
+                name: Atom::from("b"),
+                ty: i64_ty,
+                mutable: true,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Switch {
+                disc: Box::new(MirExpr::Local(disc)),
+                cases: vec![
+                    SwitchCase {
+                        value: ConstValue::Int(1),
+                        body: MirBlock {
+                            stmts: vec![MirStmt::Assign {
+                                target: MirPlace::Local { id: a },
+                                value: MirExpr::Int {
+                                    value: 10,
+                                    ty: i64_ty,
+                                },
+                            }],
+                        },
+                    },
+                    SwitchCase {
+                        value: ConstValue::Int(2),
+                        body: MirBlock {
+                            stmts: vec![MirStmt::Assign {
+                                target: MirPlace::Local { id: b },
+                                value: MirExpr::Int {
+                                    value: 20,
+                                    ty: i64_ty,
+                                },
+                            }],
+                        },
+                    },
+                ],
+                default: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 0,
+                        ty: i64_ty,
+                    }))],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("match x"),
+        "Switch must emit `match <disc>` over disc local, got: {s}"
+    );
+    assert!(
+        s.contains("1 =>") && s.contains("2 =>"),
+        "Switch cases must emit numeric arms `1 => ...` and `2 => ...`, got: {s}"
+    );
+    assert!(
+        s.contains("_ =>"),
+        "Switch default must emit `_ => ...` arm, got: {s}"
+    );
+}
+
+#[test]
+fn switch_with_string_cases_emits_match() {
+    let mut func = empty_func("switch_string");
+    let string_ty = TypeId::from_raw(8);
+    let disc = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: disc,
+            name: Atom::from("key"),
+            ty: string_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Switch {
+                disc: Box::new(MirExpr::Local(disc)),
+                cases: vec![SwitchCase {
+                    value: ConstValue::String(Atom::from("foo")),
+                    body: MirBlock {
+                        stmts: vec![MirStmt::Return(Some(MirExpr::String {
+                            id: Atom::from("foo"),
+                            ty: string_ty,
+                        }))],
+                    },
+                }],
+                default: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("match key"),
+        "Switch over string local must emit `match key`, got: {s}"
+    );
+    assert!(
+        s.contains("\"foo\" =>"),
+        "Switch string case must emit `\"foo\" =>` arm, got: {s}"
+    );
+    assert!(
+        s.contains("_ => { }"),
+        "Switch without default must emit empty `_ => {{}}` arm, got: {s}"
+    );
+}
+
+#[test]
+fn try_with_catch_emits_catch_unwind() {
+    let mut func = empty_func("try_catch");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: None,
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 2,
+                        ty: i64_ty,
+                    }))],
+                }),
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("catch_unwind"),
+        "Try/Catch must wrap body in std::panic::catch_unwind, got: {s}"
+    );
+    assert!(
+        s.contains("AssertUnwindSafe"),
+        "Try/Catch closure must use AssertUnwindSafe to bypass UnwindSafe bound, got: {s}"
+    );
+    assert!(
+        s.contains("if let Err") || s.contains("if let  Err"),
+        "Try/Catch must wrap catch arm in `if let Err(...)` check, got: {s}"
+    );
+}
+
+#[test]
+fn try_with_finally_emits_finally_after_try() {
+    let mut func = empty_func("try_finally");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 2,
+                        ty: i64_ty,
+                    }))],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("catch_unwind"),
+        "Try/Finally must wrap body in catch_unwind, got: {s}"
+    );
+    assert!(
+        s.contains("__pending_throw"),
+        "Try/Finally without catch must allocate a __pending_throw slot so a throw inside try \
+         can be re-raised after finally runs (otherwise finally would silently swallow errors). \
+         Got: {s}"
+    );
+    assert!(
+        s.contains("resume_unwind"),
+        "Try/Finally must rethrow via resume_unwind after finally so uncaught throw still \
+         propagates up. Got: {s}"
+    );
+    assert!(
+        s.contains("return 2"),
+        "Try/Finally must emit finally body after try block, got: {s}"
+    );
+}
+
+#[test]
+fn try_with_catch_and_finally_emits_both() {
+    let mut func = empty_func("try_catch_finally");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: Some(LocalId::from_raw(0)),
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Int {
+                        value: 9,
+                        ty: i64_ty,
+                    })],
+                }),
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 3,
+                        ty: i64_ty,
+                    }))],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("catch_unwind"),
+        "Try/Catch/Finally must use catch_unwind, got: {s}"
+    );
+    assert!(
+        s.contains("if let Err"),
+        "Try/Catch/Finally must have Err branch with catch body, got: {s}"
+    );
+    assert!(
+        s.contains("return 3"),
+        "Try/Catch/Finally must have finally body after catch, got: {s}"
+    );
+}
+
+#[test]
+fn try_catch_param_is_bound_for_catch_body_references() {
+    let mut func = empty_func("try_catch_param");
+    let i64_ty = TypeId::from_raw(7);
+    let err_local = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: err_local,
+            name: Atom::from("err"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: Some(err_local),
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Local(err_local)))],
+                }),
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("if let Err (__e)"),
+        "Try/Catch with catch_param must bind `__e` from catch_unwind result, got: {s}"
+    );
+    assert!(
+        s.contains("downcast"),
+        "Try/Catch with catch_param must downcast `__e` to the catch_param's local type so \
+         `let err: T = match __e.downcast::<T>() ...` produces a typed binding that \
+         round-trips the thrown value (e.g. `let err: i64 = 42`). Without downcast, the \
+         binding would be `Box<dyn Any>` and the catch body couldn't use it as `i64`. Got: {s}"
+    );
+    assert!(
+        s.contains("err : i64") || s.contains("err : __ty") || s.contains("err : i64"),
+        "Try/Catch with catch_param must type-annotate the binding so the catch body sees \
+         the downcast type, not Box<dyn Any>. Got: {s}"
+    );
+    assert!(
+        !s.contains("let _ = __e"),
+        "Try/Catch with catch_param must NOT drop the payload via `let _ = __e;` (would leave \
+         catch_param undeclared for catch body). Got: {s}"
+    );
+}
+
+#[test]
+fn try_catch_without_param_does_not_bind_param() {
+    let mut func = empty_func("try_catch_no_param");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: None,
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 2,
+                        ty: i64_ty,
+                    }))],
+                }),
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("if let Err (_e)") || s.contains("if let Err (__e)"),
+        "Try/Catch without catch_param must still inspect `__e` (either wildcard or bound). \
+         Got: {s}"
+    );
+    assert!(
+        !s.contains("let _e ="),
+        "Try/Catch without catch_param must NOT introduce a named binding for the payload — \
+         nothing in the catch body uses it. Got: {s}"
+    );
+}
+
+#[test]
+fn throw_inside_try_emits_panic_throw_helper() {
+    let mut func = empty_func("try_throw");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Int {
+                            value: 42,
+                            ty: i64_ty,
+                        },
+                        error_ty: i64_ty,
+                    }],
+                },
+                catch_param: None,
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                }),
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__ts_aot_throw"),
+        "Throw inside try must emit `__ts_aot_throw(...)` (panic-based, catchable by \
+         catch_unwind). If we emitted `return Err(...)` instead, catch_unwind would never see \
+         the throw (Result::Err is normal control flow, not a panic). Got: {s}"
+    );
+    assert!(
+        !s.contains("return Err"),
+        "Throw inside try must NOT emit `return Err(...)` (would bypass catch_unwind), got: {s}"
+    );
+}
+
+#[test]
+fn throw_outside_try_still_emits_return_err() {
+    let mut func = empty_func("bare_throw");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Throw {
+                error: MirExpr::Int {
+                    value: 7,
+                    ty: i64_ty,
+                },
+                error_ty: i64_ty,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("return Err"),
+        "Throw outside try must still emit `return Err(...)` (Result-based, propagates up to \
+         function return), got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_throw"),
+        "Throw outside try must NOT emit `__ts_aot_throw(...)` (would panic the whole process \
+         instead of returning Result::Err to caller), got: {s}"
+    );
+}
+
+#[test]
+fn nested_try_restores_in_try_state_for_catch_body() {
+    let mut func = empty_func("nested_try_catch");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                        error_ty: i64_ty,
+                    }],
+                },
+                catch_param: None,
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Int {
+                            value: 2,
+                            ty: i64_ty,
+                        },
+                        error_ty: i64_ty,
+                    }],
+                }),
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    let first_throw = s.find("__ts_aot_throw");
+    let second_throw = s.find("__ts_aot_throw");
+    let throw_count = s.matches("__ts_aot_throw").count();
+    assert!(
+        first_throw.is_some(),
+        "Inner try body must emit `__ts_aot_throw` (first occurrence, panic path), got: {s}"
+    );
+    assert!(
+        second_throw.is_some() && throw_count >= 2,
+        "Catch body throw (in_try=true) must ALSO emit `__ts_aot_throw` (so the throw from \
+         catch is captured via the catch's own catch_unwind, stored in __pending_throw, and \
+         rethrown). Previously catch body used `return Err` (Result path), but that bypassed \
+         the outer try scope — wrong because in JS the catch-body throw IS catchable by the \
+         surrounding finally and propagates as a fresh throw. Got: {s}"
+    );
+    assert!(
+        s.contains("__pending_throw") && s.contains("resume_unwind"),
+        "Outer try must keep __pending_throw slot and resume_unwind rethrow even when throw \
+         originates from the catch arm (not just from try body). Got: {s}"
+    );
+}
+
+#[test]
+fn try_throw_with_finally_runs_finally_then_rethrows() {
+    let mut func = empty_func("try_throw_finally");
+    let i64_ty = TypeId::from_raw(7);
+    let finally_flag = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: finally_flag,
+            name: Atom::from("finally_ran"),
+            ty: i64_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                        error_ty: i64_ty,
+                    }],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Assign {
+                        target: MirPlace::Local { id: finally_flag },
+                        value: MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                    }],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    let finally_pos = s.find("finally_ran =");
+    let replay_pos = s.find("if let Some (__e) = __pending_throw");
+    assert!(
+        finally_pos.is_some() && replay_pos.is_some() && finally_pos < replay_pos,
+        "Finally body must be emitted BEFORE the pending-throw replay block, otherwise the \
+         throw would bypass finally. The first `resume_unwind` inside the sentinel gate is \
+         structural (part of the try body's catch_unwind wrapper) and appears before finally; \
+         the pending-throw replay after finally is the correctness check. \
+         Expected `finally_ran = ...` before `if let Some(__e) = __pending_throw`. Got: {s}"
+    );
+}
+
+#[test]
+fn try_return_in_body_runs_finally_then_replays_return() {
+    let mut func = empty_func("try_return_finally");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 42,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Int {
+                        value: 7,
+                        ty: i64_ty,
+                    })],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    let break_pos = s.find("break __try_");
+    let finally_pos = s.find("7 ;");
+    let return_pos = s.find("return 42");
+    assert!(
+        break_pos.is_some() && finally_pos.is_some() && return_pos.is_some(),
+        "try-with-return-and-finally must emit: `break #label` (replacing `return 42` in \
+         try body), then finally body (`7 ;`), then `return 42` (replay). Got: {s}"
+    );
+    assert!(
+        break_pos < finally_pos && finally_pos < return_pos,
+        "Order must be: break (try body return → save+break) -> finally body -> return (replay). \
+         If `return 42` appears before finally, finally is skipped (wrong). Got: {s}"
+    );
+}
+
+#[test]
+fn try_catch_return_in_catch_runs_finally_then_replays_return() {
+    let mut func = empty_func("try_catch_return");
+    let i64_ty = TypeId::from_raw(7);
+    let err_local = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: err_local,
+            name: Atom::from("err"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                        error_ty: i64_ty,
+                    }],
+                },
+                catch_param: Some(err_local),
+                catch: Some(MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 99,
+                        ty: i64_ty,
+                    }))],
+                }),
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Int {
+                        value: 5,
+                        ty: i64_ty,
+                    })],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("break __try_"),
+        "catch body's `return 99` must be transformed to `break #try_label` so finally runs. \
+         Bare `return 99` inside the catch would exit the function and skip finally. Got: {s}"
+    );
+    assert!(
+        s.contains("return 99"),
+        "After finally, the saved catch return value must be replayed via `return 99;`. Got: {s}"
+    );
+    let break_pos = s.find("break __try_").expect("break in emit");
+    let finally_pos = s.find("5 ;").expect("finally in emit");
+    let replay_pos = s.rfind("return 99").expect("replay in emit");
+    assert!(
+        break_pos < finally_pos && finally_pos < replay_pos,
+        "Order must be: catch return → break (save+break) -> finally body -> return 99 (replay). \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn do_while_emits_loop_with_break_on_negated_cond() {
+    let mut func = empty_func("do_while");
+    let i64_ty = TypeId::from_raw(7);
+    let cond = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: cond,
+            name: Atom::from("c"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::DoWhile {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Local(cond))],
+                },
+                cond: MirExpr::Local(cond),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("loop"),
+        "DoWhile must emit Rust `loop` (body executes at least once), got: {s}"
+    );
+    assert!(
+        s.contains("if ! c")
+            || s.contains("if  ! c")
+            || s.contains("if ! (c")
+            || s.contains("if ! c ;"),
+        "DoWhile must break on negated cond `if !c {{ break; }}`, got: {s}"
+    );
+    assert!(
+        s.contains("break"),
+        "DoWhile must emit `break` for exit, got: {s}"
+    );
+}
+
+#[test]
+fn do_while_with_empty_body_emits_loop_break_only() {
+    let mut func = empty_func("do_while_empty");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::DoWhile {
+                body: MirBlock { stmts: Vec::new() },
+                cond: MirExpr::Bool(false),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("loop") && s.contains("if !"),
+        "DoWhile(empty body, false cond) must still emit `loop {{ if !false {{ break; }} }}`, got: {s}"
+    );
+}
+
+#[test]
+fn do_while_continue_in_body_uses_labeled_continue_for_cond_recheck() {
+    let mut func = empty_func("do_while_continue");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::DoWhile {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Continue],
+                },
+                cond: MirExpr::Bool(true),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__do_while_") && s.contains(": loop"),
+        "DoWhile must wrap body in a labeled loop `__do_while_N: loop {{ ... }}` so the cond \
+         check fires on every iteration (including continue paths). Plain `loop` would let a \
+         bare `continue;` skip the `if !cond {{ break; }}` check and break do-while semantics. \
+         Got: {s}"
+    );
+    assert!(
+        s.contains("continue") && !s.contains("continue ;"),
+        "Continue in DoWhile body must use the do-while label (e.g. `continue __do_while_0;`) \
+         so it lands on the `if !cond {{ break; }}` line instead of jumping to the loop's top. \
+         Bare `continue;` would skip the cond recheck. Got: {s}"
+    );
+    assert!(
+        s.contains("break __do_while_") || s.contains("break  __do_while_"),
+        "Break in DoWhile's cond check must also use the label for consistency (and so nested \
+         loops exit the right one). Got: {s}"
+    );
+}
+
+#[test]
+fn continue_outside_dowhile_uses_bare_continue() {
+    let mut func = empty_func("bare_while_continue");
+    let i64_ty = TypeId::from_raw(7);
+    let cond = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: cond,
+            name: Atom::from("c"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::While {
+                cond: MirExpr::Local(cond),
+                body: MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Local(cond)), MirStmt::Continue],
+                },
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("continue ;") || s.contains("continue;") || s.contains("continue ;"),
+        "Continue inside a regular While body (not DoWhile) must emit bare `continue;` — only \
+         DoWhile needs labeled continue to re-evaluate its cond. Adding a label to a plain While \
+         would compile but is noise. Got: {s}"
+    );
+    assert!(
+        !s.contains("__do_while_"),
+        "Continue in a regular While must NOT carry a __do_while_ label, got: {s}"
     );
 }

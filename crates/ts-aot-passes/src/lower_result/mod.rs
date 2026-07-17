@@ -70,9 +70,10 @@ fn rewrite_stmt(stmt: &mut MirStmt, result_ty: TypeId, err_ty: TypeId) {
                 rewrite_block(eb, result_ty, err_ty);
             }
         }
-        MirStmt::While { body, .. } | MirStmt::ForOf { body, .. } | MirStmt::ForIn { body, .. } => {
-            rewrite_block(body, result_ty, err_ty)
-        }
+        MirStmt::While { body, .. }
+        | MirStmt::DoWhile { body, .. }
+        | MirStmt::ForOf { body, .. }
+        | MirStmt::ForIn { body, .. } => rewrite_block(body, result_ty, err_ty),
         MirStmt::Switch { cases, default, .. } => {
             for case in cases {
                 rewrite_block(&mut case.body, result_ty, err_ty);

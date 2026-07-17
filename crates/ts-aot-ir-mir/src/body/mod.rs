@@ -76,6 +76,10 @@ pub enum MirStmt {
         cond: MirExpr,
         body: MirBlock,
     },
+    DoWhile {
+        body: MirBlock,
+        cond: MirExpr,
+    },
     ForOf {
         item: LocalId,
         iterable: MirExpr,
