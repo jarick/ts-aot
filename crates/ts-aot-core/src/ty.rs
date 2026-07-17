@@ -48,6 +48,7 @@ pub enum Type {
         ok: TypeId,
         err: TypeId,
     },
+    Dynamic,
     Named {
         symbol: Atom,
     },

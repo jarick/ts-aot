@@ -389,6 +389,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(expr, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::DynamicFrom { value, ty } => {
+            d.write("dynfrom(");
+            dump_expr_inline(value, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
@@ -437,6 +442,12 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpDelete => "op_delete",
         RuntimeOp::OpIn => "op_in",
         RuntimeOp::OpInstanceof => "op_instanceof",
+        RuntimeOp::OpObjectGet => "object_get",
+        RuntimeOp::OpObjectSet => "object_set",
+        RuntimeOp::OpObjectHas => "object_has",
+        RuntimeOp::OpObjectDelete => "object_delete",
+        RuntimeOp::OpObjectUnwrap => "object_unwrap",
+        RuntimeOp::OpDynamicBinary => "dynamic_binary",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
     }

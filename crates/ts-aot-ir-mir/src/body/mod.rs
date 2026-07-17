@@ -287,6 +287,10 @@ pub enum MirExpr {
         expr: Box<MirExpr>,
         ty: TypeId,
     },
+    DynamicFrom {
+        value: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -310,7 +314,8 @@ impl MirExpr {
             | MirExpr::Await { ty, .. }
             | MirExpr::Yield { ty, .. }
             | MirExpr::OptionalChain { ty, .. }
-            | MirExpr::TypeOf { ty, .. } => Some(*ty),
+            | MirExpr::TypeOf { ty, .. }
+            | MirExpr::DynamicFrom { ty, .. } => Some(*ty),
         }
     }
 }
@@ -337,6 +342,12 @@ pub enum RuntimeOp {
     OpDelete,
     OpIn,
     OpInstanceof,
+    OpObjectGet,
+    OpObjectSet,
+    OpObjectHas,
+    OpObjectDelete,
+    OpObjectUnwrap,
+    OpDynamicBinary,
 }
 
 #[cfg(test)]

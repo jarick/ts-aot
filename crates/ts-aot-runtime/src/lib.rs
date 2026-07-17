@@ -267,6 +267,301 @@ mod tests {
     }
 
     #[test]
+    fn runtime_struct_id_dynamic_matches_compiler_constant() {
+        use crate::runtime_source::STRUCT_ID_DYNAMIC;
+        assert_eq!(
+            STRUCT_ID_DYNAMIC, 0xFFFF_FFFE,
+            "runtime STRUCT_ID_DYNAMIC must match ts_aot_core::STRUCT_ID_DYNAMIC \
+             (0xFFFF_FFFE). If you change one, change the other — this assertion is a \
+             loud sync check so the compiler-emitted instanceof target and the \
+             runtime-emitted class_id cannot drift apart"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_impls_ts_class_id() {
+        use crate::runtime_source::{
+            __ts_aot_op_instanceof, Dynamic, DynamicValue, STRUCT_ID_DYNAMIC, TsClassId,
+        };
+        let dyn_val = Dynamic::new();
+        let id = Dynamic::class_id();
+        assert_eq!(
+            id, STRUCT_ID_DYNAMIC,
+            "Dynamic::class_id() must equal STRUCT_ID_DYNAMIC (0xFFFF_FFFE) so that \
+             compiler-emitted `x instanceof Dynamic` resolves to the same id at runtime; \
+             otherwise the instanceof check returns false even when the value is a Dynamic"
+        );
+        assert!(
+            __ts_aot_op_instanceof(&dyn_val, STRUCT_ID_DYNAMIC),
+            "Dynamic must implement TsClassId so __ts_aot_op_instanceof(&Dynamic, \
+             STRUCT_ID_DYNAMIC) compiles and returns true when value is a Dynamic"
+        );
+        let dyn_value: DynamicValue = DynamicValue::Object(Dynamic::new());
+        assert!(
+            __ts_aot_op_instanceof(&dyn_value, STRUCT_ID_DYNAMIC),
+            "DynamicValue::Object(Dynamic) must also pass instanceof against \
+             STRUCT_ID_DYNAMIC, since the user-facing value is DynamicValue, not Dynamic"
+        );
+        assert_ne!(
+            id,
+            i64::class_id(),
+            "Dynamic class_id must be distinct from primitives to avoid false matches"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_value_integer_preserves_precision() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        let big: i64 = 9_007_199_254_740_993;
+        __ts_aot_dynamic_set(&mut val, "big", DynamicValue::Integer(big));
+        match __ts_aot_dynamic_get(&val, "big") {
+            DynamicValue::Integer(n) => assert_eq!(
+                n, big,
+                "Integer variant must preserve full i64 precision (Number(f64) would lose bits > 2^53)"
+            ),
+            other => panic!("expected Integer({big}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_value_undefined_distinct_from_null() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut val, "u", DynamicValue::Undefined);
+        __ts_aot_dynamic_set(&mut val, "n", DynamicValue::Null);
+        assert!(matches!(
+            __ts_aot_dynamic_get(&val, "u"),
+            DynamicValue::Undefined
+        ));
+        assert!(matches!(
+            __ts_aot_dynamic_get(&val, "n"),
+            DynamicValue::Null
+        ));
+        assert_ne!(
+            DynamicValue::Undefined,
+            DynamicValue::Null,
+            "PartialEq must keep Undefined and Null distinct (strict equality); \
+             JS has loose `undefined == null` but TS-typed code compares them as distinct \
+             sentinels — 'missing field' (Undefined) is not the same as 'explicit null' (Null)"
+        );
+        assert_eq!(
+            DynamicValue::Undefined,
+            DynamicValue::Undefined,
+            "Undefined == Undefined (reflexive)"
+        );
+        assert_eq!(
+            DynamicValue::Null,
+            DynamicValue::Null,
+            "Null == Null (reflexive)"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_value_from_i64() {
+        use crate::runtime_source::DynamicValue;
+        let v: DynamicValue = DynamicValue::from(42_i64);
+        assert!(matches!(v, DynamicValue::Integer(42)));
+    }
+
+    #[test]
+    fn runtime_dynamic_value_from_f64() {
+        use crate::runtime_source::DynamicValue;
+        let v: DynamicValue = DynamicValue::from(3.5_f64);
+        assert!(matches!(v, DynamicValue::Number(n) if (n - 3.5).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn runtime_dynamic_value_from_bool() {
+        use crate::runtime_source::DynamicValue;
+        assert!(matches!(DynamicValue::from(true), DynamicValue::Bool(true)));
+        assert!(matches!(
+            DynamicValue::from(false),
+            DynamicValue::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_value_from_string_and_str() {
+        use crate::runtime_source::DynamicValue;
+        let owned: DynamicValue = DynamicValue::from(String::from("hi"));
+        let borrowed: DynamicValue = DynamicValue::from("hi");
+        assert!(matches!(owned, DynamicValue::String(s) if s == "hi"));
+        assert!(matches!(borrowed, DynamicValue::String(s) if s == "hi"));
+    }
+
+    #[test]
+    fn runtime_dynamic_op_add_integers() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_ADD, DynamicValue};
+        let l = DynamicValue::Integer(40);
+        let r = DynamicValue::Integer(2);
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_ADD, &l, &r),
+            DynamicValue::Integer(42)
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_op_add_numbers_promotes_int_to_float() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_ADD, DynamicValue};
+        let l = DynamicValue::Integer(40);
+        let r = DynamicValue::Number(2.5);
+        match __ts_aot_dynamic_op(DYNAMIC_OP_ADD, &l, &r) {
+            DynamicValue::Number(n) => assert!((n - 42.5).abs() < f64::EPSILON),
+            other => panic!("expected Number(42.5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_op_add_strings_concatenates() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_ADD, DynamicValue};
+        let l = DynamicValue::String("foo".to_owned());
+        let r = DynamicValue::String("bar".to_owned());
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_ADD, &l, &r),
+            DynamicValue::String(s) if s == "foobar"
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_op_sub_mul_div_mod() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_op, DYNAMIC_OP_DIV, DYNAMIC_OP_MOD, DYNAMIC_OP_MUL, DYNAMIC_OP_SUB,
+            DynamicValue,
+        };
+        let a = DynamicValue::Integer(10);
+        let b = DynamicValue::Integer(3);
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_SUB, &a, &b),
+            DynamicValue::Integer(7)
+        ));
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_MUL, &a, &b),
+            DynamicValue::Integer(30)
+        ));
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_DIV, &a, &b),
+            DynamicValue::Number(n) if (n - 10.0 / 3.0).abs() < 1e-9
+        ));
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_MOD, &a, &b),
+            DynamicValue::Integer(1)
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_op_mod_for_floats() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_MOD, DynamicValue};
+        let a = DynamicValue::Number(5.5);
+        let b = DynamicValue::Number(2.0);
+        match __ts_aot_dynamic_op(DYNAMIC_OP_MOD, &a, &b) {
+            DynamicValue::Number(n) => assert!(
+                (n - 1.5).abs() < 1e-9,
+                "5.5 % 2.0 must be 1.5 (JS fidelity), got {n}"
+            ),
+            other => panic!("expected Number(1.5), got {other:?}"),
+        }
+        let neg = DynamicValue::Number(-5.0);
+        match __ts_aot_dynamic_op(DYNAMIC_OP_MOD, &neg, &b) {
+            DynamicValue::Number(n) => assert!(
+                (n - (-1.0)).abs() < 1e-9,
+                "-5.0 % 2.0 must be -1.0 (sign of dividend, JS fidelity), got {n}"
+            ),
+            other => panic!("expected Number(-1.0), got {other:?}"),
+        }
+        let int_a = DynamicValue::Integer(7);
+        let float_b = DynamicValue::Number(2.5);
+        match __ts_aot_dynamic_op(DYNAMIC_OP_MOD, &int_a, &float_b) {
+            DynamicValue::Number(n) => assert!(
+                (n - 2.0).abs() < 1e-9,
+                "7 % 2.5 must be 2.0 (mixed Integer/Number), got {n}"
+            ),
+            other => panic!("expected Number(2.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_op_mod_operand_order_preserved() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_MOD, DynamicValue};
+        match __ts_aot_dynamic_op(
+            DYNAMIC_OP_MOD,
+            &DynamicValue::Number(7.0),
+            &DynamicValue::Integer(2),
+        ) {
+            DynamicValue::Number(n) => assert!(
+                (n - 1.0).abs() < 1e-9,
+                "7.0 % 2 (Number % Integer) must be 1.0 with operand order preserved, got {n}"
+            ),
+            other => panic!("expected Number(1.0), got {other:?}"),
+        }
+        match __ts_aot_dynamic_op(
+            DYNAMIC_OP_MOD,
+            &DynamicValue::Number(1.0),
+            &DynamicValue::Integer(2),
+        ) {
+            DynamicValue::Number(n) => assert!(
+                (n - 1.0).abs() < 1e-9,
+                "1.0 % 2 (Number % Integer) must be 1.0, got {n}"
+            ),
+            other => panic!("expected Number(1.0), got {other:?}"),
+        }
+        match __ts_aot_dynamic_op(
+            DYNAMIC_OP_MOD,
+            &DynamicValue::Integer(7),
+            &DynamicValue::Number(2.0),
+        ) {
+            DynamicValue::Number(n) => assert!(
+                (n - 1.0).abs() < 1e-9,
+                "7 % 2.0 (Integer % Number) must be 1.0, got {n}"
+            ),
+            other => panic!("expected Number(1.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_op_non_numeric_returns_undefined() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_ADD, DynamicValue};
+        let l = DynamicValue::Bool(true);
+        let r = DynamicValue::Integer(1);
+        assert!(matches!(
+            __ts_aot_dynamic_op(DYNAMIC_OP_ADD, &l, &r),
+            DynamicValue::Undefined
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_op_div_by_zero_yields_ieee754_specials() {
+        use crate::runtime_source::{__ts_aot_dynamic_op, DYNAMIC_OP_DIV, DynamicValue};
+        let zero = DynamicValue::Number(0.0);
+        let pos = DynamicValue::Number(1.0);
+        let neg = DynamicValue::Number(-1.0);
+        match __ts_aot_dynamic_op(DYNAMIC_OP_DIV, &zero, &zero) {
+            DynamicValue::Number(n) => {
+                assert!(n.is_nan(), "0.0 / 0.0 must be NaN (JS fidelity), got {n}");
+            }
+            other => panic!("expected Number(NaN), got {other:?}"),
+        }
+        match __ts_aot_dynamic_op(DYNAMIC_OP_DIV, &pos, &zero) {
+            DynamicValue::Number(n) => assert!(
+                n.is_infinite() && n.is_sign_positive(),
+                "1.0 / 0.0 must be +Infinity (JS fidelity), got {n}"
+            ),
+            other => panic!("expected Number(+Infinity), got {other:?}"),
+        }
+        match __ts_aot_dynamic_op(DYNAMIC_OP_DIV, &neg, &zero) {
+            DynamicValue::Number(n) => assert!(
+                n.is_infinite() && n.is_sign_negative(),
+                "-1.0 / 0.0 must be -Infinity (JS fidelity), got {n}"
+            ),
+            other => panic!("expected Number(-Infinity), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn runtime_op_instanceof_compound_types_never_match_struct_id() {
         use crate::runtime_source::__ts_aot_op_instanceof;
         let opt: Option<i64> = Some(42);
@@ -342,5 +637,197 @@ mod tests {
         assert!(__ts_aot_op_instanceof(&foo, 0u32));
         assert!(!__ts_aot_op_instanceof(&foo, u32::MAX));
         assert!(!__ts_aot_op_instanceof(&foo, 42u32));
+    }
+
+    #[test]
+    fn runtime_dynamic_get_set_returns_value() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Number(42.0));
+        match __ts_aot_dynamic_get(&val, "x") {
+            DynamicValue::Number(n) => {
+                assert!((n - 42.0).abs() < f64::EPSILON, "expected ~42.0, got {n}");
+            }
+            other => panic!("expected Number(42.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_get_missing_field_returns_undefined() {
+        use crate::runtime_source::{__ts_aot_dynamic_get, Dynamic, DynamicValue};
+        let val = DynamicValue::Object(Dynamic::new());
+        assert_eq!(
+            __ts_aot_dynamic_get(&val, "missing"),
+            DynamicValue::Undefined,
+            "get on missing field must return Undefined (JS fidelity)"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_get_on_non_object_returns_undefined() {
+        use crate::runtime_source::{__ts_aot_dynamic_get, DynamicValue};
+        assert_eq!(
+            __ts_aot_dynamic_get(&DynamicValue::Number(42.0), "x"),
+            DynamicValue::Undefined,
+            "get on non-Object value must return Undefined (no-op field access)"
+        );
+        assert_eq!(
+            __ts_aot_dynamic_get(&DynamicValue::Null, "x"),
+            DynamicValue::Undefined,
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_has_returns_true_for_set_field() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_has, __ts_aot_dynamic_key, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        assert!(
+            !__ts_aot_dynamic_has(&val, &__ts_aot_dynamic_key("x")),
+            "fresh Object value must not have field"
+        );
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Bool(true));
+        assert!(
+            __ts_aot_dynamic_has(&val, &__ts_aot_dynamic_key("x")),
+            "after set, has must return true"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_has_on_non_object_returns_false() {
+        use crate::runtime_source::{__ts_aot_dynamic_has, __ts_aot_dynamic_key, DynamicValue};
+        assert!(!__ts_aot_dynamic_has(
+            &DynamicValue::Null,
+            &__ts_aot_dynamic_key("x")
+        ));
+        assert!(!__ts_aot_dynamic_has(
+            &DynamicValue::Number(42.0),
+            &__ts_aot_dynamic_key("x")
+        ));
+    }
+
+    #[test]
+    fn runtime_dynamic_set_overwrites_existing_field() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Number(1.0));
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Number(2.0));
+        match __ts_aot_dynamic_get(&val, "x") {
+            DynamicValue::Number(n) => {
+                assert!(
+                    (n - 2.0).abs() < f64::EPSILON,
+                    "second set must overwrite first, got {n}"
+                );
+            }
+            other => panic!("expected Number(2.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_set_on_non_object_promotes_to_object() {
+        use crate::runtime_source::{__ts_aot_dynamic_get, __ts_aot_dynamic_set, DynamicValue};
+        let mut val = DynamicValue::Number(42.0);
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Bool(true));
+        match __ts_aot_dynamic_get(&val, "x") {
+            DynamicValue::Bool(b) => assert!(b),
+            other => panic!("expected Bool(true), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_stores_nested_object() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut outer = DynamicValue::Object(Dynamic::new());
+        let mut inner = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut inner, "y", DynamicValue::String(String::from("hi")));
+        __ts_aot_dynamic_set(&mut outer, "nested", inner);
+        let mut nested = __ts_aot_dynamic_get(&outer, "nested");
+        match __ts_aot_dynamic_get(&nested, "y") {
+            DynamicValue::String(s) => assert_eq!(s, "hi"),
+            other => panic!("expected String(hi) before mutation, got {other:?}"),
+        }
+        __ts_aot_dynamic_set(
+            &mut nested,
+            "y",
+            DynamicValue::String(String::from("modified")),
+        );
+        let nested_again = __ts_aot_dynamic_get(&outer, "nested");
+        match __ts_aot_dynamic_get(&nested_again, "y") {
+            DynamicValue::String(s) => assert_eq!(
+                s, "modified",
+                "mutation through retrieved nested must be visible through outer \
+                 (shared object identity, not a clone)"
+            ),
+            other => panic!("expected String(modified) after mutation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_dynamic_delete_removes_field() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_delete, __ts_aot_dynamic_get, __ts_aot_dynamic_has,
+            __ts_aot_dynamic_key, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let mut val = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut val, "x", DynamicValue::Number(42.0));
+        assert!(__ts_aot_dynamic_has(&val, &__ts_aot_dynamic_key("x")));
+        __ts_aot_dynamic_delete(&mut val, "x");
+        assert!(
+            !__ts_aot_dynamic_has(&val, &__ts_aot_dynamic_key("x")),
+            "after delete, has must return false"
+        );
+        assert_eq!(
+            __ts_aot_dynamic_get(&val, "x"),
+            DynamicValue::Undefined,
+            "deleted field must return Undefined on get"
+        );
+    }
+
+    #[test]
+    fn runtime_dynamic_delete_on_non_object_is_noop() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_delete, __ts_aot_dynamic_has, __ts_aot_dynamic_key, DynamicValue,
+        };
+        let mut val = DynamicValue::Number(42.0);
+        __ts_aot_dynamic_delete(&mut val, "x");
+        assert!(!__ts_aot_dynamic_has(&val, &__ts_aot_dynamic_key("x")));
+    }
+
+    #[test]
+    fn runtime_dynamic_object_equality_uses_rc_identity_not_structural() {
+        use crate::runtime_source::{
+            __ts_aot_dynamic_get, __ts_aot_dynamic_set, Dynamic, DynamicValue,
+        };
+        let shared_inner = DynamicValue::Object(Dynamic::new());
+        let mut outer = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut outer, "nested", shared_inner.clone());
+        let retrieved = __ts_aot_dynamic_get(&outer, "nested");
+        assert_eq!(
+            retrieved, shared_inner,
+            "retrieved nested must equal the original (shared Rc identity via __ts_aot_dynamic_get clone)"
+        );
+        let mut separate = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut separate, "x", DynamicValue::Integer(42));
+        __ts_aot_dynamic_set(&mut separate, "y", DynamicValue::String("hi".to_owned()));
+        let mut clone_structurally = DynamicValue::Object(Dynamic::new());
+        __ts_aot_dynamic_set(&mut clone_structurally, "x", DynamicValue::Integer(42));
+        __ts_aot_dynamic_set(
+            &mut clone_structurally,
+            "y",
+            DynamicValue::String("hi".to_owned()),
+        );
+        assert_ne!(
+            separate, clone_structurally,
+            "two DynamicValue::Object with identical fields but different Rc must NOT be equal \
+             (Rc::ptr_eq identity, not structural HashMap comparison — consistent with JS reference \
+             equality for objects)"
+        );
     }
 }
