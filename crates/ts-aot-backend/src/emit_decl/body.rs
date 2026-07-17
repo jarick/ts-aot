@@ -301,10 +301,7 @@ fn emit_expr(
         MirExpr::Unit | MirExpr::Null { .. } => Ok(quote!(())),
         MirExpr::Bool(value) => Ok(quote!(#value)),
         MirExpr::Int { value, .. } => Ok(emit_whole_number_literal(*value)),
-        MirExpr::Float { value, .. } if value.is_finite() => {
-            let literal = Literal::f64_unsuffixed(*value);
-            Ok(quote!(#literal))
-        }
+        MirExpr::Float { value, .. } => Ok(emit_float(*value)),
         MirExpr::String { id, .. } => {
             let literal = Literal::string(id.as_str());
             Ok(quote!(String::from(#literal)))
@@ -391,7 +388,10 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
         MirExpr::DynamicFrom { value, .. } => emit_dynamic_from(value, ctx, body_ctx),
-        MirExpr::Yield { .. } | MirExpr::Float { .. } => Err(BackendError::NotImplemented),
+        MirExpr::Yield { expr, .. } => match expr {
+            Some(inner) => emit_expr(inner, ctx, body_ctx),
+            None => Ok(quote!(())),
+        },
     }
 }
 
@@ -435,6 +435,19 @@ fn emit_binary_expr(
         BinaryOp::Shl => quote!((#left << #right)),
         BinaryOp::Shr => quote!((#left >> #right)),
     })
+}
+
+pub(super) fn emit_float(value: f64) -> TokenStream {
+    if value.is_nan() {
+        quote!(f64::NAN)
+    } else if value.is_infinite() && value.is_sign_positive() {
+        quote!(f64::INFINITY)
+    } else if value.is_infinite() {
+        quote!(f64::NEG_INFINITY)
+    } else {
+        let literal = Literal::f64_unsuffixed(value);
+        quote!(#literal)
+    }
 }
 
 fn emit_dynamic_from(

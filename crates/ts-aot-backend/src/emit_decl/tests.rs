@@ -1390,3 +1390,152 @@ fn optional_chain_index_with_non_optional_base_falls_back_to_mvp() {
         "Non-Optional base + Index must fall back to MVP rr[i] (no Option machinery). Got: {s}"
     );
 }
+
+#[test]
+fn float_nan_emits_f64_nan_literal() {
+    let mut func = empty_func("nan_test");
+    let f64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Float {
+                value: f64::NAN,
+                ty: f64_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("f64 :: NAN"),
+        "NaN literal must emit f64::NAN, got: {s}"
+    );
+}
+
+#[test]
+fn float_positive_infinity_emits_f64_infinity_literal() {
+    let mut func = empty_func("pos_inf_test");
+    let f64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Float {
+                value: f64::INFINITY,
+                ty: f64_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("f64 :: INFINITY"),
+        "+Infinity must emit f64::INFINITY, got: {s}"
+    );
+}
+
+#[test]
+fn float_negative_infinity_emits_f64_neg_infinity_literal() {
+    let mut func = empty_func("neg_inf_test");
+    let f64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Float {
+                value: f64::NEG_INFINITY,
+                ty: f64_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("f64 :: NEG_INFINITY"),
+        "-Infinity must emit f64::NEG_INFINITY, got: {s}"
+    );
+}
+
+#[test]
+fn float_finite_still_uses_unsuffixed_literal() {
+    let mut func = empty_func("finite_test");
+    let f64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Float {
+                value: 3.5,
+                ty: f64_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("3.5") && !s.contains("f64 ::"),
+        "finite float 3.5 must emit literal 3.5 (not f64::NAN/INFINITY), got: {s}"
+    );
+}
+
+#[test]
+fn yield_with_value_emits_inner_expression() {
+    let mut func = empty_func("yield_test");
+    let i64_ty = TypeId::from_raw(7);
+    let local = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: local,
+            name: Atom::from("x"),
+            ty: i64_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Yield {
+                expr: Some(Box::new(MirExpr::Local(local))),
+                ty: i64_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains('x'),
+        "Yield(Some) must emit inner expression (placeholder for async fn / generator), got: {s}"
+    );
+}
+
+#[test]
+fn yield_without_value_emits_unit() {
+    let mut func = empty_func("yield_unit_test");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Yield {
+                expr: None,
+                ty: TypeId::from_raw(0),
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("()") || s.contains("( )"),
+        "Yield(None) must emit unit `()` (placeholder), got: {s}"
+    );
+}
