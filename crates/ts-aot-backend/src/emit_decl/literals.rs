@@ -10,10 +10,7 @@ pub(super) fn emit_const_expr(expr: &MirExpr) -> Result<TokenStream, BackendErro
         MirExpr::Unit | MirExpr::Null { .. } => Ok(quote!(())),
         MirExpr::Bool(value) => Ok(quote!(#value)),
         MirExpr::Int { value, .. } => Ok(emit_whole_number_literal(*value)),
-        MirExpr::Float { value, .. } if value.is_finite() => {
-            let literal = Literal::f64_unsuffixed(*value);
-            Ok(quote!(#literal))
-        }
+        MirExpr::Float { value, .. } => Ok(crate::emit_decl::body::emit_float(*value)),
         _ => Err(BackendError::NotImplemented),
     }
 }
