@@ -343,7 +343,6 @@ pub enum RuntimeOp {
     HostConsoleLog,
     MathSqrt,
     TypeOf,
-    OpDelete,
     OpIn,
     OpInstanceof,
     OpObjectGet,
@@ -351,6 +350,10 @@ pub enum RuntimeOp {
     OpObjectHas,
     OpObjectDelete,
     OpObjectUnwrap,
+    OpObjectProtoGet,
+    OpObjectProtoSet,
+    OpObjectSetPrototypeOf,
+    OpObjectKeys,
     OpDynamicBinary,
 }
 
