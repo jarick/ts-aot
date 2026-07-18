@@ -1218,7 +1218,7 @@ fn body_walker_c_for_runs_update_before_continue() {
 
 #[test]
 fn body_walker_unsupported_expression_warns_without_erroring() {
-    let output = FrontendPass::new().run("test.ts", "function f(): void { [1, 2, 3]; }");
+    let output = FrontendPass::new().run("test.ts", "function f(): void { /abc/; }");
     assert!(
         !output.diagnostics.has_errors(),
         "unsupported body expressions degrade to a warning, not an error: {:?}",
@@ -1745,4 +1745,148 @@ fn body_walker_tagged_template_invalid_escape_keeps_raw_but_drops_cooked() {
         Some(r"\u{FFFFFFFF}"),
         "raw keeps the literal escape even when cooked is invalid"
     );
+}
+
+#[test]
+fn body_walker_array_expression_empty_produces_empty_array() {
+    let f = sole_function("function f(): i64[] { return []; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert!(
+        elements.is_empty(),
+        "empty array literal has no elements, got: {elements:?}"
+    );
+}
+
+#[test]
+fn body_walker_array_expression_with_literals_walks_each_element() {
+    let f = sole_function("function f(): i64[] { return [1, 2, 3]; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert_eq!(elements.len(), 3, "[1, 2, 3] has 3 elements");
+    assert!(matches!(&elements[0], HirExpr::Int(1)));
+    assert!(matches!(&elements[1], HirExpr::Int(2)));
+    assert!(matches!(&elements[2], HirExpr::Int(3)));
+}
+
+#[test]
+fn body_walker_array_expression_with_identifiers_walks_local_refs() {
+    let f = sole_function("function f(a: i64, b: i64): i64[] { return [a, b]; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert_eq!(elements.len(), 2);
+    assert!(
+        matches!(&elements[0], HirExpr::Local { .. }),
+        "first element is local ref to `a`"
+    );
+    assert!(
+        matches!(&elements[1], HirExpr::Local { .. }),
+        "second element is local ref to `b`"
+    );
+}
+
+#[test]
+fn body_walker_array_expression_nested_walks_inner_array() {
+    let f = sole_function("function f(): i64[] { return [[1, 2], [3]]; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert_eq!(elements.len(), 2, "outer has 2 inner arrays");
+    let inner0 = &elements[0];
+    let inner1 = &elements[1];
+    let HirExpr::ArrayLiteral {
+        elements: inner0_elements,
+        ..
+    } = inner0
+    else {
+        panic!("expected nested ArrayLiteral, got {inner0:?}");
+    };
+    assert_eq!(inner0_elements.len(), 2);
+    assert!(matches!(&inner0_elements[0], HirExpr::Int(1)));
+    assert!(matches!(&inner0_elements[1], HirExpr::Int(2)));
+    let HirExpr::ArrayLiteral {
+        elements: inner1_elements,
+        ..
+    } = inner1
+    else {
+        panic!("expected nested ArrayLiteral, got {inner1:?}");
+    };
+    assert_eq!(inner1_elements.len(), 1);
+    assert!(matches!(&inner1_elements[0], HirExpr::Int(3)));
+}
+
+#[test]
+fn body_walker_array_expression_elision_becomes_undefined() {
+    let f = sole_function("function f(): unknown[] { return [1, , 3]; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert_eq!(
+        elements.len(),
+        3,
+        "[1, , 3] has 3 elements (elision counted)"
+    );
+    assert!(matches!(&elements[0], HirExpr::Int(1)));
+    assert!(
+        matches!(&elements[1], HirExpr::Undefined),
+        "elision becomes Undefined per JS spec, got: {:?}",
+        elements[1]
+    );
+    assert!(matches!(&elements[2], HirExpr::Int(3)));
+}
+
+#[test]
+fn body_walker_array_expression_spread_walks_inner_but_warns() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(a: i64[]): i64[] { return [...a, 1]; }",
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "spread array element must not error, got: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("spread")),
+        "spread should report unwalked warning, got: {:?}",
+        output.diagnostics
+    );
+    let f = match &output.program.declarations[0] {
+        ts_aot_ir_hir::HirDecl::Function(f) => f.clone(),
+        other => panic!("expected Function, got {other:?}"),
+    };
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ArrayLiteral { elements, .. } = expr else {
+        panic!("expected ArrayLiteral, got {expr:?}");
+    };
+    assert_eq!(elements.len(), 2, "[...a, 1] has 2 elements");
+    assert!(
+        matches!(&elements[0], HirExpr::Local { .. }),
+        "spread inner is walked as local ref to `a` (PR 7.7 will do concat), got: {:?}",
+        elements[0]
+    );
+    assert!(matches!(&elements[1], HirExpr::Int(1)));
 }
