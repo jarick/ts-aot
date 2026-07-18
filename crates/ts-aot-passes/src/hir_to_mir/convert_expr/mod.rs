@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
@@ -492,17 +492,29 @@ impl ExprConverter {
                     ty: *ty,
                 }
             }
-            HirExpr::Template { parts, ty, .. } => {
-                let mut args: Vec<MirExpr> = Vec::with_capacity(parts.len());
-                for p in parts {
-                    args.push(self.convert_expr(
-                        p,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    ));
+            HirExpr::Template {
+                expressions,
+                cooked_parts,
+                ty,
+                ..
+            } => {
+                let mut args: Vec<MirExpr> = Vec::with_capacity(expressions.len() * 2 + 1);
+                for (i, cooked_opt) in cooked_parts.iter().enumerate() {
+                    let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
+                    args.push(MirExpr::String {
+                        id: Atom::from(cooked_text),
+                        ty: *ty,
+                    });
+                    if let Some(e) = expressions.get(i) {
+                        args.push(self.convert_expr(
+                            e,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        ));
+                    }
                 }
                 let dest = self.fresh_local();
                 self.push_temp_local(dest, *ty);

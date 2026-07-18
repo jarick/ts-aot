@@ -216,7 +216,9 @@ fn recurse_subexprs(
             );
         }
         HirExpr::Yield { expr: None, .. } => {}
-        HirExpr::Template { tag, parts, .. } => {
+        HirExpr::Template {
+            tag, expressions, ..
+        } => {
             if let Some(t) = tag.as_mut() {
                 rewrite_expr(
                     t.as_mut(),
@@ -226,7 +228,7 @@ fn recurse_subexprs(
                     stats,
                 );
             }
-            for p in parts {
+            for p in expressions {
                 rewrite_expr(
                     p,
                     promise_sym,

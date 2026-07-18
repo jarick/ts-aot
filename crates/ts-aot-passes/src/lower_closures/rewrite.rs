@@ -166,11 +166,13 @@ pub(super) fn rewrite_in_expr(
             rewrite_in_expr(e, closure_names, ctx);
         }
         HirExpr::Yield { expr: Some(e), .. } => rewrite_in_expr(e, closure_names, ctx),
-        HirExpr::Template { tag, parts, .. } => {
+        HirExpr::Template {
+            tag, expressions, ..
+        } => {
             if let Some(t) = tag {
                 rewrite_in_expr(t, closure_names, ctx);
             }
-            for p in parts {
+            for p in expressions {
                 rewrite_in_expr(p, closure_names, ctx);
             }
         }

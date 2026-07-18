@@ -278,11 +278,13 @@ fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCall
             expr: Some(expr), ..
         } => visit_expr_callees(expr, on_callee),
         HirExpr::Yield { expr: None, .. } => {}
-        HirExpr::Template { tag, parts, .. } => {
+        HirExpr::Template {
+            tag, expressions, ..
+        } => {
             if let Some(t) = tag.as_mut() {
                 visit_expr_callees(t, on_callee);
             }
-            for p in parts {
+            for p in expressions {
                 visit_expr_callees(p, on_callee);
             }
         }
