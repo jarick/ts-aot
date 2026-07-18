@@ -1,8 +1,8 @@
 use oxc_ast::ast::{
     Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression, Expression,
-    LogicalExpression, SimpleAssignmentTarget, UnaryExpression, UpdateExpression,
-    match_assignment_target, match_assignment_target_pattern, match_expression,
-    match_member_expression,
+    LogicalExpression, SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral,
+    UnaryExpression, UpdateExpression, match_assignment_target, match_assignment_target_pattern,
+    match_expression, match_member_expression,
 };
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
@@ -52,6 +52,10 @@ impl SkeletonBuilder<'_, '_> {
                     ty,
                 }
             }
+            Expression::TemplateLiteral(t) => self.walk_template_literal(t, scope),
+            Expression::TaggedTemplateExpression(t) => {
+                self.walk_tagged_template_expression(t, scope)
+            }
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -59,6 +63,58 @@ impl SkeletonBuilder<'_, '_> {
                 );
                 HirExpr::Unit
             }
+        }
+    }
+
+    fn walk_template_parts(
+        &mut self,
+        quasis: &[oxc_ast::ast::TemplateElement<'_>],
+        expressions: &[Expression<'_>],
+        scope: &mut BodyScope,
+    ) -> (Vec<HirExpr>, Vec<Option<Atom>>, Vec<Option<Atom>>) {
+        let mut exprs = Vec::with_capacity(expressions.len());
+        let mut cooked_parts = Vec::with_capacity(quasis.len());
+        let mut raw_parts = Vec::with_capacity(quasis.len());
+        for (i, q) in quasis.iter().enumerate() {
+            let cooked = q.value.cooked.as_ref().map(|s| Atom::from(s.as_str()));
+            let raw = Some(Atom::from(q.value.raw.as_str()));
+            cooked_parts.push(cooked);
+            raw_parts.push(raw);
+            if i < expressions.len() {
+                exprs.push(self.walk_expr(&expressions[i], scope));
+            }
+        }
+        (exprs, cooked_parts, raw_parts)
+    }
+
+    fn walk_template_literal(&mut self, t: &TemplateLiteral<'_>, scope: &mut BodyScope) -> HirExpr {
+        let (expressions, cooked_parts, raw_parts) =
+            self.walk_template_parts(&t.quasis, &t.expressions, scope);
+        let ty = self.error_ty();
+        HirExpr::Template {
+            tag: None,
+            expressions,
+            cooked_parts,
+            raw_parts,
+            ty,
+        }
+    }
+
+    fn walk_tagged_template_expression(
+        &mut self,
+        t: &TaggedTemplateExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let tag = self.walk_expr(&t.tag, scope);
+        let (expressions, cooked_parts, raw_parts) =
+            self.walk_template_parts(&t.quasi.quasis, &t.quasi.expressions, scope);
+        let ty = self.error_ty();
+        HirExpr::Template {
+            tag: Some(Box::new(tag)),
+            expressions,
+            cooked_parts,
+            raw_parts,
+            ty,
         }
     }
 

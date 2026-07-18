@@ -1555,3 +1555,194 @@ fn class_constructor_with_no_args_receives_only_synthetic_this() {
     );
     assert_eq!(ctor.params[0].name, Atom::from("this"));
 }
+
+#[test]
+fn body_walker_template_literal_no_substitution_produces_string() {
+    let f = sole_function("function f(): string { return `hello`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        tag,
+        expressions,
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert!(
+        tag.is_none(),
+        "no-substitution template must have tag = None"
+    );
+    assert!(
+        expressions.is_empty(),
+        "no expressions, got: {expressions:?}"
+    );
+    assert_eq!(
+        cooked_parts.len(),
+        1,
+        "1 quasi → 1 cooked entry, got: {cooked_parts:?}"
+    );
+    assert_eq!(
+        raw_parts.len(),
+        1,
+        "1 quasi → 1 raw entry, got: {raw_parts:?}"
+    );
+    assert_eq!(
+        cooked_parts[0].as_ref().map(Atom::as_str),
+        Some("hello"),
+        "single quasi cooked must be `hello`"
+    );
+    assert_eq!(
+        raw_parts[0].as_ref().map(Atom::as_str),
+        Some("hello"),
+        "single quasi raw must be `hello`"
+    );
+}
+
+#[test]
+fn body_walker_template_literal_with_interpolation_interleaves_strings_and_exprs() {
+    let f = sole_function("function f(name: string): string { return `hi ${name}!`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        tag,
+        expressions,
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert!(tag.is_none(), "plain template literal must have tag = None");
+    assert_eq!(expressions.len(), 1, "1 interpolation → 1 expression");
+    assert_eq!(cooked_parts.len(), 2, "2 quasis → 2 cooked entries");
+    assert_eq!(raw_parts.len(), 2, "2 quasis → 2 raw entries");
+    assert!(
+        matches!(&expressions[0], HirExpr::Local { .. }),
+        "expression must be walked Local reference to `name` param, got: {:?}",
+        expressions[0]
+    );
+    assert_eq!(cooked_parts[0].as_ref().map(Atom::as_str), Some("hi "));
+    assert_eq!(cooked_parts[1].as_ref().map(Atom::as_str), Some("!"));
+    assert_eq!(raw_parts[0].as_ref().map(Atom::as_str), Some("hi "));
+    assert_eq!(raw_parts[1].as_ref().map(Atom::as_str), Some("!"));
+}
+
+#[test]
+fn body_walker_template_literal_multiple_interpolations() {
+    let f = sole_function("function f(a: string, b: i64): string { return `${a}-${b}-end`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        expressions,
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert_eq!(expressions.len(), 2, "2 interpolations → 2 expressions");
+    assert_eq!(cooked_parts.len(), 3, "3 quasis → 3 cooked entries");
+    assert_eq!(raw_parts.len(), 3, "3 quasis → 3 raw entries");
+    assert!(matches!(&expressions[0], HirExpr::Local { .. }));
+    assert!(matches!(&expressions[1], HirExpr::Local { .. }));
+    assert_eq!(cooked_parts[0].as_ref().map(Atom::as_str), Some(""));
+    assert_eq!(cooked_parts[1].as_ref().map(Atom::as_str), Some("-"));
+    assert_eq!(cooked_parts[2].as_ref().map(Atom::as_str), Some("-end"));
+    assert_eq!(raw_parts[0].as_ref().map(Atom::as_str), Some(""));
+    assert_eq!(raw_parts[1].as_ref().map(Atom::as_str), Some("-"));
+    assert_eq!(raw_parts[2].as_ref().map(Atom::as_str), Some("-end"));
+}
+
+#[test]
+fn body_walker_template_literal_raw_preserves_escape_sequences_verbatim() {
+    let f = sole_function(r"function f(): string { return `a\nb`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert_eq!(cooked_parts.len(), 1);
+    assert_eq!(raw_parts.len(), 1);
+    assert_eq!(
+        cooked_parts[0].as_ref().map(Atom::as_str),
+        Some("a\nb"),
+        "cooked resolves \\n to a real newline"
+    );
+    assert_eq!(
+        raw_parts[0].as_ref().map(Atom::as_str),
+        Some(r"a\nb"),
+        "raw keeps the literal backslash + n"
+    );
+}
+
+#[test]
+fn body_walker_tagged_template_has_some_tag() {
+    let f = sole_function("function f(name: string): string { return String.raw`hi ${name}`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        tag,
+        expressions,
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert!(
+        tag.is_some(),
+        "tagged template must have Some(tag), got None"
+    );
+    assert_eq!(expressions.len(), 1, "1 interpolation → 1 expression");
+    assert_eq!(cooked_parts.len(), 2, "2 quasis → 2 cooked entries");
+    assert_eq!(raw_parts.len(), 2, "2 quasis → 2 raw entries");
+    assert!(matches!(&expressions[0], HirExpr::Local { .. }));
+    assert_eq!(cooked_parts[0].as_ref().map(Atom::as_str), Some("hi "));
+    assert_eq!(cooked_parts[1].as_ref().map(Atom::as_str), Some(""));
+    assert_eq!(raw_parts[0].as_ref().map(Atom::as_str), Some("hi "));
+    assert_eq!(raw_parts[1].as_ref().map(Atom::as_str), Some(""));
+}
+
+#[test]
+fn body_walker_tagged_template_invalid_escape_keeps_raw_but_drops_cooked() {
+    let f = sole_function(r"function f(): string { return String.raw`\u{FFFFFFFF}`; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Template {
+        cooked_parts,
+        raw_parts,
+        ..
+    } = expr
+    else {
+        panic!("expected Template, got {expr:?}");
+    };
+    assert_eq!(cooked_parts.len(), 1);
+    assert_eq!(raw_parts.len(), 1);
+    assert_eq!(
+        cooked_parts[0], None,
+        "out-of-range \\u{{FFFFFFFF}} → cooked is None (explicit invalid marker), got: {:?}",
+        cooked_parts[0]
+    );
+    assert_eq!(
+        raw_parts[0].as_ref().map(Atom::as_str),
+        Some(r"\u{FFFFFFFF}"),
+        "raw keeps the literal escape even when cooked is invalid"
+    );
+}

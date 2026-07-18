@@ -301,7 +301,13 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::Template { tag, parts, ty } => {
+        HirExpr::Template {
+            tag,
+            expressions,
+            cooked_parts,
+            raw_parts,
+            ty,
+        } => {
             match tag {
                 Some(t) => {
                     d.write("template(tag=");
@@ -310,11 +316,38 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
                 }
                 None => d.write("template["),
             }
-            for (i, p) in parts.iter().enumerate() {
+            for (i, e) in expressions.iter().enumerate() {
                 if i > 0 {
                     d.write(", ");
                 }
-                dump_expr_inline(p, d);
+                if let Some(c) = cooked_parts.get(i) {
+                    match c {
+                        Some(s) => d.write(&format!("cooked({:?})", s.as_str())),
+                        None => d.write("cooked(None)"),
+                    }
+                }
+                if let Some(r) = raw_parts.get(i) {
+                    match r {
+                        Some(s) => d.write(&format!(",raw({:?})", s.as_str())),
+                        None => d.write(",raw(None)"),
+                    }
+                }
+                d.write(",");
+                dump_expr_inline(e, d);
+            }
+            let last_idx = expressions.len();
+            if let Some(c) = cooked_parts.get(last_idx) {
+                d.write(",");
+                match c {
+                    Some(s) => d.write(&format!("cooked({:?})", s.as_str())),
+                    None => d.write("cooked(None)"),
+                }
+            }
+            if let Some(r) = raw_parts.get(last_idx) {
+                match r {
+                    Some(s) => d.write(&format!(",raw({:?})", s.as_str())),
+                    None => d.write(",raw(None)"),
+                }
             }
             d.write(&format!("]:{}", ty.raw()));
         }
@@ -951,7 +984,9 @@ mod tests {
         dump_expr_inline(
             &HirExpr::Template {
                 tag: None,
-                parts: vec![HirExpr::Int(1)],
+                expressions: vec![HirExpr::Int(1)],
+                cooked_parts: vec![None, None],
+                raw_parts: vec![None, None],
                 ty: TypeId::from_raw(0),
             },
             &mut d,
@@ -969,7 +1004,9 @@ mod tests {
                     name: Atom::new_inline("tag"),
                     ty: TypeId::from_raw(0),
                 })),
-                parts: vec![HirExpr::Int(1)],
+                expressions: vec![HirExpr::Int(1)],
+                cooked_parts: vec![None, None],
+                raw_parts: vec![None, None],
                 ty: TypeId::from_raw(0),
             },
             &mut d,

@@ -598,7 +598,9 @@ fn convert_expr_template_returns_local_to_dest() {
     let mut cx = ctx();
     let expr = HirExpr::Template {
         tag: None,
-        parts: vec![int_lit(1), int_lit(2)],
+        expressions: vec![int_lit(1)],
+        cooked_parts: vec![None, None],
+        raw_parts: vec![None, None],
         ty: unit_ty(),
     };
     let mir = c.convert_expr(
@@ -783,7 +785,9 @@ fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
     };
     let value = HirExpr::Template {
         tag: None,
-        parts: vec![int_lit(7)],
+        expressions: vec![],
+        cooked_parts: vec![None],
+        raw_parts: vec![None],
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -1423,7 +1427,9 @@ fn convert_block_while_template_cond_runs_template_each_iteration() {
     let mut cx = ctx();
     let cond = HirExpr::Template {
         tag: None,
-        parts: vec![int_lit(1), int_lit(2)],
+        expressions: vec![int_lit(1)],
+        cooked_parts: vec![None, None],
+        raw_parts: vec![None, None],
         ty: unit_ty(),
     };
     let block = HirBlock(vec![HirStmt::While {
@@ -1495,7 +1501,9 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
     let mut cx = ctx();
     let cond = HirExpr::Template {
         tag: None,
-        parts: vec![int_lit(1)],
+        expressions: vec![],
+        cooked_parts: vec![None],
+        raw_parts: vec![None],
         ty: unit_ty(),
     };
     let block = HirBlock(vec![HirStmt::While {
@@ -1644,7 +1652,9 @@ fn convert_block_dowhile_template_cond_runs_each_iteration() {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
         cond: HirExpr::Template {
             tag: None,
-            parts: vec![int_lit(1), int_lit(2)],
+            expressions: vec![int_lit(1)],
+            cooked_parts: vec![None, None],
+            raw_parts: vec![None, None],
             ty: unit_ty(),
         },
     }]);
@@ -1693,7 +1703,9 @@ fn convert_block_while_template_cond_runtime_runs_before_loop() {
     let block = HirBlock(vec![HirStmt::While {
         cond: HirExpr::Template {
             tag: None,
-            parts: vec![int_lit(1)],
+            expressions: vec![],
+            cooked_parts: vec![None],
+            raw_parts: vec![None],
             ty: unit_ty(),
         },
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
@@ -3561,7 +3573,9 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
     };
     let value_expr = HirExpr::Template {
         tag: None,
-        parts: vec![int_lit(1)],
+        expressions: vec![],
+        cooked_parts: vec![None],
+        raw_parts: vec![None],
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {
@@ -5190,7 +5204,9 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
     };
     let rhs_template = HirExpr::Template {
         tag: None,
-        parts: vec![f_call],
+        expressions: vec![f_call],
+        cooked_parts: vec![None, None],
+        raw_parts: vec![None, None],
         ty: unit_ty(),
     };
     let expr = HirExpr::CompoundUpdate {

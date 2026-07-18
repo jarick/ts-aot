@@ -105,14 +105,22 @@ pub fn substitute_expr(
                 .map(|e| Box::new(substitute_expr(e, mapping, types, result))),
             ty: substitute_type(*ty, mapping, types, result),
         },
-        HirExpr::Template { tag, parts, ty } => HirExpr::Template {
+        HirExpr::Template {
+            tag,
+            expressions,
+            cooked_parts,
+            raw_parts,
+            ty,
+        } => HirExpr::Template {
             tag: tag
                 .as_ref()
                 .map(|t| Box::new(substitute_expr(t, mapping, types, result))),
-            parts: parts
+            expressions: expressions
                 .iter()
                 .map(|p| substitute_expr(p, mapping, types, result))
                 .collect(),
+            cooked_parts: cooked_parts.clone(),
+            raw_parts: raw_parts.clone(),
             ty: substitute_type(*ty, mapping, types, result),
         },
         HirExpr::New { callee, args, ty } => HirExpr::New {

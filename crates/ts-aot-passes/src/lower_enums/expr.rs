@@ -70,11 +70,13 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
                 rewrite_expr(e, map);
             }
         }
-        HirExpr::Template { tag, parts, .. } => {
+        HirExpr::Template {
+            tag, expressions, ..
+        } => {
             if let Some(t) = tag.as_mut() {
                 rewrite_expr(t, map);
             }
-            for p in parts {
+            for p in expressions {
                 rewrite_expr(p, map);
             }
         }

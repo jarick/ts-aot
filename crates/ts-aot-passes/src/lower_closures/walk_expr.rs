@@ -201,7 +201,9 @@ pub(super) fn walk_expr(
             stats,
             ctx,
         ),
-        HirExpr::Template { tag, parts, .. } => {
+        HirExpr::Template {
+            tag, expressions, ..
+        } => {
             if let Some(t) = tag {
                 walk_expr(
                     t,
@@ -214,7 +216,7 @@ pub(super) fn walk_expr(
                     ctx,
                 );
             }
-            for p in parts {
+            for p in expressions {
                 walk_expr(
                     p,
                     next_id,

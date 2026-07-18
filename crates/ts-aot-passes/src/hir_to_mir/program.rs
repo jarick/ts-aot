@@ -328,7 +328,7 @@ fn body_can_throw(body: &[HirStmt]) -> bool {
             HirExpr::Field { owner, .. } => expr_can_throw(owner),
             HirExpr::Binary { lhs, rhs, .. } => expr_can_throw(lhs) || expr_can_throw(rhs),
             HirExpr::Unary { expr, .. } => expr_can_throw(expr),
-            HirExpr::Template { parts, .. } => parts.iter().any(expr_can_throw),
+            HirExpr::Template { expressions, .. } => expressions.iter().any(expr_can_throw),
             HirExpr::ArrayLiteral { elements, .. } => elements.iter().any(expr_can_throw),
             HirExpr::TypeAssertion { expr, .. } => expr_can_throw(expr),
             HirExpr::OptionalChain { base, .. } => expr_can_throw(base),

@@ -118,7 +118,9 @@ pub enum HirExpr {
     },
     Template {
         tag: Option<Box<HirExpr>>,
-        parts: Vec<HirExpr>,
+        expressions: Vec<HirExpr>,
+        cooked_parts: Vec<Option<Atom>>,
+        raw_parts: Vec<Option<Atom>>,
         ty: TypeId,
     },
     New {
