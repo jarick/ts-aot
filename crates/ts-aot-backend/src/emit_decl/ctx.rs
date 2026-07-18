@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use proc_macro2::{Ident, TokenStream};
@@ -81,6 +82,10 @@ pub(super) struct BodyCtx {
     locals: HashMap<LocalId, Ident>,
     locals_ty: HashMap<LocalId, TypeId>,
     self_param: Option<LocalId>,
+    in_try: Cell<bool>,
+    continue_label: RefCell<Option<Ident>>,
+    try_label: RefCell<Option<Ident>>,
+    pending_return: RefCell<Option<TokenStream>>,
 }
 
 impl BodyCtx {
@@ -105,6 +110,10 @@ impl BodyCtx {
             locals,
             locals_ty,
             self_param,
+            in_try: Cell::new(false),
+            continue_label: RefCell::new(None),
+            try_label: RefCell::new(None),
+            pending_return: RefCell::new(None),
         }
     }
 
@@ -126,5 +135,37 @@ impl BodyCtx {
 
     pub(super) fn local_ty(&self, id: LocalId) -> Option<TypeId> {
         self.locals_ty.get(&id).copied()
+    }
+
+    pub(super) fn set_in_try(&self, value: bool) {
+        self.in_try.set(value);
+    }
+
+    pub(super) fn in_try(&self) -> bool {
+        self.in_try.get()
+    }
+
+    pub(super) fn set_continue_label(&self, label: Option<Ident>) {
+        *self.continue_label.borrow_mut() = label;
+    }
+
+    pub(super) fn continue_label(&self) -> Option<Ident> {
+        self.continue_label.borrow().clone()
+    }
+
+    pub(super) fn set_try_label(&self, label: Option<Ident>) {
+        *self.try_label.borrow_mut() = label;
+    }
+
+    pub(super) fn try_label(&self) -> Option<Ident> {
+        self.try_label.borrow().clone()
+    }
+
+    pub(super) fn set_pending_return(&self, expr: Option<TokenStream>) {
+        *self.pending_return.borrow_mut() = expr;
+    }
+
+    pub(super) fn take_pending_return(&self) -> Option<TokenStream> {
+        self.pending_return.borrow_mut().take()
     }
 }

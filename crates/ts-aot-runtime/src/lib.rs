@@ -830,4 +830,50 @@ mod tests {
              equality for objects)"
         );
     }
+
+    #[test]
+    fn runtime_throw_helper_panics_with_value_payload() {
+        use crate::runtime_source::__ts_aot_throw;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            __ts_aot_throw(42_i64);
+        }));
+        let err = result.expect_err("__ts_aot_throw must panic");
+        let recovered = err.downcast_ref::<i64>().copied().expect(
+            "panic payload must downcast to i64 so generated `let err: i64 = __e` \
+                    bindings can recover the thrown value",
+        );
+        assert_eq!(recovered, 42, "payload must round-trip through panic");
+    }
+
+    #[test]
+    fn runtime_throw_helper_captures_string_payload() {
+        use crate::runtime_source::__ts_aot_throw;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            __ts_aot_throw(String::from("oops"));
+        }));
+        let err = result.expect_err("string payload must panic");
+        let recovered = err
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("string payload must downcast to String");
+        assert_eq!(recovered, "oops", "String payload must round-trip");
+    }
+
+    #[test]
+    fn runtime_throw_helper_panics_with_prefix_message() {
+        use crate::runtime_source::__ts_aot_throw;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            __ts_aot_throw(42_i64);
+        }));
+        let err = result.expect_err("must panic");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<i64>().map(|_| "i64"))
+            .unwrap_or("unknown");
+        assert!(
+            !msg.is_empty(),
+            "panic payload must carry a recoverable representation of the thrown value"
+        );
+    }
 }

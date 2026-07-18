@@ -1,10 +1,10 @@
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::TypeId;
+use ts_aot_core::{LocalId, TypeId};
 
 use ts_aot_ir_mir::{
-    BinaryOp, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt, RuntimeOp,
-    UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt,
+    RuntimeOp, UnaryOp,
 };
 
 use super::ctx::{BodyCtx, EmitCtx};
@@ -35,6 +35,87 @@ fn emit_block_stmts(
         .iter()
         .map(|stmt| emit_stmt(stmt, ctx, body_ctx))
         .collect()
+}
+
+fn emit_if_stmt(
+    cond: &MirExpr,
+    then_block: &MirBlock,
+    else_block: Option<&MirBlock>,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let cond = emit_expr(cond, ctx, body_ctx)?;
+    let then_stmts = emit_block_stmts(then_block, ctx, body_ctx)?;
+    if let Some(else_block) = else_block {
+        let else_stmts = emit_block_stmts(else_block, ctx, body_ctx)?;
+        Ok(quote!(if #cond { #(#then_stmts)* } else { #(#else_stmts)* }))
+    } else {
+        Ok(quote!(if #cond { #(#then_stmts)* }))
+    }
+}
+
+fn emit_runtime_stmt(
+    op: RuntimeOp,
+    args: &[MirExpr],
+    dest: Option<LocalId>,
+    ty: TypeId,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let call = emit_runtime_call(op, args, ctx, body_ctx)?;
+    if matches!(op, RuntimeOp::OpObjectSet | RuntimeOp::OpObjectDelete) {
+        let _ = dest;
+        return Ok(quote!(#call;));
+    }
+    if let Some(dest) = dest {
+        let dest = body_ctx.local_ident(dest);
+        let ty = emit_type_id_with_ctx(ty, ctx);
+        let mutability = if matches!(op, RuntimeOp::OpObjectUnwrap) {
+            quote!(mut)
+        } else {
+            quote!()
+        };
+        Ok(quote!(let #mutability #dest: #ty = #call;))
+    } else {
+        Ok(quote!(#call;))
+    }
+}
+
+fn emit_return_stmt(
+    slot: Option<&MirExpr>,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    if let Some(label) = body_ctx.try_label() {
+        if let Some(expr) = slot {
+            let expr = emit_expr(expr, ctx, body_ctx)?;
+            body_ctx.set_pending_return(Some(quote!(#expr)));
+        } else {
+            body_ctx.set_pending_return(Some(quote!(())));
+        }
+        Ok(quote!(break #label;))
+    } else if let Some(expr) = slot {
+        let expr = emit_expr(expr, ctx, body_ctx)?;
+        Ok(quote!(return #expr;))
+    } else {
+        Ok(quote!(return;))
+    }
+}
+
+fn emit_do_while(
+    body: &MirBlock,
+    cond: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let label = format_ident!("__do_while_{}", body.stmts.len());
+    let prev_label = body_ctx.continue_label();
+    body_ctx.set_continue_label(Some(label.clone()));
+    let body_stmts = emit_block_stmts(body, ctx, body_ctx);
+    body_ctx.set_continue_label(prev_label);
+    let body_stmts = body_stmts?;
+    let cond = emit_expr(cond, ctx, body_ctx)?;
+    Ok(quote!(#label: loop { #(#body_stmts)* if !(#cond) { break #label; } }))
 }
 
 fn emit_stmt(
@@ -71,29 +152,20 @@ fn emit_stmt(
             let expr = emit_expr(expr, ctx, body_ctx)?;
             Ok(quote!(#expr;))
         }
-        MirStmt::Return(None) => Ok(quote!(return;)),
-        MirStmt::Return(Some(expr)) => {
-            let expr = emit_expr(expr, ctx, body_ctx)?;
-            Ok(quote!(return #expr;))
-        }
+        MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, body_ctx),
         MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
             let error = emit_expr(error, ctx, body_ctx)?;
-            Ok(quote!(return Err(#error);))
+            if body_ctx.in_try() {
+                Ok(quote!(__ts_aot_throw(#error);))
+            } else {
+                Ok(quote!(return Err(#error);))
+            }
         }
         MirStmt::If {
             cond,
             then_block,
             else_block,
-        } => {
-            let cond = emit_expr(cond, ctx, body_ctx)?;
-            let then_stmts = emit_block_stmts(then_block, ctx, body_ctx)?;
-            if let Some(else_block) = else_block {
-                let else_stmts = emit_block_stmts(else_block, ctx, body_ctx)?;
-                Ok(quote!(if #cond { #(#then_stmts)* } else { #(#else_stmts)* }))
-            } else {
-                Ok(quote!(if #cond { #(#then_stmts)* }))
-            }
-        }
+        } => emit_if_stmt(cond, then_block, else_block.as_ref(), ctx, body_ctx),
         MirStmt::While { cond, body } => {
             let cond = emit_expr(cond, ctx, body_ctx)?;
             let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
@@ -116,27 +188,35 @@ fn emit_stmt(
             Ok(quote!(for #key in #object { #(#body_stmts)* }))
         }
         MirStmt::Break => Ok(quote!(break;)),
-        MirStmt::Continue => Ok(quote!(continue;)),
-        MirStmt::Runtime { op, args, dest, ty } => {
-            let call = emit_runtime_call(*op, args, ctx, body_ctx)?;
-            if matches!(op, RuntimeOp::OpObjectSet | RuntimeOp::OpObjectDelete) {
-                let _ = dest;
-                return Ok(quote!(#call;));
-            }
-            if let Some(dest) = dest {
-                let dest = body_ctx.local_ident(*dest);
-                let ty = emit_type_id_with_ctx(*ty, ctx);
-                let mutability = if matches!(op, RuntimeOp::OpObjectUnwrap) {
-                    quote!(mut)
-                } else {
-                    quote!()
-                };
-                Ok(quote!(let #mutability #dest: #ty = #call;))
+        MirStmt::Continue => {
+            if let Some(label) = body_ctx.continue_label() {
+                Ok(quote!(continue #label;))
             } else {
-                Ok(quote!(#call;))
+                Ok(quote!(continue;))
             }
         }
-        MirStmt::Switch { .. } | MirStmt::Try { .. } => Err(BackendError::NotImplemented),
+        MirStmt::Runtime { op, args, dest, ty } => {
+            emit_runtime_stmt(*op, args, *dest, *ty, ctx, body_ctx)
+        }
+        MirStmt::DoWhile { body, cond } => emit_do_while(body, cond, ctx, body_ctx),
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => emit_switch(disc, cases, default.as_ref(), ctx, body_ctx),
+        MirStmt::Try {
+            body,
+            catch_param,
+            catch,
+            finally,
+        } => emit_try(
+            body,
+            *catch_param,
+            catch.as_ref(),
+            finally.as_ref(),
+            ctx,
+            body_ctx,
+        ),
     }
 }
 
@@ -557,6 +637,163 @@ fn extract_string_arg(expr: &MirExpr) -> Result<TokenStream, BackendError> {
     };
     let literal = Literal::string(id.as_str());
     Ok(quote!(#literal))
+}
+
+fn emit_switch(
+    disc: &MirExpr,
+    cases: &[ts_aot_ir_mir::SwitchCase],
+    default: Option<&MirBlock>,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let disc_expr = emit_expr(disc, ctx, body_ctx)?;
+    let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
+    for case in cases {
+        let pat = match &case.value {
+            ConstValue::Int(v) => {
+                let lit = Literal::i128_unsuffixed(*v);
+                quote!(#lit)
+            }
+            ConstValue::String(s) => {
+                let lit = Literal::string(s.as_str());
+                quote!(#lit)
+            }
+        };
+        let body_stmts = emit_block_stmts(&case.body, ctx, body_ctx)?;
+        arms.push(quote!(#pat => { #(#body_stmts)* }));
+    }
+    if let Some(def) = default {
+        let body_stmts = emit_block_stmts(def, ctx, body_ctx)?;
+        arms.push(quote!(_ => { #(#body_stmts)* }));
+    } else {
+        arms.push(quote!(_ => {}));
+    }
+    Ok(quote!(match #disc_expr { #(#arms),* }))
+}
+
+#[allow(clippy::too_many_lines)]
+fn emit_try(
+    body: &MirBlock,
+    catch_param: Option<LocalId>,
+    catch: Option<&MirBlock>,
+    finally: Option<&MirBlock>,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let label = format_ident!("__try_{}", body.stmts.len());
+    let prev_in_try = body_ctx.in_try();
+    let prev_try_label = body_ctx.try_label();
+    let prev_pending_return = body_ctx.take_pending_return();
+    body_ctx.set_in_try(true);
+    body_ctx.set_try_label(Some(label.clone()));
+    let body_stmts = emit_block_stmts(body, ctx, body_ctx);
+    body_ctx.set_try_label(prev_try_label);
+    let body_stmts = body_stmts?;
+
+    let catch_stmts = if let Some(catch_block) = catch {
+        let prev = body_ctx.try_label();
+        body_ctx.set_try_label(Some(label.clone()));
+        let stmts = emit_block_stmts(catch_block, ctx, body_ctx);
+        body_ctx.set_try_label(prev);
+        Some(stmts?)
+    } else {
+        None
+    };
+
+    body_ctx.set_in_try(false);
+    body_ctx.set_try_label(None);
+    let finally_stmts = if let Some(fin) = finally {
+        Some(emit_block_stmts(fin, ctx, body_ctx)?)
+    } else {
+        None
+    };
+    body_ctx.set_in_try(prev_in_try);
+    let pending_return_after_try = body_ctx.take_pending_return();
+    body_ctx.set_pending_return(prev_pending_return);
+
+    let catch_unwind = format_ident!("catch_unwind");
+    let assert_unwind_safe = format_ident!("AssertUnwindSafe");
+    let resume_unwind = format_ident!("resume_unwind");
+
+    let replay_return = if let Some(return_expr) = &pending_return_after_try {
+        quote! {
+            return #return_expr;
+        }
+    } else {
+        quote! {}
+    };
+
+    let body_arm = if catch.is_some() {
+        let catch_stmts = catch_stmts.expect("catch block present");
+        if let Some(param) = catch_param {
+            let param_ident = body_ctx.local_ident(param);
+            let param_ty = body_ctx
+                .local_ty(param)
+                .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, ctx));
+            quote! {
+                if let Err(__e) = __try_result {
+                    let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
+                        Ok(v) => *v,
+                        Err(__e) => std::panic::#resume_unwind(__e),
+                    };
+                    let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                        #(#catch_stmts)*
+                    }));
+                    if let Err(__e2) = __catch_result {
+                        __pending_throw = Some(__e2);
+                    }
+                }
+            }
+        } else {
+            quote! {
+                if let Err(__e) = __try_result {
+                    let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                        #(#catch_stmts)*
+                    }));
+                    if let Err(__e2) = __catch_result {
+                        __pending_throw = Some(__e2);
+                    }
+                }
+            }
+        }
+    } else if finally_stmts.is_some() {
+        quote! {
+            if let Err(__e) = __try_result {
+                let __e = if let Ok(__sentinel) = __e.downcast::<TsAotThrowSentinel>() {
+                    __sentinel
+                } else {
+                    std::panic::#resume_unwind(__e)
+                };
+                __pending_throw = Some(__e);
+            }
+        }
+    } else {
+        quote! {
+            let _ = __try_result;
+        }
+    };
+
+    let finally_block = if let Some(finally_stmts) = finally_stmts {
+        quote! { #(#finally_stmts)* }
+    } else {
+        quote! {}
+    };
+
+    Ok(quote! {{
+        let mut __pending_throw: Option<Box<dyn std::any::Any + Send>> = None;
+        #label: loop {
+            let __try_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                #(#body_stmts)*
+            }));
+            #body_arm
+            break #label;
+        }
+        #finally_block
+        if let Some(__e) = __pending_throw {
+            std::panic::#resume_unwind(__e);
+        }
+        #replay_return
+    }})
 }
 
 fn runtime_op_ident(op: RuntimeOp) -> Ident {
