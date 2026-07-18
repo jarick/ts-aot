@@ -45,13 +45,19 @@ impl RuntimeRequirements {
             RuntimeOp::MathSqrt => {
                 self.needs_math = true;
             }
-            RuntimeOp::OpDelete | RuntimeOp::OpIn | RuntimeOp::OpInstanceof => {
+            RuntimeOp::OpIn | RuntimeOp::OpInstanceof => {
                 self.needs_runtime = true;
             }
             RuntimeOp::OpObjectGet | RuntimeOp::OpObjectSet | RuntimeOp::OpObjectHas => {
                 self.needs_runtime = true;
             }
-            RuntimeOp::OpObjectDelete | RuntimeOp::OpObjectUnwrap | RuntimeOp::OpDynamicBinary => {
+            RuntimeOp::OpObjectDelete
+            | RuntimeOp::OpObjectUnwrap
+            | RuntimeOp::OpObjectProtoGet
+            | RuntimeOp::OpObjectProtoSet
+            | RuntimeOp::OpObjectSetPrototypeOf
+            | RuntimeOp::OpObjectKeys
+            | RuntimeOp::OpDynamicBinary => {
                 self.needs_runtime = true;
             }
             RuntimeOp::TypeOf => unreachable!(

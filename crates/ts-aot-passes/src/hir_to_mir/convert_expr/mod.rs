@@ -66,6 +66,17 @@ impl ExprConverter {
                         ctx,
                     );
                     let dynamic_ty = types.intern(&Type::Dynamic);
+                    if field_name.as_str() == "__proto__" {
+                        let dest = self.fresh_local();
+                        self.push_temp_local(dest, dynamic_ty);
+                        out.push(MirStmt::Runtime {
+                            op: RuntimeOp::OpObjectProtoGet,
+                            args: vec![owner_mir],
+                            dest: Some(dest),
+                            ty: dynamic_ty,
+                        });
+                        return MirExpr::Local(dest);
+                    }
                     let dest = self.fresh_local();
                     self.push_temp_local(dest, dynamic_ty);
                     let field_name_mir = MirExpr::String {
@@ -127,6 +138,66 @@ impl ExprConverter {
                 if callee_id == PLACEHOLDER_FUNCTION
                     && let HirCallee::Indirect(inner) = callee
                 {
+                    if let HirExpr::Field { field_name, .. } = inner.as_ref() {
+                        let expected = match field_name.as_str() {
+                            "getPrototypeOf" | "keys" => Some(1),
+                            "setPrototypeOf" => Some(2),
+                            _ => None,
+                        };
+                        if let Some(exp) = expected
+                            && args.len() != exp
+                        {
+                            ctx.error(
+                                "P0005",
+                                format!(
+                                    "Object.{} requires exactly {} argument{}, got {}",
+                                    field_name.as_str(),
+                                    exp,
+                                    if exp == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                                ts_aot_core::Span::new(0, 0),
+                            );
+                            return MirExpr::Unit;
+                        }
+                    }
+                    let all_args_dynamic = args.iter().all(|a| match a {
+                        HirExpr::Local { ty, .. }
+                        | HirExpr::Global { ty, .. }
+                        | HirExpr::Field { ty, .. }
+                        | HirExpr::Index { ty, .. }
+                        | HirExpr::Call { ty, .. }
+                        | HirExpr::Binary { ty, .. }
+                        | HirExpr::Unary { ty, .. }
+                        | HirExpr::StructLiteral { ty, .. }
+                        | HirExpr::ArrayLiteral { ty, .. }
+                        | HirExpr::Closure { ty, .. }
+                        | HirExpr::Await { ty, .. }
+                        | HirExpr::Yield { ty, .. }
+                        | HirExpr::Template { ty, .. }
+                        | HirExpr::New { ty, .. }
+                        | HirExpr::OptionalChain { ty, .. }
+                        | HirExpr::Assignment { ty, .. }
+                        | HirExpr::CompoundUpdate { ty, .. } => types
+                            .resolve(*ty)
+                            .is_some_and(|t| is_dynamic_type(t, types)),
+                        HirExpr::TypeAssertion { target, .. } => types
+                            .resolve(*target)
+                            .is_some_and(|t| is_dynamic_type(t, types)),
+                        HirExpr::Int(_)
+                        | HirExpr::Float(_)
+                        | HirExpr::String(_)
+                        | HirExpr::Bool(_)
+                        | HirExpr::Null
+                        | HirExpr::Unit
+                        | HirExpr::Undefined => false,
+                    });
+                    if all_args_dynamic
+                        && let Some(result) =
+                            self.try_emit_builtin_object_call(inner.as_ref(), &mir_args, *ty, out)
+                    {
+                        return result;
+                    }
                     let callee_value = self.convert_expr(
                         inner,
                         out,
@@ -333,26 +404,10 @@ impl ExprConverter {
                         types,
                         ctx,
                     );
-                    match expr.as_ref() {
-                        HirExpr::Field { .. } | HirExpr::Index { .. } => {
-                            let dest = self.fresh_local();
-                            let bool_ty = types.intern(&ts_aot_core::Type::Bool);
-                            self.push_temp_local(dest, bool_ty);
-                            out.push(MirStmt::Runtime {
-                                op: RuntimeOp::OpDelete,
-                                args: vec![inner],
-                                dest: Some(dest),
-                                ty: bool_ty,
-                            });
-                            MirExpr::Local(dest)
-                        }
-                        _ => {
-                            if has_potential_side_effects(&inner) {
-                                out.push(MirStmt::Expr(inner));
-                            }
-                            MirExpr::Bool(true)
-                        }
+                    if has_potential_side_effects(&inner) {
+                        out.push(MirStmt::Expr(inner));
                     }
+                    MirExpr::Bool(true)
                 }
                 _ => MirExpr::Unary {
                     op: convert_unaryop(*op, ctx),
@@ -558,6 +613,15 @@ impl ExprConverter {
                         mutable: false,
                     });
                     let dynamic_ty = types.intern(&Type::Dynamic);
+                    if field_name.as_str() == "__proto__" {
+                        out.push(MirStmt::Runtime {
+                            op: RuntimeOp::OpObjectProtoSet,
+                            args: vec![owner_mir, MirExpr::Local(value_temp)],
+                            dest: None,
+                            ty: dynamic_ty,
+                        });
+                        return MirExpr::Local(value_temp);
+                    }
                     out.push(MirStmt::Runtime {
                         op: RuntimeOp::OpObjectSet,
                         args: vec![
@@ -647,17 +711,24 @@ impl ExprConverter {
                         init: Some(owner_mir),
                         mutable: true,
                     });
+                    let is_proto = field_name.as_str() == "__proto__";
                     let old_local = self.fresh_local();
                     self.push_temp_local(old_local, dynamic_ty);
+                    let get_op = if is_proto {
+                        RuntimeOp::OpObjectProtoGet
+                    } else {
+                        RuntimeOp::OpObjectGet
+                    };
+                    let mut get_args = vec![MirExpr::Local(owner_temp)];
+                    if !is_proto {
+                        get_args.push(MirExpr::String {
+                            id: field_name.clone(),
+                            ty: TypeId::from_raw(0),
+                        });
+                    }
                     out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpObjectGet,
-                        args: vec![
-                            MirExpr::Local(owner_temp),
-                            MirExpr::String {
-                                id: field_name.clone(),
-                                ty: TypeId::from_raw(0),
-                            },
-                        ],
+                        op: get_op,
+                        args: get_args,
                         dest: Some(old_local),
                         ty: dynamic_ty,
                     });
@@ -714,16 +785,22 @@ impl ExprConverter {
                         dest: Some(new_local),
                         ty: dynamic_ty,
                     });
+                    let set_op = if is_proto {
+                        RuntimeOp::OpObjectProtoSet
+                    } else {
+                        RuntimeOp::OpObjectSet
+                    };
+                    let mut set_args = vec![MirExpr::Local(owner_temp)];
+                    if !is_proto {
+                        set_args.push(MirExpr::String {
+                            id: field_name.clone(),
+                            ty: TypeId::from_raw(0),
+                        });
+                    }
+                    set_args.push(MirExpr::Local(new_local));
                     out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpObjectSet,
-                        args: vec![
-                            MirExpr::Local(owner_temp),
-                            MirExpr::String {
-                                id: field_name.clone(),
-                                ty: TypeId::from_raw(0),
-                            },
-                            MirExpr::Local(new_local),
-                        ],
+                        op: set_op,
+                        args: set_args,
                         dest: None,
                         ty: dynamic_ty,
                     });
@@ -868,5 +945,44 @@ impl ExprConverter {
             current = Some(*inner);
         }
         mir
+    }
+
+    fn try_emit_builtin_object_call(
+        &mut self,
+        inner: &HirExpr,
+        mir_args: &[MirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+    ) -> Option<MirExpr> {
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner
+        else {
+            return None;
+        };
+        let HirExpr::Global {
+            name: owner_name, ..
+        } = owner.as_ref()
+        else {
+            return None;
+        };
+        if owner_name.as_str() != "Object" {
+            return None;
+        }
+        let op = match field_name.as_str() {
+            "getPrototypeOf" => RuntimeOp::OpObjectProtoGet,
+            "setPrototypeOf" => RuntimeOp::OpObjectSetPrototypeOf,
+            "keys" => RuntimeOp::OpObjectKeys,
+            _ => return None,
+        };
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, ty);
+        out.push(MirStmt::Runtime {
+            op,
+            args: mir_args.to_vec(),
+            dest: Some(dest),
+            ty,
+        });
+        Some(MirExpr::Local(dest))
     }
 }

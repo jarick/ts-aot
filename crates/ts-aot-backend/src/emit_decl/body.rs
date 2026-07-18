@@ -614,6 +614,24 @@ fn emit_runtime_call(
             let field_name = extract_string_arg(&args[1])?;
             Ok(quote!(__ts_aot_dynamic_delete(&mut #obj, #field_name)))
         }
+        RuntimeOp::OpObjectProtoGet => {
+            let obj = emit_expr(&args[0], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_object_proto_get(&#obj)))
+        }
+        RuntimeOp::OpObjectProtoSet => {
+            let obj = emit_expr(&args[0], ctx, body_ctx)?;
+            let proto = emit_expr(&args[1], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_object_proto_set(&#obj, #proto)))
+        }
+        RuntimeOp::OpObjectSetPrototypeOf => {
+            let obj = emit_expr(&args[0], ctx, body_ctx)?;
+            let proto = emit_expr(&args[1], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_object_set_prototype_of(&#obj, #proto)))
+        }
+        RuntimeOp::OpObjectKeys => {
+            let obj = emit_expr(&args[0], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_object_keys(&#obj)))
+        }
         RuntimeOp::OpDynamicBinary => {
             let op_id = match args.first() {
                 Some(MirExpr::Int { value, .. }) => u8::try_from(*value).unwrap_or(0),
@@ -815,7 +833,6 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
         RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
         RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
-        RuntimeOp::OpDelete => format_ident!("__ts_aot_op_delete"),
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
         RuntimeOp::OpObjectGet => format_ident!("__ts_aot_dynamic_get"),
@@ -823,6 +840,10 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::OpObjectHas => format_ident!("__ts_aot_dynamic_has"),
         RuntimeOp::OpObjectDelete => format_ident!("__ts_aot_dynamic_delete"),
         RuntimeOp::OpObjectUnwrap => format_ident!("__ts_aot_dynamic_unwrap"),
+        RuntimeOp::OpObjectProtoGet => format_ident!("__ts_aot_object_proto_get"),
+        RuntimeOp::OpObjectProtoSet => format_ident!("__ts_aot_object_proto_set"),
+        RuntimeOp::OpObjectSetPrototypeOf => format_ident!("__ts_aot_object_set_prototype_of"),
+        RuntimeOp::OpObjectKeys => format_ident!("__ts_aot_object_keys"),
         RuntimeOp::OpDynamicBinary => format_ident!("__ts_aot_dynamic_op"),
     }
 }

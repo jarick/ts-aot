@@ -450,7 +450,6 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is not a MirStmt::Runtime; it's a MirExpr::TypeOf")
         }
-        RuntimeOp::OpDelete => "op_delete",
         RuntimeOp::OpIn => "op_in",
         RuntimeOp::OpInstanceof => "op_instanceof",
         RuntimeOp::OpObjectGet => "object_get",
@@ -458,6 +457,10 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpObjectHas => "object_has",
         RuntimeOp::OpObjectDelete => "object_delete",
         RuntimeOp::OpObjectUnwrap => "object_unwrap",
+        RuntimeOp::OpObjectProtoGet => "object_proto_get",
+        RuntimeOp::OpObjectProtoSet => "object_proto_set",
+        RuntimeOp::OpObjectSetPrototypeOf => "object_set_prototype_of",
+        RuntimeOp::OpObjectKeys => "object_keys",
         RuntimeOp::OpDynamicBinary => "dynamic_binary",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
