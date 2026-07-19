@@ -56,6 +56,7 @@ impl SkeletonBuilder<'_, '_> {
             Expression::TaggedTemplateExpression(t) => {
                 self.walk_tagged_template_expression(t, scope)
             }
+            Expression::ArrayExpression(arr) => self.walk_array_expression(arr, scope),
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -116,6 +117,34 @@ impl SkeletonBuilder<'_, '_> {
             raw_parts,
             ty,
         }
+    }
+
+    fn walk_array_expression(
+        &mut self,
+        arr: &oxc_ast::ast::ArrayExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        use oxc_ast::ast::ArrayExpressionElement;
+        let mut elements = Vec::with_capacity(arr.elements.len());
+        for el in &arr.elements {
+            match el {
+                ArrayExpressionElement::Elision(_) => {
+                    elements.push(HirExpr::Undefined);
+                }
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    self.report_unwalked(
+                        "array spread element is not supported by the body walker (planned for PR 7.7)",
+                        spread.span,
+                    );
+                    elements.push(self.walk_expr(&spread.argument, scope));
+                }
+                el @ match_expression!(ArrayExpressionElement) => {
+                    elements.push(self.walk_expr(el.to_expression(), scope));
+                }
+            }
+        }
+        let ty = self.error_ty();
+        HirExpr::ArrayLiteral { elements, ty }
     }
 
     fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {
