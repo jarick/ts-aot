@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, GenericParamId, LocalId, Severity, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirStmt};
+use ts_aot_ir_hir::{
+    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirStmt, ObjectLiteralField,
+};
 
 use super::*;
 use crate::type_resolver::TypeParamMap;
@@ -1889,4 +1891,211 @@ fn body_walker_array_expression_spread_walks_inner_but_warns() {
         elements[0]
     );
     assert!(matches!(&elements[1], HirExpr::Int(1)));
+}
+
+#[test]
+fn body_walker_object_expression_empty_produces_empty_object() {
+    let f = sole_function("function f(): unknown { return {}; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    assert!(
+        fields.is_empty(),
+        "empty object literal has no fields, got: {fields:?}"
+    );
+}
+
+#[test]
+fn body_walker_object_expression_with_identifier_keys_walks_values() {
+    let f = sole_function("function f(a: i64, b: i64): unknown { return { x: a, y: b }; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    assert_eq!(fields.len(), 2, "{{x:a, y:b}} has 2 properties");
+    let (name0, val0) = match &fields[0] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(name0.as_str(), "x");
+    assert!(
+        matches!(val0, HirExpr::Local { .. }),
+        "value is local ref to `a`, got: {val0:?}"
+    );
+    let (name1, val1) = match &fields[1] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(name1.as_str(), "y");
+    assert!(matches!(val1, HirExpr::Local { .. }));
+}
+
+#[test]
+fn body_walker_object_expression_with_string_key_records_atom_name() {
+    let f = sole_function(r#"function f(): unknown { return { "key": 1 }; }"#);
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    assert_eq!(fields.len(), 1);
+    let (name, value) = match &fields[0] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(
+        name.as_str(),
+        "key",
+        "string-literal key resolves to its text"
+    );
+    assert!(matches!(value, HirExpr::Int(1)));
+}
+
+#[test]
+fn body_walker_object_expression_with_numeric_key_stringifies_to_atom() {
+    let f = sole_function("function f(): unknown { return { 1: 2 }; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    let (name, _) = match &fields[0] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(name.as_str(), "1", "numeric key stringified to Atom");
+}
+
+#[test]
+fn body_walker_object_expression_shorthand_walks_identifier_value() {
+    let f = sole_function("function f(a: i64): unknown { return { a }; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    let (name, value) = match &fields[0] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(name.as_str(), "a");
+    assert!(
+        matches!(value, HirExpr::Local { .. }),
+        "shorthand `a` walks as local ref to `a`, got: {value:?}"
+    );
+}
+
+#[test]
+fn body_walker_object_expression_spread_walks_inner_but_warns() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(o: unknown): unknown { return { ...o, x: 1 }; }",
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "spread object property must not error, got: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("spread")),
+        "spread should report unwalked warning, got: {:?}",
+        output.diagnostics
+    );
+    let f = match &output.program.declarations[0] {
+        HirDecl::Function(f) => f.clone(),
+        other => panic!("expected Function, got {other:?}"),
+    };
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    assert_eq!(fields.len(), 2, "{{...o, x:1}} has 2 fields");
+    assert!(
+        matches!(
+            &fields[0],
+            ObjectLiteralField::Spread(HirExpr::Local { .. })
+        ),
+        "first field is Spread with local ref to `o`, got: {:?}",
+        fields[0]
+    );
+    let (name, value) = match &fields[1] {
+        ObjectLiteralField::Property { name, value } => (name, value),
+        ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
+    };
+    assert_eq!(name.as_str(), "x");
+    assert!(matches!(value, HirExpr::Int(1)));
+}
+
+#[test]
+fn body_walker_object_expression_getter_warns_without_erroring() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): unknown { return { get x() { return 1; } }; }",
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "getter syntax degrades to warning, not error: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("accessor")),
+        "expected accessor warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn body_walker_object_expression_computed_key_walks_key_and_value_for_side_effects() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "let key: i64 = 0; function f(): unknown { return { [++key]: ++key }; }",
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "computed key object literal must not error, got: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("computed property key")),
+        "computed key should report unwalked warning, got: {:?}",
+        output.diagnostics
+    );
+    let f = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name.as_str() == "f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function `f` declaration");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::ObjectLiteral { fields, .. } = expr else {
+        panic!("expected ObjectLiteral, got {expr:?}");
+    };
+    assert!(
+        fields.is_empty(),
+        "unsupported computed key property must be omitted from fields, got: {fields:?}"
+    );
 }

@@ -350,6 +350,7 @@ pub enum RuntimeOp {
     OpObjectHas,
     OpObjectDelete,
     OpObjectUnwrap,
+    OpObjectNew,
     OpObjectProtoGet,
     OpObjectProtoSet,
     OpObjectSetPrototypeOf,

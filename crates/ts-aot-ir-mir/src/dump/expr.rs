@@ -457,6 +457,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpObjectHas => "object_has",
         RuntimeOp::OpObjectDelete => "object_delete",
         RuntimeOp::OpObjectUnwrap => "object_unwrap",
+        RuntimeOp::OpObjectNew => "object_new",
         RuntimeOp::OpObjectProtoGet => "object_proto_get",
         RuntimeOp::OpObjectProtoSet => "object_proto_set",
         RuntimeOp::OpObjectSetPrototypeOf => "object_set_prototype_of",

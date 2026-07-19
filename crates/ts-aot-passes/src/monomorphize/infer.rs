@@ -208,6 +208,7 @@ pub fn hir_expr_ty(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }
+        | HirExpr::ObjectLiteral { ty, .. }
         | HirExpr::ArrayLiteral { ty, .. }
         | HirExpr::Closure { ty, .. }
         | HirExpr::Await { ty, .. }

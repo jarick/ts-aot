@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::Atom;
-use ts_aot_ir_hir::{HirCallee, HirExpr};
+use ts_aot_ir_hir::{HirCallee, HirExpr, ObjectLiteralField};
 
 pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>) {
     match expr {
@@ -57,6 +57,15 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
         HirExpr::ArrayLiteral { elements, .. } => {
             for e in elements {
                 rewrite_expr(e, map);
+            }
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                let value = match f {
+                    ObjectLiteralField::Property { value, .. } => value,
+                    ObjectLiteralField::Spread(value) => value,
+                };
+                rewrite_expr(value, map);
             }
         }
         HirExpr::Closure { captures, .. } => {

@@ -702,6 +702,21 @@ fn runtime_dynamic_get_set_returns_value() {
 }
 
 #[test]
+fn runtime_object_new_returns_fresh_empty_dynamic_object() {
+    use crate::{__ts_aot_dynamic_get, __ts_aot_object_keys, __ts_aot_object_new, DynamicValue};
+    let obj = __ts_aot_object_new();
+    assert!(
+        __ts_aot_object_keys(&obj).is_empty(),
+        "__ts_aot_object_new must produce a fresh Dynamic with no fields"
+    );
+    assert_eq!(
+        __ts_aot_dynamic_get(&obj, "anything"),
+        DynamicValue::Undefined,
+        "fresh Dynamic must not have arbitrary fields"
+    );
+}
+
+#[test]
 fn runtime_dynamic_get_missing_field_returns_undefined() {
     use crate::{__ts_aot_dynamic_get, Dynamic, DynamicValue};
     let val = DynamicValue::Object(Dynamic::new());

@@ -57,6 +57,7 @@ impl SkeletonBuilder<'_, '_> {
                 self.walk_tagged_template_expression(t, scope)
             }
             Expression::ArrayExpression(arr) => self.walk_array_expression(arr, scope),
+            Expression::ObjectExpression(obj) => self.walk_object_expression(obj, scope),
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -145,6 +146,63 @@ impl SkeletonBuilder<'_, '_> {
         }
         let ty = self.error_ty();
         HirExpr::ArrayLiteral { elements, ty }
+    }
+
+    fn walk_object_expression(
+        &mut self,
+        obj: &oxc_ast::ast::ObjectExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        use oxc_ast::ast::{ObjectPropertyKind, PropertyKey, PropertyKind};
+        use ts_aot_ir_hir::ObjectLiteralField;
+        let mut fields = Vec::with_capacity(obj.properties.len());
+        for prop in &obj.properties {
+            match prop {
+                ObjectPropertyKind::SpreadProperty(spread) => {
+                    self.report_unwalked(
+                        "object spread property is not supported by the body walker (planned for PR 7.7)",
+                        spread.span,
+                    );
+                    let value = self.walk_expr(&spread.argument, scope);
+                    fields.push(ObjectLiteralField::Spread(value));
+                }
+                ObjectPropertyKind::ObjectProperty(p) => {
+                    if p.kind != PropertyKind::Init {
+                        self.report_unwalked(
+                            "object accessor (get/set) property is not supported by the body walker",
+                            p.span,
+                        );
+                        continue;
+                    }
+                    let name = match &p.key {
+                        PropertyKey::StaticIdentifier(ident) => Atom::from(ident.name.as_str()),
+                        PropertyKey::StringLiteral(s) => Atom::from(s.value.as_str()),
+                        PropertyKey::NumericLiteral(n) => Atom::from(n.value.to_string().as_str()),
+                        key @ match_expression!(PropertyKey) => {
+                            self.report_unwalked(
+                                "object computed property key is not supported by the body walker",
+                                p.key.span(),
+                            );
+                            self.walk_expr(key.to_expression(), scope);
+                            self.walk_expr(&p.value, scope);
+                            continue;
+                        }
+                        _ => {
+                            self.report_unwalked(
+                                "object computed property key is not supported by the body walker",
+                                p.key.span(),
+                            );
+                            self.walk_expr(&p.value, scope);
+                            continue;
+                        }
+                    };
+                    let value = self.walk_expr(&p.value, scope);
+                    fields.push(ObjectLiteralField::Property { name, value });
+                }
+            }
+        }
+        let ty = self.error_ty();
+        HirExpr::ObjectLiteral { fields, ty }
     }
 
     fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {

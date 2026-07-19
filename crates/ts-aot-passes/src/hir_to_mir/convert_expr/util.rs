@@ -43,6 +43,9 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
 }
 
 pub(super) fn is_dynamic_owner(owner: &HirExpr, types: &TypeTable) -> bool {
+    if matches!(owner, HirExpr::ObjectLiteral { .. }) {
+        return true;
+    }
     let Some(ty_id) = hir_expr_type_id(owner) else {
         return false;
     };
@@ -62,6 +65,7 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }
+        | HirExpr::ObjectLiteral { ty, .. }
         | HirExpr::ArrayLiteral { ty, .. }
         | HirExpr::Closure { ty, .. }
         | HirExpr::Await { ty, .. }

@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use ts_aot_core::{Atom, FunctionId, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt};
+use ts_aot_ir_hir::{
+    HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField,
+};
 
 use crate::PassContext;
 
@@ -265,6 +267,18 @@ fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCall
         HirExpr::ArrayLiteral { elements, .. } => {
             for el in elements {
                 visit_expr_callees(el, on_callee);
+            }
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                match f {
+                    ObjectLiteralField::Property { value, .. } => {
+                        visit_expr_callees(value, on_callee);
+                    }
+                    ObjectLiteralField::Spread(value) => {
+                        visit_expr_callees(value, on_callee);
+                    }
+                }
             }
         }
         HirExpr::Closure { body, captures, .. } => {

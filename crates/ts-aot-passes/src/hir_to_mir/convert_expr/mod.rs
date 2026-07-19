@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp, ObjectLiteralField};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
@@ -162,6 +162,7 @@ impl ExprConverter {
                         }
                     }
                     let all_args_dynamic = args.iter().all(|a| match a {
+                        HirExpr::ObjectLiteral { .. } => true,
                         HirExpr::Local { ty, .. }
                         | HirExpr::Global { ty, .. }
                         | HirExpr::Field { ty, .. }
@@ -445,6 +446,75 @@ impl ExprConverter {
                         .collect(),
                     ty: *ty,
                 }
+            }
+            HirExpr::ObjectLiteral { fields, ty: _ } => {
+                let dynamic_ty = types.intern(&Type::Dynamic);
+                let dest = self.fresh_local();
+                self.push_temp_local(dest, dynamic_ty);
+                out.push(MirStmt::Runtime {
+                    op: RuntimeOp::OpObjectNew,
+                    args: Vec::new(),
+                    dest: Some(dest),
+                    ty: dynamic_ty,
+                });
+                for field in fields {
+                    let (name, value) = match field {
+                        ObjectLiteralField::Property { name, value } => (name, value),
+                        ObjectLiteralField::Spread(value) => {
+                            ctx.error(
+                                "P0005",
+                                "object spread is not yet supported in HIR→MIR (planned for PR 7.7); \
+                                 spread value is evaluated for side effects but not merged",
+                                Span::new(0, 0),
+                            );
+                            let spread_value = self.convert_expr(
+                                value,
+                                out,
+                                shared_struct_ids,
+                                shared_next_struct,
+                                types,
+                                ctx,
+                            );
+                            if has_potential_side_effects(&spread_value) {
+                                out.push(MirStmt::Expr(spread_value));
+                            }
+                            continue;
+                        }
+                    };
+                    let value_mir = self.convert_expr(
+                        value,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    let value_temp = self.fresh_local();
+                    self.push_temp_local(value_temp, dynamic_ty);
+                    out.push(MirStmt::Let {
+                        local: value_temp,
+                        ty: dynamic_ty,
+                        init: Some(MirExpr::DynamicFrom {
+                            value: Box::new(value_mir),
+                            ty: dynamic_ty,
+                        }),
+                        mutable: false,
+                    });
+                    out.push(MirStmt::Runtime {
+                        op: RuntimeOp::OpObjectSet,
+                        args: vec![
+                            MirExpr::Local(dest),
+                            MirExpr::String {
+                                id: name.clone(),
+                                ty: TypeId::from_raw(0),
+                            },
+                            MirExpr::Local(value_temp),
+                        ],
+                        dest: None,
+                        ty: dynamic_ty,
+                    });
+                }
+                MirExpr::Local(dest)
             }
             HirExpr::ArrayLiteral { elements, ty } => {
                 let args: Vec<MirExpr> = elements
