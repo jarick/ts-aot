@@ -76,7 +76,8 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::New { ty, .. }
         | HirExpr::OptionalChain { ty, .. }
         | HirExpr::Assignment { ty, .. }
-        | HirExpr::CompoundUpdate { ty, .. } => Some(*ty),
+        | HirExpr::CompoundUpdate { ty, .. }
+        | HirExpr::Sequence { ty, .. } => Some(*ty),
         HirExpr::TypeAssertion { target, .. } => Some(*target),
         HirExpr::Int(_)
         | HirExpr::Float(_)

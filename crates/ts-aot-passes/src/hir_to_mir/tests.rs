@@ -3826,6 +3826,71 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
 }
 
 #[test]
+fn sequence_preserves_side_effects_of_intermediate_expressions() {
+    let first_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let second_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(8)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Sequence {
+                exprs: vec![first_call, second_call],
+                ty: unit_ty(),
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &std::sync::Arc::new(HashMap::new()),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &empty_field_id_lookup(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let stmts = &mir.body.block.stmts;
+    let first_call_pos = stmts.iter().position(|s| {
+        matches!(
+            s,
+            MirStmt::Expr(MirExpr::Call { callee, .. }) if *callee == FunctionId::from_raw(7)
+        )
+    });
+    assert!(
+        first_call_pos.is_some(),
+        "BUG: intermediate Call in Sequence is dropped; must be emitted as MirStmt::Expr before the return; got stmts={stmts:?}"
+    );
+    let MirStmt::Return(ret_value) = stmts.last().expect("expected trailing Return") else {
+        panic!("expected trailing Return, got {stmts:?}");
+    };
+    let ret_call = ret_value
+        .as_ref()
+        .expect("return must carry the last sequence element value");
+    assert!(
+        matches!(ret_call, MirExpr::Call { callee, .. } if *callee == FunctionId::from_raw(8)),
+        "Return must carry the LAST sequence element (call to fn #8), got {ret_call:?}"
+    );
+}
+
+#[test]
 fn body_can_throw_propagates_through_while_condition_call() {
     let call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(0)),

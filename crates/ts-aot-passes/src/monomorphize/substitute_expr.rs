@@ -103,6 +103,13 @@ pub fn substitute_expr(
             else_branch: Box::new(substitute_expr(else_branch, mapping, types, result)),
             ty: substitute_type(*ty, mapping, types, result),
         },
+        HirExpr::Sequence { exprs, ty } => HirExpr::Sequence {
+            exprs: exprs
+                .iter()
+                .map(|e| substitute_expr(e, mapping, types, result))
+                .collect(),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
         HirExpr::Closure {
             id,
             params,

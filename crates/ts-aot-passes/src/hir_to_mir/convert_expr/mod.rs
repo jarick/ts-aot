@@ -172,6 +172,7 @@ impl ExprConverter {
                         | HirExpr::Unary { ty, .. }
                         | HirExpr::StructLiteral { ty, .. }
                         | HirExpr::Ternary { ty, .. }
+                        | HirExpr::Sequence { ty, .. }
                         | HirExpr::ArrayLiteral { ty, .. }
                         | HirExpr::Closure { ty, .. }
                         | HirExpr::Await { ty, .. }
@@ -516,6 +517,26 @@ impl ExprConverter {
                     });
                 }
                 MirExpr::Local(dest)
+            }
+            HirExpr::Sequence { exprs, .. } => {
+                if let Some((last, rest)) = exprs.split_last() {
+                    for e in rest {
+                        let mir = self.convert_expr(
+                            e,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
+                        if has_potential_side_effects(&mir) {
+                            out.push(MirStmt::Expr(mir));
+                        }
+                    }
+                    self.convert_expr(last, out, shared_struct_ids, shared_next_struct, types, ctx)
+                } else {
+                    MirExpr::Unit
+                }
             }
             HirExpr::Ternary {
                 cond,

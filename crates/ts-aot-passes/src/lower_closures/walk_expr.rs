@@ -236,6 +236,20 @@ pub(super) fn walk_expr(
                 ctx,
             );
         }
+        HirExpr::Sequence { exprs, .. } => {
+            for e in exprs {
+                walk_expr(
+                    e,
+                    next_id,
+                    closure_names,
+                    new_decls,
+                    generated,
+                    taken,
+                    stats,
+                    ctx,
+                );
+            }
+        }
         HirExpr::Await { expr: e, .. } | HirExpr::TypeAssertion { expr: e, .. } => walk_expr(
             e,
             next_id,

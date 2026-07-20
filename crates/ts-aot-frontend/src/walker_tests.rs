@@ -2175,3 +2175,53 @@ fn body_walker_conditional_expression_with_call_in_branch() {
     };
     assert_eq!(args.len(), 1, "else_branch should call f(2)");
 }
+
+#[test]
+fn body_walker_sequence_expression_returns_last_value() {
+    let f = sole_function("function f(): i64 { return (1, 2, 3); }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Sequence { exprs, .. } = expr else {
+        panic!("expected Sequence, got {expr:?}");
+    };
+    assert_eq!(exprs.len(), 3, "sequence must hold all 3 elements");
+    assert!(matches!(exprs[0], HirExpr::Int(1)));
+    assert!(matches!(exprs[1], HirExpr::Int(2)));
+    assert!(matches!(exprs[2], HirExpr::Int(3)));
+}
+
+#[test]
+fn body_walker_sequence_expression_walks_all_subexpressions() {
+    let f = sole_function("function f(a: i64, b: i64): i64 { return (a, b, a + b); }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Sequence { exprs, .. } = expr else {
+        panic!("expected Sequence, got {expr:?}");
+    };
+    assert_eq!(exprs.len(), 3);
+    assert!(matches!(exprs[0], HirExpr::Local { .. }));
+    assert!(matches!(exprs[1], HirExpr::Local { .. }));
+    assert!(matches!(exprs[2], HirExpr::Binary { .. }));
+}
+
+#[test]
+fn body_walker_sequence_expression_nested() {
+    let f = sole_function("function f(): i64 { return ((1, 2), 3); }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Sequence { exprs, .. } = expr else {
+        panic!("expected outer Sequence, got {expr:?}");
+    };
+    assert_eq!(exprs.len(), 2);
+    let inner_seq = &exprs[0];
+    let HirExpr::Sequence { exprs: inner, .. } = inner_seq else {
+        panic!("expected inner Sequence, got {inner_seq:?}");
+    };
+    assert_eq!(inner.len(), 2);
+    assert!(matches!(inner[0], HirExpr::Int(1)));
+    assert!(matches!(inner[1], HirExpr::Int(2)));
+    assert!(matches!(exprs[1], HirExpr::Int(3)));
+}
