@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ts_aot_core::{Atom, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp, ObjectLiteralField};
-use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
+use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
@@ -171,6 +171,7 @@ impl ExprConverter {
                         | HirExpr::Binary { ty, .. }
                         | HirExpr::Unary { ty, .. }
                         | HirExpr::StructLiteral { ty, .. }
+                        | HirExpr::Ternary { ty, .. }
                         | HirExpr::ArrayLiteral { ty, .. }
                         | HirExpr::Closure { ty, .. }
                         | HirExpr::Await { ty, .. }
@@ -514,6 +515,55 @@ impl ExprConverter {
                         ty: dynamic_ty,
                     });
                 }
+                MirExpr::Local(dest)
+            }
+            HirExpr::Ternary {
+                cond,
+                then_branch,
+                else_branch,
+                ty,
+            } => {
+                let cond_mir =
+                    self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let dest = self.fresh_local();
+                self.push_temp_local(dest, *ty);
+                out.push(MirStmt::Let {
+                    local: dest,
+                    ty: *ty,
+                    init: None,
+                    mutable: true,
+                });
+                let mut then_stmts: Vec<MirStmt> = Vec::new();
+                let then_value = self.convert_expr(
+                    then_branch,
+                    &mut then_stmts,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                then_stmts.push(MirStmt::Assign {
+                    target: MirPlace::Local { id: dest },
+                    value: then_value,
+                });
+                let mut else_stmts: Vec<MirStmt> = Vec::new();
+                let else_value = self.convert_expr(
+                    else_branch,
+                    &mut else_stmts,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                else_stmts.push(MirStmt::Assign {
+                    target: MirPlace::Local { id: dest },
+                    value: else_value,
+                });
+                out.push(MirStmt::If {
+                    cond: cond_mir,
+                    then_block: MirBlock { stmts: then_stmts },
+                    else_block: Some(MirBlock { stmts: else_stmts }),
+                });
                 MirExpr::Local(dest)
             }
             HirExpr::ArrayLiteral { elements, ty } => {

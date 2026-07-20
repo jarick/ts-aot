@@ -17,7 +17,8 @@ target
 tests/harness-out/
 tests/test262-report.json
 
-# tests/test262/
+# test262 corpus (local-only, not a submodule)
+tests/test262/
 
 # leftover build artifacts
 *.wasm.o

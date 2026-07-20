@@ -271,6 +271,20 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("}}:{{{}}}", ty.raw()));
         }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ty,
+        } => {
+            d.write("ternary(");
+            dump_expr_inline(cond, d);
+            d.write(" ? ");
+            dump_expr_inline(then_branch, d);
+            d.write(" : ");
+            dump_expr_inline(else_branch, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
         HirExpr::ArrayLiteral { elements, ty } => {
             d.write("[");
             for (i, e) in elements.iter().enumerate() {

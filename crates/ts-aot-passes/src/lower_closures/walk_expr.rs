@@ -199,6 +199,43 @@ pub(super) fn walk_expr(
                 );
             }
         }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expr(
+                cond,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+            walk_expr(
+                then_branch,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+            walk_expr(
+                else_branch,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+        }
         HirExpr::Await { expr: e, .. } | HirExpr::TypeAssertion { expr: e, .. } => walk_expr(
             e,
             next_id,

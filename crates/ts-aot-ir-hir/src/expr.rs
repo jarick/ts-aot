@@ -101,6 +101,12 @@ pub enum HirExpr {
         fields: Vec<ObjectLiteralField>,
         ty: TypeId,
     },
+    Ternary {
+        cond: Box<HirExpr>,
+        then_branch: Box<HirExpr>,
+        else_branch: Box<HirExpr>,
+        ty: TypeId,
+    },
     ArrayLiteral {
         elements: Vec<HirExpr>,
         ty: TypeId,

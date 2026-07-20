@@ -210,6 +210,34 @@ fn recurse_subexprs(
                 );
             }
         }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            rewrite_expr(
+                cond,
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+            rewrite_expr(
+                then_branch,
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+            rewrite_expr(
+                else_branch,
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+        }
         HirExpr::Closure { captures, .. } => {
             for c in captures {
                 rewrite_expr(

@@ -405,6 +405,20 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(value, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ty,
+        } => {
+            d.write("cond(");
+            dump_expr_inline(cond, d);
+            d.write(" ? ");
+            dump_expr_inline(then_branch, d);
+            d.write(" : ");
+            dump_expr_inline(else_branch, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
