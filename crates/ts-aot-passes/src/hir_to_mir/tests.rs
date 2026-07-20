@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{
-    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, TypeTable, Visibility,
+    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, Type, TypeId, TypeTable, Visibility,
 };
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
@@ -611,11 +611,357 @@ fn convert_expr_template_returns_local_to_dest() {
         &mut empty_types(),
         &mut cx,
     );
-    let dest_id = match &out[0] {
+    let runtime_count = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::StringConcat,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        runtime_count, 2,
+        "3-part template must chain via N-1 = 2 StringConcat Runtime stmts; got out={out:?}"
+    );
+    let final_dest = match out.last().expect("at least one stmt") {
         MirStmt::Runtime { dest: Some(d), .. } => *d,
-        other => panic!("expected Runtime with dest, got {other:?}"),
+        other => panic!("expected trailing StringConcat Runtime with dest, got {other:?}"),
     };
-    assert_eq!(mir, MirExpr::Local(dest_id));
+    assert_eq!(
+        mir,
+        MirExpr::Local(final_dest),
+        "convert_expr must return the LAST chained concat's dest local"
+    );
+}
+
+#[test]
+fn convert_expr_tagged_template_calls_tag_with_string_slice_and_substitutions() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let tag_ident = HirExpr::Global {
+        name: Atom::new_inline("tag"),
+        ty: unit_ty(),
+    };
+    let sub = HirExpr::Int(42);
+    let expr = HirExpr::Template {
+        tag: Some(Box::new(tag_ident)),
+        expressions: vec![sub],
+        cooked_parts: vec![
+            Some(Atom::new_inline("Hello, ")),
+            Some(Atom::new_inline("!")),
+        ],
+        raw_parts: vec![
+            Some(Atom::new_inline("Hello, ")),
+            Some(Atom::new_inline("!")),
+        ],
+        ty: unit_ty(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let runtime_count = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::StringConcat,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        runtime_count, 0,
+        "tagged template must NOT emit StringConcat (no concat; the tag handles joining); out={out:?}"
+    );
+    let (let_local, let_init) = match out.last().expect("expected Let for tagged template") {
+        MirStmt::Let {
+            local,
+            init: Some(init),
+            ..
+        } => (*local, init),
+        other => panic!("expected trailing Let for tagged template, got {other:?}"),
+    };
+    let MirExpr::IndirectCall { callee, args, .. } = let_init else {
+        panic!("Let init must be IndirectCall (tag dispatch), got {let_init:?}");
+    };
+    assert!(
+        matches!(callee.as_ref(), MirExpr::Global(name) if name.as_str() == "tag"),
+        "callee must be the tag Global, got {callee:?}"
+    );
+    assert_eq!(
+        args.len(),
+        2,
+        "tag call must receive [TemplateStringsArray, Vec<DynamicValue> (rest subs)]; got {args:?}"
+    );
+    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
+        panic!(
+            "first arg must be TemplateStringsArray (carries cooked + raw parts), got {:?}",
+            args[0]
+        );
+    };
+    assert_eq!(
+        cooked.len(),
+        2,
+        "must carry both cooked parts; got cooked={cooked:?}"
+    );
+    assert_eq!(cooked[0].as_str(), "Hello, ");
+    assert_eq!(cooked[1].as_str(), "!");
+    assert_eq!(
+        raw.len(),
+        2,
+        "must also carry raw parts (spec requires both); got raw={raw:?}"
+    );
+    assert_eq!(raw[0].as_str(), "Hello, ");
+    assert_eq!(raw[1].as_str(), "!");
+    let subs_local = match &args[1] {
+        MirExpr::Local(l) => *l,
+        other => panic!(
+            "second arg must be a Local holding the substitutions Vec<DynamicValue>, got {other:?}"
+        ),
+    };
+    let subs_len = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::DynVecAppend,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        subs_len, 1,
+        "one substitution must produce one DynVecAppend stmt (not a single int arg); got out={out:?}"
+    );
+    let subs_initialized = out.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::DynVecNew,
+                dest: Some(d),
+                ..
+            } if *d == subs_local
+        )
+    });
+    assert!(
+        subs_initialized,
+        "subs_vec Local({subs_local:?}) must be initialized by a DynVecNew Runtime stmt; got out={out:?}"
+    );
+    assert_eq!(
+        mir,
+        MirExpr::Local(let_local),
+        "convert_expr must return the Let dest local"
+    );
+}
+
+#[test]
+fn convert_expr_tagged_template_without_substitutions_passes_only_string_slice() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let tag_ident = HirExpr::Global {
+        name: Atom::new_inline("String.raw"),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::Template {
+        tag: Some(Box::new(tag_ident)),
+        expressions: vec![],
+        cooked_parts: vec![Some(Atom::new_inline("raw text"))],
+        raw_parts: vec![Some(Atom::new_inline("raw text"))],
+        ty: unit_ty(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let (let_local, let_init) = match out.last().expect("expected Let") {
+        MirStmt::Let {
+            local,
+            init: Some(init),
+            ..
+        } => (*local, init),
+        other => panic!("expected Let, got {other:?}"),
+    };
+    let MirExpr::IndirectCall { callee, args, .. } = let_init else {
+        panic!("init must be IndirectCall; got {let_init:?}");
+    };
+    assert!(
+        matches!(callee.as_ref(), MirExpr::Global(name) if name.as_str() == "String.raw"),
+        "callee must be String.raw; got {callee:?}"
+    );
+    assert_eq!(
+        args.len(),
+        2,
+        "tag call must receive [TemplateStringsArray, Vec<DynamicValue>] (the subs Vec is always present, even when empty); got {args:?}"
+    );
+    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
+        panic!("first arg must be TemplateStringsArray; got {:?}", args[0]);
+    };
+    assert_eq!(cooked.len(), 1);
+    assert_eq!(cooked[0].as_str(), "raw text");
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0].as_str(), "raw text");
+    let subs_local = match &args[1] {
+        MirExpr::Local(l) => *l,
+        other => panic!(
+            "second arg must be a Local holding the (empty) substitutions Vec<DynamicValue>, got {other:?}"
+        ),
+    };
+    let subs_initialized = out.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::DynVecNew,
+                dest: Some(d),
+                ..
+            } if *d == subs_local
+        )
+    });
+    assert!(
+        subs_initialized,
+        "subs_vec Local({subs_local:?}) must be initialized by a DynVecNew Runtime stmt even when no substitutions; got out={out:?}"
+    );
+    let subs_appends = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::DynVecAppend,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        subs_appends, 0,
+        "no substitutions means zero DynVecAppend stmts; got out={out:?}"
+    );
+    assert_eq!(mir, MirExpr::Local(let_local));
+}
+
+#[test]
+fn convert_expr_tagged_template_preserves_raw_separately_from_cooked() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let tag_ident = HirExpr::Global {
+        name: Atom::new_inline("tag"),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::Template {
+        tag: Some(Box::new(tag_ident)),
+        expressions: vec![],
+        cooked_parts: vec![Some(Atom::new_inline("\\n cooked"))],
+        raw_parts: vec![Some(Atom::new_inline("\\n raw"))],
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let MirStmt::Let {
+        init: Some(init), ..
+    } = out.last().expect("expected Let")
+    else {
+        panic!("expected Let; got {out:?}");
+    };
+    let MirExpr::IndirectCall { args, .. } = init else {
+        panic!("init must be IndirectCall; got {init:?}");
+    };
+    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
+        panic!("first arg must be TemplateStringsArray; got {:?}", args[0]);
+    };
+    assert_eq!(
+        cooked[0].as_str(),
+        "\\n cooked",
+        "cooked part must carry the cooked text (escape processed)"
+    );
+    assert_eq!(
+        raw[0].as_str(),
+        "\\n raw",
+        "raw part must carry the raw text (escape UN-processed) — spec requires BOTH cooked and raw on the template strings array; got raw={raw:?}"
+    );
+    assert_ne!(
+        cooked[0].as_str(),
+        raw[0].as_str(),
+        "cooked and raw MUST be preserved independently for spec compliance (e.g. String.raw uses raw, regular tags use cooked)"
+    );
+}
+
+#[test]
+fn tagged_template_subs_vec_typed_as_vec_dynamic_value_not_dynamicvalue() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = empty_types();
+    let tag_ident = HirExpr::Global {
+        name: Atom::new_inline("tag"),
+        ty: unit_ty(),
+    };
+    let expr = HirExpr::Template {
+        tag: Some(Box::new(tag_ident)),
+        expressions: vec![int_lit(42)],
+        cooked_parts: vec![Some(Atom::new_inline("a")), Some(Atom::new_inline("b"))],
+        raw_parts: vec![Some(Atom::new_inline("a")), Some(Atom::new_inline("b"))],
+        ty: unit_ty(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let subs_init = out.iter().find_map(|s| match s {
+        MirStmt::Runtime {
+            op: RuntimeOp::DynVecNew,
+            dest: Some(d),
+            ty,
+            ..
+        } => Some((*d, *ty)),
+        _ => None,
+    });
+    let (subs_local, subs_ty) = subs_init.expect("DynVecNew Runtime stmt must be present");
+    let dynamic_ty = types.intern(&Type::Dynamic);
+    let subs_resolved = types.resolve(subs_ty).expect("subs_ty must resolve");
+    let dynamic_resolved = types.resolve(dynamic_ty).expect("dynamic_ty must resolve");
+    assert!(
+        matches!(subs_resolved, Type::Array { .. }),
+        "subs_vec Local({subs_local:?}) MUST be typed as `Type::Array` (so backend emits `Vec<DynamicValue>` and `__ts_aot_dyn_vec_new() -> Vec<DynamicValue>` matches); got type={subs_resolved:?}"
+    );
+    let array_element = if let Type::Array { element } = subs_resolved {
+        *element
+    } else {
+        unreachable!()
+    };
+    assert_eq!(
+        array_element, dynamic_ty,
+        "subs_vec must be Vec<DynamicValue> = Type::Array{{ element: Type::Dynamic }}; got element={array_element:?} vs expected dynamic_ty={dynamic_resolved:?}"
+    );
 }
 
 #[test]
@@ -803,8 +1149,26 @@ fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
         &mut empty_types(),
         &mut cx,
     );
-    assert_eq!(out.len(), 3);
-    assert!(matches!(out[0], MirStmt::Runtime { .. }));
+    assert_eq!(
+        out.len(),
+        3,
+        "1-part template + Assignment emits 3 stmts; out={out:?}"
+    );
+    let MirStmt::Let {
+        local: template_temp,
+        init: Some(template_init),
+        ..
+    } = &out[0]
+    else {
+        panic!(
+            "expected out[0] = Let for 1-part template, got {:?}",
+            out[0]
+        );
+    };
+    assert!(
+        matches!(template_init, MirExpr::String { .. } | MirExpr::Local(_)),
+        "1-part template Let init must be the cooked string or a Local; got {template_init:?}"
+    );
     let MirStmt::Let {
         local: value_temp,
         init: Some(value_init),
@@ -816,6 +1180,11 @@ fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
     assert!(
         matches!(value_init, MirExpr::Local(_)),
         "Let init must capture the RHS value (e.g. Template's runtime dest temp), got {value_init:?}"
+    );
+    assert_eq!(
+        *value_init,
+        MirExpr::Local(*template_temp),
+        "Assignment value Let must load from the 1-part template's temp"
     );
     let MirStmt::Assign {
         value: assign_value,
@@ -1529,15 +1898,17 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
         "user's Continue must be rewritten to MirStmt::Break targeting the inner wrapper, got {:?}",
         inner_while
     );
+    let cond_let_idx = outer_while
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::Let { .. }))
+        .expect("cond Let (1-part template) must be present in outer-while body");
+    let inner_while_idx_in_outer = 0;
     assert!(
-        outer_while.stmts.iter().any(|s| matches!(
-            s,
-            MirStmt::Runtime {
-                op: RuntimeOp::StringConcat,
-                ..
-            }
-        )),
-        "cond_stmts must run after the inner wrapper so Continue still re-evaluates cond, got {:?}",
+        cond_let_idx > inner_while_idx_in_outer,
+        "cond Let (idx {}) must appear AFTER the inner-while wrapper (idx {}) so cond re-evaluates each iteration (1-part template emits Let, not Runtime); got stmts {:?}",
+        cond_let_idx,
+        inner_while_idx_in_outer,
         outer_while.stmts
     );
 }
@@ -1712,25 +2083,17 @@ fn convert_block_while_template_cond_runtime_runs_before_loop() {
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     let stmts = &mir_block.stmts;
-    let initial_runtime_idx = stmts
+    let initial_let_idx = stmts
         .iter()
-        .position(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::StringConcat,
-                    ..
-                }
-            )
-        })
-        .expect("template runtime stmt must be present");
+        .position(|s| matches!(s, MirStmt::Let { .. }))
+        .expect("1-part template Let must be present");
     let outer_while_idx = stmts
         .iter()
         .position(|s| matches!(s, MirStmt::While { .. }))
         .expect("expected outer MirStmt::While");
     assert!(
-        initial_runtime_idx < outer_while_idx,
-        "template runtime stmt must appear BEFORE the outer MirStmt::While (cond re-evaluates each iter from populated temp); got stmts={:?}",
+        initial_let_idx < outer_while_idx,
+        "1-part template Let must appear BEFORE the outer MirStmt::While (cond re-evaluates each iter from populated temp); got stmts={:?}",
         stmts
     );
     let outer_while_cond = stmts
@@ -3571,11 +3934,16 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
     };
+    let rhs_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
     let value_expr = HirExpr::Template {
         tag: None,
-        expressions: vec![],
-        cooked_parts: vec![None],
-        raw_parts: vec![None],
+        expressions: vec![rhs_call],
+        cooked_parts: vec![None, None],
+        raw_parts: vec![None, None],
         ty: unit_ty(),
     };
     let expr = HirExpr::Assignment {

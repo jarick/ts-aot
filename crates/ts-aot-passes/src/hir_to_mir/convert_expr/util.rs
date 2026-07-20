@@ -36,7 +36,7 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::IndirectCall { ty, .. }
         | MirExpr::TypeOf { ty, .. }
         | MirExpr::DynamicFrom { ty, .. }
-        | MirExpr::Conditional { ty, .. } => *ty,
+        | MirExpr::TemplateStringsArray { ty, .. } => *ty,
         MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => {
             TypeId::from_raw(0)
         }

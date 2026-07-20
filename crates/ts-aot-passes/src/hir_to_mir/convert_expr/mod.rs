@@ -634,38 +634,142 @@ impl ExprConverter {
                 }
             }
             HirExpr::Template {
+                tag,
                 expressions,
                 cooked_parts,
+                raw_parts,
                 ty,
                 ..
             } => {
-                let mut args: Vec<MirExpr> = Vec::with_capacity(expressions.len() * 2 + 1);
-                for (i, cooked_opt) in cooked_parts.iter().enumerate() {
-                    let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
-                    args.push(MirExpr::String {
-                        id: Atom::from(cooked_text),
-                        ty: *ty,
+                if let Some(tag_expr) = tag {
+                    let tag_mir = self.convert_expr(
+                        tag_expr,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    let mut cooked_atoms: Vec<Atom> = Vec::with_capacity(cooked_parts.len());
+                    for cooked_opt in cooked_parts.iter() {
+                        let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
+                        cooked_atoms.push(Atom::from(cooked_text));
+                    }
+                    let mut raw_atoms: Vec<Atom> = Vec::with_capacity(raw_parts.len());
+                    for raw_opt in raw_parts.iter() {
+                        let raw_text = raw_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
+                        raw_atoms.push(Atom::from(raw_text));
+                    }
+                    let dynamic_ty = types.intern(&Type::Dynamic);
+                    let subs_vec_ty = types.intern(&Type::Array {
+                        element: dynamic_ty,
                     });
-                    if let Some(e) = expressions.get(i) {
-                        args.push(self.convert_expr(
+                    let subs_vec = self.fresh_local();
+                    self.push_temp_local(subs_vec, subs_vec_ty);
+                    out.push(MirStmt::Runtime {
+                        op: RuntimeOp::DynVecNew,
+                        args: vec![],
+                        dest: Some(subs_vec),
+                        ty: subs_vec_ty,
+                    });
+                    for e in expressions.iter() {
+                        let sub_mir = self.convert_expr(
                             e,
                             out,
                             shared_struct_ids,
                             shared_next_struct,
                             types,
                             ctx,
-                        ));
+                        );
+                        let sub_dyn = MirExpr::DynamicFrom {
+                            value: Box::new(sub_mir),
+                            ty: dynamic_ty,
+                        };
+                        out.push(MirStmt::Runtime {
+                            op: RuntimeOp::DynVecAppend,
+                            args: vec![MirExpr::Local(subs_vec), sub_dyn],
+                            dest: None,
+                            ty: dynamic_ty,
+                        });
+                    }
+                    let call_args: Vec<MirExpr> = vec![
+                        MirExpr::TemplateStringsArray {
+                            cooked: cooked_atoms,
+                            raw: raw_atoms,
+                            ty: *ty,
+                        },
+                        MirExpr::Local(subs_vec),
+                    ];
+                    let dest = self.fresh_local();
+                    self.push_temp_local(dest, *ty);
+                    out.push(MirStmt::Let {
+                        local: dest,
+                        ty: *ty,
+                        init: Some(MirExpr::IndirectCall {
+                            callee: Box::new(tag_mir),
+                            args: call_args,
+                            ty: *ty,
+                        }),
+                        mutable: false,
+                    });
+                    MirExpr::Local(dest)
+                } else {
+                    let mut parts: Vec<MirExpr> = Vec::with_capacity(expressions.len() * 2 + 1);
+                    for (i, cooked_opt) in cooked_parts.iter().enumerate() {
+                        let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
+                        parts.push(MirExpr::String {
+                            id: Atom::from(cooked_text),
+                            ty: *ty,
+                        });
+                        if let Some(e) = expressions.get(i) {
+                            parts.push(self.convert_expr(
+                                e,
+                                out,
+                                shared_struct_ids,
+                                shared_next_struct,
+                                types,
+                                ctx,
+                            ));
+                        }
+                    }
+                    if parts.is_empty() {
+                        MirExpr::Unit
+                    } else if parts.len() == 1 {
+                        let part = parts.into_iter().next().expect("len 1");
+                        let dest = self.fresh_local();
+                        self.push_temp_local(dest, *ty);
+                        out.push(MirStmt::Let {
+                            local: dest,
+                            ty: *ty,
+                            init: Some(part),
+                            mutable: false,
+                        });
+                        MirExpr::Local(dest)
+                    } else {
+                        let (first, rest) = parts.split_first().expect("len >= 2");
+                        let first_dest = self.fresh_local();
+                        self.push_temp_local(first_dest, *ty);
+                        out.push(MirStmt::Let {
+                            local: first_dest,
+                            ty: *ty,
+                            init: Some(first.clone()),
+                            mutable: false,
+                        });
+                        let mut current = MirExpr::Local(first_dest);
+                        for part in rest.iter() {
+                            let dest = self.fresh_local();
+                            self.push_temp_local(dest, *ty);
+                            out.push(MirStmt::Runtime {
+                                op: RuntimeOp::StringConcat,
+                                args: vec![current, part.clone()],
+                                dest: Some(dest),
+                                ty: *ty,
+                            });
+                            current = MirExpr::Local(dest);
+                        }
+                        current
                     }
                 }
-                let dest = self.fresh_local();
-                self.push_temp_local(dest, *ty);
-                out.push(MirStmt::Runtime {
-                    op: RuntimeOp::StringConcat,
-                    args,
-                    dest: Some(dest),
-                    ty: *ty,
-                });
-                MirExpr::Local(dest)
             }
             HirExpr::New { callee, args, ty } => {
                 let callee_mir = self.convert_expr(

@@ -2,6 +2,7 @@ use std::any::Any;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
+use std::ops::Index;
 use std::panic::panic_any;
 use std::rc::Rc;
 
@@ -367,6 +368,37 @@ impl Default for Dynamic {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct TemplateStringsArray {
+    pub cooked: Vec<String>,
+    pub raw: Vec<String>,
+}
+
+impl TemplateStringsArray {
+    #[must_use]
+    pub fn new(cooked: Vec<String>, raw: Vec<String>) -> Self {
+        debug_assert_eq!(cooked.len(), raw.len());
+        Self { cooked, raw }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.cooked.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cooked.is_empty()
+    }
+}
+
+impl Index<usize> for TemplateStringsArray {
+    type Output = str;
+    fn index(&self, idx: usize) -> &str {
+        &self.cooked[idx]
+    }
+}
+
 impl PartialEq for DynamicValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -459,6 +491,15 @@ impl From<&str> for DynamicValue {
     fn from(v: &str) -> Self {
         DynamicValue::String(v.to_owned())
     }
+}
+
+#[must_use]
+pub fn __ts_aot_dyn_vec_new() -> Vec<DynamicValue> {
+    Vec::new()
+}
+
+pub fn __ts_aot_dyn_vec_append(vec: &mut Vec<DynamicValue>, value: DynamicValue) {
+    vec.push(value);
 }
 
 #[must_use]
