@@ -6,7 +6,7 @@ use std::fmt;
 use ts_aot_core::Atom;
 
 use crate::program::{MirExport, MirImport, MirProgram};
-use crate::runtime::RuntimeRequirements;
+use crate::runtime::{RuntimeFeature, RuntimeRequirements};
 
 pub(crate) struct Dumper {
     indent: usize,
@@ -115,42 +115,19 @@ pub(crate) fn dump_sym(id: &Atom, _d: &Dumper) -> String {
 
 impl fmt::Display for RuntimeRequirements {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut parts = Vec::new();
-        if self.needs_runtime {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.needs_runtime() {
             parts.push("runtime");
         }
-        if self.needs_string {
-            parts.push("string");
-        }
-        if self.needs_array {
-            parts.push("array");
-        }
-        if self.needs_map {
-            parts.push("map");
-        }
-        if self.needs_result {
-            parts.push("result");
-        }
-        if self.needs_promise {
-            parts.push("promise");
-        }
-        if self.needs_scheduler {
-            parts.push("scheduler");
-        }
-        if self.needs_host_io {
-            parts.push("host_io");
-        }
-        if self.needs_console {
-            parts.push("console");
-        }
-        if self.needs_math {
-            parts.push("math");
-        }
-        if parts.is_empty() {
-            write!(f, "RuntimeRequirements(none)")
+        let mut labels: Vec<&str> = self.features().map(RuntimeFeature::label).collect();
+        labels.sort_unstable();
+        parts.extend(labels);
+        let body = if parts.is_empty() {
+            "none"
         } else {
-            write!(f, "RuntimeRequirements({})", parts.join(", "))
-        }
+            &parts.join(", ")
+        };
+        write!(f, "RuntimeRequirements({body})")
     }
 }
 
@@ -426,6 +403,22 @@ mod tests {
         assert!(text.contains("string"));
         assert!(text.contains("array"));
         assert!(text.contains("runtime"));
+    }
+
+    #[test]
+    fn dump_template_strings_array_escapes_special_chars() {
+        let cooked = vec![Atom::from("a\"b"), Atom::from("c\\d\n")];
+        let raw = vec![Atom::from("e\tf")];
+        let expr = MirExpr::TemplateStringsArray {
+            cooked,
+            raw,
+            ty: TypeId::from_raw(7),
+        };
+        let stmt = MirStmt::Expr(expr);
+        let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
+        assert!(text.contains("\"a\\\"b\""));
+        assert!(text.contains("\"c\\\\d\\n\""));
+        assert!(text.contains("\"e\\tf\""));
     }
 
     #[test]

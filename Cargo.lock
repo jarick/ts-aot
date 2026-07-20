@@ -968,6 +968,7 @@ version = "0.1.0"
 dependencies = [
  "ts-aot-backend",
  "ts-aot-core",
+ "ts-aot-frontend",
  "ts-aot-ir-hir",
  "ts-aot-ir-mir",
 ]

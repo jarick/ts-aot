@@ -70,7 +70,10 @@ fn emit_runtime_stmt(
     if let Some(dest) = dest {
         let dest = body_ctx.local_ident(dest);
         let ty = emit_type_id_with_ctx(ty, ctx);
-        let mutability = if matches!(op, RuntimeOp::OpObjectUnwrap | RuntimeOp::OpObjectNew) {
+        let mutability = if matches!(
+            op,
+            RuntimeOp::OpObjectUnwrap | RuntimeOp::OpObjectNew | RuntimeOp::DynVecNew
+        ) {
             quote!(mut)
         } else {
             quote!()
@@ -469,16 +472,25 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
         MirExpr::DynamicFrom { value, .. } => emit_dynamic_from(value, ctx, body_ctx),
-        MirExpr::Conditional {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let cond = emit_expr(cond, ctx, body_ctx)?;
-            let then_b = emit_expr(then_branch, ctx, body_ctx)?;
-            let else_b = emit_expr(else_branch, ctx, body_ctx)?;
-            Ok(quote!(if #cond { #then_b } else { #else_b }))
+        MirExpr::TemplateStringsArray { cooked, raw, .. } => {
+            let cooked_lits: Vec<TokenStream> = cooked
+                .iter()
+                .map(|p| {
+                    let lit = Literal::string(p.as_str());
+                    quote!(String::from(#lit))
+                })
+                .collect();
+            let raw_lits: Vec<TokenStream> = raw
+                .iter()
+                .map(|p| {
+                    let lit = Literal::string(p.as_str());
+                    quote!(String::from(#lit))
+                })
+                .collect();
+            Ok(quote!(ts_aot_runtime::TemplateStringsArray::new(
+                vec![#(#cooked_lits),*],
+                vec![#(#raw_lits),*]
+            )))
         }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
@@ -611,6 +623,11 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_dynamic_unwrap(#opt)))
         }
         RuntimeOp::OpObjectNew => Ok(quote!(__ts_aot_object_new())),
+        RuntimeOp::DynVecAppend => {
+            let vec = emit_expr(&args[0], ctx, body_ctx)?;
+            let value = emit_expr(&args[1], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_dyn_vec_append(&mut #vec, #value)))
+        }
         RuntimeOp::OpObjectSet => {
             let obj = emit_expr(&args[0], ctx, body_ctx)?;
             let field_name = extract_string_arg(&args[1])?;
@@ -859,5 +876,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::OpObjectSetPrototypeOf => format_ident!("__ts_aot_object_set_prototype_of"),
         RuntimeOp::OpObjectKeys => format_ident!("__ts_aot_object_keys"),
         RuntimeOp::OpDynamicBinary => format_ident!("__ts_aot_dynamic_op"),
+        RuntimeOp::DynVecNew => format_ident!("__ts_aot_dyn_vec_new"),
+        RuntimeOp::DynVecAppend => format_ident!("__ts_aot_dyn_vec_append"),
     }
 }

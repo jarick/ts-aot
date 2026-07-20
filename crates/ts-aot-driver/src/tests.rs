@@ -154,6 +154,94 @@ fn parse_throws_id(mir_text: &str, fn_name: &str) -> Option<u32> {
 }
 
 #[test]
+fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
+    let opts = CompileOptions {
+        emit: EmitStage::Mir,
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "function tag(strings: string[], ...subs: any[]): i64 { return 0; } function f(): i64 { return tag`hi ${42}!`; }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "tagged template with rest-param `...subs: any[]` must lower through full pipeline; got {:?}",
+        out.diagnostics
+    );
+    let text = out
+        .mir_text
+        .expect("emit-mir must populate mir_text for e2e tagged template check");
+    let f_idx = text.find("fn #1 f(").expect("f must be in MIR dump");
+    let f_block_start = text[f_idx..].find("block: {").expect("f must have a block");
+    let f_body_start = f_idx + f_block_start + "block: {".len();
+    let f_body_end_rel = text[f_body_start..].find("      }").expect("f block end");
+    let f_body = &text[f_body_start..f_body_start + f_body_end_rel];
+    assert!(
+        f_body.contains("tplstrings(cooked=[\"hi \", \"!\"], raw=[\"hi \", \"!\"])"),
+        "tagged template must emit TemplateStringsArray carrying both cooked AND raw parts; got f body:\n{f_body}\n\nfull dump:\n{text}"
+    );
+    assert!(
+        f_body.contains("dyn_vec_new") && f_body.contains("dyn_vec_append"),
+        "substitutions must be wrapped in Vec<DynamicValue> via DynVecNew + DynVecAppend (rest-param path); got f body:\n{f_body}\n\nfull dump:\n{text}"
+    );
+    assert!(
+        f_body.contains("dynfrom(42"),
+        "substitution `42` must be wrapped in DynamicValue via MirExpr::DynamicFrom; got f body:\n{f_body}"
+    );
+    assert!(
+        f_body.contains("indirect_call(tag)") || f_body.contains("indirect_call(tag)("),
+        "tag must be invoked as an indirect call (callee=tag); got f body:\n{f_body}"
+    );
+}
+
+#[test]
+fn e2e_tagged_template_string_array_arg_emits_vec_string_not_slice_str() {
+    let opts = CompileOptions {
+        emit: EmitStage::Rust,
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "function tag(strings: string[], ...subs: any[]): i64 { return strings.len() as i64; } function f(): i64 { return tag`hi ${42}!`; }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "tagged template with string[] + rest-param must lower through full pipeline; got {:?}",
+        out.diagnostics
+    );
+    let rust = out
+        .rust_source
+        .expect("emit-rust must populate rust_source for e2e tagged template Rust check");
+    let uses_template_strings_array =
+        rust.contains("TemplateStringsArray :: new") || rust.contains("TemplateStringsArray::new");
+    assert!(
+        uses_template_strings_array,
+        "tag's first arg must be a TemplateStringsArray::new(cooked, raw) call — spec requires both cooked and raw parts; got rust:\n{rust}"
+    );
+    let has_amp_slice_str = rust.contains("& [\"hi\"")
+        || rust.contains("&[\"hi\"")
+        || rust.contains("& [\"!\"]")
+        || rust.contains("&[\"!\"");
+    assert!(
+        !has_amp_slice_str,
+        "tag's first arg must NOT be a &[&str] slice — must be TemplateStringsArray (carries cooked + raw); got rust:\n{rust}"
+    );
+    let uses_dyn_vec =
+        rust.contains("__ts_aot_dyn_vec_new") && rust.contains("__ts_aot_dyn_vec_append");
+    assert!(
+        uses_dyn_vec,
+        "substitutions must be wrapped in Vec<DynamicValue> via __ts_aot_dyn_vec_new + __ts_aot_dyn_vec_append (rest-param path); got rust:\n{rust}"
+    );
+    let append_takes_mut_ref = rust.contains("& mut")
+        && (rust.contains("__ts_aot_dyn_vec_append (& mut")
+            || rust.contains("& mut _ ,") && rust.contains("__ts_aot_dyn_vec_append"));
+    assert!(
+        append_takes_mut_ref,
+        "DynVecAppend must receive `&mut subs_vec` (the runtime helper signature is `__ts_aot_dyn_vec_append(vec: &mut Vec<DynamicValue>, ...)`); without `&mut` the call would NOT compile. got rust:\n{rust}"
+    );
+}
+
+#[test]
 fn parse_error_surfaces_as_diagnostic_and_no_artifact() {
     let out = compile("const = 1;");
     assert!(out.has_errors());

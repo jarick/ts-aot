@@ -14,3 +14,4 @@ ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
 
 [dev-dependencies]
 ts-aot-backend = { path = "../ts-aot-backend" }
+ts-aot-frontend = { path = "../ts-aot-frontend" }

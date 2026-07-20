@@ -405,19 +405,22 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(value, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        MirExpr::Conditional {
-            cond,
-            then_branch,
-            else_branch,
-            ty,
-        } => {
-            d.write("cond(");
-            dump_expr_inline(cond, d);
-            d.write(" ? ");
-            dump_expr_inline(then_branch, d);
-            d.write(" : ");
-            dump_expr_inline(else_branch, d);
-            d.write(&format!("):{}", ty.raw()));
+        MirExpr::TemplateStringsArray { cooked, raw, ty } => {
+            d.write("tplstrings(cooked=[");
+            for (i, p) in cooked.iter().enumerate() {
+                if i > 0 {
+                    d.write(", ");
+                }
+                d.write(&format!("{:?}", p.as_str()));
+            }
+            d.write("], raw=[");
+            for (i, p) in raw.iter().enumerate() {
+                if i > 0 {
+                    d.write(", ");
+                }
+                d.write(&format!("{:?}", p.as_str()));
+            }
+            d.write(&format!("]):{}", ty.raw()));
         }
     }
 }
@@ -477,6 +480,8 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpObjectSetPrototypeOf => "object_set_prototype_of",
         RuntimeOp::OpObjectKeys => "object_keys",
         RuntimeOp::OpDynamicBinary => "dynamic_binary",
+        RuntimeOp::DynVecNew => "dyn_vec_new",
+        RuntimeOp::DynVecAppend => "dyn_vec_append",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
     }

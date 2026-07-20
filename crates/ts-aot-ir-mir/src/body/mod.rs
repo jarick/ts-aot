@@ -295,10 +295,9 @@ pub enum MirExpr {
         value: Box<MirExpr>,
         ty: TypeId,
     },
-    Conditional {
-        cond: Box<MirExpr>,
-        then_branch: Box<MirExpr>,
-        else_branch: Box<MirExpr>,
+    TemplateStringsArray {
+        cooked: Vec<Atom>,
+        raw: Vec<Atom>,
         ty: TypeId,
     },
 }
@@ -326,7 +325,7 @@ impl MirExpr {
             | MirExpr::OptionalChain { ty, .. }
             | MirExpr::TypeOf { ty, .. }
             | MirExpr::DynamicFrom { ty, .. }
-            | MirExpr::Conditional { ty, .. } => Some(*ty),
+            | MirExpr::TemplateStringsArray { ty, .. } => Some(*ty),
         }
     }
 }
@@ -363,6 +362,8 @@ pub enum RuntimeOp {
     OpObjectSetPrototypeOf,
     OpObjectKeys,
     OpDynamicBinary,
+    DynVecNew,
+    DynVecAppend,
 }
 
 #[cfg(test)]
