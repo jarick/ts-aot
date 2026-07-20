@@ -158,6 +158,10 @@ pub enum HirExpr {
         post: bool,
         ty: TypeId,
     },
+    Sequence {
+        exprs: Vec<HirExpr>,
+        ty: TypeId,
+    },
 }
 
 #[cfg(test)]

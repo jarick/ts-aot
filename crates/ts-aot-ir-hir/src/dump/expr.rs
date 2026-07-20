@@ -427,6 +427,16 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             dump_expr_inline(rhs, d);
             d.write(&format!(", post={}):{}", post, ty.raw()));
         }
+        HirExpr::Sequence { exprs, ty } => {
+            d.write("seq(");
+            for (i, e) in exprs.iter().enumerate() {
+                if i > 0 {
+                    d.write(", ");
+                }
+                dump_expr_inline(e, d);
+            }
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 

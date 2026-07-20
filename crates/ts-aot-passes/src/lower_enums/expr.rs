@@ -78,6 +78,11 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
             rewrite_expr(then_branch, map);
             rewrite_expr(else_branch, map);
         }
+        HirExpr::Sequence { exprs, .. } => {
+            for e in exprs {
+                rewrite_expr(e, map);
+            }
+        }
         HirExpr::Closure { captures, .. } => {
             for c in captures {
                 rewrite_expr(c, map);

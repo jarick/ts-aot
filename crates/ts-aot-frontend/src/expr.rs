@@ -1,8 +1,8 @@
 use oxc_ast::ast::{
     Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression, Expression,
-    LogicalExpression, SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral,
-    UnaryExpression, UpdateExpression, match_assignment_target, match_assignment_target_pattern,
-    match_expression, match_member_expression,
+    LogicalExpression, SequenceExpression, SimpleAssignmentTarget, TaggedTemplateExpression,
+    TemplateLiteral, UnaryExpression, UpdateExpression, match_assignment_target,
+    match_assignment_target_pattern, match_expression, match_member_expression,
 };
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
@@ -61,6 +61,7 @@ impl SkeletonBuilder<'_, '_> {
             Expression::ConditionalExpression(cond) => {
                 self.walk_conditional_expression(cond, scope)
             }
+            Expression::SequenceExpression(seq) => self.walk_sequence_expression(seq, scope),
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -223,6 +224,20 @@ impl SkeletonBuilder<'_, '_> {
             else_branch: Box::new(else_branch),
             ty,
         }
+    }
+
+    fn walk_sequence_expression(
+        &mut self,
+        seq: &SequenceExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let exprs: Vec<HirExpr> = seq
+            .expressions
+            .iter()
+            .map(|e| self.walk_expr(e, scope))
+            .collect();
+        let ty = self.error_ty();
+        HirExpr::Sequence { exprs, ty }
     }
 
     fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {

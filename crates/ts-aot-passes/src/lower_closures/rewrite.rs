@@ -181,6 +181,11 @@ pub(super) fn rewrite_in_expr(
             rewrite_in_expr(then_branch, closure_names, ctx);
             rewrite_in_expr(else_branch, closure_names, ctx);
         }
+        HirExpr::Sequence { exprs, .. } => {
+            for e in exprs {
+                rewrite_in_expr(e, closure_names, ctx);
+            }
+        }
         HirExpr::Await { expr: e, .. } | HirExpr::TypeAssertion { expr: e, .. } => {
             rewrite_in_expr(e, closure_names, ctx);
         }

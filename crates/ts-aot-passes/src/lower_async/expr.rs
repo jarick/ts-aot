@@ -259,6 +259,17 @@ fn recurse_subexprs(
             );
         }
         HirExpr::Yield { expr: None, .. } => {}
+        HirExpr::Sequence { exprs, .. } => {
+            for e in exprs {
+                rewrite_expr(
+                    e,
+                    promise_sym,
+                    resolve_sym,
+                    can_rewrite_promise_resolve,
+                    stats,
+                );
+            }
+        }
         HirExpr::Template {
             tag, expressions, ..
         } => {

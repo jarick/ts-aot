@@ -342,6 +342,7 @@ fn body_can_throw(body: &[HirStmt]) -> bool {
                 else_branch,
                 ..
             } => expr_can_throw(cond) || expr_can_throw(then_branch) || expr_can_throw(else_branch),
+            HirExpr::Sequence { exprs, .. } => exprs.iter().any(expr_can_throw),
             HirExpr::TypeAssertion { expr, .. } => expr_can_throw(expr),
             HirExpr::OptionalChain { base, .. } => expr_can_throw(base),
             HirExpr::Closure { captures, .. } => captures.iter().any(expr_can_throw),
@@ -445,7 +446,8 @@ fn throw_expr_type(expr: &HirExpr) -> TypeId {
         | HirExpr::OptionalChain { ty, .. }
         | HirExpr::Assignment { ty, .. }
         | HirExpr::CompoundUpdate { ty, .. }
-        | HirExpr::Ternary { ty, .. } => *ty,
+        | HirExpr::Ternary { ty, .. }
+        | HirExpr::Sequence { ty, .. } => *ty,
         HirExpr::TypeAssertion { target, .. } => *target,
         _ => TypeId::from_raw(0),
     }
