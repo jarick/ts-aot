@@ -281,6 +281,16 @@ fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCall
                 }
             }
         }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visit_expr_callees(cond, on_callee);
+            visit_expr_callees(then_branch, on_callee);
+            visit_expr_callees(else_branch, on_callee);
+        }
         HirExpr::Closure { body, captures, .. } => {
             for cap in captures {
                 visit_expr_callees(cap, on_callee);

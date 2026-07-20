@@ -3666,6 +3666,166 @@ fn body_can_throw_propagates_through_if_condition_call() {
 }
 
 #[test]
+fn body_can_throw_propagates_through_ternary_branches() {
+    let throwing_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(99)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Ternary {
+                cond: Box::new(HirExpr::Bool(true)),
+                then_branch: Box::new(throwing_call),
+                else_branch: Box::new(HirExpr::Int(0)),
+                ty: unit_ty(),
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &std::sync::Arc::new(HashMap::new()),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &empty_field_id_lookup(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        mir.effects.can_throw,
+        "Ternary with throwing then_branch must propagate can_throw (without this arm, function is mis-analyzed as Plain)"
+    );
+}
+
+#[test]
+fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
+    let side_effect_call = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: unit_ty(),
+    };
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Ternary {
+                cond: Box::new(HirExpr::Bool(false)),
+                then_branch: Box::new(side_effect_call),
+                else_branch: Box::new(HirExpr::Int(0)),
+                ty: unit_ty(),
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &std::sync::Arc::new(HashMap::new()),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &empty_field_id_lookup(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let outer_stmts = &mir.body.block.stmts;
+    let outer_has_call_directly = outer_stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Expr(MirExpr::Call { .. })
+                | MirStmt::Let {
+                    init: Some(MirExpr::Call { .. }),
+                    ..
+                }
+        )
+    });
+    assert!(
+        !outer_has_call_directly,
+        "BUG: then_branch side effect was emitted in the outer block (no short-circuit); outer_stmts={outer_stmts:?}"
+    );
+    let if_idx = outer_stmts
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::If {
+                    cond: MirExpr::Bool(false),
+                    ..
+                }
+            )
+        })
+        .expect("expected MirStmt::If for the Ternary (cond = false)");
+    let MirStmt::If {
+        then_block,
+        else_block,
+        ..
+    } = &outer_stmts[if_idx]
+    else {
+        unreachable!()
+    };
+    let then_has_call = then_block.stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Expr(MirExpr::Call { .. })
+                | MirStmt::Let {
+                    init: Some(MirExpr::Call { .. }),
+                    ..
+                }
+                | MirStmt::Assign {
+                    value: MirExpr::Call { .. },
+                    ..
+                }
+        )
+    });
+    assert!(
+        then_has_call,
+        "then_branch side effect must live inside then_block"
+    );
+    let else_block = else_block
+        .as_ref()
+        .expect("Ternary must produce an else block");
+    let else_has_call = else_block.stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Expr(MirExpr::Call { .. })
+                | MirStmt::Let {
+                    init: Some(MirExpr::Call { .. }),
+                    ..
+                }
+                | MirStmt::Assign {
+                    value: MirExpr::Call { .. },
+                    ..
+                }
+        )
+    });
+    assert!(
+        !else_has_call,
+        "else_branch must not contain then_branch call"
+    );
+}
+
+#[test]
 fn body_can_throw_propagates_through_while_condition_call() {
     let call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
@@ -4227,6 +4387,51 @@ fn infer_throws_uses_real_source_when_throwing_typed_expr() {
         mir.throws,
         Some(custom_err_ty),
         "throws must be derived from the thrown expression's type, not a sentinel"
+    );
+}
+
+#[test]
+fn infer_throws_uses_ternary_ty_not_sentinel() {
+    let custom_err_ty = TypeId::from_raw(77);
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Throw {
+            expr: HirExpr::Ternary {
+                cond: Box::new(HirExpr::Bool(true)),
+                then_branch: Box::new(HirExpr::Local {
+                    id: LocalId::from_raw(0),
+                    ty: custom_err_ty,
+                }),
+                else_branch: Box::new(HirExpr::Int(0)),
+                ty: custom_err_ty,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = convert_function(
+        &f,
+        FunctionId::from_raw(0),
+        None,
+        HashMap::new(),
+        &std::sync::Arc::new(HashMap::new()),
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &empty_field_id_lookup(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        mir.throws,
+        Some(custom_err_ty),
+        "throw_expr_type must use the Ternary's `ty` (real type), not the TypeId::from_raw(0) sentinel"
     );
 }
 

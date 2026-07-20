@@ -2099,3 +2099,79 @@ fn body_walker_object_expression_computed_key_walks_key_and_value_for_side_effec
         "unsupported computed key property must be omitted from fields, got: {fields:?}"
     );
 }
+
+#[test]
+fn body_walker_conditional_expression_basic_true_branch() {
+    let f = sole_function("function f(c: i64): i64 { return c > 0 ? 1 : 2; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Ternary {
+        cond,
+        then_branch,
+        else_branch,
+        ..
+    } = expr
+    else {
+        panic!("expected Ternary, got {expr:?}");
+    };
+    assert!(matches!(cond.as_ref(), HirExpr::Binary { .. }));
+    assert!(matches!(then_branch.as_ref(), HirExpr::Int(1)));
+    assert!(matches!(else_branch.as_ref(), HirExpr::Int(2)));
+}
+
+#[test]
+fn body_walker_conditional_expression_nested() {
+    let f =
+        sole_function("function f(a: i64, b: i64): i64 { return a > 0 ? (b > 0 ? 1 : 2) : 3; }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Ternary {
+        cond,
+        then_branch,
+        else_branch,
+        ..
+    } = expr
+    else {
+        panic!("expected outer Ternary, got {expr:?}");
+    };
+    assert!(matches!(cond.as_ref(), HirExpr::Binary { .. }));
+    assert!(matches!(else_branch.as_ref(), HirExpr::Int(3)));
+    let HirExpr::Ternary {
+        cond: inner_cond,
+        then_branch: inner_then,
+        else_branch: inner_else,
+        ..
+    } = then_branch.as_ref()
+    else {
+        panic!("expected inner Ternary in then_branch, got {then_branch:?}");
+    };
+    assert!(matches!(inner_cond.as_ref(), HirExpr::Binary { .. }));
+    assert!(matches!(inner_then.as_ref(), HirExpr::Int(1)));
+    assert!(matches!(inner_else.as_ref(), HirExpr::Int(2)));
+}
+
+#[test]
+fn body_walker_conditional_expression_with_call_in_branch() {
+    let f = sole_function("function f(c: i64): i64 { return c > 0 ? f(1) : f(2); }");
+    let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
+        panic!("expected Return, got {:?}", f.body[0]);
+    };
+    let HirExpr::Ternary {
+        then_branch,
+        else_branch,
+        ..
+    } = expr
+    else {
+        panic!("expected Ternary, got {expr:?}");
+    };
+    let HirExpr::Call { args, .. } = then_branch.as_ref() else {
+        panic!("expected Call in then_branch, got {then_branch:?}");
+    };
+    assert_eq!(args.len(), 1, "then_branch should call f(1)");
+    let HirExpr::Call { args, .. } = else_branch.as_ref() else {
+        panic!("expected Call in else_branch, got {else_branch:?}");
+    };
+    assert_eq!(args.len(), 1, "else_branch should call f(2)");
+}

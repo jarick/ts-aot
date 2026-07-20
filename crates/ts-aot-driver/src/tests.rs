@@ -109,6 +109,51 @@ fn emit_mir_produces_mir_dump() {
 }
 
 #[test]
+fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
+    let opts = CompileOptions {
+        emit: EmitStage::Mir,
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "function f(c: i64): never { throw c > 0 ? throwingFn() : 0; }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "frontend+passes+convert must accept `throw c > 0 ? throwingFn() : 0`; got {:?}",
+        out.diagnostics
+    );
+    let text = out
+        .mir_text
+        .expect("emit-mir must populate mir_text for e2e ternary throws check");
+    let throws_id = parse_throws_id(&text, "f").unwrap_or_else(|| {
+        panic!(
+            "MIR dump must contain `fn #0 f(c: ...) -> ... throws N` for function f; got:\n{text}"
+        )
+    });
+    assert!(
+        throws_id > 0,
+        "MIR dump must show `throws N` with N > 0 — `throw c > 0 ? throwingFn() : 0` must propagate the Ternary's `ty` through throw_expr_type, not the TypeId::from_raw(0) sentinel; got:\n{text}"
+    );
+    assert!(
+        text.contains("can_throw: true"),
+        "MIR dump must show `can_throw: true` in FunctionEffects — ternary with throwing call must keep can_throw set through the full pipeline; got:\n{text}"
+    );
+}
+
+fn parse_throws_id(mir_text: &str, fn_name: &str) -> Option<u32> {
+    let sig = format!("fn #0 {fn_name}(");
+    let start = mir_text.find(&sig)?;
+    let after = &mir_text[start + sig.len()..];
+    let throws_idx = after.find(" throws ")?;
+    let after_throws = &after[throws_idx + " throws ".len()..];
+    let id_end = after_throws
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_throws.len());
+    after_throws[..id_end].parse().ok()
+}
+
+#[test]
 fn parse_error_surfaces_as_diagnostic_and_no_artifact() {
     let out = compile("const = 1;");
     assert!(out.has_errors());

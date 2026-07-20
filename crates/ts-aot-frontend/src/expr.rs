@@ -58,6 +58,9 @@ impl SkeletonBuilder<'_, '_> {
             }
             Expression::ArrayExpression(arr) => self.walk_array_expression(arr, scope),
             Expression::ObjectExpression(obj) => self.walk_object_expression(obj, scope),
+            Expression::ConditionalExpression(cond) => {
+                self.walk_conditional_expression(cond, scope)
+            }
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -203,6 +206,23 @@ impl SkeletonBuilder<'_, '_> {
         }
         let ty = self.error_ty();
         HirExpr::ObjectLiteral { fields, ty }
+    }
+
+    fn walk_conditional_expression(
+        &mut self,
+        c: &oxc_ast::ast::ConditionalExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let cond = self.walk_expr(&c.test, scope);
+        let then_branch = self.walk_expr(&c.consequent, scope);
+        let else_branch = self.walk_expr(&c.alternate, scope);
+        let ty = self.error_ty();
+        HirExpr::Ternary {
+            cond: Box::new(cond),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+            ty,
+        }
     }
 
     fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {

@@ -92,6 +92,17 @@ pub fn substitute_expr(
                 .collect(),
             ty: substitute_type(*ty, mapping, types, result),
         },
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ty,
+        } => HirExpr::Ternary {
+            cond: Box::new(substitute_expr(cond, mapping, types, result)),
+            then_branch: Box::new(substitute_expr(then_branch, mapping, types, result)),
+            else_branch: Box::new(substitute_expr(else_branch, mapping, types, result)),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
         HirExpr::Closure {
             id,
             params,

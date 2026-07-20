@@ -372,6 +372,7 @@ fn emit_optional_chain_assign(
     }))
 }
 
+#[allow(clippy::too_many_lines)]
 fn emit_expr(
     expr: &MirExpr,
     ctx: &EmitCtx<'_>,
@@ -468,6 +469,17 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
         MirExpr::DynamicFrom { value, .. } => emit_dynamic_from(value, ctx, body_ctx),
+        MirExpr::Conditional {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let cond = emit_expr(cond, ctx, body_ctx)?;
+            let then_b = emit_expr(then_branch, ctx, body_ctx)?;
+            let else_b = emit_expr(else_branch, ctx, body_ctx)?;
+            Ok(quote!(if #cond { #then_b } else { #else_b }))
+        }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
             None => Ok(quote!(())),

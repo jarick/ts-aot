@@ -295,6 +295,12 @@ pub enum MirExpr {
         value: Box<MirExpr>,
         ty: TypeId,
     },
+    Conditional {
+        cond: Box<MirExpr>,
+        then_branch: Box<MirExpr>,
+        else_branch: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -319,7 +325,8 @@ impl MirExpr {
             | MirExpr::Yield { ty, .. }
             | MirExpr::OptionalChain { ty, .. }
             | MirExpr::TypeOf { ty, .. }
-            | MirExpr::DynamicFrom { ty, .. } => Some(*ty),
+            | MirExpr::DynamicFrom { ty, .. }
+            | MirExpr::Conditional { ty, .. } => Some(*ty),
         }
     }
 }
