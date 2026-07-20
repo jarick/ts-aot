@@ -1,6 +1,8 @@
 use ts_aot_backend::emit_decls;
 use ts_aot_core::{Atom, FieldId, LocalId, ModuleId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
+use ts_aot_ir_hir::{
+    HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt, ObjectLiteralField,
+};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 use ts_aot_passes::{PassContext, convert_program};
 
@@ -895,5 +897,156 @@ fn proto_compound_update_on_dynamic_owner_uses_proto_runtime_ops() {
         !has_plain_object_set,
         "x.__proto__ += y must NOT route through OpObjectSet, got stmts: {:?}",
         f.body.block.stmts
+    );
+}
+
+#[test]
+fn object_literal_arg_to_object_keys_emits_object_keys_runtime_call() {
+    let (mut types, mut ctx) = (TypeTable::new(), PassContext::default());
+    let dynamic_ty = types.intern(&Type::Dynamic);
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    let arg = HirExpr::ObjectLiteral {
+        fields: vec![ObjectLiteralField::Property {
+            name: Atom::new_inline("a"),
+            value: HirExpr::Int(1),
+        }],
+        ty: dynamic_ty,
+    };
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("f"),
+        params: Vec::new(),
+        ret: dynamic_ty,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                    owner: Box::new(HirExpr::Global {
+                        name: Atom::new_inline("Object"),
+                        ty: dynamic_ty,
+                    }),
+                    field: FieldId::from_raw(0),
+                    field_name: Atom::new_inline("keys"),
+                    ty: dynamic_ty,
+                })),
+                args: vec![arg],
+                ty: dynamic_ty,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mir = convert_program(&hir, &mut types, &mut ctx);
+    let f = mir.functions().next().expect("one function");
+    let has_object_keys = f.body.block.stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::OpObjectKeys,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_object_keys,
+        "Object.keys({{a:1}}) on a fresh object literal must emit OpObjectKeys (object literals are dynamic, so the inlined path applies), got stmts: {:?}",
+        f.body.block.stmts
+    );
+}
+
+#[test]
+fn empty_object_literal_emits_object_new_runtime_call() {
+    let (mut types, mut ctx) = (TypeTable::new(), PassContext::default());
+    let dynamic_ty = types.intern(&Type::Dynamic);
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    let arg = HirExpr::ObjectLiteral {
+        fields: Vec::new(),
+        ty: dynamic_ty,
+    };
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("f"),
+        params: Vec::new(),
+        ret: dynamic_ty,
+        throws: None,
+        body: vec![HirStmt::Return { value: Some(arg) }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mir = convert_program(&hir, &mut types, &mut ctx);
+    let f = mir.functions().next().expect("one function");
+    let has_object_new = f.body.block.stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::OpObjectNew,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_object_new,
+        "empty `{{}}` must emit OpObjectNew (not DynamicFrom(Unit) which would yield undefined), got stmts: {:?}",
+        f.body.block.stmts
+    );
+    let has_object_set = f.body.block.stmts.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::OpObjectSet,
+                ..
+            }
+        )
+    });
+    assert!(
+        !has_object_set,
+        "empty `{{}}` must NOT emit OpObjectSet (no fields), got stmts: {:?}",
+        f.body.block.stmts
+    );
+}
+
+#[test]
+fn object_literal_with_field_emits_mutable_dest_for_subsequent_set() {
+    let (mut types, mut ctx) = (TypeTable::new(), PassContext::default());
+    let dynamic_ty = types.intern(&Type::Dynamic);
+    let mut hir = HirProgram::new(ModuleId::from_raw(0));
+    hir.declarations.push(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("f"),
+        params: Vec::new(),
+        ret: dynamic_ty,
+        throws: None,
+        body: vec![HirStmt::Return {
+            value: Some(HirExpr::ObjectLiteral {
+                fields: vec![ObjectLiteralField::Property {
+                    name: Atom::new_inline("x"),
+                    value: HirExpr::Int(1),
+                }],
+                ty: dynamic_ty,
+            }),
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mir = convert_program(&hir, &mut types, &mut ctx);
+    let tokens = emit_decls(&mir, &types).expect("emit must succeed");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("let mut "),
+        "OpObjectNew dest must be `let mut` (not `let`) so subsequent `&mut <local>` in OpObjectSet compiles, got: {s}"
+    );
+    assert!(
+        s.contains("__ts_aot_object_new ()"),
+        "OpObjectNew must call __ts_aot_object_new, got: {s}"
+    );
+    assert!(
+        s.contains("__ts_aot_dynamic_set (& mut "),
+        "OpObjectSet on the dest must take `&mut <local>` (matches the mutability of the let), got: {s}"
     );
 }

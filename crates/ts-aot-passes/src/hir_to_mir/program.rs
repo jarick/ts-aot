@@ -4,7 +4,9 @@ use std::sync::Arc;
 use ts_aot_core::{
     Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId, TypeTable, Visibility,
 };
-use ts_aot_ir_hir::{HirClass, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase};
+use ts_aot_ir_hir::{
+    HirClass, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase, ObjectLiteralField,
+};
 use ts_aot_ir_mir::{
     FunctionEffects, FunctionKind, MirBody, MirDecl, MirExpr, MirFieldDecl, MirFunctionDecl,
     MirGlobalDecl, MirImport, MirParam, MirProgram, MirStructDecl,
@@ -330,6 +332,10 @@ fn body_can_throw(body: &[HirStmt]) -> bool {
             HirExpr::Unary { expr, .. } => expr_can_throw(expr),
             HirExpr::Template { expressions, .. } => expressions.iter().any(expr_can_throw),
             HirExpr::ArrayLiteral { elements, .. } => elements.iter().any(expr_can_throw),
+            HirExpr::ObjectLiteral { fields, .. } => fields.iter().any(|f| match f {
+                ObjectLiteralField::Property { value, .. } => expr_can_throw(value),
+                ObjectLiteralField::Spread(value) => expr_can_throw(value),
+            }),
             HirExpr::TypeAssertion { expr, .. } => expr_can_throw(expr),
             HirExpr::OptionalChain { base, .. } => expr_can_throw(base),
             HirExpr::Closure { captures, .. } => captures.iter().any(expr_can_throw),
@@ -423,6 +429,7 @@ fn throw_expr_type(expr: &HirExpr) -> TypeId {
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }
+        | HirExpr::ObjectLiteral { ty, .. }
         | HirExpr::ArrayLiteral { ty, .. }
         | HirExpr::Closure { ty, .. }
         | HirExpr::Await { ty, .. }

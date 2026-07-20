@@ -1,5 +1,5 @@
 use ts_aot_core::Atom;
-use ts_aot_ir_hir::{HirCallee, HirExpr};
+use ts_aot_ir_hir::{HirCallee, HirExpr, ObjectLiteralField};
 
 use super::LowerAsyncStats;
 
@@ -188,6 +188,21 @@ fn recurse_subexprs(
             for e in elements {
                 rewrite_expr(
                     e,
+                    promise_sym,
+                    resolve_sym,
+                    can_rewrite_promise_resolve,
+                    stats,
+                );
+            }
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                let value = match f {
+                    ObjectLiteralField::Property { value, .. } => value,
+                    ObjectLiteralField::Spread(value) => value,
+                };
+                rewrite_expr(
+                    value,
                     promise_sym,
                     resolve_sym,
                     can_rewrite_promise_resolve,

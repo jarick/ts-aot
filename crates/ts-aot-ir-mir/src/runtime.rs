@@ -53,6 +53,7 @@ impl RuntimeRequirements {
             }
             RuntimeOp::OpObjectDelete
             | RuntimeOp::OpObjectUnwrap
+            | RuntimeOp::OpObjectNew
             | RuntimeOp::OpObjectProtoGet
             | RuntimeOp::OpObjectProtoSet
             | RuntimeOp::OpObjectSetPrototypeOf

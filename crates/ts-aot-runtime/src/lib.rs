@@ -389,6 +389,11 @@ impl PartialEq for Dynamic {
 }
 
 #[must_use]
+pub fn __ts_aot_object_new() -> DynamicValue {
+    DynamicValue::Object(Dynamic::new())
+}
+
+#[must_use]
 pub fn __ts_aot_dynamic_get(value: &DynamicValue, field_name: &str) -> DynamicValue {
     match value {
         DynamicValue::Object(dyn_obj) => dyn_obj

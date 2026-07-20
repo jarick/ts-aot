@@ -70,7 +70,7 @@ fn emit_runtime_stmt(
     if let Some(dest) = dest {
         let dest = body_ctx.local_ident(dest);
         let ty = emit_type_id_with_ctx(ty, ctx);
-        let mutability = if matches!(op, RuntimeOp::OpObjectUnwrap) {
+        let mutability = if matches!(op, RuntimeOp::OpObjectUnwrap | RuntimeOp::OpObjectNew) {
             quote!(mut)
         } else {
             quote!()
@@ -598,6 +598,7 @@ fn emit_runtime_call(
             let opt = emit_expr(&args[0], ctx, body_ctx)?;
             Ok(quote!(__ts_aot_dynamic_unwrap(#opt)))
         }
+        RuntimeOp::OpObjectNew => Ok(quote!(__ts_aot_object_new())),
         RuntimeOp::OpObjectSet => {
             let obj = emit_expr(&args[0], ctx, body_ctx)?;
             let field_name = extract_string_arg(&args[1])?;
@@ -840,6 +841,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::OpObjectHas => format_ident!("__ts_aot_dynamic_has"),
         RuntimeOp::OpObjectDelete => format_ident!("__ts_aot_dynamic_delete"),
         RuntimeOp::OpObjectUnwrap => format_ident!("__ts_aot_dynamic_unwrap"),
+        RuntimeOp::OpObjectNew => format_ident!("__ts_aot_object_new"),
         RuntimeOp::OpObjectProtoGet => format_ident!("__ts_aot_object_proto_get"),
         RuntimeOp::OpObjectProtoSet => format_ident!("__ts_aot_object_proto_set"),
         RuntimeOp::OpObjectSetPrototypeOf => format_ident!("__ts_aot_object_set_prototype_of"),

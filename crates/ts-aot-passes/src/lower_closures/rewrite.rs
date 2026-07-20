@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, LocalId, Span, TypeId};
-use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirStmt};
+use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirStmt, ObjectLiteralField};
 
 use crate::PassContext;
 
@@ -160,6 +160,15 @@ pub(super) fn rewrite_in_expr(
         HirExpr::ArrayLiteral { elements, .. } => {
             for e in elements {
                 rewrite_in_expr(e, closure_names, ctx);
+            }
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                let value = match f {
+                    ObjectLiteralField::Property { value, .. } => value,
+                    ObjectLiteralField::Spread(value) => value,
+                };
+                rewrite_in_expr(value, closure_names, ctx);
             }
         }
         HirExpr::Await { expr: e, .. } | HirExpr::TypeAssertion { expr: e, .. } => {

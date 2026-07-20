@@ -1,6 +1,6 @@
 use super::Dumper;
 
-use crate::expr::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp};
+use crate::expr::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp, ObjectLiteralField};
 use crate::stmt::{HirCatchClause, HirStmt, HirSwitchCase};
 
 pub(crate) fn dump_body(stmts: &[HirStmt], d: &mut Dumper) {
@@ -251,6 +251,25 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
                 dump_expr_inline(val, d);
             }
             d.write(&format!("}}:{}", ty.raw()));
+        }
+        HirExpr::ObjectLiteral { fields, ty } => {
+            d.write("{");
+            for (i, field) in fields.iter().enumerate() {
+                if i > 0 {
+                    d.write(", ");
+                }
+                match field {
+                    ObjectLiteralField::Property { name, value } => {
+                        d.write(&format!("{}:", name.as_str()));
+                        dump_expr_inline(value, d);
+                    }
+                    ObjectLiteralField::Spread(value) => {
+                        d.write("...");
+                        dump_expr_inline(value, d);
+                    }
+                }
+            }
+            d.write(&format!("}}:{{{}}}", ty.raw()));
         }
         HirExpr::ArrayLiteral { elements, ty } => {
             d.write("[");

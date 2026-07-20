@@ -97,6 +97,10 @@ pub enum HirExpr {
         ty: TypeId,
         fields: Vec<(FieldId, HirExpr)>,
     },
+    ObjectLiteral {
+        fields: Vec<ObjectLiteralField>,
+        ty: TypeId,
+    },
     ArrayLiteral {
         elements: Vec<HirExpr>,
         ty: TypeId,
@@ -204,4 +208,10 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectLiteralField {
+    Property { name: Atom, value: HirExpr },
+    Spread(HirExpr),
 }

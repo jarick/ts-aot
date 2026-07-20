@@ -4,6 +4,7 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use super::substitute::{TypeParamMap, TypeSubstitutionResult};
 use super::substitute_decl::substitute_body;
 use super::substitute_ty::{substitute_param, substitute_type};
+use ts_aot_ir_hir::ObjectLiteralField;
 
 pub fn substitute_expr(
     expr: &HirExpr,
@@ -73,6 +74,21 @@ pub fn substitute_expr(
             elements: elements
                 .iter()
                 .map(|e| substitute_expr(e, mapping, types, result))
+                .collect(),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
+        HirExpr::ObjectLiteral { fields, ty } => HirExpr::ObjectLiteral {
+            fields: fields
+                .iter()
+                .map(|f| match f {
+                    ObjectLiteralField::Property { name, value } => ObjectLiteralField::Property {
+                        name: name.clone(),
+                        value: substitute_expr(value, mapping, types, result),
+                    },
+                    ObjectLiteralField::Spread(value) => {
+                        ObjectLiteralField::Spread(substitute_expr(value, mapping, types, result))
+                    }
+                })
                 .collect(),
             ty: substitute_type(*ty, mapping, types, result),
         },

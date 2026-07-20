@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ts_aot_core::{Atom, LocalId, Span};
-use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr};
+use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, ObjectLiteralField};
 
 use super::LowerClosuresStats;
 use super::walk_stmt::walk_body;
@@ -171,6 +171,24 @@ pub(super) fn walk_expr(
             for e in elements {
                 walk_expr(
                     e,
+                    next_id,
+                    closure_names,
+                    new_decls,
+                    generated,
+                    taken,
+                    stats,
+                    ctx,
+                );
+            }
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            for f in fields {
+                let value = match f {
+                    ObjectLiteralField::Property { value, .. } => value,
+                    ObjectLiteralField::Spread(value) => value,
+                };
+                walk_expr(
+                    value,
                     next_id,
                     closure_names,
                     new_decls,
