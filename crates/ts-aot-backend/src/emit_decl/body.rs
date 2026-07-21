@@ -1,6 +1,6 @@
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::{LocalId, TypeId};
+use ts_aot_core::{LocalId, Type, TypeId};
 
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt,
@@ -466,8 +466,17 @@ fn emit_expr(
         } => emit_binary_expr(*op, left, right, ctx, body_ctx),
         MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, body_ctx),
         MirExpr::Await { expr, .. } => {
-            let expr = emit_expr(expr, ctx, body_ctx)?;
-            Ok(quote!(#expr.await))
+            let inner = emit_expr(expr, ctx, body_ctx)?;
+            let needs_helper = matches!(expr.as_ref(), MirExpr::Import { .. })
+                || expr
+                    .ty()
+                    .and_then(|ty_id| ctx.types.resolve(ty_id))
+                    .is_some_and(|ty| matches!(ty, Type::Promise { .. }));
+            if needs_helper {
+                Ok(quote!(ts_aot_runtime::__ts_aot_await(&#inner)))
+            } else {
+                Ok(inner)
+            }
         }
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
@@ -500,6 +509,10 @@ fn emit_expr(
         MirExpr::BigInt { value, .. } => {
             let value_lit = Literal::string(value);
             Ok(quote!(ts_aot_runtime::__ts_aot_bigint_new(#value_lit)))
+        }
+        MirExpr::Import { source, .. } => {
+            let source = emit_expr(source, ctx, body_ctx)?;
+            Ok(quote!(ts_aot_runtime::__ts_aot_dynamic_import(&#source)))
         }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),

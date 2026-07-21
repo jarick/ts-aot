@@ -29,6 +29,10 @@ pub fn substitute_expr(
             value: value.clone(),
             ty: substitute_type(*ty, mapping, types, result),
         },
+        HirExpr::Import { source, ty } => HirExpr::Import {
+            source: Box::new(substitute_expr(source, mapping, types, result)),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
         HirExpr::Local { id, ty } => HirExpr::Local {
             id: *id,
             ty: substitute_type(*ty, mapping, types, result),

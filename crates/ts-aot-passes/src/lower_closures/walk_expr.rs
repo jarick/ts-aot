@@ -388,6 +388,18 @@ pub(super) fn walk_expr(
         | HirExpr::Yield { expr: None, .. }
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. } => {}
+        HirExpr::Import { source, .. } => {
+            walk_expr(
+                source,
+                next_id,
+                closure_names,
+                new_decls,
+                generated,
+                taken,
+                stats,
+                ctx,
+            );
+        }
     }
 }
 

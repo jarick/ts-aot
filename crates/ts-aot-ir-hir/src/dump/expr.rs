@@ -446,6 +446,11 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
         HirExpr::BigInt { value, ty } => {
             d.write(&format!("bigint({:?}):{}", value.as_str(), ty.raw()))
         }
+        HirExpr::Import { source, ty } => {
+            d.write("import(");
+            dump_expr_inline(source, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 

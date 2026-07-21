@@ -183,7 +183,8 @@ impl ExprConverter {
                         | HirExpr::Assignment { ty, .. }
                         | HirExpr::CompoundUpdate { ty, .. }
                         | HirExpr::RegExp { ty, .. }
-                        | HirExpr::BigInt { ty, .. } => types
+                        | HirExpr::BigInt { ty, .. }
+                        | HirExpr::Import { ty, .. } => types
                             .resolve(*ty)
                             .is_some_and(|t| is_dynamic_type(t, types)),
                         HirExpr::TypeAssertion { target, .. } => types
@@ -549,6 +550,26 @@ impl ExprConverter {
                 value: value.to_string(),
                 ty: *ty,
             },
+            HirExpr::Import { source, ty } => {
+                let mut sub_out = Vec::new();
+                let source_mir = self.convert_expr(
+                    source,
+                    &mut sub_out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                out.extend(sub_out);
+                let dynamic_ty = types.intern(&Type::Dynamic);
+                MirExpr::Import {
+                    source: Box::new(MirExpr::DynamicFrom {
+                        value: Box::new(source_mir),
+                        ty: dynamic_ty,
+                    }),
+                    ty: *ty,
+                }
+            }
             HirExpr::Ternary {
                 cond,
                 then_branch,

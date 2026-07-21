@@ -171,6 +171,10 @@ pub enum HirExpr {
         value: Atom,
         ty: TypeId,
     },
+    Import {
+        source: Box<HirExpr>,
+        ty: TypeId,
+    },
 }
 
 #[cfg(test)]

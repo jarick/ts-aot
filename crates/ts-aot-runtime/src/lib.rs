@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::any::TypeId;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::ops::Index;
@@ -86,6 +87,170 @@ impl BigIntHandle {
 #[must_use]
 pub fn __ts_aot_bigint_new(value: &str) -> BigIntHandle {
     BigIntHandle::new(value)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PromiseState {
+    Pending,
+    Fulfilled,
+    Rejected,
+}
+
+pub struct Promise {
+    inner: Rc<RefCell<PromiseInner>>,
+}
+
+struct PromiseInner {
+    state: PromiseState,
+    value: Option<DynamicValue>,
+    callbacks: Vec<Box<dyn FnOnce(DynamicValue)>>,
+}
+
+#[must_use]
+pub fn __ts_aot_promise_create() -> Promise {
+    Promise {
+        inner: Rc::new(RefCell::new(PromiseInner {
+            state: PromiseState::Pending,
+            value: None,
+            callbacks: Vec::new(),
+        })),
+    }
+}
+
+pub fn __ts_aot_promise_resolve(promise: &Promise, value: &DynamicValue) {
+    let to_fire: Vec<Box<dyn FnOnce(DynamicValue)>> = {
+        let mut inner = promise.inner.borrow_mut();
+        if inner.state != PromiseState::Pending {
+            return;
+        }
+        inner.state = PromiseState::Fulfilled;
+        inner.value = Some(value.clone());
+        std::mem::take(&mut inner.callbacks)
+    };
+    for cb in to_fire {
+        cb(value.clone());
+    }
+}
+
+pub fn __ts_aot_promise_reject(promise: &Promise, reason: &DynamicValue) {
+    let to_fire: Vec<Box<dyn FnOnce(DynamicValue)>> = {
+        let mut inner = promise.inner.borrow_mut();
+        if inner.state != PromiseState::Pending {
+            return;
+        }
+        inner.state = PromiseState::Rejected;
+        inner.value = Some(reason.clone());
+        std::mem::take(&mut inner.callbacks)
+    };
+    // In Fulfilled + Rejected we currently fire the same way: pass the
+    // stored value (success payload or rejection reason) to the callback.
+    // try/catch wrapper HIR is not yet implemented, so a Rejected promise
+    // reached via __ts_aot_await will panic below.
+    for cb in to_fire {
+        cb(reason.clone());
+    }
+}
+
+pub fn __ts_aot_promise_then(promise: &Promise, callback: Box<dyn FnOnce(DynamicValue)>) {
+    let inner = promise.inner.borrow();
+    if matches!(
+        inner.state,
+        PromiseState::Fulfilled | PromiseState::Rejected
+    ) {
+        let value = inner
+            .value
+            .clone()
+            .expect("settled promise must have a value");
+        drop(inner);
+        callback(value);
+    } else {
+        drop(inner);
+        promise.inner.borrow_mut().callbacks.push(callback);
+    }
+}
+
+#[must_use]
+pub fn __ts_aot_await(promise: &Promise) -> DynamicValue {
+    let inner = promise.inner.borrow();
+    match &inner.state {
+        PromiseState::Fulfilled => inner
+            .value
+            .clone()
+            .expect("fulfilled promise must have a value"),
+        PromiseState::Rejected => {
+            let reason = inner
+                .value
+                .clone()
+                .expect("rejected promise must have a reason");
+            panic!("await on a rejected promise: {}", format_dynamic(&reason));
+        }
+        PromiseState::Pending => {
+            panic!("__ts_aot_await only works on settled promises; this one is pending")
+        }
+    }
+}
+
+fn format_dynamic(value: &DynamicValue) -> String {
+    match value {
+        DynamicValue::String(s) => s.clone(),
+        DynamicValue::Integer(i) => i.to_string(),
+        DynamicValue::Number(f) => f.to_string(),
+        DynamicValue::Bool(b) => b.to_string(),
+        DynamicValue::Undefined => "undefined".to_owned(),
+        DynamicValue::Null => "null".to_owned(),
+        DynamicValue::Object(_) => "[object Object]".to_owned(),
+    }
+}
+
+type ModuleNamespace = HashMap<String, DynamicValue>;
+
+fn with_module_registry<R>(f: impl FnOnce(&mut HashMap<String, ModuleNamespace>) -> R) -> R {
+    thread_local! {
+        static REGISTRY: RefCell<HashMap<String, ModuleNamespace>> = RefCell::new(HashMap::new());
+    }
+    REGISTRY.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+pub fn __ts_aot_module_register(specifier: &str, namespace: ModuleNamespace) {
+    with_module_registry(|reg| {
+        reg.insert(specifier.to_owned(), namespace);
+    });
+}
+
+#[must_use]
+pub fn __ts_aot_dynamic_import_resolve(specifier: &str) -> Promise {
+    let promise = __ts_aot_promise_create();
+    let value = with_module_registry(|reg| {
+        let mut namespace = reg.get(specifier).cloned().unwrap_or_default();
+        namespace
+            .entry("__esModule".to_owned())
+            .or_insert(DynamicValue::Bool(true));
+        DynamicValue::Object(namespace_to_dynamic(&namespace))
+    });
+    __ts_aot_promise_resolve(&promise, &value);
+    promise
+}
+
+fn namespace_to_dynamic(namespace: &ModuleNamespace) -> Dynamic {
+    let obj = Dynamic::new();
+    let mut order: Vec<String> = namespace.keys().cloned().collect();
+    order.sort();
+    for key in &order {
+        if let Some(value) = namespace.get(key) {
+            obj.fields.borrow_mut().insert(key.clone(), value.clone());
+        }
+    }
+    obj.field_order.borrow_mut().clone_from(&order);
+    obj
+}
+
+#[must_use]
+pub fn __ts_aot_dynamic_import(source: &DynamicValue) -> Promise {
+    let specifier = match source {
+        DynamicValue::String(s) => s.clone(),
+        other => panic!("dynamic import() requires a string specifier, got {other:?}"),
+    };
+    __ts_aot_dynamic_import_resolve(&specifier)
 }
 
 #[must_use]

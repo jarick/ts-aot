@@ -360,6 +360,15 @@ fn recurse_subexprs(
                 stats,
             );
         }
+        HirExpr::Import { source, .. } => {
+            rewrite_expr(
+                source.as_mut(),
+                promise_sym,
+                resolve_sym,
+                can_rewrite_promise_resolve,
+                stats,
+            );
+        }
         HirExpr::Unit
         | HirExpr::Bool(_)
         | HirExpr::Int(_)

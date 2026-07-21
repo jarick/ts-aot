@@ -309,6 +309,10 @@ pub enum MirExpr {
         value: String,
         ty: TypeId,
     },
+    Import {
+        source: Box<MirExpr>,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -336,7 +340,8 @@ impl MirExpr {
             | MirExpr::DynamicFrom { ty, .. }
             | MirExpr::TemplateStringsArray { ty, .. }
             | MirExpr::RegExp { ty, .. }
-            | MirExpr::BigInt { ty, .. } => Some(*ty),
+            | MirExpr::BigInt { ty, .. }
+            | MirExpr::Import { ty, .. } => Some(*ty),
         }
     }
 }

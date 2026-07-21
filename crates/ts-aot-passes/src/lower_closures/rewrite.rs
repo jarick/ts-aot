@@ -227,5 +227,8 @@ pub(super) fn rewrite_in_expr(
         | HirExpr::Yield { expr: None, .. }
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. } => {}
+        HirExpr::Import { source, .. } => {
+            rewrite_in_expr(source, closure_names, ctx);
+        }
     }
 }

@@ -1324,6 +1324,40 @@ fn body_walker_bigint_literal_handles_large_value_via_const_fold() {
 }
 
 #[test]
+fn body_walker_dynamic_import_emits_import_expr() {
+    let f = sole_function("function f(): i64 { return import('./mod.js'); }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    let HirExpr::Import { source, .. } = ret else {
+        panic!("expected Import, got {ret:?}");
+    };
+    match source.as_ref() {
+        HirExpr::String(s) => assert_eq!(s.as_str(), "./mod.js"),
+        other => panic!("expected String source, got {other:?}"),
+    }
+}
+
+#[test]
+fn body_walker_dynamic_import_with_options_emits_unwalked_diagnostic() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): i64 { return import('./mod', { with: { type: 'json' } }); }",
+    );
+    let diags: Vec<String> = output
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("with") && d.contains("not supported")),
+        "expected unwalked diagnostic about `with` import options, got: {diags:?}"
+    );
+}
+
+#[test]
 fn body_walker_method_this_is_local_zero_and_params_follow() {
     let output = FrontendPass::new().run(
         "test.ts",

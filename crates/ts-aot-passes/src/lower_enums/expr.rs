@@ -123,6 +123,7 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
         | HirExpr::Undefined
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. } => {}
+        HirExpr::Import { source, .. } => rewrite_expr(source, map),
     }
 }
 

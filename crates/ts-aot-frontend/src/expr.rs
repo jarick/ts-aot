@@ -82,6 +82,26 @@ impl SkeletonBuilder<'_, '_> {
                 let ty = self.error_ty();
                 HirExpr::BigInt { value, ty }
             }
+            Expression::ImportExpression(imp) => {
+                if imp.options.is_some() {
+                    self.report_unwalked(
+                        "dynamic import() with options (e.g. { with: { ... } }) is not supported by the body walker",
+                        imp.span,
+                    );
+                }
+                if imp.phase.is_some() {
+                    self.report_unwalked(
+                        "dynamic import() with explicit phase (e.g. import.source) is not supported by the body walker",
+                        imp.span,
+                    );
+                }
+                let source = self.walk_expr(&imp.source, scope);
+                let ty = self.error_ty();
+                HirExpr::Import {
+                    source: Box::new(source),
+                    ty,
+                }
+            }
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
