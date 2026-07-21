@@ -36,7 +36,8 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::IndirectCall { ty, .. }
         | MirExpr::TypeOf { ty, .. }
         | MirExpr::DynamicFrom { ty, .. }
-        | MirExpr::TemplateStringsArray { ty, .. } => *ty,
+        | MirExpr::TemplateStringsArray { ty, .. }
+        | MirExpr::RegExp { ty, .. } => *ty,
         MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => {
             TypeId::from_raw(0)
         }
@@ -77,7 +78,8 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::OptionalChain { ty, .. }
         | HirExpr::Assignment { ty, .. }
         | HirExpr::CompoundUpdate { ty, .. }
-        | HirExpr::Sequence { ty, .. } => Some(*ty),
+        | HirExpr::Sequence { ty, .. }
+        | HirExpr::RegExp { ty, .. } => Some(*ty),
         HirExpr::TypeAssertion { target, .. } => Some(*target),
         HirExpr::Int(_)
         | HirExpr::Float(_)

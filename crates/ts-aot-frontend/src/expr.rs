@@ -65,6 +65,12 @@ impl SkeletonBuilder<'_, '_> {
             Expression::ClassExpression(class_expr) => {
                 self.walk_class_expression(class_expr, scope)
             }
+            Expression::RegExpLiteral(re) => {
+                let pattern = Atom::from(re.regex.pattern.text.as_str());
+                let flags = Atom::from(re.regex.flags.to_string().as_str());
+                let ty = self.error_ty();
+                HirExpr::RegExp { pattern, flags, ty }
+            }
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",

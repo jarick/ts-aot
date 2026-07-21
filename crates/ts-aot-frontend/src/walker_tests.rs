@@ -1230,7 +1230,7 @@ fn body_walker_c_for_runs_update_before_continue() {
 
 #[test]
 fn body_walker_unsupported_expression_warns_without_erroring() {
-    let output = FrontendPass::new().run("test.ts", "function f(): void { /abc/; }");
+    let output = FrontendPass::new().run("test.ts", "function f(): void { new.target; }");
     assert!(
         !output.diagnostics.has_errors(),
         "unsupported body expressions degrade to a warning, not an error: {:?}",
@@ -1244,6 +1244,55 @@ fn body_walker_unsupported_expression_warns_without_erroring() {
         "expected an E0500 walker warning, got {:?}",
         output.diagnostics
     );
+}
+
+#[test]
+fn body_walker_regexp_literal_with_flags_emits_regexp_expr() {
+    let f = sole_function("function f(): i64 { return /foo/g; }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret {
+        HirExpr::RegExp { pattern, flags, .. } => {
+            assert_eq!(pattern, Atom::from("foo"));
+            assert_eq!(flags, Atom::from("g"));
+        }
+        other => panic!("expected RegExp, got {other:?}"),
+    }
+}
+
+#[test]
+fn body_walker_regexp_literal_without_flags_uses_empty_flags() {
+    let f = sole_function("function f(): i64 { return /abc/; }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret {
+        HirExpr::RegExp { pattern, flags, .. } => {
+            assert_eq!(pattern, Atom::from("abc"));
+            assert_eq!(
+                flags.as_str(),
+                "",
+                "no-flags regex must produce empty flags string"
+            );
+        }
+        other => panic!("expected RegExp, got {other:?}"),
+    }
+}
+
+#[test]
+fn body_walker_regexp_literal_with_multiple_flags_preserves_all() {
+    let f = sole_function("function f(): i64 { return /foo/gim; }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret {
+        HirExpr::RegExp { pattern, flags, .. } => {
+            assert_eq!(pattern, Atom::from("foo"));
+            assert_eq!(flags.as_str().len(), 3);
+        }
+        other => panic!("expected RegExp, got {other:?}"),
+    }
 }
 
 #[test]

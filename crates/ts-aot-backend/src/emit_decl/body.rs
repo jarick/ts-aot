@@ -492,6 +492,11 @@ fn emit_expr(
                 vec![#(#raw_lits),*]
             )))
         }
+        MirExpr::RegExp { pattern, flags, .. } => {
+            let pattern_lit = Literal::string(pattern);
+            let flags_lit = Literal::string(flags);
+            Ok(quote!(ts_aot_runtime::__ts_aot_regex_new(#pattern_lit, #flags_lit)))
+        }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
             None => Ok(quote!(())),

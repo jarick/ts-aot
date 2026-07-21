@@ -437,6 +437,12 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
+        HirExpr::RegExp { pattern, flags, ty } => d.write(&format!(
+            "regexp({:?}, {:?}):{}",
+            pattern.as_str(),
+            flags.as_str(),
+            ty.raw()
+        )),
     }
 }
 

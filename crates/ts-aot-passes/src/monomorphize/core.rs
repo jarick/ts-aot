@@ -341,6 +341,7 @@ fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCall
         | HirExpr::Null
         | HirExpr::Undefined
         | HirExpr::Local { .. }
-        | HirExpr::Global { .. } => {}
+        | HirExpr::Global { .. }
+        | HirExpr::RegExp { .. } => {}
     }
 }
