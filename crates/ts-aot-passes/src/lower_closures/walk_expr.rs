@@ -386,7 +386,8 @@ pub(super) fn walk_expr(
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::Yield { expr: None, .. }
-        | HirExpr::RegExp { .. } => {}
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => {}
     }
 }
 

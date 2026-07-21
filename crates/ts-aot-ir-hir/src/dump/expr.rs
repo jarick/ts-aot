@@ -443,6 +443,9 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             flags.as_str(),
             ty.raw()
         )),
+        HirExpr::BigInt { value, ty } => {
+            d.write(&format!("bigint({:?}):{}", value.as_str(), ty.raw()))
+        }
     }
 }
 

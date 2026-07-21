@@ -225,6 +225,7 @@ pub(super) fn rewrite_in_expr(
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::Yield { expr: None, .. }
-        | HirExpr::RegExp { .. } => {}
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => {}
     }
 }

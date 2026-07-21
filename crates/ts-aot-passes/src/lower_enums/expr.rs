@@ -121,7 +121,8 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
         | HirExpr::String(_)
         | HirExpr::Null
         | HirExpr::Undefined
-        | HirExpr::RegExp { .. } => {}
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => {}
     }
 }
 

@@ -25,6 +25,10 @@ pub fn substitute_expr(
             flags: flags.clone(),
             ty: substitute_type(*ty, mapping, types, result),
         },
+        HirExpr::BigInt { value, ty } => HirExpr::BigInt {
+            value: value.clone(),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
         HirExpr::Local { id, ty } => HirExpr::Local {
             id: *id,
             ty: substitute_type(*ty, mapping, types, result),

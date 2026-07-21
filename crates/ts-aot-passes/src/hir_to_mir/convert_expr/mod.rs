@@ -182,7 +182,8 @@ impl ExprConverter {
                         | HirExpr::OptionalChain { ty, .. }
                         | HirExpr::Assignment { ty, .. }
                         | HirExpr::CompoundUpdate { ty, .. }
-                        | HirExpr::RegExp { ty, .. } => types
+                        | HirExpr::RegExp { ty, .. }
+                        | HirExpr::BigInt { ty, .. } => types
                             .resolve(*ty)
                             .is_some_and(|t| is_dynamic_type(t, types)),
                         HirExpr::TypeAssertion { target, .. } => types
@@ -542,6 +543,10 @@ impl ExprConverter {
             HirExpr::RegExp { pattern, flags, ty } => MirExpr::RegExp {
                 pattern: pattern.to_string(),
                 flags: flags.to_string(),
+                ty: *ty,
+            },
+            HirExpr::BigInt { value, ty } => MirExpr::BigInt {
+                value: value.to_string(),
                 ty: *ty,
             },
             HirExpr::Ternary {

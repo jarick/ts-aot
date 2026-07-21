@@ -305,6 +305,10 @@ pub enum MirExpr {
         flags: String,
         ty: TypeId,
     },
+    BigInt {
+        value: String,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -331,7 +335,8 @@ impl MirExpr {
             | MirExpr::TypeOf { ty, .. }
             | MirExpr::DynamicFrom { ty, .. }
             | MirExpr::TemplateStringsArray { ty, .. }
-            | MirExpr::RegExp { ty, .. } => Some(*ty),
+            | MirExpr::RegExp { ty, .. }
+            | MirExpr::BigInt { ty, .. } => Some(*ty),
         }
     }
 }

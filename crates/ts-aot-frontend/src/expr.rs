@@ -4,6 +4,7 @@ use oxc_ast::ast::{
     TemplateLiteral, UnaryExpression, UpdateExpression, match_assignment_target,
     match_assignment_target_pattern, match_expression, match_member_expression,
 };
+use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
 use ts_aot_core::{Atom, FieldId};
@@ -70,6 +71,16 @@ impl SkeletonBuilder<'_, '_> {
                 let flags = Atom::from(re.regex.flags.to_string().as_str());
                 let ty = self.error_ty();
                 HirExpr::RegExp { pattern, flags, ty }
+            }
+            Expression::BigIntLiteral(big_int) => {
+                let value = big_int
+                    .to_big_int(&WithoutGlobalReferenceInformation)
+                    .map_or_else(
+                        || Atom::from(big_int.value.as_str()),
+                        |bi| Atom::from(bi.to_string()),
+                    );
+                let ty = self.error_ty();
+                HirExpr::BigInt { value, ty }
             }
             other => {
                 self.report_unwalked(
