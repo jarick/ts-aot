@@ -300,6 +300,11 @@ pub enum MirExpr {
         raw: Vec<Atom>,
         ty: TypeId,
     },
+    RegExp {
+        pattern: String,
+        flags: String,
+        ty: TypeId,
+    },
 }
 
 impl MirExpr {
@@ -325,7 +330,8 @@ impl MirExpr {
             | MirExpr::OptionalChain { ty, .. }
             | MirExpr::TypeOf { ty, .. }
             | MirExpr::DynamicFrom { ty, .. }
-            | MirExpr::TemplateStringsArray { ty, .. } => Some(*ty),
+            | MirExpr::TemplateStringsArray { ty, .. }
+            | MirExpr::RegExp { ty, .. } => Some(*ty),
         }
     }
 }

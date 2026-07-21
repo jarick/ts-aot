@@ -19,6 +19,51 @@ pub fn __ts_aot_math_sqrt(x: f64) -> f64 {
     x.sqrt()
 }
 
+#[derive(Debug, Clone)]
+pub struct RegExpHandle {
+    #[allow(dead_code)]
+    regex: regex::Regex,
+    source: String,
+}
+
+impl RegExpHandle {
+    pub fn new(pattern: &str, flags: &str) -> Result<Self, regex::Error> {
+        let compiled = compile_js_pattern(pattern, flags);
+        let regex = regex::Regex::new(&compiled)?;
+        Ok(Self {
+            regex,
+            source: pattern.to_owned(),
+        })
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+fn compile_js_pattern(pattern: &str, flags: &str) -> String {
+    let mut recognized = String::new();
+    for ch in flags.chars() {
+        if matches!(ch, 'i' | 's' | 'm') && !recognized.contains(ch) {
+            recognized.push(ch);
+        }
+    }
+    if recognized.is_empty() {
+        pattern.to_owned()
+    } else {
+        format!("(?{recognized}){pattern}")
+    }
+}
+
+#[must_use]
+pub fn __ts_aot_regex_new(pattern: &str, flags: &str) -> RegExpHandle {
+    RegExpHandle::new(pattern, flags).unwrap_or_else(|_| RegExpHandle {
+        regex: regex::Regex::new("^$").expect("^$ is a valid no-op regex"),
+        source: pattern.to_owned(),
+    })
+}
+
 #[must_use]
 pub fn __ts_aot_string_concat(a: &str, b: &str) -> String {
     let mut out = String::with_capacity(a.len() + b.len());

@@ -162,6 +162,11 @@ pub enum HirExpr {
         exprs: Vec<HirExpr>,
         ty: TypeId,
     },
+    RegExp {
+        pattern: Atom,
+        flags: Atom,
+        ty: TypeId,
+    },
 }
 
 #[cfg(test)]

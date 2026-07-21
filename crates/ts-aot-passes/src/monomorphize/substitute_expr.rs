@@ -20,6 +20,11 @@ pub fn substitute_expr(
         | HirExpr::String(_)
         | HirExpr::Null
         | HirExpr::Undefined => expr.clone(),
+        HirExpr::RegExp { pattern, flags, ty } => HirExpr::RegExp {
+            pattern: pattern.clone(),
+            flags: flags.clone(),
+            ty: substitute_type(*ty, mapping, types, result),
+        },
         HirExpr::Local { id, ty } => HirExpr::Local {
             id: *id,
             ty: substitute_type(*ty, mapping, types, result),
