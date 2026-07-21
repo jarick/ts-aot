@@ -25,7 +25,7 @@ pub(super) fn emit_type_id_with_ctx(id: TypeId, ctx: &EmitCtx<'_>) -> TokenStrea
 
 fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
     match ty {
-        Type::Void | Type::Null | Type::Error => quote!(()),
+        Type::Void | Type::Null | Type::Error | Type::Fn { .. } => quote!(()),
         Type::Never => quote!(!),
         Type::Bool => quote!(bool),
         Type::I8 => quote!(i8),
@@ -57,9 +57,7 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             quote!(Result<#ok_tokens, #err_tokens>)
         }
         Type::Dynamic => quote!(DynamicValue),
-        Type::Fn { .. } | Type::Promise { .. } => {
-            quote!(())
-        }
+        Type::Promise { .. } => quote!(ts_aot_runtime::Promise),
         Type::Named { symbol } => {
             let raw = symbol.as_str();
             let sanitized = sanitize_ident(raw);

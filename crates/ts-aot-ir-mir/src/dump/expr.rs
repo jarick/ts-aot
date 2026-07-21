@@ -428,6 +428,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
         MirExpr::BigInt { value, ty } => {
             d.write(&format!("bigint({:?}):{}", value, ty.raw()));
         }
+        MirExpr::Import { source, ty } => {
+            d.write("import(");
+            dump_expr_inline(source, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
     }
 }
 
