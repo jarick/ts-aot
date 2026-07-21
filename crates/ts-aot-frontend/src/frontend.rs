@@ -74,6 +74,7 @@ impl FrontendPass {
             diagnostics: &mut diagnostics,
             program: &mut program,
             next_generic_param: 0,
+            next_anon_class_id: 0,
             resolved_aliases: HashMap::new(),
         }
         .build(oxc_program);

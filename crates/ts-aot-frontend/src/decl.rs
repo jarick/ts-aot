@@ -167,7 +167,7 @@ impl SkeletonBuilder<'_, '_> {
         }
     }
 
-    fn build_class(&mut self, class: &Class<'_>, _is_exported: bool) -> HirClass {
+    pub(crate) fn build_class(&mut self, class: &Class<'_>, _is_exported: bool) -> HirClass {
         let name = class
             .id
             .as_ref()

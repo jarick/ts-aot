@@ -813,10 +813,20 @@ fn mutually_recursive_aliases_emit_cycle_warning_without_panicking() {
 fn sole_function(source: &str) -> HirFunction {
     let output = FrontendPass::new().run("test.ts", source);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
-    match &output.program.declarations[0] {
-        HirDecl::Function(f) => f.clone(),
-        other => panic!("expected Function, got {other:?}"),
-    }
+    output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "expected Function in decls, got {:?}",
+                output.program.declarations
+            )
+        })
 }
 
 #[test]
@@ -2224,4 +2234,113 @@ fn body_walker_sequence_expression_nested() {
     assert!(matches!(inner[0], HirExpr::Int(1)));
     assert!(matches!(inner[1], HirExpr::Int(2)));
     assert!(matches!(exprs[1], HirExpr::Int(3)));
+}
+
+#[test]
+fn class_expression_anonymous_registers_with_module_unique_name() {
+    let output =
+        FrontendPass::new().run("test.ts", "function f(): i64 { return class { x: i32; }; }");
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let anon_class = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Class(c) if c.name == Atom::from("__class_m0_0") => Some(c.clone()),
+            _ => None,
+        })
+        .expect("anonymous class expression must register a Class decl named __class_m0_0");
+    assert_eq!(anon_class.fields.len(), 1);
+    assert_eq!(anon_class.fields[0].name, Atom::from("x"));
+}
+
+#[test]
+fn class_expression_named_uses_module_unique_name_not_source_name() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): i64 { return class Named { y: i32; }; }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let named = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Class(c) if c.name == Atom::from("__class_m0_0") => Some(c.clone()),
+            _ => None,
+        })
+        .expect("named class expression must also get a module-unique name (not the source name)");
+    assert_eq!(named.fields.len(), 1);
+    assert_eq!(named.fields[0].name, Atom::from("y"));
+}
+
+#[test]
+fn class_expression_in_body_returns_global_reference() {
+    let f = sole_function("function f(): i64 { return class { x: i32; }; }");
+    let HirStmt::Return {
+        value: Some(ret_expr),
+    } = &f.body[0]
+    else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret_expr {
+        HirExpr::Global { name, .. } => {
+            assert_eq!(name, Atom::from("__class_m0_0"));
+        }
+        other => panic!("expected Global referencing anon class, got {other:?}"),
+    }
+}
+
+#[test]
+fn class_expression_with_extends_captures_parent_name() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): i64 { return class extends Base { y: i32; }; }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let anon = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Class(c) if c.name == Atom::from("__class_m0_0") => Some(c.clone()),
+            _ => None,
+        })
+        .expect("anonymous extends class must register with module-unique name");
+    assert_eq!(anon.extends, Some(Atom::from("Base")));
+}
+
+#[test]
+fn multiple_class_expressions_get_distinct_module_unique_names() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): i64 { const A = class { a: i32; }; const B = class { b: i32; }; return 0; }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let mut names: Vec<String> = output
+        .program
+        .declarations
+        .iter()
+        .filter_map(|d| match d {
+            HirDecl::Class(c) if c.name.as_str().starts_with("__class_m0_") => {
+                Some(c.name.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["__class_m0_0", "__class_m0_1"]);
+}
+
+#[test]
+fn class_expression_assigned_to_local_keeps_class_registered() {
+    let f = sole_function("function f(): i64 { const C = class { z: i32; }; return 0; }");
+    let HirStmt::Let { init, .. } = &f.body[0] else {
+        panic!("expected first stmt to be Let, got {:?}", f.body[0]);
+    };
+    let init = init.as_ref().expect("const binding must have an init");
+    match init {
+        HirExpr::Global { name, .. } => assert_eq!(name, Atom::from("__class_m0_0")),
+        other => panic!("expected Global referencing anon class, got {other:?}"),
+    }
 }

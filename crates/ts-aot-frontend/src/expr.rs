@@ -62,6 +62,9 @@ impl SkeletonBuilder<'_, '_> {
                 self.walk_conditional_expression(cond, scope)
             }
             Expression::SequenceExpression(seq) => self.walk_sequence_expression(seq, scope),
+            Expression::ClassExpression(class_expr) => {
+                self.walk_class_expression(class_expr, scope)
+            }
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -238,6 +241,26 @@ impl SkeletonBuilder<'_, '_> {
             .collect();
         let ty = self.error_ty();
         HirExpr::Sequence { exprs, ty }
+    }
+
+    fn walk_class_expression(
+        &mut self,
+        class_expr: &oxc_ast::ast::Class<'_>,
+        _scope: &mut BodyScope,
+    ) -> HirExpr {
+        let module_id = self.program.module.raw();
+        let seq = self.next_anon_class_id;
+        self.next_anon_class_id = self.next_anon_class_id.saturating_add(1);
+        let unique_name = Atom::from(format!("__class_m{module_id}_{seq}"));
+        let mut hir_class = self.build_class(class_expr, false);
+        hir_class.name = unique_name.clone();
+        self.program
+            .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
+        let ty = self.error_ty();
+        HirExpr::Global {
+            name: unique_name,
+            ty,
+        }
     }
 
     fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {

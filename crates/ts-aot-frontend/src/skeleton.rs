@@ -13,6 +13,7 @@ pub(crate) struct SkeletonBuilder<'a, 'b> {
     pub(crate) diagnostics: &'b mut DiagnosticBag,
     pub(crate) program: &'b mut HirProgram,
     pub(crate) next_generic_param: u32,
+    pub(crate) next_anon_class_id: u32,
     pub(crate) resolved_aliases: HashMap<String, TypeId>,
 }
 
