@@ -167,6 +167,10 @@ pub enum HirExpr {
         flags: Atom,
         ty: TypeId,
     },
+    BigInt {
+        value: Atom,
+        ty: TypeId,
+    },
 }
 
 #[cfg(test)]

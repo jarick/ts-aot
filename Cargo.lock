@@ -970,6 +970,7 @@ dependencies = [
  "oxc_allocator",
  "oxc_ast",
  "oxc_diagnostics",
+ "oxc_ecmascript",
  "oxc_parser",
  "oxc_semantic",
  "oxc_span",

@@ -1296,6 +1296,34 @@ fn body_walker_regexp_literal_with_multiple_flags_preserves_all() {
 }
 
 #[test]
+fn body_walker_bigint_literal_emits_bigint_expr() {
+    let f = sole_function("function f(): i64 { return 42n; }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret {
+        HirExpr::BigInt { value, .. } => {
+            assert_eq!(value, Atom::from("42"));
+        }
+        other => panic!("expected BigInt, got {other:?}"),
+    }
+}
+
+#[test]
+fn body_walker_bigint_literal_handles_large_value_via_const_fold() {
+    let f = sole_function("function f(): i64 { return 99999999999999999999n; }");
+    let HirStmt::Return { value: Some(ret) } = &f.body[0] else {
+        panic!("expected Return with value, got {:?}", f.body[0]);
+    };
+    match ret {
+        HirExpr::BigInt { value, .. } => {
+            assert_eq!(value, Atom::from("99999999999999999999"));
+        }
+        other => panic!("expected BigInt, got {other:?}"),
+    }
+}
+
+#[test]
 fn body_walker_method_this_is_local_zero_and_params_follow() {
     let output = FrontendPass::new().run(
         "test.ts",

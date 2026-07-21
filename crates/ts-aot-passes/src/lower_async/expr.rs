@@ -369,6 +369,7 @@ fn recurse_subexprs(
         | HirExpr::Undefined
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
-        | HirExpr::RegExp { .. } => {}
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => {}
     }
 }

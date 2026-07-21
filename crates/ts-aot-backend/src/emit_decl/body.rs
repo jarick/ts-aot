@@ -497,6 +497,10 @@ fn emit_expr(
             let flags_lit = Literal::string(flags);
             Ok(quote!(ts_aot_runtime::__ts_aot_regex_new(#pattern_lit, #flags_lit)))
         }
+        MirExpr::BigInt { value, .. } => {
+            let value_lit = Literal::string(value);
+            Ok(quote!(ts_aot_runtime::__ts_aot_bigint_new(#value_lit)))
+        }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
             None => Ok(quote!(())),

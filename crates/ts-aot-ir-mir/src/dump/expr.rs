@@ -425,6 +425,9 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
         MirExpr::RegExp { pattern, flags, ty } => {
             d.write(&format!("regexp({:?}, {:?}):{}", pattern, flags, ty.raw()));
         }
+        MirExpr::BigInt { value, ty } => {
+            d.write(&format!("bigint({:?}):{}", value, ty.raw()));
+        }
     }
 }
 
