@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp, ObjectLiteralField};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp};
 
 use crate::PassContext;
@@ -13,10 +13,7 @@ mod place;
 mod util;
 
 use place::{mir_expr_to_place, mir_place_to_expr};
-use util::{
-    has_potential_side_effects, hir_expr_type_id, is_dynamic_owner, is_dynamic_type,
-    is_string_typed, map_dynamic_op, mir_expr_ty,
-};
+use util::{has_potential_side_effects, mir_expr_ty};
 
 impl ExprConverter {
     pub(super) fn convert_expr(
@@ -56,41 +53,6 @@ impl ExprConverter {
                 ty,
                 ..
             } => {
-                if is_dynamic_owner(owner, types) {
-                    let owner_mir = self.convert_dynamic_owner(
-                        owner,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let dynamic_ty = types.intern(&Type::Dynamic);
-                    if field_name.as_str() == "__proto__" {
-                        let dest = self.fresh_local();
-                        self.push_temp_local(dest, dynamic_ty);
-                        out.push(MirStmt::Runtime {
-                            op: RuntimeOp::OpObjectProtoGet,
-                            args: vec![owner_mir],
-                            dest: Some(dest),
-                            ty: dynamic_ty,
-                        });
-                        return MirExpr::Local(dest);
-                    }
-                    let dest = self.fresh_local();
-                    self.push_temp_local(dest, dynamic_ty);
-                    let field_name_mir = MirExpr::String {
-                        id: field_name.clone(),
-                        ty: TypeId::from_raw(0),
-                    };
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpObjectGet,
-                        args: vec![owner_mir, field_name_mir],
-                        dest: Some(dest),
-                        ty: dynamic_ty,
-                    });
-                    return MirExpr::Local(dest);
-                }
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, ctx);
                 MirExpr::Field {
@@ -138,71 +100,26 @@ impl ExprConverter {
                 if callee_id == PLACEHOLDER_FUNCTION
                     && let HirCallee::Indirect(inner) = callee
                 {
-                    if let HirExpr::Field { field_name, .. } = inner.as_ref() {
-                        let expected = match field_name.as_str() {
-                            "getPrototypeOf" | "keys" => Some(1),
-                            "setPrototypeOf" => Some(2),
-                            _ => None,
-                        };
-                        if let Some(exp) = expected
-                            && args.len() != exp
-                        {
-                            ctx.error(
-                                "P0005",
-                                format!(
-                                    "Object.{} requires exactly {} argument{}, got {}",
-                                    field_name.as_str(),
-                                    exp,
-                                    if exp == 1 { "" } else { "s" },
-                                    args.len()
-                                ),
-                                ts_aot_core::Span::new(0, 0),
-                            );
-                            return MirExpr::Unit;
-                        }
-                    }
-                    let all_args_dynamic = args.iter().all(|a| match a {
-                        HirExpr::ObjectLiteral { .. } => true,
-                        HirExpr::Local { ty, .. }
-                        | HirExpr::Global { ty, .. }
-                        | HirExpr::Field { ty, .. }
-                        | HirExpr::Index { ty, .. }
-                        | HirExpr::Call { ty, .. }
-                        | HirExpr::Binary { ty, .. }
-                        | HirExpr::Unary { ty, .. }
-                        | HirExpr::StructLiteral { ty, .. }
-                        | HirExpr::Ternary { ty, .. }
-                        | HirExpr::Sequence { ty, .. }
-                        | HirExpr::ArrayLiteral { ty, .. }
-                        | HirExpr::Closure { ty, .. }
-                        | HirExpr::Await { ty, .. }
-                        | HirExpr::Yield { ty, .. }
-                        | HirExpr::Template { ty, .. }
-                        | HirExpr::New { ty, .. }
-                        | HirExpr::OptionalChain { ty, .. }
-                        | HirExpr::Assignment { ty, .. }
-                        | HirExpr::CompoundUpdate { ty, .. }
-                        | HirExpr::RegExp { ty, .. }
-                        | HirExpr::BigInt { ty, .. }
-                        | HirExpr::Import { ty, .. } => types
-                            .resolve(*ty)
-                            .is_some_and(|t| is_dynamic_type(t, types)),
-                        HirExpr::TypeAssertion { target, .. } => types
-                            .resolve(*target)
-                            .is_some_and(|t| is_dynamic_type(t, types)),
-                        HirExpr::Int(_)
-                        | HirExpr::Float(_)
-                        | HirExpr::String(_)
-                        | HirExpr::Bool(_)
-                        | HirExpr::Null
-                        | HirExpr::Unit
-                        | HirExpr::Undefined => false,
-                    });
-                    if all_args_dynamic
-                        && let Some(result) =
-                            self.try_emit_builtin_object_call(inner.as_ref(), &mir_args, *ty, out)
+                    if let HirExpr::Field {
+                        owner, field_name, ..
+                    } = inner.as_ref()
+                        && is_global_object_reference(owner)
+                        && matches!(
+                            field_name.as_str(),
+                            "getPrototypeOf" | "keys" | "setPrototypeOf"
+                        )
                     {
-                        return result;
+                        ctx.error(
+                            "E0404",
+                            format!(
+                                "`Object.{}()` is not supported in strict AOT mode. \
+                                 Use static alternatives: struct fields for known types, \
+                                 or compile-time constants for prototype introspection.",
+                                field_name
+                            ),
+                            Span::new(0, 0),
+                        );
+                        return MirExpr::Unit;
                     }
                     let callee_value = self.convert_expr(
                         inner,
@@ -234,25 +151,6 @@ impl ExprConverter {
                         types,
                         ctx,
                     );
-                    if is_dynamic_owner(rhs, types) && is_string_typed(lhs, types) {
-                        let rhs_mir = self.convert_dynamic_owner(
-                            rhs,
-                            out,
-                            shared_struct_ids,
-                            shared_next_struct,
-                            types,
-                            ctx,
-                        );
-                        let dest = self.fresh_local();
-                        self.push_temp_local(dest, *ty);
-                        out.push(MirStmt::Runtime {
-                            op: RuntimeOp::OpObjectHas,
-                            args: vec![rhs_mir, lhs_mir],
-                            dest: Some(dest),
-                            ty: *ty,
-                        });
-                        return MirExpr::Local(dest);
-                    }
                     let rhs_mir = self.convert_expr(
                         rhs,
                         out,
@@ -374,34 +272,6 @@ impl ExprConverter {
                     MirExpr::Unit
                 }
                 HirUnaryOp::Delete => {
-                    if let HirExpr::Field {
-                        owner, field_name, ..
-                    } = expr.as_ref()
-                        && is_dynamic_owner(owner, types)
-                    {
-                        let owner_mir = self.convert_dynamic_owner(
-                            owner,
-                            out,
-                            shared_struct_ids,
-                            shared_next_struct,
-                            types,
-                            ctx,
-                        );
-                        let dynamic_ty = types.intern(&Type::Dynamic);
-                        out.push(MirStmt::Runtime {
-                            op: RuntimeOp::OpObjectDelete,
-                            args: vec![
-                                owner_mir,
-                                MirExpr::String {
-                                    id: field_name.clone(),
-                                    ty: TypeId::from_raw(0),
-                                },
-                            ],
-                            dest: None,
-                            ty: dynamic_ty,
-                        });
-                        return MirExpr::Bool(true);
-                    }
                     let inner = self.convert_expr(
                         expr,
                         out,
@@ -452,74 +322,14 @@ impl ExprConverter {
                     ty: *ty,
                 }
             }
-            HirExpr::ObjectLiteral { fields, ty: _ } => {
-                let dynamic_ty = types.intern(&Type::Dynamic);
-                let dest = self.fresh_local();
-                self.push_temp_local(dest, dynamic_ty);
-                out.push(MirStmt::Runtime {
-                    op: RuntimeOp::OpObjectNew,
-                    args: Vec::new(),
-                    dest: Some(dest),
-                    ty: dynamic_ty,
-                });
-                for field in fields {
-                    let (name, value) = match field {
-                        ObjectLiteralField::Property { name, value } => (name, value),
-                        ObjectLiteralField::Spread(value) => {
-                            ctx.error(
-                                "P0005",
-                                "object spread is not yet supported in HIR→MIR (planned for PR 7.7); \
-                                 spread value is evaluated for side effects but not merged",
-                                Span::new(0, 0),
-                            );
-                            let spread_value = self.convert_expr(
-                                value,
-                                out,
-                                shared_struct_ids,
-                                shared_next_struct,
-                                types,
-                                ctx,
-                            );
-                            if has_potential_side_effects(&spread_value) {
-                                out.push(MirStmt::Expr(spread_value));
-                            }
-                            continue;
-                        }
-                    };
-                    let value_mir = self.convert_expr(
-                        value,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let value_temp = self.fresh_local();
-                    self.push_temp_local(value_temp, dynamic_ty);
-                    out.push(MirStmt::Let {
-                        local: value_temp,
-                        ty: dynamic_ty,
-                        init: Some(MirExpr::DynamicFrom {
-                            value: Box::new(value_mir),
-                            ty: dynamic_ty,
-                        }),
-                        mutable: false,
-                    });
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpObjectSet,
-                        args: vec![
-                            MirExpr::Local(dest),
-                            MirExpr::String {
-                                id: name.clone(),
-                                ty: TypeId::from_raw(0),
-                            },
-                            MirExpr::Local(value_temp),
-                        ],
-                        dest: None,
-                        ty: dynamic_ty,
-                    });
-                }
-                MirExpr::Local(dest)
+            HirExpr::ObjectLiteral { .. } => {
+                ctx.error(
+                    "E0402",
+                    "object literals (`{}`) are not supported in strict AOT mode. \
+                     Use an explicit struct constructor or factory function instead.",
+                    Span::new(0, 0),
+                );
+                MirExpr::Unit
             }
             HirExpr::Sequence { exprs, .. } => {
                 if let Some((last, rest)) = exprs.split_last() {
@@ -561,12 +371,8 @@ impl ExprConverter {
                     ctx,
                 );
                 out.extend(sub_out);
-                let dynamic_ty = types.intern(&Type::Dynamic);
                 MirExpr::Import {
-                    source: Box::new(MirExpr::DynamicFrom {
-                        value: Box::new(source_mir),
-                        ty: dynamic_ty,
-                    }),
+                    source: Box::new(source_mir),
                     ty: *ty,
                 }
             }
@@ -669,7 +475,6 @@ impl ExprConverter {
                 tag,
                 expressions,
                 cooked_parts,
-                raw_parts,
                 ty,
                 ..
             } => {
@@ -687,51 +492,21 @@ impl ExprConverter {
                         let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
                         cooked_atoms.push(Atom::from(cooked_text));
                     }
-                    let mut raw_atoms: Vec<Atom> = Vec::with_capacity(raw_parts.len());
-                    for raw_opt in raw_parts.iter() {
-                        let raw_text = raw_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);
-                        raw_atoms.push(Atom::from(raw_text));
-                    }
-                    let dynamic_ty = types.intern(&Type::Dynamic);
-                    let subs_vec_ty = types.intern(&Type::Array {
-                        element: dynamic_ty,
-                    });
-                    let subs_vec = self.fresh_local();
-                    self.push_temp_local(subs_vec, subs_vec_ty);
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::DynVecNew,
-                        args: vec![],
-                        dest: Some(subs_vec),
-                        ty: subs_vec_ty,
+                    let mut call_args: Vec<MirExpr> = Vec::with_capacity(1 + expressions.len());
+                    call_args.push(MirExpr::TemplateStringsArray {
+                        cooked: cooked_atoms,
+                        ty: *ty,
                     });
                     for e in expressions.iter() {
-                        let sub_mir = self.convert_expr(
+                        call_args.push(self.convert_expr(
                             e,
                             out,
                             shared_struct_ids,
                             shared_next_struct,
                             types,
                             ctx,
-                        );
-                        let sub_dyn = MirExpr::DynamicFrom {
-                            value: Box::new(sub_mir),
-                            ty: dynamic_ty,
-                        };
-                        out.push(MirStmt::Runtime {
-                            op: RuntimeOp::DynVecAppend,
-                            args: vec![MirExpr::Local(subs_vec), sub_dyn],
-                            dest: None,
-                            ty: dynamic_ty,
-                        });
+                        ));
                     }
-                    let call_args: Vec<MirExpr> = vec![
-                        MirExpr::TemplateStringsArray {
-                            cooked: cooked_atoms,
-                            raw: raw_atoms,
-                            ty: *ty,
-                        },
-                        MirExpr::Local(subs_vec),
-                    ];
                     let dest = self.fresh_local();
                     self.push_temp_local(dest, *ty);
                     out.push(MirStmt::Let {
@@ -869,63 +644,6 @@ impl ExprConverter {
                 inner
             }
             HirExpr::Assignment { target, value, ty } => {
-                if let HirExpr::Field {
-                    owner, field_name, ..
-                } = target.as_ref()
-                    && is_dynamic_owner(owner, types)
-                {
-                    let owner_mir = self.convert_dynamic_owner(
-                        owner,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let value_mir = self.convert_expr(
-                        value,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let value_temp = self.fresh_local();
-                    self.push_temp_local(value_temp, *ty);
-                    out.push(MirStmt::Let {
-                        local: value_temp,
-                        ty: *ty,
-                        init: Some(MirExpr::DynamicFrom {
-                            value: Box::new(value_mir),
-                            ty: *ty,
-                        }),
-                        mutable: false,
-                    });
-                    let dynamic_ty = types.intern(&Type::Dynamic);
-                    if field_name.as_str() == "__proto__" {
-                        out.push(MirStmt::Runtime {
-                            op: RuntimeOp::OpObjectProtoSet,
-                            args: vec![owner_mir, MirExpr::Local(value_temp)],
-                            dest: None,
-                            ty: dynamic_ty,
-                        });
-                        return MirExpr::Local(value_temp);
-                    }
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpObjectSet,
-                        args: vec![
-                            owner_mir,
-                            MirExpr::String {
-                                id: field_name.clone(),
-                                ty: TypeId::from_raw(0),
-                            },
-                            MirExpr::Local(value_temp),
-                        ],
-                        dest: None,
-                        ty: dynamic_ty,
-                    });
-                    return MirExpr::Local(value_temp);
-                }
                 let target_mir = self.convert_expr(
                     target,
                     out,
@@ -978,127 +696,6 @@ impl ExprConverter {
                 post,
                 ty,
             } => {
-                if let HirExpr::Field {
-                    owner, field_name, ..
-                } = target.as_ref()
-                    && is_dynamic_owner(owner, types)
-                {
-                    let owner_mir = self.convert_dynamic_owner(
-                        owner,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let owner_temp = self.fresh_local();
-                    let dynamic_ty = types.intern(&Type::Dynamic);
-                    self.push_temp_local(owner_temp, dynamic_ty);
-                    out.push(MirStmt::Let {
-                        local: owner_temp,
-                        ty: dynamic_ty,
-                        init: Some(owner_mir),
-                        mutable: true,
-                    });
-                    let is_proto = field_name.as_str() == "__proto__";
-                    let old_local = self.fresh_local();
-                    self.push_temp_local(old_local, dynamic_ty);
-                    let get_op = if is_proto {
-                        RuntimeOp::OpObjectProtoGet
-                    } else {
-                        RuntimeOp::OpObjectGet
-                    };
-                    let mut get_args = vec![MirExpr::Local(owner_temp)];
-                    if !is_proto {
-                        get_args.push(MirExpr::String {
-                            id: field_name.clone(),
-                            ty: TypeId::from_raw(0),
-                        });
-                    }
-                    out.push(MirStmt::Runtime {
-                        op: get_op,
-                        args: get_args,
-                        dest: Some(old_local),
-                        ty: dynamic_ty,
-                    });
-                    let rhs_mir = self.convert_expr(
-                        rhs,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    let new_local = self.fresh_local();
-                    self.push_temp_local(new_local, dynamic_ty);
-                    let Some(dynamic_op_id) = map_dynamic_op(*op) else {
-                        ctx.error(
-                            "P0005",
-                            format!(
-                                "compound update for dynamic field with operator {:?} is not yet \
-                                 supported; supported operators are Add, Sub, Mul, Div, Mod. \
-                                 The dynamic compound update is treated as Undefined to keep \
-                                 lowering total; the original owner is unchanged",
-                                op
-                            ),
-                            ts_aot_core::Span::new(0, 0),
-                        );
-                        out.push(MirStmt::Let {
-                            local: new_local,
-                            ty: dynamic_ty,
-                            init: Some(MirExpr::DynamicFrom {
-                                value: Box::new(MirExpr::Unit),
-                                ty: dynamic_ty,
-                            }),
-                            mutable: false,
-                        });
-                        return if *post {
-                            MirExpr::Local(old_local)
-                        } else {
-                            MirExpr::Local(new_local)
-                        };
-                    };
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::OpDynamicBinary,
-                        args: vec![
-                            MirExpr::Int {
-                                value: i128::from(dynamic_op_id),
-                                ty: TypeId::from_raw(0),
-                            },
-                            MirExpr::Local(old_local),
-                            MirExpr::DynamicFrom {
-                                value: Box::new(rhs_mir),
-                                ty: dynamic_ty,
-                            },
-                        ],
-                        dest: Some(new_local),
-                        ty: dynamic_ty,
-                    });
-                    let set_op = if is_proto {
-                        RuntimeOp::OpObjectProtoSet
-                    } else {
-                        RuntimeOp::OpObjectSet
-                    };
-                    let mut set_args = vec![MirExpr::Local(owner_temp)];
-                    if !is_proto {
-                        set_args.push(MirExpr::String {
-                            id: field_name.clone(),
-                            ty: TypeId::from_raw(0),
-                        });
-                    }
-                    set_args.push(MirExpr::Local(new_local));
-                    out.push(MirStmt::Runtime {
-                        op: set_op,
-                        args: set_args,
-                        dest: None,
-                        ty: dynamic_ty,
-                    });
-                    return if *post {
-                        MirExpr::Local(old_local)
-                    } else {
-                        MirExpr::Local(new_local)
-                    };
-                }
                 let target_mir = self.convert_expr(
                     target,
                     out,
@@ -1175,103 +772,8 @@ impl ExprConverter {
             }
         }
     }
+}
 
-    fn convert_dynamic_owner(
-        &mut self,
-        owner: &HirExpr,
-        out: &mut Vec<MirStmt>,
-        shared_struct_ids: &mut HashMap<TypeId, StructId>,
-        shared_next_struct: &mut u32,
-        types: &mut TypeTable,
-        ctx: &mut PassContext,
-    ) -> MirExpr {
-        let dynamic_ty = types.intern(&Type::Dynamic);
-        let source_mir = self.convert_expr(
-            owner,
-            out,
-            shared_struct_ids,
-            shared_next_struct,
-            types,
-            ctx,
-        );
-        let mut current = hir_expr_type_id(owner);
-        let outer_is_optional = matches!(
-            current.and_then(|id| types.resolve(id)),
-            Some(Type::Optional { .. })
-        );
-        let mut mir = if outer_is_optional {
-            source_mir
-        } else {
-            let dest = self.fresh_local();
-            self.push_temp_local(dest, dynamic_ty);
-            out.push(MirStmt::Let {
-                local: dest,
-                ty: dynamic_ty,
-                init: Some(source_mir),
-                mutable: true,
-            });
-            MirExpr::Local(dest)
-        };
-        while let Some(ty_id) = current {
-            let Some(Type::Optional { inner }) = types.resolve(ty_id) else {
-                break;
-            };
-            let Some(inner_ty) = types.resolve(*inner) else {
-                break;
-            };
-            if !is_dynamic_type(inner_ty, types) {
-                break;
-            }
-            let unwrap_dest = self.fresh_local();
-            self.push_temp_local(unwrap_dest, dynamic_ty);
-            out.push(MirStmt::Runtime {
-                op: RuntimeOp::OpObjectUnwrap,
-                args: vec![mir],
-                dest: Some(unwrap_dest),
-                ty: dynamic_ty,
-            });
-            mir = MirExpr::Local(unwrap_dest);
-            current = Some(*inner);
-        }
-        mir
-    }
-
-    fn try_emit_builtin_object_call(
-        &mut self,
-        inner: &HirExpr,
-        mir_args: &[MirExpr],
-        ty: TypeId,
-        out: &mut Vec<MirStmt>,
-    ) -> Option<MirExpr> {
-        let HirExpr::Field {
-            owner, field_name, ..
-        } = inner
-        else {
-            return None;
-        };
-        let HirExpr::Global {
-            name: owner_name, ..
-        } = owner.as_ref()
-        else {
-            return None;
-        };
-        if owner_name.as_str() != "Object" {
-            return None;
-        }
-        let op = match field_name.as_str() {
-            "getPrototypeOf" => RuntimeOp::OpObjectProtoGet,
-            "setPrototypeOf" => RuntimeOp::OpObjectSetPrototypeOf,
-            "keys" => RuntimeOp::OpObjectKeys,
-            _ => return None,
-        };
-        let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
-        out.push(MirStmt::Runtime {
-            op,
-            args: mir_args.to_vec(),
-            dest: Some(dest),
-            ty,
-        });
-        Some(MirExpr::Local(dest))
-    }
+fn is_global_object_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Object")
 }

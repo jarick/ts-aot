@@ -408,17 +408,14 @@ mod tests {
     #[test]
     fn dump_template_strings_array_escapes_special_chars() {
         let cooked = vec![Atom::from("a\"b"), Atom::from("c\\d\n")];
-        let raw = vec![Atom::from("e\tf")];
         let expr = MirExpr::TemplateStringsArray {
             cooked,
-            raw,
             ty: TypeId::from_raw(7),
         };
         let stmt = MirStmt::Expr(expr);
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
         assert!(text.contains("\"a\\\"b\""));
         assert!(text.contains("\"c\\\\d\\n\""));
-        assert!(text.contains("\"e\\tf\""));
     }
 
     #[test]

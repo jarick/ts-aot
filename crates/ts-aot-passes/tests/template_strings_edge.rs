@@ -38,12 +38,14 @@ fn template_strings_array_cooked_with_double_quote() {
 }
 
 #[test]
-fn template_strings_array_raw_with_backslash_preserved() {
+fn template_strings_array_cooked_with_backslash_preserved() {
     let src = r#"function tag(s: string[], ...x: any[]): i64 { return 0; } function f(): i64 { return tag`a\nb ${42}!`; }"#;
     let (mir, diags) = convert(src);
     assert!(diags.is_empty(), "diags: {diags:?}");
-    let raw_present = mir.contains("raw=[");
-    assert!(raw_present, "raw parts must be emitted; got MIR:\n{mir}");
+    assert!(
+        mir.contains("tplstrings(cooked=["),
+        "cooked parts must be emitted; got MIR:\n{mir}"
+    );
 }
 
 #[test]

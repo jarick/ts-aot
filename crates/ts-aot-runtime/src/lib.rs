@@ -3,7 +3,6 @@ use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
-use std::ops::Index;
 use std::panic::panic_any;
 use std::rc::Rc;
 
@@ -89,36 +88,40 @@ pub fn __ts_aot_bigint_new(value: &str) -> BigIntHandle {
     BigIntHandle::new(value)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PromiseState {
     Pending,
     Fulfilled,
     Rejected,
 }
 
-pub struct Promise {
-    inner: Rc<RefCell<PromiseInner>>,
+pub struct Promise<T> {
+    inner: Rc<RefCell<PromiseInner<T>>>,
 }
 
-struct PromiseInner {
+struct PromiseInner<T> {
     state: PromiseState,
-    value: Option<DynamicValue>,
-    callbacks: Vec<Box<dyn FnOnce(DynamicValue)>>,
+    value: Option<T>,
+    error: Option<String>,
+    callbacks: Vec<PromiseCallback<T>>,
 }
+
+type PromiseCallback<T> = Box<dyn FnOnce(Result<T, String>)>;
 
 #[must_use]
-pub fn __ts_aot_promise_create() -> Promise {
+pub fn __ts_aot_promise_create<T>() -> Promise<T> {
     Promise {
         inner: Rc::new(RefCell::new(PromiseInner {
             state: PromiseState::Pending,
             value: None,
+            error: None,
             callbacks: Vec::new(),
         })),
     }
 }
 
-pub fn __ts_aot_promise_resolve(promise: &Promise, value: &DynamicValue) {
-    let to_fire: Vec<Box<dyn FnOnce(DynamicValue)>> = {
+pub fn __ts_aot_promise_resolve<T: Clone + 'static>(promise: &Promise<T>, value: T) {
+    let to_fire: Vec<PromiseCallback<T>> = {
         let mut inner = promise.inner.borrow_mut();
         if inner.state != PromiseState::Pending {
             return;
@@ -128,41 +131,48 @@ pub fn __ts_aot_promise_resolve(promise: &Promise, value: &DynamicValue) {
         std::mem::take(&mut inner.callbacks)
     };
     for cb in to_fire {
-        cb(value.clone());
+        cb(Ok(value.clone()));
     }
 }
 
-pub fn __ts_aot_promise_reject(promise: &Promise, reason: &DynamicValue) {
-    let to_fire: Vec<Box<dyn FnOnce(DynamicValue)>> = {
+#[allow(clippy::needless_pass_by_value)]
+pub fn __ts_aot_promise_reject<T: 'static>(promise: &Promise<T>, reason: String) {
+    let to_fire: Vec<PromiseCallback<T>> = {
         let mut inner = promise.inner.borrow_mut();
         if inner.state != PromiseState::Pending {
             return;
         }
         inner.state = PromiseState::Rejected;
-        inner.value = Some(reason.clone());
+        inner.error = Some(reason.clone());
         std::mem::take(&mut inner.callbacks)
     };
-    // In Fulfilled + Rejected we currently fire the same way: pass the
-    // stored value (success payload or rejection reason) to the callback.
-    // try/catch wrapper HIR is not yet implemented, so a Rejected promise
-    // reached via __ts_aot_await will panic below.
     for cb in to_fire {
-        cb(reason.clone());
+        cb(Err(reason.clone()));
     }
 }
 
-pub fn __ts_aot_promise_then(promise: &Promise, callback: Box<dyn FnOnce(DynamicValue)>) {
+pub fn __ts_aot_promise_then<T: Clone + 'static>(
+    promise: &Promise<T>,
+    callback: Box<dyn FnOnce(Result<T, String>)>,
+) {
     let inner = promise.inner.borrow();
     if matches!(
         inner.state,
         PromiseState::Fulfilled | PromiseState::Rejected
     ) {
-        let value = inner
-            .value
-            .clone()
-            .expect("settled promise must have a value");
+        let result = if inner.state == PromiseState::Fulfilled {
+            Ok(inner
+                .value
+                .clone()
+                .expect("fulfilled promise must have a value"))
+        } else {
+            Err(inner
+                .error
+                .clone()
+                .expect("rejected promise must have an error"))
+        };
         drop(inner);
-        callback(value);
+        callback(result);
     } else {
         drop(inner);
         promise.inner.borrow_mut().callbacks.push(callback);
@@ -170,7 +180,7 @@ pub fn __ts_aot_promise_then(promise: &Promise, callback: Box<dyn FnOnce(Dynamic
 }
 
 #[must_use]
-pub fn __ts_aot_await(promise: &Promise) -> DynamicValue {
+pub fn __ts_aot_await<T: Clone>(promise: &Promise<T>) -> T {
     let inner = promise.inner.borrow();
     match &inner.state {
         PromiseState::Fulfilled => inner
@@ -178,11 +188,10 @@ pub fn __ts_aot_await(promise: &Promise) -> DynamicValue {
             .clone()
             .expect("fulfilled promise must have a value"),
         PromiseState::Rejected => {
-            let reason = inner
-                .value
-                .clone()
-                .expect("rejected promise must have a reason");
-            panic!("await on a rejected promise: {}", format_dynamic(&reason));
+            panic!(
+                "await on a rejected promise: {}",
+                inner.error.as_deref().unwrap_or("unknown error")
+            );
         }
         PromiseState::Pending => {
             panic!("__ts_aot_await only works on settled promises; this one is pending")
@@ -190,67 +199,40 @@ pub fn __ts_aot_await(promise: &Promise) -> DynamicValue {
     }
 }
 
-fn format_dynamic(value: &DynamicValue) -> String {
-    match value {
-        DynamicValue::String(s) => s.clone(),
-        DynamicValue::Integer(i) => i.to_string(),
-        DynamicValue::Number(f) => f.to_string(),
-        DynamicValue::Bool(b) => b.to_string(),
-        DynamicValue::Undefined => "undefined".to_owned(),
-        DynamicValue::Null => "null".to_owned(),
-        DynamicValue::Object(_) => "[object Object]".to_owned(),
-    }
-}
+pub trait ModuleNamespace: Sized + Clone + 'static {}
+impl<T: Sized + Clone + 'static> ModuleNamespace for T {}
 
-type ModuleNamespace = HashMap<String, DynamicValue>;
+type AnyNamespace = Box<dyn Any>;
 
-fn with_module_registry<R>(f: impl FnOnce(&mut HashMap<String, ModuleNamespace>) -> R) -> R {
+fn with_module_registry<R>(f: impl FnOnce(&mut HashMap<String, AnyNamespace>) -> R) -> R {
     thread_local! {
-        static REGISTRY: RefCell<HashMap<String, ModuleNamespace>> = RefCell::new(HashMap::new());
+        static REGISTRY: RefCell<HashMap<String, AnyNamespace>> = RefCell::new(HashMap::new());
     }
     REGISTRY.with(|cell| f(&mut cell.borrow_mut()))
 }
 
-pub fn __ts_aot_module_register(specifier: &str, namespace: ModuleNamespace) {
+pub fn __ts_aot_module_register<T: ModuleNamespace>(specifier: &str, namespace: T) {
     with_module_registry(|reg| {
-        reg.insert(specifier.to_owned(), namespace);
+        reg.insert(specifier.to_owned(), Box::new(namespace));
     });
 }
 
 #[must_use]
-pub fn __ts_aot_dynamic_import_resolve(specifier: &str) -> Promise {
+pub fn __ts_aot_dynamic_import<T: ModuleNamespace>(specifier: &str) -> Promise<T> {
     let promise = __ts_aot_promise_create();
-    let value = with_module_registry(|reg| {
-        let mut namespace = reg.get(specifier).cloned().unwrap_or_default();
-        namespace
-            .entry("__esModule".to_owned())
-            .or_insert(DynamicValue::Bool(true));
-        DynamicValue::Object(namespace_to_dynamic(&namespace))
+    let result: Result<T, String> = with_module_registry(|reg| {
+        let Some(boxed) = reg.get(specifier) else {
+            return Err(format!("module '{specifier}' is not registered"));
+        };
+        boxed.downcast_ref::<T>().cloned().ok_or_else(|| {
+            format!("module '{specifier}' is registered but the requested type does not match the registered namespace")
+        })
     });
-    __ts_aot_promise_resolve(&promise, &value);
-    promise
-}
-
-fn namespace_to_dynamic(namespace: &ModuleNamespace) -> Dynamic {
-    let obj = Dynamic::new();
-    let mut order: Vec<String> = namespace.keys().cloned().collect();
-    order.sort();
-    for key in &order {
-        if let Some(value) = namespace.get(key) {
-            obj.fields.borrow_mut().insert(key.clone(), value.clone());
-        }
+    match result {
+        Ok(value) => __ts_aot_promise_resolve(&promise, value),
+        Err(reason) => __ts_aot_promise_reject(&promise, reason),
     }
-    obj.field_order.borrow_mut().clone_from(&order);
-    obj
-}
-
-#[must_use]
-pub fn __ts_aot_dynamic_import(source: &DynamicValue) -> Promise {
-    let specifier = match source {
-        DynamicValue::String(s) => s.clone(),
-        other => panic!("dynamic import() requires a string specifier, got {other:?}"),
-    };
-    __ts_aot_dynamic_import_resolve(&specifier)
+    promise
 }
 
 #[must_use]
@@ -323,15 +305,7 @@ pub fn __ts_aot_map_set<S: BuildHasher>(
 
 #[must_use]
 pub fn __ts_aot_typeof<T: 'static>(value: &T) -> &'static str {
-    if let Some(dv) = (value as &dyn std::any::Any).downcast_ref::<DynamicValue>() {
-        return match dv {
-            DynamicValue::Undefined => "undefined",
-            DynamicValue::Null | DynamicValue::Object(_) => "object",
-            DynamicValue::Bool(_) => "boolean",
-            DynamicValue::Number(_) | DynamicValue::Integer(_) => "number",
-            DynamicValue::String(_) => "string",
-        };
-    }
+    let _ = value;
     let id = TypeId::of::<T>();
     if id == TypeId::of::<i64>()
         || id == TypeId::of::<i32>()
@@ -390,7 +364,6 @@ pub trait TsClassId {
 }
 
 const PRIMITIVE_CLASS_ID_BASE: u32 = 0xFFFF_FF00;
-pub const STRUCT_ID_DYNAMIC: u32 = 0xFFFF_FFFE;
 
 impl TsClassId for i8 {
     fn class_id() -> u32 {
@@ -487,16 +460,6 @@ impl<K, V, S: BuildHasher> TsClassId for HashMap<K, V, S> {
         PRIMITIVE_CLASS_ID_BASE + 18
     }
 }
-impl TsClassId for Dynamic {
-    fn class_id() -> u32 {
-        STRUCT_ID_DYNAMIC
-    }
-}
-impl TsClassId for DynamicValue {
-    fn class_id() -> u32 {
-        STRUCT_ID_DYNAMIC
-    }
-}
 impl<T> TsClassId for Option<T> {
     fn class_id() -> u32 {
         PRIMITIVE_CLASS_ID_BASE + 19
@@ -561,352 +524,6 @@ impl<T1, T2, T3, T4, T5, T6, T7, T8> TsClassId for (T1, T2, T3, T4, T5, T6, T7, 
 
 #[must_use]
 pub fn __ts_aot_op_instanceof<T: TsClassId + 'static>(value: &T, target_type_id: u32) -> bool {
-    if let Some(dv) = (value as &dyn std::any::Any).downcast_ref::<DynamicValue>() {
-        return matches!(dv, DynamicValue::Object(_)) && target_type_id == STRUCT_ID_DYNAMIC;
-    }
+    let _ = value;
     T::class_id() == target_type_id
 }
-
-#[derive(Clone, Debug)]
-pub enum DynamicValue {
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(f64),
-    Integer(i64),
-    String(String),
-    Object(Dynamic),
-}
-
-#[derive(Clone, Debug)]
-pub struct Dynamic {
-    pub fields: Rc<std::cell::RefCell<HashMap<String, DynamicValue>>>,
-    pub proto: Rc<std::cell::RefCell<Option<Box<DynamicValue>>>>,
-    pub field_order: Rc<std::cell::RefCell<Vec<String>>>,
-}
-
-impl Dynamic {
-    #[must_use]
-    pub fn new() -> Self {
-        Dynamic {
-            fields: Rc::new(std::cell::RefCell::new(HashMap::new())),
-            proto: Rc::new(std::cell::RefCell::new(None)),
-            field_order: Rc::new(std::cell::RefCell::new(Vec::new())),
-        }
-    }
-}
-
-impl Default for Dynamic {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct TemplateStringsArray {
-    pub cooked: Vec<String>,
-    pub raw: Vec<String>,
-}
-
-impl TemplateStringsArray {
-    #[must_use]
-    pub fn new(cooked: Vec<String>, raw: Vec<String>) -> Self {
-        debug_assert_eq!(cooked.len(), raw.len());
-        Self { cooked, raw }
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.cooked.len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.cooked.is_empty()
-    }
-}
-
-impl Index<usize> for TemplateStringsArray {
-    type Output = str;
-    fn index(&self, idx: usize) -> &str {
-        &self.cooked[idx]
-    }
-}
-
-impl PartialEq for DynamicValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (DynamicValue::Undefined, DynamicValue::Undefined)
-            | (DynamicValue::Null, DynamicValue::Null) => true,
-            (DynamicValue::Bool(a), DynamicValue::Bool(b)) => a == b,
-            (DynamicValue::Number(a), DynamicValue::Number(b)) => a == b,
-            (DynamicValue::Integer(a), DynamicValue::Integer(b)) => a == b,
-            (DynamicValue::String(a), DynamicValue::String(b)) => a == b,
-            (DynamicValue::Object(a), DynamicValue::Object(b)) => Rc::ptr_eq(&a.fields, &b.fields),
-            _ => false,
-        }
-    }
-}
-
-impl PartialEq for Dynamic {
-    fn eq(&self, other: &Self) -> bool {
-        *self.fields.borrow() == *other.fields.borrow()
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_object_new() -> DynamicValue {
-    DynamicValue::Object(Dynamic::new())
-}
-
-#[must_use]
-pub fn __ts_aot_dynamic_get(value: &DynamicValue, field_name: &str) -> DynamicValue {
-    match value {
-        DynamicValue::Object(dyn_obj) => dyn_obj
-            .fields
-            .borrow()
-            .get(field_name)
-            .cloned()
-            .unwrap_or(DynamicValue::Undefined),
-        _ => DynamicValue::Undefined,
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_dynamic_unwrap(value: Option<DynamicValue>) -> DynamicValue {
-    value.unwrap_or(DynamicValue::Undefined)
-}
-
-pub fn __ts_aot_dynamic_set(target: &mut DynamicValue, field_name: &str, value: DynamicValue) {
-    if !matches!(target, DynamicValue::Object(_)) {
-        *target = DynamicValue::Object(Dynamic::new());
-    }
-    if let DynamicValue::Object(dyn_obj) = target {
-        let mut fields = dyn_obj.fields.borrow_mut();
-        let is_new = !fields.contains_key(field_name);
-        fields.insert(field_name.to_owned(), value);
-        drop(fields);
-        if is_new {
-            dyn_obj.field_order.borrow_mut().push(field_name.to_owned());
-        }
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_dynamic_key(s: &str) -> DynamicValue {
-    DynamicValue::String(s.to_owned())
-}
-
-impl From<i64> for DynamicValue {
-    fn from(v: i64) -> Self {
-        DynamicValue::Integer(v)
-    }
-}
-
-impl From<f64> for DynamicValue {
-    fn from(v: f64) -> Self {
-        DynamicValue::Number(v)
-    }
-}
-
-impl From<bool> for DynamicValue {
-    fn from(v: bool) -> Self {
-        DynamicValue::Bool(v)
-    }
-}
-
-impl From<String> for DynamicValue {
-    fn from(v: String) -> Self {
-        DynamicValue::String(v)
-    }
-}
-
-impl From<&str> for DynamicValue {
-    fn from(v: &str) -> Self {
-        DynamicValue::String(v.to_owned())
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_dyn_vec_new() -> Vec<DynamicValue> {
-    Vec::new()
-}
-
-pub fn __ts_aot_dyn_vec_append(vec: &mut Vec<DynamicValue>, value: DynamicValue) {
-    vec.push(value);
-}
-
-#[must_use]
-pub fn __ts_aot_dynamic_has(value: &DynamicValue, key: &DynamicValue) -> bool {
-    let DynamicValue::String(field_name) = key else {
-        return false;
-    };
-    match value {
-        DynamicValue::Object(dyn_obj) => dyn_obj.fields.borrow().contains_key(field_name),
-        _ => false,
-    }
-}
-
-pub fn __ts_aot_dynamic_delete(target: &mut DynamicValue, field_name: &str) {
-    if let DynamicValue::Object(dyn_obj) = target
-        && dyn_obj.fields.borrow_mut().remove(field_name).is_some()
-    {
-        dyn_obj.field_order.borrow_mut().retain(|k| k != field_name);
-    }
-}
-
-pub const DYNAMIC_OP_ADD: u8 = 0;
-pub const DYNAMIC_OP_SUB: u8 = 1;
-pub const DYNAMIC_OP_MUL: u8 = 2;
-pub const DYNAMIC_OP_DIV: u8 = 3;
-pub const DYNAMIC_OP_MOD: u8 = 4;
-
-#[must_use]
-#[allow(clippy::cast_precision_loss)]
-pub fn __ts_aot_dynamic_op(op: u8, left: &DynamicValue, right: &DynamicValue) -> DynamicValue {
-    let numeric = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
-        match (a, b) {
-            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Integer(x.wrapping_add(*y)))
-            }
-            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x + y)),
-            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
-                Some(DynamicValue::Number(*x as f64 + y))
-            }
-            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Number(x + *y as f64))
-            }
-            _ => None,
-        }
-    };
-    let numeric_sub = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
-        match (a, b) {
-            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Integer(x.wrapping_sub(*y)))
-            }
-            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x - y)),
-            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
-                Some(DynamicValue::Number(*x as f64 - y))
-            }
-            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Number(x - *y as f64))
-            }
-            _ => None,
-        }
-    };
-    let numeric_mul = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
-        match (a, b) {
-            (DynamicValue::Integer(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Integer(x.wrapping_mul(*y)))
-            }
-            (DynamicValue::Number(x), DynamicValue::Number(y)) => Some(DynamicValue::Number(x * y)),
-            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
-                Some(DynamicValue::Number(*x as f64 * y))
-            }
-            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Number(x * *y as f64))
-            }
-            _ => None,
-        }
-    };
-    let numeric_div = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
-        let to_f64 = |v: &DynamicValue| -> Option<f64> {
-            match v {
-                DynamicValue::Integer(x) => Some(*x as f64),
-                DynamicValue::Number(x) => Some(*x),
-                _ => None,
-            }
-        };
-        match (to_f64(a), to_f64(b)) {
-            (Some(x), Some(y)) => Some(DynamicValue::Number(x / y)),
-            _ => None,
-        }
-    };
-    let numeric_mod = |a: &DynamicValue, b: &DynamicValue| -> Option<DynamicValue> {
-        match (a, b) {
-            (DynamicValue::Integer(x), DynamicValue::Integer(y)) if *y != 0 => {
-                Some(DynamicValue::Integer(x.wrapping_rem(*y)))
-            }
-            (DynamicValue::Integer(_), DynamicValue::Integer(0)) => {
-                Some(DynamicValue::Number(f64::NAN))
-            }
-            (DynamicValue::Integer(x), DynamicValue::Number(y)) => {
-                Some(DynamicValue::Number(*x as f64 % *y))
-            }
-            (DynamicValue::Number(x), DynamicValue::Integer(y)) => {
-                Some(DynamicValue::Number(*x % *y as f64))
-            }
-            (DynamicValue::Number(x), DynamicValue::Number(y)) => {
-                Some(DynamicValue::Number(*x % *y))
-            }
-            _ => None,
-        }
-    };
-    match op {
-        DYNAMIC_OP_ADD => {
-            if let (DynamicValue::String(a), DynamicValue::String(b)) = (left, right) {
-                let mut s = a.clone();
-                s.push_str(b);
-                return DynamicValue::String(s);
-            }
-            numeric(left, right).unwrap_or(DynamicValue::Undefined)
-        }
-        DYNAMIC_OP_SUB => numeric_sub(left, right).unwrap_or(DynamicValue::Undefined),
-        DYNAMIC_OP_MUL => numeric_mul(left, right).unwrap_or(DynamicValue::Undefined),
-        DYNAMIC_OP_DIV => numeric_div(left, right).unwrap_or(DynamicValue::Undefined),
-        DYNAMIC_OP_MOD => numeric_mod(left, right).unwrap_or(DynamicValue::Undefined),
-        _ => DynamicValue::Undefined,
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_object_proto_get(obj: &DynamicValue) -> Option<DynamicValue> {
-    if let DynamicValue::Object(d) = obj {
-        d.proto.borrow().as_ref().map(|b| (**b).clone())
-    } else {
-        None
-    }
-}
-
-pub fn __ts_aot_object_proto_set(obj: &DynamicValue, proto: Option<DynamicValue>) -> DynamicValue {
-    if let DynamicValue::Object(d) = obj {
-        let valid = matches!(
-            &proto,
-            None | Some(DynamicValue::Object(_) | DynamicValue::Null)
-        );
-        if valid {
-            *d.proto.borrow_mut() = proto.map(Box::new);
-        }
-        obj.clone()
-    } else {
-        DynamicValue::Undefined
-    }
-}
-
-#[must_use]
-pub fn __ts_aot_object_set_prototype_of(obj: &DynamicValue, proto: DynamicValue) -> DynamicValue {
-    let DynamicValue::Object(d) = obj else {
-        __ts_aot_throw("Object.setPrototypeOf called on non-object");
-    };
-    if !matches!(proto, DynamicValue::Object(_) | DynamicValue::Null) {
-        __ts_aot_throw("Object.setPrototypeOf: prototype must be an Object or null");
-    }
-    *d.proto.borrow_mut() = if matches!(proto, DynamicValue::Null) {
-        None
-    } else {
-        Some(Box::new(proto))
-    };
-    obj.clone()
-}
-
-#[must_use]
-pub fn __ts_aot_object_keys(obj: &DynamicValue) -> Vec<String> {
-    if let DynamicValue::Object(d) = obj {
-        d.field_order.borrow().clone()
-    } else {
-        Vec::new()
-    }
-}
-
-#[cfg(test)]
-mod tests;

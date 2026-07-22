@@ -160,12 +160,12 @@ fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
     };
     let out = Driver::new().compile_source(
         "test.ts",
-        "function tag(strings: string[], ...subs: any[]): i64 { return 0; } function f(): i64 { return tag`hi ${42}!`; }",
+        "function tag(strings: string[], sub: i64): i64 { return 0; } function f(): i64 { return tag`hi ${42}!`; }",
         &opts,
     );
     assert!(
         !out.has_errors(),
-        "tagged template with rest-param `...subs: any[]` must lower through full pipeline; got {:?}",
+        "tagged template must lower through full pipeline; got {:?}",
         out.diagnostics
     );
     let text = out
@@ -177,16 +177,12 @@ fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
     let f_body_end_rel = text[f_body_start..].find("      }").expect("f block end");
     let f_body = &text[f_body_start..f_body_start + f_body_end_rel];
     assert!(
-        f_body.contains("tplstrings(cooked=[\"hi \", \"!\"], raw=[\"hi \", \"!\"])"),
-        "tagged template must emit TemplateStringsArray carrying both cooked AND raw parts; got f body:\n{f_body}\n\nfull dump:\n{text}"
+        f_body.contains("tplstrings(cooked=[\"hi \", \"!\"])"),
+        "tagged template must emit tplstrings with cooked parts; got f body:\n{f_body}\n\nfull dump:\n{text}"
     );
     assert!(
-        f_body.contains("dyn_vec_new") && f_body.contains("dyn_vec_append"),
-        "substitutions must be wrapped in Vec<DynamicValue> via DynVecNew + DynVecAppend (rest-param path); got f body:\n{f_body}\n\nfull dump:\n{text}"
-    );
-    assert!(
-        f_body.contains("dynfrom(42"),
-        "substitution `42` must be wrapped in DynamicValue via MirExpr::DynamicFrom; got f body:\n{f_body}"
+        f_body.contains("int(42") || f_body.contains("42"),
+        "substitution `42` must appear as a direct arg to indirect_call; got f body:\n{f_body}"
     );
     assert!(
         f_body.contains("indirect_call(tag)") || f_body.contains("indirect_call(tag)("),
@@ -195,28 +191,27 @@ fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
 }
 
 #[test]
-fn e2e_tagged_template_string_array_arg_emits_vec_string_not_slice_str() {
+fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
     };
     let out = Driver::new().compile_source(
         "test.ts",
-        "function tag(strings: string[], ...subs: any[]): i64 { return strings.len() as i64; } function f(): i64 { return tag`hi ${42}!`; }",
+        "function tag(strings: string[], sub: i64): i64 { return strings.len() as i64; } function f(): i64 { return tag`hi ${42}!`; }",
         &opts,
     );
     assert!(
         !out.has_errors(),
-        "tagged template with string[] + rest-param must lower through full pipeline; got {:?}",
+        "tagged template must lower through full pipeline; got {:?}",
         out.diagnostics
     );
     let rust = out
         .rust_source
         .expect("emit-rust must populate rust_source for e2e tagged template Rust check");
-    let uses_template_strings_array =
-        rust.contains("TemplateStringsArray :: new") || rust.contains("TemplateStringsArray::new");
     assert!(
-        uses_template_strings_array,
-        "tag's first arg must be a TemplateStringsArray::new(cooked, raw) call — spec requires both cooked and raw parts; got rust:\n{rust}"
+        rust.contains("vec ! [String :: from (\"hi \") , String :: from (\"!\")]")
+            || rust.contains("vec![String::from(\"hi \"), String::from(\"!\")]"),
+        "tag's first arg must be a typed vec![String::from(\"hi \"), String::from(\"!\")] (no TemplateStringsArray wrapper), got rust:\n{rust}"
     );
     let has_amp_slice_str = rust.contains("& [\"hi\"")
         || rust.contains("&[\"hi\"")
@@ -224,20 +219,18 @@ fn e2e_tagged_template_string_array_arg_emits_vec_string_not_slice_str() {
         || rust.contains("&[\"!\"");
     assert!(
         !has_amp_slice_str,
-        "tag's first arg must NOT be a &[&str] slice — must be TemplateStringsArray (carries cooked + raw); got rust:\n{rust}"
+        "tag's first arg must NOT be a &[&str] slice, got rust:\n{rust}"
     );
-    let uses_dyn_vec =
-        rust.contains("__ts_aot_dyn_vec_new") && rust.contains("__ts_aot_dyn_vec_append");
+    let has_dyn_vec =
+        rust.contains("__ts_aot_dyn_vec_new") || rust.contains("__ts_aot_dyn_vec_append");
     assert!(
-        uses_dyn_vec,
-        "substitutions must be wrapped in Vec<DynamicValue> via __ts_aot_dyn_vec_new + __ts_aot_dyn_vec_append (rest-param path); got rust:\n{rust}"
+        !has_dyn_vec,
+        "strict AOT must NOT emit DynVec ops — subs are passed as direct typed args, got rust:\n{rust}"
     );
-    let append_takes_mut_ref = rust.contains("& mut")
-        && (rust.contains("__ts_aot_dyn_vec_append (& mut")
-            || rust.contains("& mut _ ,") && rust.contains("__ts_aot_dyn_vec_append"));
+    let has_template_strings_array = rust.contains("TemplateStringsArray");
     assert!(
-        append_takes_mut_ref,
-        "DynVecAppend must receive `&mut subs_vec` (the runtime helper signature is `__ts_aot_dyn_vec_append(vec: &mut Vec<DynamicValue>, ...)`); without `&mut` the call would NOT compile. got rust:\n{rust}"
+        !has_template_strings_array,
+        "strict AOT must NOT reference TemplateStringsArray type — emit is typed Vec<String>, got rust:\n{rust}"
     );
 }
 

@@ -87,21 +87,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::PromiseCreate | RuntimeOp::PromiseResolve => &[Promise, Scheduler],
         RuntimeOp::HostConsoleLog => &[HostIo, Console],
         RuntimeOp::MathSqrt => &[Math],
-        RuntimeOp::OpIn
-        | RuntimeOp::OpInstanceof
-        | RuntimeOp::OpObjectGet
-        | RuntimeOp::OpObjectSet
-        | RuntimeOp::OpObjectHas
-        | RuntimeOp::OpObjectDelete
-        | RuntimeOp::OpObjectUnwrap
-        | RuntimeOp::OpObjectNew
-        | RuntimeOp::OpObjectProtoGet
-        | RuntimeOp::OpObjectProtoSet
-        | RuntimeOp::OpObjectSetPrototypeOf
-        | RuntimeOp::OpObjectKeys
-        | RuntimeOp::OpDynamicBinary
-        | RuntimeOp::DynVecNew
-        | RuntimeOp::DynVecAppend => &[],
+        RuntimeOp::OpIn | RuntimeOp::OpInstanceof => &[],
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime")
         }
