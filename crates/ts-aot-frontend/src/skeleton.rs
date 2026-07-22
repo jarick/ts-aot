@@ -15,9 +15,28 @@ pub(crate) struct SkeletonBuilder<'a, 'b> {
     pub(crate) next_generic_param: u32,
     pub(crate) next_anon_class_id: u32,
     pub(crate) resolved_aliases: HashMap<String, TypeId>,
+    pub(crate) is_generator_stack: Vec<bool>,
 }
 
-impl SkeletonBuilder<'_, '_> {
+impl<'a, 'b> SkeletonBuilder<'a, 'b> {
+    pub(crate) fn new(
+        source: &'a str,
+        types: &'b mut ts_aot_core::TypeTable,
+        diagnostics: &'b mut DiagnosticBag,
+        program: &'b mut HirProgram,
+    ) -> Self {
+        Self {
+            source,
+            types,
+            diagnostics,
+            program,
+            next_generic_param: 0,
+            next_anon_class_id: 0,
+            resolved_aliases: HashMap::new(),
+            is_generator_stack: Vec::new(),
+        }
+    }
+
     pub(crate) fn build(mut self, program: &Program<'_>) {
         self.pre_resolve_all_aliases(program);
         for stmt in &program.body {

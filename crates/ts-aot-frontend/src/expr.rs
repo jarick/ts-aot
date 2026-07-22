@@ -7,7 +7,7 @@ use oxc_ast::ast::{
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
-use ts_aot_core::{Atom, FieldId};
+use ts_aot_core::{Atom, Diagnostic, FieldId};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr};
 
 use crate::ops::{
@@ -15,6 +15,7 @@ use crate::ops::{
 };
 use crate::scope::BodyScope;
 use crate::skeleton::SkeletonBuilder;
+use crate::util::core_span_from_oxc;
 
 impl SkeletonBuilder<'_, '_> {
     pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
@@ -53,6 +54,7 @@ impl SkeletonBuilder<'_, '_> {
                     ty,
                 }
             }
+            Expression::YieldExpression(y) => self.walk_yield_expression(y, scope),
             Expression::TemplateLiteral(t) => self.walk_template_literal(t, scope),
             Expression::TaggedTemplateExpression(t) => {
                 self.walk_tagged_template_expression(t, scope)
@@ -142,6 +144,28 @@ impl SkeletonBuilder<'_, '_> {
             expressions,
             cooked_parts,
             raw_parts,
+            ty,
+        }
+    }
+
+    fn walk_yield_expression(
+        &mut self,
+        y: &oxc_ast::ast::YieldExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        if !self.current_function_is_generator() {
+            self.diagnostics.push(Diagnostic::error(
+                "E0500",
+                "`yield` is only valid inside a generator function (`function*`); \
+                 `yield` in non-generator context is rejected by the body walker.",
+                core_span_from_oxc(y.span),
+            ));
+            return HirExpr::Unit;
+        }
+        let inner = y.argument.as_ref().map(|a| self.walk_expr(a, scope));
+        let ty = self.error_ty();
+        HirExpr::Yield {
+            expr: inner.map(Box::new),
             ty,
         }
     }
