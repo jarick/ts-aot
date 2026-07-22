@@ -1,4 +1,4 @@
-use ts_aot_core::{Type, TypeId, TypeTable};
+use ts_aot_core::TypeId;
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::MirExpr;
 
@@ -35,7 +35,6 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::OptionalChain { ty, .. }
         | MirExpr::IndirectCall { ty, .. }
         | MirExpr::TypeOf { ty, .. }
-        | MirExpr::DynamicFrom { ty, .. }
         | MirExpr::TemplateStringsArray { ty, .. }
         | MirExpr::RegExp { ty, .. }
         | MirExpr::BigInt { ty, .. }
@@ -44,19 +43,6 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
             TypeId::from_raw(0)
         }
     }
-}
-
-pub(super) fn is_dynamic_owner(owner: &HirExpr, types: &TypeTable) -> bool {
-    if matches!(owner, HirExpr::ObjectLiteral { .. }) {
-        return true;
-    }
-    let Some(ty_id) = hir_expr_type_id(owner) else {
-        return false;
-    };
-    let Some(ty) = types.resolve(ty_id) else {
-        return false;
-    };
-    is_dynamic_type(ty, types)
 }
 
 pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
@@ -92,44 +78,5 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::Null
         | HirExpr::Unit
         | HirExpr::Undefined => None,
-    }
-}
-
-pub(super) fn is_dynamic_type(ty: &Type, types: &TypeTable) -> bool {
-    match ty {
-        Type::Dynamic => true,
-        Type::Optional { inner } => types
-            .resolve(*inner)
-            .is_some_and(|inner_ty| is_dynamic_type(inner_ty, types)),
-        Type::Named { symbol } => {
-            let s = symbol.as_str();
-            s == "any" || s == "Object" || s == "unknown"
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn is_string_typed(expr: &HirExpr, types: &TypeTable) -> bool {
-    let Some(ty_id) = hir_expr_type_id(expr) else {
-        return matches!(expr, HirExpr::String(_));
-    };
-    matches!(types.resolve(ty_id), Some(Type::String))
-}
-
-pub(super) const DYNAMIC_OP_ADD: u8 = 0;
-pub(super) const DYNAMIC_OP_SUB: u8 = 1;
-pub(super) const DYNAMIC_OP_MUL: u8 = 2;
-pub(super) const DYNAMIC_OP_DIV: u8 = 3;
-pub(super) const DYNAMIC_OP_MOD: u8 = 4;
-
-pub(super) fn map_dynamic_op(op: ts_aot_ir_hir::HirBinaryOp) -> Option<u8> {
-    use ts_aot_ir_hir::HirBinaryOp;
-    match op {
-        HirBinaryOp::Add => Some(DYNAMIC_OP_ADD),
-        HirBinaryOp::Sub => Some(DYNAMIC_OP_SUB),
-        HirBinaryOp::Mul => Some(DYNAMIC_OP_MUL),
-        HirBinaryOp::Div => Some(DYNAMIC_OP_DIV),
-        HirBinaryOp::Mod => Some(DYNAMIC_OP_MOD),
-        _ => None,
     }
 }

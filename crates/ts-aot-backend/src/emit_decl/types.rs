@@ -56,7 +56,6 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             let err_tokens = emit_type_id_with_ctx(*err, ctx);
             quote!(Result<#ok_tokens, #err_tokens>)
         }
-        Type::Dynamic => quote!(DynamicValue),
         Type::Promise { .. } => quote!(ts_aot_runtime::Promise),
         Type::Named { symbol } => {
             let raw = symbol.as_str();

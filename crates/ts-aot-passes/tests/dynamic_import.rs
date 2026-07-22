@@ -23,7 +23,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
 }
 
 #[test]
-fn dynamic_import_string_source_emits_dynfrom_wrap() {
+fn dynamic_import_string_source_emits_direct_not_dynfrom() {
     let (mir, diags) = convert("function f(): i64 { return import('./mod.js'); }");
     assert!(diags.is_empty(), "diags: {diags:?}");
     let import_line = mir
@@ -31,8 +31,8 @@ fn dynamic_import_string_source_emits_dynfrom_wrap() {
         .find(|l| l.starts_with("return import(") || l.contains(" return import("))
         .unwrap_or_else(|| panic!("expected return import(...) line, got:\n{mir}"));
     assert!(
-        import_line.contains("dynfrom("),
-        "source must be wrapped in DynamicFrom for DynamicValue param, got: {import_line}"
+        !import_line.contains("dynfrom("),
+        "strict AOT must NOT wrap import source in DynamicFrom, got: {import_line}"
     );
     assert!(
         import_line.contains("\"./mod.js\""),

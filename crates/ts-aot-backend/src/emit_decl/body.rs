@@ -63,21 +63,10 @@ fn emit_runtime_stmt(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let call = emit_runtime_call(op, args, ctx, body_ctx)?;
-    if matches!(op, RuntimeOp::OpObjectSet | RuntimeOp::OpObjectDelete) {
-        let _ = dest;
-        return Ok(quote!(#call;));
-    }
     if let Some(dest) = dest {
         let dest = body_ctx.local_ident(dest);
         let ty = emit_type_id_with_ctx(ty, ctx);
-        let mutability = if matches!(
-            op,
-            RuntimeOp::OpObjectUnwrap | RuntimeOp::OpObjectNew | RuntimeOp::DynVecNew
-        ) {
-            quote!(mut)
-        } else {
-            quote!()
-        };
+        let mutability = quote!();
         Ok(quote!(let #mutability #dest: #ty = #call;))
     } else {
         Ok(quote!(#call;))
@@ -480,8 +469,7 @@ fn emit_expr(
         }
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
-        MirExpr::DynamicFrom { value, .. } => emit_dynamic_from(value, ctx, body_ctx),
-        MirExpr::TemplateStringsArray { cooked, raw, .. } => {
+        MirExpr::TemplateStringsArray { cooked, .. } => {
             let cooked_lits: Vec<TokenStream> = cooked
                 .iter()
                 .map(|p| {
@@ -489,17 +477,7 @@ fn emit_expr(
                     quote!(String::from(#lit))
                 })
                 .collect();
-            let raw_lits: Vec<TokenStream> = raw
-                .iter()
-                .map(|p| {
-                    let lit = Literal::string(p.as_str());
-                    quote!(String::from(#lit))
-                })
-                .collect();
-            Ok(quote!(ts_aot_runtime::TemplateStringsArray::new(
-                vec![#(#cooked_lits),*],
-                vec![#(#raw_lits),*]
-            )))
+            Ok(quote!(vec![#(#cooked_lits),*]))
         }
         MirExpr::RegExp { pattern, flags, .. } => {
             let pattern_lit = Literal::string(pattern);
@@ -512,7 +490,7 @@ fn emit_expr(
         }
         MirExpr::Import { source, .. } => {
             let source = emit_expr(source, ctx, body_ctx)?;
-            Ok(quote!(ts_aot_runtime::__ts_aot_dynamic_import(&#source)))
+            Ok(quote!(ts_aot_runtime::__ts_aot_dynamic_import(#source.as_str())))
         }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
@@ -576,21 +554,6 @@ pub(super) fn emit_float(value: f64) -> TokenStream {
     }
 }
 
-fn emit_dynamic_from(
-    value: &MirExpr,
-    ctx: &EmitCtx<'_>,
-    body_ctx: &BodyCtx,
-) -> Result<TokenStream, BackendError> {
-    match value {
-        MirExpr::Unit => Ok(quote!(DynamicValue::Undefined)),
-        MirExpr::Null { .. } => Ok(quote!(DynamicValue::Null)),
-        _ => {
-            let inner = emit_expr(value, ctx, body_ctx)?;
-            Ok(quote!(DynamicValue::from(#inner)))
-        }
-    }
-}
-
 fn emit_typeof(
     expr: &MirExpr,
     ctx: &EmitCtx<'_>,
@@ -635,78 +598,12 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_op_instanceof(&#value, #target_type_id)))
         }
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, body_ctx),
-        RuntimeOp::OpObjectGet => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let field_name = extract_string_arg(&args[1])?;
-            Ok(quote!(__ts_aot_dynamic_get(&#obj, #field_name)))
-        }
-        RuntimeOp::OpObjectUnwrap => {
-            let opt = emit_expr(&args[0], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_dynamic_unwrap(#opt)))
-        }
-        RuntimeOp::OpObjectNew => Ok(quote!(__ts_aot_object_new())),
-        RuntimeOp::DynVecAppend => {
-            let vec = emit_expr(&args[0], ctx, body_ctx)?;
-            let value = emit_expr(&args[1], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_dyn_vec_append(&mut #vec, #value)))
-        }
-        RuntimeOp::OpObjectSet => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let field_name = extract_string_arg(&args[1])?;
-            let value = emit_expr(&args[2], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_dynamic_set(&mut #obj, #field_name, #value)))
-        }
-        RuntimeOp::OpObjectHas => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let key = emit_expr(&args[1], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_dynamic_has(&#obj, &__ts_aot_dynamic_key(#key.as_str()))))
-        }
-        RuntimeOp::OpObjectDelete => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let field_name = extract_string_arg(&args[1])?;
-            Ok(quote!(__ts_aot_dynamic_delete(&mut #obj, #field_name)))
-        }
-        RuntimeOp::OpObjectProtoGet => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_object_proto_get(&#obj)))
-        }
-        RuntimeOp::OpObjectProtoSet => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let proto = emit_expr(&args[1], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_object_proto_set(&#obj, #proto)))
-        }
-        RuntimeOp::OpObjectSetPrototypeOf => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            let proto = emit_expr(&args[1], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_object_set_prototype_of(&#obj, #proto)))
-        }
-        RuntimeOp::OpObjectKeys => {
-            let obj = emit_expr(&args[0], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_object_keys(&#obj)))
-        }
-        RuntimeOp::OpDynamicBinary => {
-            let op_id = match args.first() {
-                Some(MirExpr::Int { value, .. }) => u8::try_from(*value).unwrap_or(0),
-                _ => 0,
-            };
-            let left = emit_expr(&args[1], ctx, body_ctx)?;
-            let right = emit_expr(&args[2], ctx, body_ctx)?;
-            Ok(quote!(__ts_aot_dynamic_op(#op_id, &#left, &#right)))
-        }
         _ => {
             let name = runtime_op_ident(op);
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#name(#(#args),*)))
         }
     }
-}
-
-fn extract_string_arg(expr: &MirExpr) -> Result<TokenStream, BackendError> {
-    let MirExpr::String { id, .. } = expr else {
-        return Err(BackendError::NotImplemented);
-    };
-    let literal = Literal::string(id.as_str());
-    Ok(quote!(#literal))
 }
 
 fn emit_switch(
@@ -887,18 +784,5 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
-        RuntimeOp::OpObjectGet => format_ident!("__ts_aot_dynamic_get"),
-        RuntimeOp::OpObjectSet => format_ident!("__ts_aot_dynamic_set"),
-        RuntimeOp::OpObjectHas => format_ident!("__ts_aot_dynamic_has"),
-        RuntimeOp::OpObjectDelete => format_ident!("__ts_aot_dynamic_delete"),
-        RuntimeOp::OpObjectUnwrap => format_ident!("__ts_aot_dynamic_unwrap"),
-        RuntimeOp::OpObjectNew => format_ident!("__ts_aot_object_new"),
-        RuntimeOp::OpObjectProtoGet => format_ident!("__ts_aot_object_proto_get"),
-        RuntimeOp::OpObjectProtoSet => format_ident!("__ts_aot_object_proto_set"),
-        RuntimeOp::OpObjectSetPrototypeOf => format_ident!("__ts_aot_object_set_prototype_of"),
-        RuntimeOp::OpObjectKeys => format_ident!("__ts_aot_object_keys"),
-        RuntimeOp::OpDynamicBinary => format_ident!("__ts_aot_dynamic_op"),
-        RuntimeOp::DynVecNew => format_ident!("__ts_aot_dyn_vec_new"),
-        RuntimeOp::DynVecAppend => format_ident!("__ts_aot_dyn_vec_append"),
     }
 }

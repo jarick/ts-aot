@@ -496,6 +496,81 @@ fn function_with_unknown_return_type_yields_error_marker() {
     }
 }
 
+fn assert_e0401_for(source: &str, contains: &str) {
+    let output = FrontendPass::new().run("test.ts", source);
+    assert!(
+        output.diagnostics.has_errors(),
+        "banned type `{contains}` must trigger E0401, got clean diagnostics for: {source}"
+    );
+    let found = output
+        .diagnostics
+        .iter()
+        .any(|d| d.code.as_str() == "E0401" && d.message.contains(contains));
+    assert!(
+        found,
+        "expected E0401 mentioning `{contains}`, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn e0401_rejects_top_level_any() {
+    assert_e0401_for("function f(): any {}", "any");
+}
+
+#[test]
+fn e0401_rejects_top_level_unknown() {
+    assert_e0401_for("function f(): unknown {}", "unknown");
+}
+
+#[test]
+fn e0401_rejects_top_level_object() {
+    assert_e0401_for("function f(): Object {}", "Object");
+}
+
+#[test]
+fn e0401_rejects_any_inside_array_element() {
+    assert_e0401_for("function f(): any[] {}", "any");
+}
+
+#[test]
+fn e0401_rejects_unknown_inside_array_element() {
+    assert_e0401_for("function f(): unknown[] {}", "unknown");
+}
+
+#[test]
+fn e0401_rejects_any_inside_generic_type_argument() {
+    assert_e0401_for("function f(): Vec<any> {}", "any");
+}
+
+#[test]
+fn e0401_rejects_object_inside_generic_type_argument() {
+    assert_e0401_for("function f(): Vec<Object> {}", "Object");
+}
+
+#[test]
+fn e0401_returns_type_error_marker_not_warning() {
+    let mut types = TypeTable::new();
+    let output =
+        FrontendPass::new().run_with_types("test.ts", "function f(): unknown {}", &mut types);
+    let error = output
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "E0401")
+        .expect("E0401 must be emitted");
+    assert_eq!(
+        error.severity,
+        ts_aot_core::Severity::Error,
+        "E0401 must be Severity::Error so has_errors() rejects it"
+    );
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => {
+            assert_eq!(types.resolve(f.ret), Some(&Type::Error));
+        }
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
 #[test]
 fn generic_function_resolves_param_and_return_to_generic_param() {
     let mut types = TypeTable::new();
@@ -1046,7 +1121,7 @@ fn body_walker_update_lowers_pre_increment_with_post_false() {
 
 #[test]
 fn body_walker_compound_update_does_not_clone_target_side_effects() {
-    let f = sole_function("function f(o: any, k: any): void { o[k()]++; }");
+    let f = sole_function("function f(o: Vec<i64>, k: i64): void { o[k()]++; }");
     let body = &f.body[0];
     let HirStmt::Expr {
         expr: HirExpr::CompoundUpdate { target, rhs, .. },
@@ -1955,7 +2030,7 @@ fn body_walker_array_expression_nested_walks_inner_array() {
 
 #[test]
 fn body_walker_array_expression_elision_becomes_undefined() {
-    let f = sole_function("function f(): unknown[] { return [1, , 3]; }");
+    let f = sole_function("function f(): i64[] { return [1, , 3]; }");
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2016,7 +2091,7 @@ fn body_walker_array_expression_spread_walks_inner_but_warns() {
 
 #[test]
 fn body_walker_object_expression_empty_produces_empty_object() {
-    let f = sole_function("function f(): unknown { return {}; }");
+    let f = sole_function("function f(): i64 { return {}; }");
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2031,7 +2106,7 @@ fn body_walker_object_expression_empty_produces_empty_object() {
 
 #[test]
 fn body_walker_object_expression_with_identifier_keys_walks_values() {
-    let f = sole_function("function f(a: i64, b: i64): unknown { return { x: a, y: b }; }");
+    let f = sole_function("function f(a: i64, b: i64): i64 { return { x: a, y: b }; }");
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2058,7 +2133,7 @@ fn body_walker_object_expression_with_identifier_keys_walks_values() {
 
 #[test]
 fn body_walker_object_expression_with_string_key_records_atom_name() {
-    let f = sole_function(r#"function f(): unknown { return { "key": 1 }; }"#);
+    let f = sole_function(r#"function f(): i64 { return { "key": 1 }; }"#);
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2080,7 +2155,7 @@ fn body_walker_object_expression_with_string_key_records_atom_name() {
 
 #[test]
 fn body_walker_object_expression_with_numeric_key_stringifies_to_atom() {
-    let f = sole_function("function f(): unknown { return { 1: 2 }; }");
+    let f = sole_function("function f(): i64 { return { 1: 2 }; }");
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2096,7 +2171,7 @@ fn body_walker_object_expression_with_numeric_key_stringifies_to_atom() {
 
 #[test]
 fn body_walker_object_expression_shorthand_walks_identifier_value() {
-    let f = sole_function("function f(a: i64): unknown { return { a }; }");
+    let f = sole_function("function f(a: i64): i64 { return { a }; }");
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
@@ -2118,7 +2193,7 @@ fn body_walker_object_expression_shorthand_walks_identifier_value() {
 fn body_walker_object_expression_spread_walks_inner_but_warns() {
     let output = FrontendPass::new().run(
         "test.ts",
-        "function f(o: unknown): unknown { return { ...o, x: 1 }; }",
+        "function f(o: Record<string, i64>): i64 { return { ...o, x: 1 }; }",
     );
     assert!(
         !output.diagnostics.has_errors(),
@@ -2164,7 +2239,7 @@ fn body_walker_object_expression_spread_walks_inner_but_warns() {
 fn body_walker_object_expression_getter_warns_without_erroring() {
     let output = FrontendPass::new().run(
         "test.ts",
-        "function f(): unknown { return { get x() { return 1; } }; }",
+        "function f(): i64 { return { get x() { return 1; } }; }",
     );
     assert!(
         !output.diagnostics.has_errors(),
@@ -2185,7 +2260,7 @@ fn body_walker_object_expression_getter_warns_without_erroring() {
 fn body_walker_object_expression_computed_key_walks_key_and_value_for_side_effects() {
     let output = FrontendPass::new().run(
         "test.ts",
-        "let key: i64 = 0; function f(): unknown { return { [++key]: ++key }; }",
+        "let key: i64 = 0; function f(): i64 { return { [++key]: ++key }; }",
     );
     assert!(
         !output.diagnostics.has_errors(),

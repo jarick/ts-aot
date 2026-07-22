@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{
-    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, Type, TypeId, TypeTable, Visibility,
+    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, TypeTable, Visibility,
 };
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
@@ -639,332 +639,7 @@ fn convert_expr_template_returns_local_to_dest() {
 }
 
 #[test]
-fn convert_expr_tagged_template_calls_tag_with_string_slice_and_substitutions() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    let tag_ident = HirExpr::Global {
-        name: Atom::new_inline("tag"),
-        ty: unit_ty(),
-    };
-    let sub = HirExpr::Int(42);
-    let expr = HirExpr::Template {
-        tag: Some(Box::new(tag_ident)),
-        expressions: vec![sub],
-        cooked_parts: vec![
-            Some(Atom::new_inline("Hello, ")),
-            Some(Atom::new_inline("!")),
-        ],
-        raw_parts: vec![
-            Some(Atom::new_inline("Hello, ")),
-            Some(Atom::new_inline("!")),
-        ],
-        ty: unit_ty(),
-    };
-    let mir = c.convert_expr(
-        &expr,
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx,
-    );
-    let runtime_count = out
-        .iter()
-        .filter(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::StringConcat,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        runtime_count, 0,
-        "tagged template must NOT emit StringConcat (no concat; the tag handles joining); out={out:?}"
-    );
-    let (let_local, let_init) = match out.last().expect("expected Let for tagged template") {
-        MirStmt::Let {
-            local,
-            init: Some(init),
-            ..
-        } => (*local, init),
-        other => panic!("expected trailing Let for tagged template, got {other:?}"),
-    };
-    let MirExpr::IndirectCall { callee, args, .. } = let_init else {
-        panic!("Let init must be IndirectCall (tag dispatch), got {let_init:?}");
-    };
-    assert!(
-        matches!(callee.as_ref(), MirExpr::Global(name) if name.as_str() == "tag"),
-        "callee must be the tag Global, got {callee:?}"
-    );
-    assert_eq!(
-        args.len(),
-        2,
-        "tag call must receive [TemplateStringsArray, Vec<DynamicValue> (rest subs)]; got {args:?}"
-    );
-    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
-        panic!(
-            "first arg must be TemplateStringsArray (carries cooked + raw parts), got {:?}",
-            args[0]
-        );
-    };
-    assert_eq!(
-        cooked.len(),
-        2,
-        "must carry both cooked parts; got cooked={cooked:?}"
-    );
-    assert_eq!(cooked[0].as_str(), "Hello, ");
-    assert_eq!(cooked[1].as_str(), "!");
-    assert_eq!(
-        raw.len(),
-        2,
-        "must also carry raw parts (spec requires both); got raw={raw:?}"
-    );
-    assert_eq!(raw[0].as_str(), "Hello, ");
-    assert_eq!(raw[1].as_str(), "!");
-    let subs_local = match &args[1] {
-        MirExpr::Local(l) => *l,
-        other => panic!(
-            "second arg must be a Local holding the substitutions Vec<DynamicValue>, got {other:?}"
-        ),
-    };
-    let subs_len = out
-        .iter()
-        .filter(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::DynVecAppend,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        subs_len, 1,
-        "one substitution must produce one DynVecAppend stmt (not a single int arg); got out={out:?}"
-    );
-    let subs_initialized = out.iter().any(|s| {
-        matches!(
-            s,
-            MirStmt::Runtime {
-                op: RuntimeOp::DynVecNew,
-                dest: Some(d),
-                ..
-            } if *d == subs_local
-        )
-    });
-    assert!(
-        subs_initialized,
-        "subs_vec Local({subs_local:?}) must be initialized by a DynVecNew Runtime stmt; got out={out:?}"
-    );
-    assert_eq!(
-        mir,
-        MirExpr::Local(let_local),
-        "convert_expr must return the Let dest local"
-    );
-}
 
-#[test]
-fn convert_expr_tagged_template_without_substitutions_passes_only_string_slice() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    let tag_ident = HirExpr::Global {
-        name: Atom::new_inline("String.raw"),
-        ty: unit_ty(),
-    };
-    let expr = HirExpr::Template {
-        tag: Some(Box::new(tag_ident)),
-        expressions: vec![],
-        cooked_parts: vec![Some(Atom::new_inline("raw text"))],
-        raw_parts: vec![Some(Atom::new_inline("raw text"))],
-        ty: unit_ty(),
-    };
-    let mir = c.convert_expr(
-        &expr,
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx,
-    );
-    let (let_local, let_init) = match out.last().expect("expected Let") {
-        MirStmt::Let {
-            local,
-            init: Some(init),
-            ..
-        } => (*local, init),
-        other => panic!("expected Let, got {other:?}"),
-    };
-    let MirExpr::IndirectCall { callee, args, .. } = let_init else {
-        panic!("init must be IndirectCall; got {let_init:?}");
-    };
-    assert!(
-        matches!(callee.as_ref(), MirExpr::Global(name) if name.as_str() == "String.raw"),
-        "callee must be String.raw; got {callee:?}"
-    );
-    assert_eq!(
-        args.len(),
-        2,
-        "tag call must receive [TemplateStringsArray, Vec<DynamicValue>] (the subs Vec is always present, even when empty); got {args:?}"
-    );
-    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
-        panic!("first arg must be TemplateStringsArray; got {:?}", args[0]);
-    };
-    assert_eq!(cooked.len(), 1);
-    assert_eq!(cooked[0].as_str(), "raw text");
-    assert_eq!(raw.len(), 1);
-    assert_eq!(raw[0].as_str(), "raw text");
-    let subs_local = match &args[1] {
-        MirExpr::Local(l) => *l,
-        other => panic!(
-            "second arg must be a Local holding the (empty) substitutions Vec<DynamicValue>, got {other:?}"
-        ),
-    };
-    let subs_initialized = out.iter().any(|s| {
-        matches!(
-            s,
-            MirStmt::Runtime {
-                op: RuntimeOp::DynVecNew,
-                dest: Some(d),
-                ..
-            } if *d == subs_local
-        )
-    });
-    assert!(
-        subs_initialized,
-        "subs_vec Local({subs_local:?}) must be initialized by a DynVecNew Runtime stmt even when no substitutions; got out={out:?}"
-    );
-    let subs_appends = out
-        .iter()
-        .filter(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::DynVecAppend,
-                    ..
-                }
-            )
-        })
-        .count();
-    assert_eq!(
-        subs_appends, 0,
-        "no substitutions means zero DynVecAppend stmts; got out={out:?}"
-    );
-    assert_eq!(mir, MirExpr::Local(let_local));
-}
-
-#[test]
-fn convert_expr_tagged_template_preserves_raw_separately_from_cooked() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    let tag_ident = HirExpr::Global {
-        name: Atom::new_inline("tag"),
-        ty: unit_ty(),
-    };
-    let expr = HirExpr::Template {
-        tag: Some(Box::new(tag_ident)),
-        expressions: vec![],
-        cooked_parts: vec![Some(Atom::new_inline("\\n cooked"))],
-        raw_parts: vec![Some(Atom::new_inline("\\n raw"))],
-        ty: unit_ty(),
-    };
-    let _ = c.convert_expr(
-        &expr,
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx,
-    );
-    let MirStmt::Let {
-        init: Some(init), ..
-    } = out.last().expect("expected Let")
-    else {
-        panic!("expected Let; got {out:?}");
-    };
-    let MirExpr::IndirectCall { args, .. } = init else {
-        panic!("init must be IndirectCall; got {init:?}");
-    };
-    let MirExpr::TemplateStringsArray { cooked, raw, .. } = &args[0] else {
-        panic!("first arg must be TemplateStringsArray; got {:?}", args[0]);
-    };
-    assert_eq!(
-        cooked[0].as_str(),
-        "\\n cooked",
-        "cooked part must carry the cooked text (escape processed)"
-    );
-    assert_eq!(
-        raw[0].as_str(),
-        "\\n raw",
-        "raw part must carry the raw text (escape UN-processed) — spec requires BOTH cooked and raw on the template strings array; got raw={raw:?}"
-    );
-    assert_ne!(
-        cooked[0].as_str(),
-        raw[0].as_str(),
-        "cooked and raw MUST be preserved independently for spec compliance (e.g. String.raw uses raw, regular tags use cooked)"
-    );
-}
-
-#[test]
-fn tagged_template_subs_vec_typed_as_vec_dynamic_value_not_dynamicvalue() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    let mut types = empty_types();
-    let tag_ident = HirExpr::Global {
-        name: Atom::new_inline("tag"),
-        ty: unit_ty(),
-    };
-    let expr = HirExpr::Template {
-        tag: Some(Box::new(tag_ident)),
-        expressions: vec![int_lit(42)],
-        cooked_parts: vec![Some(Atom::new_inline("a")), Some(Atom::new_inline("b"))],
-        raw_parts: vec![Some(Atom::new_inline("a")), Some(Atom::new_inline("b"))],
-        ty: unit_ty(),
-    };
-    let _ = c.convert_expr(
-        &expr,
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut types,
-        &mut cx,
-    );
-    let subs_init = out.iter().find_map(|s| match s {
-        MirStmt::Runtime {
-            op: RuntimeOp::DynVecNew,
-            dest: Some(d),
-            ty,
-            ..
-        } => Some((*d, *ty)),
-        _ => None,
-    });
-    let (subs_local, subs_ty) = subs_init.expect("DynVecNew Runtime stmt must be present");
-    let dynamic_ty = types.intern(&Type::Dynamic);
-    let subs_resolved = types.resolve(subs_ty).expect("subs_ty must resolve");
-    let dynamic_resolved = types.resolve(dynamic_ty).expect("dynamic_ty must resolve");
-    assert!(
-        matches!(subs_resolved, Type::Array { .. }),
-        "subs_vec Local({subs_local:?}) MUST be typed as `Type::Array` (so backend emits `Vec<DynamicValue>` and `__ts_aot_dyn_vec_new() -> Vec<DynamicValue>` matches); got type={subs_resolved:?}"
-    );
-    let array_element = if let Type::Array { element } = subs_resolved {
-        *element
-    } else {
-        unreachable!()
-    };
-    assert_eq!(
-        array_element, dynamic_ty,
-        "subs_vec must be Vec<DynamicValue> = Type::Array{{ element: Type::Dynamic }}; got element={array_element:?} vs expected dynamic_ty={dynamic_resolved:?}"
-    );
-}
-
-#[test]
 fn convert_expr_await_emits_mir_await_expr() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
@@ -1121,88 +796,7 @@ fn convert_expr_assignment_returns_assigned_value() {
 }
 
 #[test]
-fn convert_expr_assignment_value_template_emits_runtime_before_assign() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    let target = HirExpr::Local {
-        id: LocalId::from_raw(0),
-        ty: unit_ty(),
-    };
-    let value = HirExpr::Template {
-        tag: None,
-        expressions: vec![],
-        cooked_parts: vec![None],
-        raw_parts: vec![None],
-        ty: unit_ty(),
-    };
-    let expr = HirExpr::Assignment {
-        target: Box::new(target),
-        value: Box::new(value),
-        ty: unit_ty(),
-    };
-    let _ = c.convert_expr(
-        &expr,
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx,
-    );
-    assert_eq!(
-        out.len(),
-        3,
-        "1-part template + Assignment emits 3 stmts; out={out:?}"
-    );
-    let MirStmt::Let {
-        local: template_temp,
-        init: Some(template_init),
-        ..
-    } = &out[0]
-    else {
-        panic!(
-            "expected out[0] = Let for 1-part template, got {:?}",
-            out[0]
-        );
-    };
-    assert!(
-        matches!(template_init, MirExpr::String { .. } | MirExpr::Local(_)),
-        "1-part template Let init must be the cooked string or a Local; got {template_init:?}"
-    );
-    let MirStmt::Let {
-        local: value_temp,
-        init: Some(value_init),
-        ..
-    } = &out[1]
-    else {
-        panic!("expected out[1] = Let init=RHS-result, got {:?}", out[1]);
-    };
-    assert!(
-        matches!(value_init, MirExpr::Local(_)),
-        "Let init must capture the RHS value (e.g. Template's runtime dest temp), got {value_init:?}"
-    );
-    assert_eq!(
-        *value_init,
-        MirExpr::Local(*template_temp),
-        "Assignment value Let must load from the 1-part template's temp"
-    );
-    let MirStmt::Assign {
-        value: assign_value,
-        ..
-    } = &out[2]
-    else {
-        panic!("expected out[2] = Assign, got {:?}", out[2]);
-    };
-    let MirExpr::Local(assign_src) = assign_value else {
-        panic!("Assign value must be Local (load of value_temp), got {assign_value:?}");
-    };
-    assert_eq!(
-        *assign_src, *value_temp,
-        "Assign value must be MirExpr::Local(value_temp) — NOT a clone of the RHS expression (which would re-run side effects in a statement-context Expr)"
-    );
-}
 
-#[test]
 fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
@@ -1791,80 +1385,7 @@ fn convert_block_while_false_does_not_loop_forever() {
 }
 
 #[test]
-fn convert_block_while_template_cond_runs_template_each_iteration() {
-    let mut c = ExprConverter::new();
-    let mut cx = ctx();
-    let cond = HirExpr::Template {
-        tag: None,
-        expressions: vec![int_lit(1)],
-        cooked_parts: vec![None, None],
-        raw_parts: vec![None, None],
-        ty: unit_ty(),
-    };
-    let block = HirBlock(vec![HirStmt::While {
-        cond,
-        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-    }]);
-    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
-    let outer_while_idx = mir_block
-        .stmts
-        .iter()
-        .position(|s| matches!(s, MirStmt::While { .. }))
-        .expect("expected outer MirStmt::While");
-    let outer_while = match &mir_block.stmts[outer_while_idx] {
-        MirStmt::While { cond, body } => (cond, body),
-        other => panic!("expected MirStmt::While, got {other:?}"),
-    };
-    assert!(matches!(*outer_while.0, MirExpr::Local(_)));
-    let inner_while_idx = outer_while
-        .1
-        .stmts
-        .iter()
-        .position(|s| {
-            matches!(
-                s,
-                MirStmt::While {
-                    cond: MirExpr::Bool(true),
-                    ..
-                }
-            )
-        })
-        .expect("expected inner MirStmt::While at index 0 of outer-while body");
-    let inner_body = match &outer_while.1.stmts[inner_while_idx] {
-        MirStmt::While { body: ib, .. } => &ib.stmts,
-        other => panic!("expected inner MirStmt::While, got {other:?}"),
-    };
-    assert!(
-        inner_body
-            .iter()
-            .any(|s| matches!(s, MirStmt::Expr(MirExpr::Int { value: 0, .. }))),
-        "original body stmts must remain in inner-while body, got {:?}",
-        inner_body
-    );
-    let template_runtime_idx = outer_while
-        .1
-        .stmts
-        .iter()
-        .position(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::StringConcat,
-                    ..
-                }
-            )
-        })
-        .expect("template runtime stmt must be present in outer-while body");
-    assert!(
-        template_runtime_idx > inner_while_idx,
-        "template runtime stmt (idx {}) must appear AFTER the inner-while wrapper (idx {}) so cond re-evaluates each iteration; got stmts {:?}",
-        template_runtime_idx,
-        inner_while_idx,
-        outer_while.1.stmts
-    );
-}
 
-#[test]
 fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
@@ -2016,100 +1537,7 @@ fn convert_block_dowhile_continue_still_evaluates_cond() {
 }
 
 #[test]
-fn convert_block_dowhile_template_cond_runs_each_iteration() {
-    let mut c = ExprConverter::new();
-    let mut cx = ctx();
-    let block = HirBlock(vec![HirStmt::DoWhile {
-        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-        cond: HirExpr::Template {
-            tag: None,
-            expressions: vec![int_lit(1)],
-            cooked_parts: vec![None, None],
-            raw_parts: vec![None, None],
-            ty: unit_ty(),
-        },
-    }]);
-    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
-    let while_stmt = match &mir_block.stmts[2] {
-        MirStmt::While { body, .. } => body,
-        other => panic!("expected While at index 2, got {other:?}"),
-    };
-    let inner_while_idx = while_stmt
-        .stmts
-        .iter()
-        .position(|s| {
-            matches!(
-                s,
-                MirStmt::While {
-                    cond: MirExpr::Bool(true),
-                    ..
-                }
-            )
-        })
-        .expect("expected inner MirStmt::While in do-while body");
-    let template_runtime_idx = while_stmt
-        .stmts
-        .iter()
-        .position(|s| {
-            matches!(
-                s,
-                MirStmt::Runtime {
-                    op: RuntimeOp::StringConcat,
-                    ..
-                }
-            )
-        })
-        .expect("template runtime stmt must be present in do-while body");
-    assert!(
-        template_runtime_idx > inner_while_idx,
-        "template runtime stmt must appear AFTER the inner-while wrapper (so cond re-evaluates each iter even on Continue); got stmts={:?}",
-        while_stmt.stmts
-    );
-}
 
-#[test]
-fn convert_block_while_template_cond_runtime_runs_before_loop() {
-    let mut c = ExprConverter::new();
-    let mut cx = ctx();
-    let block = HirBlock(vec![HirStmt::While {
-        cond: HirExpr::Template {
-            tag: None,
-            expressions: vec![],
-            cooked_parts: vec![None],
-            raw_parts: vec![None],
-            ty: unit_ty(),
-        },
-        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-    }]);
-    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
-    let stmts = &mir_block.stmts;
-    let initial_let_idx = stmts
-        .iter()
-        .position(|s| matches!(s, MirStmt::Let { .. }))
-        .expect("1-part template Let must be present");
-    let outer_while_idx = stmts
-        .iter()
-        .position(|s| matches!(s, MirStmt::While { .. }))
-        .expect("expected outer MirStmt::While");
-    assert!(
-        initial_let_idx < outer_while_idx,
-        "1-part template Let must appear BEFORE the outer MirStmt::While (cond re-evaluates each iter from populated temp); got stmts={:?}",
-        stmts
-    );
-    let outer_while_cond = stmts
-        .iter()
-        .find_map(|s| match s {
-            MirStmt::While { cond, .. } => Some(cond),
-            _ => None,
-        })
-        .expect("outer MirStmt::While already validated by outer_while_idx");
-    assert!(
-        matches!(*outer_while_cond, MirExpr::Local(_)),
-        "While.cond must be the Local(temp) holding the template result, got {outer_while_cond:?}"
-    );
-}
-
-#[test]
 fn convert_block_while_call_cond_evaluated_once_per_iteration() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
@@ -6486,6 +5914,165 @@ fn resolve_field_id_compound_update_owner_with_registered_ty_resolves_field() {
     assert!(
         !cx.has_errors(),
         "CompoundUpdate owner with registered ty struct id + present field must not emit any diagnostic, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+fn object_method_call(field_name: &str) -> HirExpr {
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Object"),
+                ty: unit_ty(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline(field_name),
+            ty: unit_ty(),
+        })),
+        args: Vec::new(),
+        ty: unit_ty(),
+    }
+}
+
+fn local_method_call(field_name: &str) -> HirExpr {
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: unit_ty(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline(field_name),
+            ty: unit_ty(),
+        })),
+        args: Vec::new(),
+        ty: unit_ty(),
+    }
+}
+
+fn e0404_count(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| d.code.as_str() == "E0404")
+        .count()
+}
+
+#[test]
+fn e0404_emits_for_object_keys_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call("keys"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Unit),
+        "E0404 path must lower to MirExpr::Unit, got {mir:?}"
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        1,
+        "Object.keys() must emit exactly one E0404, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn e0404_emits_for_object_get_prototype_of_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &object_method_call("getPrototypeOf"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(e0404_count(cx.diagnostics()), 1);
+}
+
+#[test]
+fn e0404_emits_for_object_set_prototype_of_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &object_method_call("setPrototypeOf"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(e0404_count(cx.diagnostics()), 1);
+}
+
+#[test]
+fn e0404_not_emitted_for_local_receiver_keys_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &local_method_call("keys"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        0,
+        "myMap.keys() with local receiver must not trigger E0404, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn e0404_not_emitted_for_local_receiver_user_defined_method() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &local_method_call("getPrototypeOf"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        0,
+        "user-defined `.getPrototypeOf` on local receiver must not trigger E0404, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn e0404_not_emitted_for_object_local_global_other_method() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &object_method_call("assign"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        0,
+        "Object.assign() (not in banned set) must not trigger E0404, got {:?}",
         cx.diagnostics()
     );
 }

@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
-    Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind,
-    match_member_expression,
+    Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind, TSType,
+    TSTypeName, match_member_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
@@ -413,9 +413,23 @@ impl SkeletonBuilder<'_, '_> {
 
     pub(crate) fn resolve_ts_type_with_params(
         &mut self,
-        ty: Option<&oxc_ast::ast::TSType<'_>>,
+        ty: Option<&TSType<'_>>,
         type_params: Option<&TypeParamMap>,
     ) -> TypeId {
+        if let Some(ts_type) = ty
+            && let Some(name) = banned_type_name(ts_type)
+        {
+            let span = core_span_from_oxc(ts_type.span());
+            self.diagnostics.push(Diagnostic::error(
+                "E0401",
+                format!(
+                    "the type `{name}` is not supported in strict AOT mode. \
+                     Use explicit types like `i64`, `string`, or a named struct instead.",
+                ),
+                span,
+            ));
+            return self.types.intern(&Type::Error);
+        }
         if let Some(id) =
             resolve_simple_type(ty, self.types, Some(&self.resolved_aliases), type_params)
         {
@@ -471,4 +485,23 @@ fn build_type_param_context(
         ids.push(id);
     }
     (ids, map)
+}
+
+fn banned_type_name(ty: &TSType<'_>) -> Option<&'static str> {
+    match ty {
+        TSType::TSAnyKeyword(_) => Some("any"),
+        TSType::TSUnknownKeyword(_) => Some("unknown"),
+        TSType::TSTypeReference(r) => {
+            if let TSTypeName::IdentifierReference(id) = &r.type_name
+                && id.name.as_str() == "Object"
+            {
+                return Some("Object");
+            }
+            r.type_arguments
+                .as_ref()
+                .and_then(|args| args.params.iter().find_map(banned_type_name))
+        }
+        TSType::TSArrayType(element) => banned_type_name(&element.element_type),
+        _ => None,
+    }
 }

@@ -291,13 +291,8 @@ pub enum MirExpr {
         expr: Box<MirExpr>,
         ty: TypeId,
     },
-    DynamicFrom {
-        value: Box<MirExpr>,
-        ty: TypeId,
-    },
     TemplateStringsArray {
         cooked: Vec<Atom>,
-        raw: Vec<Atom>,
         ty: TypeId,
     },
     RegExp {
@@ -337,7 +332,6 @@ impl MirExpr {
             | MirExpr::Yield { ty, .. }
             | MirExpr::OptionalChain { ty, .. }
             | MirExpr::TypeOf { ty, .. }
-            | MirExpr::DynamicFrom { ty, .. }
             | MirExpr::TemplateStringsArray { ty, .. }
             | MirExpr::RegExp { ty, .. }
             | MirExpr::BigInt { ty, .. }
@@ -367,19 +361,6 @@ pub enum RuntimeOp {
     TypeOf,
     OpIn,
     OpInstanceof,
-    OpObjectGet,
-    OpObjectSet,
-    OpObjectHas,
-    OpObjectDelete,
-    OpObjectUnwrap,
-    OpObjectNew,
-    OpObjectProtoGet,
-    OpObjectProtoSet,
-    OpObjectSetPrototypeOf,
-    OpObjectKeys,
-    OpDynamicBinary,
-    DynVecNew,
-    DynVecAppend,
 }
 
 #[cfg(test)]
