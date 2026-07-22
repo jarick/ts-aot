@@ -25,7 +25,7 @@ pub(super) fn emit_type_id_with_ctx(id: TypeId, ctx: &EmitCtx<'_>) -> TokenStrea
 
 fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
     match ty {
-        Type::Void | Type::Null | Type::Error | Type::Fn { .. } => quote!(()),
+        Type::Void | Type::Null | Type::Error | Type::Fn { .. } | Type::Union { .. } => quote!(()),
         Type::Never => quote!(!),
         Type::Bool => quote!(bool),
         Type::I8 => quote!(i8),

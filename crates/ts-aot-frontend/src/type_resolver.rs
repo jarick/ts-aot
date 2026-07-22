@@ -92,6 +92,15 @@ pub(crate) fn resolve_simple_type(
                 types.intern(&Type::Error)
             }
         },
+        TSType::TSUnionType(u) => {
+            let mut variants: Vec<TypeId> = Vec::with_capacity(u.types.len());
+            for variant in &u.types {
+                let id = resolve_simple_type(Some(variant), types, aliases, type_params)
+                    .unwrap_or_else(|| types.intern(&Type::Error));
+                variants.push(id);
+            }
+            types.intern(&Type::Union { variants })
+        }
         _ => types.intern(&Type::Error),
     })
 }
