@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
 use oxc_parser::Parser;
@@ -68,16 +66,7 @@ impl FrontendPass {
         }
 
         let oxc_program: &Program<'_> = &ret.program;
-        SkeletonBuilder {
-            source,
-            types,
-            diagnostics: &mut diagnostics,
-            program: &mut program,
-            next_generic_param: 0,
-            next_anon_class_id: 0,
-            resolved_aliases: HashMap::new(),
-        }
-        .build(oxc_program);
+        SkeletonBuilder::new(source, types, &mut diagnostics, &mut program).build(oxc_program);
 
         program.diagnostics.extend(diagnostics.iter().cloned());
         FrontendOutput {

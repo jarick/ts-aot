@@ -2530,3 +2530,132 @@ fn class_expression_assigned_to_local_keeps_class_registered() {
         other => panic!("expected Global referencing anon class, got {other:?}"),
     }
 }
+
+fn yield_diagnostic_check(source: &str, expected_substring: &str) {
+    let output = FrontendPass::new().run("test.ts", source);
+    assert!(
+        output.diagnostics.has_errors(),
+        "`yield` in non-generator must produce a hard error, got clean diagnostics for: {source}"
+    );
+    let found = output.diagnostics.iter().any(|d| {
+        d.code.as_str() == "E0500"
+            && d.message.contains(expected_substring)
+            && d.severity == ts_aot_core::Severity::Error
+    });
+    assert!(
+        found,
+        "expected E0500 error (not warning) mentioning `{expected_substring}`, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn body_walker_yield_expression_in_non_generator_rejects_with_e0500_error() {
+    yield_diagnostic_check(
+        "function f(): i64 { yield 1; return 0; }",
+        "generator function",
+    );
+}
+
+#[test]
+fn body_walker_yield_expression_in_non_generator_returns_unit_placeholder() {
+    let output = FrontendPass::new().run("test.ts", "function f(): i64 { yield 42; return 0; }");
+    let f = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("expected Function decl");
+    let HirStmt::Expr { expr, .. } = &f.body[0] else {
+        panic!("expected first stmt to be Expr, got {:?}", f.body[0]);
+    };
+    assert!(
+        matches!(expr, HirExpr::Unit),
+        "rejected `yield` must produce HirExpr::Unit placeholder, not propagate to MIR; got {expr:?}"
+    );
+}
+
+#[test]
+fn body_walker_yield_inside_nested_non_generator_rejects_with_e0500_error() {
+    use crate::skeleton::SkeletonBuilder;
+    use ts_aot_core::{DiagnosticBag, ModuleId, Span as CoreSpan, TypeTable};
+    use ts_aot_ir_hir::HirProgram;
+
+    let mut types = TypeTable::new();
+    let mut diagnostics = DiagnosticBag::new();
+    let mut program = HirProgram::new(ModuleId::from_raw(0));
+    let mut builder = SkeletonBuilder::new("test.ts", &mut types, &mut diagnostics, &mut program);
+
+    builder.is_generator_stack.push(true);
+    builder.is_generator_stack.push(false);
+    assert!(
+        !builder.current_function_is_generator(),
+        "innermost non-generator must override enclosing generator context"
+    );
+
+    builder.is_generator_stack.clear();
+    builder.is_generator_stack.push(true);
+    builder.is_generator_stack.push(true);
+    assert!(
+        builder.current_function_is_generator(),
+        "generator nested inside generator must remain generator"
+    );
+
+    builder.is_generator_stack.clear();
+    builder.is_generator_stack.push(false);
+    assert!(
+        !builder.current_function_is_generator(),
+        "single non-generator must be detected as non-generator"
+    );
+    let _ = (CoreSpan::new(0, 0),);
+}
+
+#[test]
+fn body_walker_yield_expression_in_generator_walks_into_hir_yield() {
+    let output = FrontendPass::new().run("test.ts", "function* gen(): i64 { yield 42; return 0; }");
+    let f = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("expected Function decl");
+    assert!(f.is_generator, "function* must set is_generator=true");
+    let HirStmt::Expr { expr, .. } = &f.body[0] else {
+        panic!("expected first stmt to be Expr, got {:?}", f.body[0]);
+    };
+    let HirExpr::Yield { expr: inner, .. } = expr else {
+        panic!("`yield` in generator must produce HirExpr::Yield, got {expr:?}");
+    };
+    let inner = inner.as_deref().expect("yield 42 must have inner");
+    assert!(
+        matches!(inner, HirExpr::Int(42)),
+        "yield argument must be walked in generator context, got {inner:?}"
+    );
+}
+
+#[test]
+fn body_walker_bare_yield_in_generator_produces_hir_yield_with_none() {
+    let output = FrontendPass::new().run("test.ts", "function* gen(): i64 { yield; return 0; }");
+    let f = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("expected Function decl");
+    let HirStmt::Expr { expr, .. } = &f.body[0] else {
+        panic!("expected first stmt to be Expr, got {:?}", f.body[0]);
+    };
+    assert!(
+        matches!(expr, HirExpr::Yield { expr: None, .. }),
+        "bare `yield` in generator must produce HirExpr::Yield with expr=None; got {expr:?}"
+    );
+}

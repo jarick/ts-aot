@@ -3,7 +3,7 @@ use ts_aot_core::{Diagnostic, Span, TypeTable};
 use ts_aot_frontend::FrontendPass;
 use ts_aot_passes::{
     PassContext, convert_program, lower_async, lower_classes, lower_closures, lower_enums,
-    lower_result, monomorphize,
+    lower_generators, lower_result, monomorphize,
 };
 
 use crate::{CompileOptions, DriverOutput, EmitStage};
@@ -25,6 +25,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
     monomorphize(&mut hir, &mut types, &mut ctx);
     lower_closures(&mut hir, &mut ctx);
     let _ = lower_async(&mut hir, &mut types, &mut ctx);
+    let _ = lower_generators(&mut hir, &mut types, &mut ctx);
     out.diagnostics
         .extend(ctx.take_diagnostics().iter().cloned());
     if out.diagnostics.has_errors() {

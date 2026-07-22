@@ -151,7 +151,7 @@ impl SkeletonBuilder<'_, '_> {
             Some(&type_param_map),
         );
 
-        let body = self.walk_function_body(func.body.as_deref(), &params);
+        let body = self.walk_function_body(func.body.as_deref(), &params, func.generator);
 
         HirFunction {
             name,
@@ -301,7 +301,7 @@ impl SkeletonBuilder<'_, '_> {
             value.return_type.as_deref(),
             Some(&combined_map),
         );
-        let body = self.walk_function_body(value.body.as_deref(), &params);
+        let body = self.walk_function_body(value.body.as_deref(), &params, value.generator);
         Some(HirFunction {
             name: method_name,
             params,
