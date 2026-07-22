@@ -48,6 +48,9 @@ pub enum Type {
         ok: TypeId,
         err: TypeId,
     },
+    Union {
+        variants: Vec<TypeId>,
+    },
     Named {
         symbol: Atom,
     },
@@ -162,6 +165,49 @@ mod tests {
                 err: TypeId::from_raw(1)
             }
         );
+    }
+
+    #[test]
+    fn union_equality_depends_on_variant_order() {
+        let a = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let b = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let c = Type::Union {
+            variants: vec![TypeId::from_raw(2), TypeId::from_raw(1)],
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c, "variant order must participate in equality");
+    }
+
+    #[test]
+    fn union_equality_depends_on_variant_count() {
+        let one = Type::Union {
+            variants: vec![TypeId::from_raw(1)],
+        };
+        let two = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn union_distinguishes_from_other_aggregate_variants() {
+        let u = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let p = Type::Promise {
+            ok: TypeId::from_raw(1),
+            err: Some(TypeId::from_raw(2)),
+        };
+        let r = Type::Result {
+            ok: TypeId::from_raw(1),
+            err: TypeId::from_raw(2),
+        };
+        assert_ne!(u, p);
+        assert_ne!(u, r);
     }
 
     #[test]

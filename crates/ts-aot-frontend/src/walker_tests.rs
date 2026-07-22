@@ -780,6 +780,234 @@ fn never_keyword_annotation_resolves_to_type_never_not_error() {
 }
 
 #[test]
+fn union_type_in_param_resolves_to_type_union_with_primitive_variants() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function pick(x: i64 | string): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let expected = Type::Union {
+        variants: vec![i64_id, string_id],
+    };
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&expected),
+        "param type `i64 | string` must resolve to Type::Union with [I64, String]"
+    );
+    let interned_union = types.intern(&expected);
+    assert_eq!(
+        fn_decl.params[0].ty, interned_union,
+        "the param's TypeId must be the same TypeId obtained from interning the expected Union"
+    );
+}
+
+#[test]
+fn union_type_in_return_position_resolves_to_type_union() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function either(): i64 | string { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.ret),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id]
+        }),
+        "return type `i64 | string` must resolve to Type::Union with [I64, String]"
+    );
+}
+
+#[test]
+fn union_type_with_three_variants_preserves_order() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64 | string | bool): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let bool_id = types.intern(&Type::Bool);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id, bool_id]
+        }),
+        "variant order must be preserved as written in the source"
+    );
+}
+
+#[test]
+fn union_type_with_alias_variant_resolves_to_underlying_type() {
+    let mut types = TypeTable::new();
+    let source = "type Foo = i64; function f(v: Foo | string): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id]
+        }),
+        "alias `Foo = i64` must expand to I64 inside the union (no Named wrapper)"
+    );
+}
+
+#[test]
+fn union_type_alias_resolves_through_alias_chain() {
+    let mut types = TypeTable::new();
+    let source = "type MaybeNumber = i64 | string; function f(x: MaybeNumber): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id]
+        }),
+        "alias `MaybeNumber = i64 | string` must resolve to the same Union TypeId"
+    );
+    let alias_target = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::TypeAlias { name, target } if name.as_str() == "MaybeNumber" => Some(*target),
+            _ => None,
+        })
+        .expect("MaybeNumber alias decl should be present");
+    assert_eq!(
+        alias_target, fn_decl.params[0].ty,
+        "alias target TypeId must equal the consumer's TypeId (interning is idempotent)"
+    );
+}
+
+#[test]
+fn union_type_interning_is_idempotent() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: i64 | string): i64 { return 0; } function g(y: i64 | string): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_eq!(
+        f_param, g_param,
+        "two identical `i64 | string` annotations must intern to the same TypeId"
+    );
+}
+
+#[test]
+fn union_type_with_forward_declared_alias_pre_resolves_inner_alias() {
+    let mut types = TypeTable::new();
+    let source = "type Bar = Foo | string;\ntype Foo = i64;\nfunction f(x: Bar): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id]
+        }),
+        "Bar = Foo | string with forward-declared Foo must pre-resolve Foo before caching Bar"
+    );
+    let bar_target = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::TypeAlias { name, target } if name.as_str() == "Bar" => Some(*target),
+            _ => None,
+        })
+        .expect("Bar alias decl should be present");
+    assert_eq!(
+        bar_target, fn_decl.params[0].ty,
+        "Bar alias target TypeId must equal the consumer's TypeId (pre-resolve cache hit)"
+    );
+}
+
+#[test]
 fn chained_alias_forward_ref_resolves_via_cache_update_in_handle_type_alias() {
     let mut types = TypeTable::new();
     let source = "type Foo = Bar;\n type Bar = string;\n function f(x: Foo): i32 { return 0; }";

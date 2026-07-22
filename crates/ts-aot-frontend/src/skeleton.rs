@@ -108,13 +108,7 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
                 None
             };
             if let Some(rhs) = annotation_opt {
-                if let TSType::TSTypeReference(r) = rhs
-                    && let TSTypeName::IdentifierReference(id) = &r.type_name
-                    && alias_set.contains(id.name.as_str())
-                    && !self.resolved_aliases.contains_key(id.name.as_str())
-                {
-                    self.resolve_alias_chain(id.name.as_str(), alias_set, visiting, program);
-                }
+                self.pre_resolve_aliases_in_type(rhs, alias_set, visiting, program);
                 let target_id = self.resolve_ts_type(Some(rhs));
                 visiting.remove(name);
                 self.resolved_aliases.insert(name.to_string(), target_id);
@@ -124,6 +118,32 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
         visiting.remove(name);
         let id = self.types.intern(&Type::Error);
         self.resolved_aliases.insert(name.to_string(), id);
+    }
+
+    fn pre_resolve_aliases_in_type(
+        &mut self,
+        ty: &TSType<'_>,
+        alias_set: &HashSet<String>,
+        visiting: &mut HashSet<String>,
+        program: &Program<'_>,
+    ) {
+        match ty {
+            TSType::TSTypeReference(r) => {
+                if let TSTypeName::IdentifierReference(id) = &r.type_name {
+                    let dep_name = id.name.as_str();
+                    if alias_set.contains(dep_name) && !self.resolved_aliases.contains_key(dep_name)
+                    {
+                        self.resolve_alias_chain(dep_name, alias_set, visiting, program);
+                    }
+                }
+            }
+            TSType::TSUnionType(u) => {
+                for variant in &u.types {
+                    self.pre_resolve_aliases_in_type(variant, alias_set, visiting, program);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn record_alias_cycle(&mut self, name: &str, program: &Program<'_>) {

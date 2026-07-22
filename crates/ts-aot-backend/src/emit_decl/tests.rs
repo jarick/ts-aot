@@ -273,6 +273,95 @@ fn async_function_is_excluded_from_dispatch_table() {
 }
 
 #[test]
+fn union_typed_param_and_return_exclude_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let union_param_ty = types.intern(&Type::Union {
+        variants: vec![i64_ty, string_ty],
+    });
+    let union_return_ty = types.intern(&Type::Union {
+        variants: vec![i64_ty, string_ty],
+    });
+
+    let mut with_union_param = empty_func("with_union_param");
+    with_union_param.ret = i64_ty;
+    with_union_param.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: union_param_ty,
+    }];
+
+    let mut with_union_return = empty_func("with_union_return");
+    with_union_return.id = FunctionId::from_raw(1);
+    with_union_return.ret = union_return_ty;
+    with_union_return.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(with_union_param));
+    prog.push_decl(MirDecl::Function(with_union_return));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("fn with_union_param") && s.contains("v : ()"),
+        "function with union-typed param must still emit, with the union collapsed to the unit \n         ABI placeholder `()` so the signature stays valid Rust. Got: {s}"
+    );
+    assert!(
+        s.contains("fn with_union_return") && s.contains("-> ()"),
+        "function with union-typed return must still emit, with the union collapsed to the unit \n         ABI placeholder `()`. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_union_param"),
+        "union-typed param => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_union_return"),
+        "union-typed return => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function (both excluded by union types) => no dispatch table. Got: {s}"
+    );
+}
+
+#[test]
+fn union_type_emits_unit_placeholder_at_call_site() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let union_ty = types.intern(&Type::Union {
+        variants: vec![i64_ty, string_ty],
+    });
+
+    let mut f = empty_func("identity");
+    f.ret = union_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: union_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn identity")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    assert!(
+        sig.contains("v : ()") && sig.contains("-> ()"),
+        "both param and return of `i64 | string` must emit as `()` (unit placeholder) in the \n         function signature, so the source-level TS union type stays representable in Rust \n         until Phase 5 introduces a real union runtime. Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
 fn plain_function_emits_fn_signature() {
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Function(empty_func("greet")));
