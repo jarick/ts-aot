@@ -969,6 +969,242 @@ fn union_type_interning_is_idempotent() {
 }
 
 #[test]
+fn intersection_type_in_param_resolves_to_type_intersection_with_primitive_parts() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function combine(x: i64 & string): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let expected = Type::Intersection {
+        parts: vec![i64_id, string_id],
+    };
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&expected),
+        "param type `i64 & string` must resolve to Type::Intersection with [I64, String]"
+    );
+    let interned = types.intern(&expected);
+    assert_eq!(
+        fn_decl.params[0].ty, interned,
+        "the param's TypeId must be the same TypeId obtained from interning the expected Intersection"
+    );
+}
+
+#[test]
+fn intersection_type_in_return_position_resolves_to_type_intersection() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function both(): i64 & string { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.ret),
+        Some(&Type::Intersection {
+            parts: vec![i64_id, string_id]
+        }),
+        "return type `i64 & string` must resolve to Type::Intersection with [I64, String]"
+    );
+}
+
+#[test]
+fn intersection_type_with_three_parts_resolves_to_sorted_intersection() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64 & string & bool): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let bool_id = types.intern(&Type::Bool);
+    let mut expected = vec![i64_id, string_id, bool_id];
+    expected.sort_unstable_by_key(|id| id.raw());
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Intersection { parts: expected }),
+        "Intersection part order is canonicalised by the resolver (sorted by TypeId::raw())"
+    );
+}
+
+#[test]
+fn intersection_type_is_commutative_under_part_reordering() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: i64 & string): i64 { return 0; }\nfunction g(y: string & i64): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_eq!(
+        f_param, g_param,
+        "`i64 & string` and `string & i64` must intern to the same TypeId (Intersection is commutative)"
+    );
+}
+
+#[test]
+fn intersection_type_with_repeated_member_dedups_to_canonical_form() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: i64 & i64): i64 { return 0; }\nfunction g(y: i64 & i64 & string): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(f_param),
+        Some(&Type::Intersection {
+            parts: vec![i64_id]
+        }),
+        "`i64 & i64` must dedup to a singleton Intersection (idempotent under repeated members)"
+    );
+    let mut expected = vec![i64_id, string_id];
+    expected.sort_unstable_by_key(|id| id.raw());
+    assert_eq!(
+        types.resolve(g_param),
+        Some(&Type::Intersection { parts: expected }),
+        "`i64 & i64 & string` must dedup to `i64 & string` (sorted canonical form)"
+    );
+}
+
+#[test]
+fn intersection_type_alias_resolves_through_alias_chain() {
+    let mut types = TypeTable::new();
+    let source = "type Combined = i64 & string; function f(x: Combined): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Intersection {
+            parts: vec![i64_id, string_id]
+        }),
+        "alias `Combined = i64 & string` must resolve to the same Intersection TypeId"
+    );
+}
+
+#[test]
+fn intersection_type_distinguishes_from_union_with_same_parts() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: i64 & string): i64 { return 0; }\nfunction g(y: i64 | string): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_ne!(
+        f_param, g_param,
+        "`i64 & string` and `i64 | string` must resolve to different TypeIds"
+    );
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(f_param),
+        Some(&Type::Intersection {
+            parts: vec![i64_id, string_id]
+        })
+    );
+    assert_eq!(
+        types.resolve(g_param),
+        Some(&Type::Union {
+            variants: vec![i64_id, string_id]
+        })
+    );
+}
+
+#[test]
 fn union_type_with_forward_declared_alias_pre_resolves_inner_alias() {
     let mut types = TypeTable::new();
     let source = "type Bar = Foo | string;\ntype Foo = i64;\nfunction f(x: Bar): i64 { return 0; }";

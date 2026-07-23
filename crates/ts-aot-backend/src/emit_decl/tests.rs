@@ -306,14 +306,15 @@ fn union_typed_param_and_return_exclude_function_from_dispatch_table() {
     prog.push_decl(MirDecl::Function(with_union_return));
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
+    let s_norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
 
     assert!(
-        s.contains("fn with_union_param") && s.contains("v : ()"),
-        "function with union-typed param must still emit, with the union collapsed to the unit \n         ABI placeholder `()` so the signature stays valid Rust. Got: {s}"
+        s_norm.contains("fnwith_union_param") && s_norm.contains("v:()"),
+        "function with union-typed param must still emit, with the union collapsed to the unit \n         ABI placeholder `()`. Whitespace-insensitive (handles `v: ()` or `v : ()`). Got: {s}"
     );
     assert!(
-        s.contains("fn with_union_return") && s.contains("-> ()"),
-        "function with union-typed return must still emit, with the union collapsed to the unit \n         ABI placeholder `()`. Got: {s}"
+        s_norm.contains("fnwith_union_return") && s_norm.contains("->()"),
+        "function with union-typed return must still emit, with the union collapsed to the unit \n         ABI placeholder `()`. Whitespace-insensitive. Got: {s}"
     );
     assert!(
         !s.contains("__ts_aot_dispatch_with_union_param"),
@@ -355,9 +356,101 @@ fn union_type_emits_unit_placeholder_at_call_site() {
         .nth(1)
         .and_then(|rest| rest.split('{').next())
         .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig.contains("v : ()") && sig.contains("-> ()"),
-        "both param and return of `i64 | string` must emit as `()` (unit placeholder) in the \n         function signature, so the source-level TS union type stays representable in Rust \n         until Phase 5 introduces a real union runtime. Got signature fragment: `{sig}`"
+        sig_norm.contains("v:()") && sig_norm.contains("->()"),
+        "both param and return of `i64 | string` must emit as `()` (unit placeholder) in the \n         function signature, so the source-level TS union type stays representable in Rust \n         until Phase 5 introduces a real union runtime. Whitespace-insensitive. Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn intersection_typed_param_and_return_exclude_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let intersection_param_ty = types.intern(&Type::Intersection {
+        parts: vec![i64_ty, string_ty],
+    });
+    let intersection_return_ty = types.intern(&Type::Intersection {
+        parts: vec![i64_ty, string_ty],
+    });
+
+    let mut with_intersection_param = empty_func("with_intersection_param");
+    with_intersection_param.ret = i64_ty;
+    with_intersection_param.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: intersection_param_ty,
+    }];
+
+    let mut with_intersection_return = empty_func("with_intersection_return");
+    with_intersection_return.id = FunctionId::from_raw(1);
+    with_intersection_return.ret = intersection_return_ty;
+    with_intersection_return.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(with_intersection_param));
+    prog.push_decl(MirDecl::Function(with_intersection_return));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let s_norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+
+    assert!(
+        s_norm.contains("fnwith_intersection_param") && s_norm.contains("v:()"),
+        "function with intersection-typed param must still emit, with the intersection collapsed \n         to the unit ABI placeholder `()`. Whitespace-insensitive (handles `v: ()` or `v : ()`). Got: {s}"
+    );
+    assert!(
+        s_norm.contains("fnwith_intersection_return") && s_norm.contains("->()"),
+        "function with intersection-typed return must still emit, with the intersection collapsed \n         to the unit ABI placeholder `()`. Whitespace-insensitive. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_intersection_param"),
+        "intersection-typed param => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. \n         Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_intersection_return"),
+        "intersection-typed return => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. \n         Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function (both excluded by intersection types) => no dispatch table. \n         Got: {s}"
+    );
+}
+
+#[test]
+fn intersection_type_emits_unit_placeholder_at_call_site() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let intersection_ty = types.intern(&Type::Intersection {
+        parts: vec![i64_ty, string_ty],
+    });
+
+    let mut f = empty_func("combine");
+    f.ret = intersection_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: intersection_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn combine")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("v:()") && sig_norm.contains("->()"),
+        "both param and return of `i64 & string` must emit as `()` (unit placeholder) in the \n         function signature, so the source-level TS intersection type stays representable in \n         Rust until Phase 5 introduces a real intersection runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
     );
 }
 
