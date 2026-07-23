@@ -546,6 +546,106 @@ fn tuple_type_emits_unit_placeholder_at_call_site() {
 }
 
 #[test]
+fn array_typed_param_and_return_exclude_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_param_ty = types.intern(&Type::Array { element: i64_ty });
+    let array_return_ty = types.intern(&Type::Array { element: i64_ty });
+
+    let mut with_array_param = empty_func("with_array_param");
+    with_array_param.ret = i64_ty;
+    with_array_param.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: array_param_ty,
+    }];
+
+    let mut with_array_return = empty_func("with_array_return");
+    with_array_return.id = FunctionId::from_raw(1);
+    with_array_return.ret = array_return_ty;
+    with_array_return.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(with_array_param));
+    prog.push_decl(MirDecl::Function(with_array_return));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_array_param"),
+        "array-typed param => Array not in is_u64_arg_packable set => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_array_return"),
+        "array-typed return => Array not in is_u64_ret_packable set => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function (both excluded by array types) => no dispatch table. Got: {s}"
+    );
+}
+
+#[test]
+fn array_typed_return_emits_vec_placeholder() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_ty = types.intern(&Type::Array { element: i64_ty });
+
+    let mut f = empty_func("make_array");
+    f.ret = array_ty;
+    f.params = vec![];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn make_array")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("->Vec<i64>"),
+        "return type `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn array_typed_param_emits_vec_placeholder() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_ty = types.intern(&Type::Array { element: i64_ty });
+
+    let mut f = empty_func("take_array");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: array_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn take_array")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("v:Vec<i64>"),
+        "param typed `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
 fn plain_function_emits_fn_signature() {
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Function(empty_func("greet")));

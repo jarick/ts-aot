@@ -11,6 +11,12 @@ use crate::type_resolver::TypeParamMap;
 const PARSE_ERROR_CODE: &str = "E0200";
 const PARSE_PANIC_CODE: &str = "E0100";
 
+fn has_e0403(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
+    diagnostics
+        .iter()
+        .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0403")
+}
+
 #[test]
 fn empty_source_yields_empty_program_without_errors() {
     let output = FrontendPass::new().run("test.ts", "");
@@ -1422,6 +1428,430 @@ fn tuple_type_with_optional_element_emits_warning_diagnostic() {
             .any(|d| d.severity == ts_aot_core::Severity::Warning),
         "optional tuple element must produce a warning, got: {:?}",
         output.diagnostics
+    );
+}
+
+#[test]
+fn array_generic_syntax_in_param_resolves_to_type_array() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<i64>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: i64_id }),
+        "param type `Array<i64>` must resolve to Type::Array with element I64 (special-case in resolver)"
+    );
+}
+
+#[test]
+fn array_generic_and_array_sugar_resolve_to_same_type() {
+    let mut types = TypeTable::new();
+    let source =
+        "function f(x: Array<i64>): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_eq!(
+        f_param, g_param,
+        "`Array<i64>` and `i64[]` must intern to the same TypeId (canonical form of array-of-i64)"
+    );
+}
+
+#[test]
+fn array_generic_with_alias_element_resolves_through_alias() {
+    let mut types = TypeTable::new();
+    let source = "type Foo = i64; function f(x: Array<Foo>): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: i64_id }),
+        "alias `Foo = i64` must resolve inside `Array<Foo>` element position"
+    );
+}
+
+#[test]
+fn array_generic_with_nested_generic_resolves_recursively() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<Array<i64>>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let inner_array_id = types.intern(&Type::Array { element: i64_id });
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array {
+            element: inner_array_id
+        }),
+        "nested generic `Array<Array<i64>>` must resolve recursively"
+    );
+}
+
+#[test]
+fn user_defined_array_alias_overrides_builtin_array_generic_syntax() {
+    let mut types = TypeTable::new();
+    let source = "type Array = string;\nfunction f(x: Array<i64>): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::String),
+        "user-defined alias `type Array = string` must shadow the builtin `Array<T>` special case — `Array<i64>` resolves to `string`, not to `Type::Array`"
+    );
+    assert_eq!(
+        fn_decl.params[0].ty, string_id,
+        "alias resolves to the canonical String TypeId"
+    );
+}
+
+#[test]
+fn array_generic_bare_reference_emits_e0403_and_resolves_to_type_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0403(&output.diagnostics),
+        "bare `Array` (no `<...>`) is treated as zero arguments and must produce an E0403 warning, got: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let error_id = types.intern(&Type::Error);
+    assert_eq!(
+        fn_decl.params[0].ty, error_id,
+        "bare `Array` reference must resolve to Type::Error after E0403 warning"
+    );
+}
+
+#[test]
+fn array_generic_with_zero_type_arguments_emits_e0403_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0403(&output.diagnostics),
+        "empty `Array<>` must produce an E0403 warning about required arity, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn array_generic_with_too_many_type_arguments_emits_e0403_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<i64, i32>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0403(&output.diagnostics),
+        "`Array<i64, i32>` (wrong arity) must produce an E0403 warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn array_generic_with_nested_wrong_arity_inside_emits_e0403_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<Array<>>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0403(&output.diagnostics),
+        "`Array<Array<>>` (nested zero-arity) must produce an E0403 warning via resolver recursion, got: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let error_id = types.intern(&Type::Error);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: error_id }),
+        "outer Array must wrap the inner-error: param type must be Array-of-Error, not flat Error"
+    );
+}
+
+#[test]
+fn array_generic_with_nested_multiple_type_arguments_inside_emits_e0403_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: Array<Array<i64, i32>>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0403(&output.diagnostics),
+        "`Array<Array<i64, i32>>` (nested multiple-arity) must produce an E0403 warning via resolver recursion, got: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let error_id = types.intern(&Type::Error);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: error_id }),
+        "outer Array must wrap the inner-error: param type must be Array-of-Error, not flat Error"
+    );
+}
+
+#[test]
+fn array_type_in_param_resolves_to_type_array() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64[]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: i64_id }),
+        "param type `i64[]` must resolve to Type::Array with element I64"
+    );
+}
+
+#[test]
+fn array_type_in_return_position_resolves_to_type_array() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): i64[] { return []; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.ret),
+        Some(&Type::Array { element: i64_id }),
+        "return type `i64[]` must resolve to Type::Array with element I64"
+    );
+}
+
+#[test]
+fn nested_array_type_resolves_recursively() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64[][]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let inner_array_id = types.intern(&Type::Array { element: i64_id });
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array {
+            element: inner_array_id
+        }),
+        "nested array `i64[][]` must resolve to Type::Array containing a nested Type::Array (resolver recursion through TSArrayType)"
+    );
+}
+
+#[test]
+fn array_type_with_alias_element_resolves_through_alias() {
+    let mut types = TypeTable::new();
+    let source = "type Foo = i64; function f(x: Foo[]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Array { element: i64_id }),
+        "alias `Foo = i64` must resolve to the same TypeId as `i64` in array element position (covers pre-resolve recursion into TSArrayType in skeleton.rs)"
+    );
+}
+
+#[test]
+fn array_type_as_alias_body_resolves_to_same_type_as_inline_array() {
+    let mut types = TypeTable::new();
+    let source = "type Ints = i64[];\nfunction f(x: Ints): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_eq!(
+        f_param, g_param,
+        "alias `type Ints = i64[]` must produce the same TypeId as the inline array `i64[]` (covers pre-resolve recursion into TSArrayType in skeleton.rs)"
+    );
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(f_param),
+        Some(&Type::Array { element: i64_id })
+    );
+}
+
+#[test]
+fn array_type_distinguishes_from_singleton_tuple() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: i64[]): i64 { return 0; }\nfunction g(y: [i64]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_ne!(
+        f_param, g_param,
+        "`i64[]` (array) and `[i64]` (singleton tuple) must resolve to different TypeIds"
     );
 }
 

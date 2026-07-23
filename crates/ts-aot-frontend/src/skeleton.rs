@@ -136,6 +136,11 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
                         self.resolve_alias_chain(dep_name, alias_set, visiting, program);
                     }
                 }
+                if let Some(type_args) = &r.type_arguments {
+                    for arg in &type_args.params {
+                        self.pre_resolve_aliases_in_type(arg, alias_set, visiting, program);
+                    }
+                }
             }
             TSType::TSUnionType(u) => {
                 for variant in &u.types {
@@ -153,6 +158,9 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
                         self.pre_resolve_aliases_in_type(ty, alias_set, visiting, program);
                     }
                 }
+            }
+            TSType::TSArrayType(a) => {
+                self.pre_resolve_aliases_in_type(&a.element_type, alias_set, visiting, program);
             }
             _ => {}
         }
