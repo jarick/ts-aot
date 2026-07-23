@@ -455,6 +455,97 @@ fn intersection_type_emits_unit_placeholder_at_call_site() {
 }
 
 #[test]
+fn tuple_typed_param_and_return_exclude_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let tuple_param_ty = types.intern(&Type::Tuple {
+        elements: vec![i64_ty, string_ty],
+    });
+    let tuple_return_ty = types.intern(&Type::Tuple {
+        elements: vec![i64_ty, string_ty],
+    });
+
+    let mut with_tuple_param = empty_func("with_tuple_param");
+    with_tuple_param.ret = i64_ty;
+    with_tuple_param.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: tuple_param_ty,
+    }];
+
+    let mut with_tuple_return = empty_func("with_tuple_return");
+    with_tuple_return.id = FunctionId::from_raw(1);
+    with_tuple_return.ret = tuple_return_ty;
+    with_tuple_return.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(with_tuple_param));
+    prog.push_decl(MirDecl::Function(with_tuple_return));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let s_norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+
+    assert!(
+        s_norm.contains("fnwith_tuple_param") && s_norm.contains("v:()"),
+        "function with tuple-typed param must still emit, with the tuple collapsed to the unit ABI placeholder `()`. Whitespace-insensitive (handles `v: ()` or `v : ()`). Got: {s}"
+    );
+    assert!(
+        s_norm.contains("fnwith_tuple_return") && s_norm.contains("->()"),
+        "function with tuple-typed return must still emit, with the tuple collapsed to the unit ABI placeholder `()`. Whitespace-insensitive. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_tuple_param"),
+        "tuple-typed param => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. \n         Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_tuple_return"),
+        "tuple-typed return => `()` ABI => not u64-packable => no `fn(&[u64]) -> u64` wrapper. \n         Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function (both excluded by tuple types) => no dispatch table. \n         Got: {s}"
+    );
+}
+
+#[test]
+fn tuple_type_emits_unit_placeholder_at_call_site() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let tuple_ty = types.intern(&Type::Tuple {
+        elements: vec![i64_ty, string_ty],
+    });
+
+    let mut f = empty_func("combine");
+    f.ret = tuple_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("v"),
+        ty: tuple_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn combine")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("v:()") && sig_norm.contains("->()"),
+        "both param and return of `[i64, string]` must emit as `()` (unit placeholder) in the \n         function signature, so the source-level TS tuple type stays representable in Rust \n         until Phase 5 introduces a real tuple runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
 fn plain_function_emits_fn_signature() {
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Function(empty_func("greet")));

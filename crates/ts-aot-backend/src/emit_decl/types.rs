@@ -30,7 +30,8 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
         | Type::Error
         | Type::Fn { .. }
         | Type::Union { .. }
-        | Type::Intersection { .. } => quote!(()),
+        | Type::Intersection { .. }
+        | Type::Tuple { .. } => quote!(()),
         Type::Never => quote!(!),
         Type::Bool => quote!(bool),
         Type::I8 => quote!(i8),

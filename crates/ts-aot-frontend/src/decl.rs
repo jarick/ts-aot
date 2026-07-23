@@ -430,9 +430,13 @@ impl SkeletonBuilder<'_, '_> {
             ));
             return self.types.intern(&Type::Error);
         }
-        if let Some(id) =
-            resolve_simple_type(ty, self.types, Some(&self.resolved_aliases), type_params)
-        {
+        if let Some(id) = resolve_simple_type(
+            ty,
+            self.types,
+            Some(&self.resolved_aliases),
+            type_params,
+            Some(&mut self.diagnostics),
+        ) {
             id
         } else {
             let span = ty.map_or_else(

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
-use oxc_ast::ast::{TSType, TSTypeName};
-use ts_aot_core::{Type, TypeId, TypeTable};
+use oxc_ast::ast::{TSTupleElement, TSType, TSTypeName};
+use oxc_span::GetSpan;
+use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
+
+use crate::util::core_span_from_oxc;
 
 pub(crate) struct TypeParamMap {
     tys: HashMap<String, TypeId>,
@@ -69,6 +72,7 @@ pub(crate) fn resolve_simple_type(
     types: &mut TypeTable,
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
+    mut diagnostics: Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     Some(match ty? {
         TSType::TSNeverKeyword(_) => types.intern(&Type::Never),
@@ -92,11 +96,30 @@ pub(crate) fn resolve_simple_type(
                 types.intern(&Type::Error)
             }
         },
+        TSType::TSNamedTupleMember(m) => {
+            if let Some(diag) = diagnostics.as_deref_mut() {
+                diag.push(Diagnostic::warning(
+                    "E0402",
+                    format!(
+                        "named tuple element `{}:` is not supported in Phase 4 — use `[T]` instead",
+                        m.label.name
+                    ),
+                    core_span_from_oxc(m.span),
+                ));
+            }
+            types.intern(&Type::Error)
+        }
         TSType::TSUnionType(u) => {
             let mut variants: Vec<TypeId> = Vec::with_capacity(u.types.len());
             for variant in &u.types {
-                let id = resolve_simple_type(Some(variant), types, aliases, type_params)
-                    .unwrap_or_else(|| types.intern(&Type::Error));
+                let id = resolve_simple_type(
+                    Some(variant),
+                    types,
+                    aliases,
+                    type_params,
+                    diagnostics.as_deref_mut(),
+                )
+                .unwrap_or_else(|| types.intern(&Type::Error));
                 variants.push(id);
             }
             types.intern(&Type::Union { variants })
@@ -104,16 +127,69 @@ pub(crate) fn resolve_simple_type(
         TSType::TSIntersectionType(i) => {
             let mut parts: Vec<TypeId> = Vec::with_capacity(i.types.len());
             for part in &i.types {
-                let id = resolve_simple_type(Some(part), types, aliases, type_params)
-                    .unwrap_or_else(|| types.intern(&Type::Error));
+                let id = resolve_simple_type(
+                    Some(part),
+                    types,
+                    aliases,
+                    type_params,
+                    diagnostics.as_deref_mut(),
+                )
+                .unwrap_or_else(|| types.intern(&Type::Error));
                 parts.push(id);
             }
             parts.sort_unstable_by_key(|id| id.raw());
             parts.dedup();
             types.intern(&Type::Intersection { parts })
         }
+        TSType::TSTupleType(t) => {
+            let mut elements: Vec<TypeId> = Vec::with_capacity(t.element_types.len());
+            for element in &t.element_types {
+                if let Some(ty) = element.as_ts_type() {
+                    let id = resolve_simple_type(
+                        Some(ty),
+                        types,
+                        aliases,
+                        type_params,
+                        diagnostics.as_deref_mut(),
+                    )
+                    .unwrap_or_else(|| types.intern(&Type::Error));
+                    elements.push(id);
+                } else {
+                    report_unsupported_tuple_element(element, diagnostics.as_deref_mut());
+                    elements.push(types.intern(&Type::Error));
+                }
+            }
+            types.intern(&Type::Tuple { elements })
+        }
         _ => types.intern(&Type::Error),
     })
+}
+
+fn report_unsupported_tuple_element(
+    element: &TSTupleElement<'_>,
+    diagnostics: Option<&mut DiagnosticBag>,
+) {
+    if let Some(diag) = diagnostics {
+        let (code, message) = match element {
+            TSTupleElement::TSRestType(_) => (
+                "E0402",
+                "rest tuple element `...T` is not supported in Phase 4".to_owned(),
+            ),
+            TSTupleElement::TSOptionalType(_) => (
+                "E0402",
+                "optional tuple element `T?` is not supported in Phase 4".to_owned(),
+            ),
+            _ => (
+                "E0402",
+                "extended tuple element is not supported in Phase 4".to_owned(),
+            ),
+        };
+        diag.push(Diagnostic::warning(
+            code,
+            message,
+            core_span_from_oxc(element.span()),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -157,7 +233,7 @@ mod tests {
     #[test]
     fn resolve_simple_type_returns_none_for_none_input() {
         let mut types = TypeTable::new();
-        let result = resolve_simple_type(None, &mut types, None, None);
+        let result = resolve_simple_type(None, &mut types, None, None, None);
         assert!(result.is_none());
         assert!(types.is_empty());
     }
