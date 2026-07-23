@@ -51,6 +51,9 @@ pub enum Type {
     Union {
         variants: Vec<TypeId>,
     },
+    Intersection {
+        parts: Vec<TypeId>,
+    },
     Named {
         symbol: Atom,
     },
@@ -63,6 +66,7 @@ pub enum Type {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TypeTable;
     use crate::ids::{FunctionId, LocalId};
 
     #[test]
@@ -208,6 +212,108 @@ mod tests {
         };
         assert_ne!(u, p);
         assert_ne!(u, r);
+    }
+
+    #[test]
+    fn intersection_type_id_intern_preserves_part_order() {
+        let mut types = TypeTable::new();
+        let forward = vec![TypeId::from_raw(1), TypeId::from_raw(2)];
+        let reverse = vec![TypeId::from_raw(2), TypeId::from_raw(1)];
+        let three_parts = vec![
+            TypeId::from_raw(1),
+            TypeId::from_raw(2),
+            TypeId::from_raw(3),
+        ];
+        let id_forward = types.intern(&Type::Intersection { parts: forward });
+        let id_reverse = types.intern(&Type::Intersection { parts: reverse });
+        let id_three_parts = types.intern(&Type::Intersection { parts: three_parts });
+        assert_ne!(
+            id_forward, id_reverse,
+            "TypeTable interning is order-sensitive: A & B and B & A produce distinct TypeIds unless canonicalised upstream (the resolver does this by sorting parts by TypeId::raw() before interning)"
+        );
+        assert_ne!(
+            id_forward, id_three_parts,
+            "TypeTable interning is set-sensitive: a superset of parts must produce a distinct TypeId"
+        );
+    }
+
+    #[test]
+    fn intersection_type_id_equality_canonicalises_against_union() {
+        let mut types = TypeTable::new();
+        let mut sorted = vec![TypeId::from_raw(1), TypeId::from_raw(2)];
+        sorted.sort_unstable_by_key(|id| id.raw());
+        let id_intersection = types.intern(&Type::Intersection { parts: sorted });
+        let id_union = types.intern(&Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        });
+        assert_ne!(
+            id_intersection, id_union,
+            "Intersection and Union with same canonicalised parts must remain distinct TypeIds"
+        );
+    }
+
+    #[test]
+    fn intersection_equality_depends_on_part_count() {
+        let one = Type::Intersection {
+            parts: vec![TypeId::from_raw(1)],
+        };
+        let two = Type::Intersection {
+            parts: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn empty_intersection_is_a_well_formed_distinct_type() {
+        let mut types = TypeTable::new();
+        let empty = Type::Intersection { parts: vec![] };
+        let id_a = types.intern(&empty);
+        let id_b = types.intern(&Type::Intersection { parts: vec![] });
+        assert_eq!(
+            id_a, id_b,
+            "empty Intersection must intern to a stable TypeId (dedup via Type Hash/Eq)"
+        );
+        assert_ne!(
+            id_a,
+            types.intern(&Type::Never),
+            "empty Intersection must be distinct from `never` (oxc parser guards empty intersection source as E0100, but the type itself is a constructible API edge case)"
+        );
+        assert_ne!(
+            id_a,
+            types.intern(&Type::Union { variants: vec![] }),
+            "empty Intersection must be distinct from empty Union"
+        );
+        assert_ne!(
+            id_a,
+            types.intern(&Type::Intersection {
+                parts: vec![TypeId::from_raw(1)]
+            }),
+            "empty Intersection must be distinct from a populated Intersection"
+        );
+    }
+
+    #[test]
+    fn intersection_distinguishes_from_union_and_other_aggregates() {
+        let i = Type::Intersection {
+            parts: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let u = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let p = Type::Promise {
+            ok: TypeId::from_raw(1),
+            err: Some(TypeId::from_raw(2)),
+        };
+        let r = Type::Result {
+            ok: TypeId::from_raw(1),
+            err: TypeId::from_raw(2),
+        };
+        assert_ne!(
+            i, u,
+            "Intersection and Union with the same TypeIds must be distinguishable"
+        );
+        assert_ne!(i, p);
+        assert_ne!(i, r);
     }
 
     #[test]

@@ -101,6 +101,17 @@ pub(crate) fn resolve_simple_type(
             }
             types.intern(&Type::Union { variants })
         }
+        TSType::TSIntersectionType(i) => {
+            let mut parts: Vec<TypeId> = Vec::with_capacity(i.types.len());
+            for part in &i.types {
+                let id = resolve_simple_type(Some(part), types, aliases, type_params)
+                    .unwrap_or_else(|| types.intern(&Type::Error));
+                parts.push(id);
+            }
+            parts.sort_unstable_by_key(|id| id.raw());
+            parts.dedup();
+            types.intern(&Type::Intersection { parts })
+        }
         _ => types.intern(&Type::Error),
     })
 }
