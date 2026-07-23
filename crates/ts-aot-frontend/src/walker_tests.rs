@@ -1093,6 +1093,32 @@ fn intersection_type_is_commutative_under_part_reordering() {
 }
 
 #[test]
+fn intersection_type_as_alias_body_pre_resolves_inner_aliases() {
+    let mut types = TypeTable::new();
+    let source = "type Foo = i64;\ntype Bar = string;\ntype Combined = Foo & Bar;\nfunction f(x: Combined): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let mut expected = vec![i64_id, string_id];
+    expected.sort_unstable_by_key(|id| id.raw());
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Intersection { parts: expected }),
+        "alias body `Foo & Bar` must pre-resolve inner aliases through `pre_resolve_aliases_in_type` recursion into TSIntersectionType"
+    );
+}
+
+#[test]
 fn intersection_type_with_repeated_member_dedups_to_canonical_form() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64 & i64): i64 { return 0; }\nfunction g(y: i64 & i64 & string): i64 { return 0; }";
@@ -1157,6 +1183,282 @@ fn intersection_type_alias_resolves_through_alias_chain() {
             parts: vec![i64_id, string_id]
         }),
         "alias `Combined = i64 & string` must resolve to the same Intersection TypeId"
+    );
+}
+
+#[test]
+fn tuple_type_in_param_resolves_to_type_tuple_with_ordered_elements() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [i64, string]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Tuple {
+            elements: vec![i64_id, string_id]
+        }),
+        "param type `[i64, string]` must resolve to Type::Tuple with [I64, String] in order"
+    );
+}
+
+#[test]
+fn tuple_type_in_return_position_resolves_to_type_tuple() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): [i64, string] { return [0, '']; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.ret),
+        Some(&Type::Tuple {
+            elements: vec![i64_id, string_id]
+        }),
+        "return type `[i64, string]` must resolve to Type::Tuple with [I64, String]"
+    );
+}
+
+#[test]
+fn tuple_type_with_three_elements_preserves_source_order() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [i64, string, bool]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let bool_id = types.intern(&Type::Bool);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Tuple {
+            elements: vec![i64_id, string_id, bool_id]
+        }),
+        "element order must be preserved as written in the source"
+    );
+}
+
+#[test]
+fn tuple_type_with_alias_element_resolves_through_alias() {
+    let mut types = TypeTable::new();
+    let source = "type Idx = i64; function f(x: [Idx, string]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Tuple {
+            elements: vec![i64_id, string_id]
+        }),
+        "alias `Idx = i64` must resolve to the same TypeId as `i64` in tuple element position"
+    );
+}
+
+#[test]
+fn tuple_type_as_alias_body_resolves_to_same_type_as_inline_tuple() {
+    let mut types = TypeTable::new();
+    let source = "type Pair = [i64, string];\nfunction f(x: Pair): i64 { return 0; }\nfunction g(y: [i64, string]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_eq!(
+        f_param, g_param,
+        "alias `type Pair = [i64, string]` must produce the same TypeId as the inline tuple `[i64, string]` (covers pre-resolve recursion into TSTupleType in skeleton.rs)"
+    );
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    assert_eq!(
+        types.resolve(f_param),
+        Some(&Type::Tuple {
+            elements: vec![i64_id, string_id]
+        })
+    );
+}
+
+#[test]
+fn nested_tuple_type_resolves_recursively() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [[i64, string], bool]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let string_id = types.intern(&Type::String);
+    let bool_id = types.intern(&Type::Bool);
+    let inner_tuple_id = types.intern(&Type::Tuple {
+        elements: vec![i64_id, string_id],
+    });
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Tuple {
+            elements: vec![inner_tuple_id, bool_id]
+        }),
+        "nested tuple `[[i64, string], bool]` must resolve to Type::Tuple containing a nested Type::Tuple (resolver recursion through TSTupleType)"
+    );
+}
+
+#[test]
+fn tuple_type_with_named_element_emits_warning_diagnostic() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [name: i64, string]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == ts_aot_core::Severity::Warning),
+        "named tuple element must produce a warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn tuple_type_with_rest_element_emits_warning_diagnostic() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [i64, ...string[]]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == ts_aot_core::Severity::Warning),
+        "rest tuple element must produce a warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn tuple_type_with_optional_element_emits_warning_diagnostic() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: [i64, string?]): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == ts_aot_core::Severity::Warning),
+        "optional tuple element must produce a warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn tuple_type_distinguishes_from_array_with_same_element() {
+    let mut types = TypeTable::new();
+    let source = "function f(x: [i64]): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let f_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("f") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function f should be present");
+    let g_param = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) if f.name == Atom::from("g") => Some(f.params[0].ty),
+            _ => None,
+        })
+        .expect("function g should be present");
+    assert_ne!(
+        f_param, g_param,
+        "`[i64]` (singleton tuple) and `i64[]` (array) must resolve to different TypeIds"
+    );
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(f_param),
+        Some(&Type::Tuple {
+            elements: vec![i64_id]
+        })
     );
 }
 

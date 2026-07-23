@@ -54,6 +54,9 @@ pub enum Type {
     Intersection {
         parts: Vec<TypeId>,
     },
+    Tuple {
+        elements: Vec<TypeId>,
+    },
     Named {
         symbol: Atom,
     },
@@ -314,6 +317,78 @@ mod tests {
         );
         assert_ne!(i, p);
         assert_ne!(i, r);
+    }
+
+    #[test]
+    fn tuple_equality_preserves_element_order() {
+        let a = Type::Tuple {
+            elements: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let b = Type::Tuple {
+            elements: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let c = Type::Tuple {
+            elements: vec![TypeId::from_raw(2), TypeId::from_raw(1)],
+        };
+        assert_eq!(a, b);
+        assert_ne!(
+            a, c,
+            "Tuple element order is positional: [A, B] must not equal [B, A]"
+        );
+    }
+
+    #[test]
+    fn tuple_equality_depends_on_element_count() {
+        let one = Type::Tuple {
+            elements: vec![TypeId::from_raw(1)],
+        };
+        let two = Type::Tuple {
+            elements: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn tuple_distinguishes_from_array_and_other_aggregates() {
+        let t = Type::Tuple {
+            elements: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let a = Type::Array {
+            element: TypeId::from_raw(1),
+        };
+        let u = Type::Union {
+            variants: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        let i = Type::Intersection {
+            parts: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+        };
+        assert_ne!(
+            t, a,
+            "Tuple [A, B] is fixed-length heterogeneous; Array T is dynamic-length homogeneous"
+        );
+        assert_ne!(t, u);
+        assert_ne!(t, i);
+    }
+
+    #[test]
+    fn empty_tuple_is_distinct_from_void_by_design() {
+        let mut types = TypeTable::new();
+        let id_empty = types.intern(&Type::Tuple { elements: vec![] });
+        let id_void = types.intern(&Type::Void);
+        let id_never = types.intern(&Type::Never);
+        let id_again = types.intern(&Type::Tuple { elements: vec![] });
+        assert_ne!(
+            id_empty, id_void,
+            "TypeScript `[]` (empty tuple) is semantically a zero-length tuple, not `void` (no value) — they must remain distinct TypeIds"
+        );
+        assert_ne!(
+            id_empty, id_never,
+            "empty tuple must also be distinct from `never`"
+        );
+        assert_eq!(
+            id_empty, id_again,
+            "interning two empty Tuples must yield the same TypeId (dedup)"
+        );
     }
 
     #[test]

@@ -142,6 +142,18 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
                     self.pre_resolve_aliases_in_type(variant, alias_set, visiting, program);
                 }
             }
+            TSType::TSIntersectionType(i) => {
+                for part in &i.types {
+                    self.pre_resolve_aliases_in_type(part, alias_set, visiting, program);
+                }
+            }
+            TSType::TSTupleType(t) => {
+                for element in &t.element_types {
+                    if let Some(ty) = element.as_ts_type() {
+                        self.pre_resolve_aliases_in_type(ty, alias_set, visiting, program);
+                    }
+                }
+            }
             _ => {}
         }
     }
