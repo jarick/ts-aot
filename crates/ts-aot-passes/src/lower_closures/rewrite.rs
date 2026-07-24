@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Atom, LocalId, Span, TypeId};
+use ts_aot_core::{Atom, LocalId, TypeId};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirStmt, ObjectLiteralField};
 
 use crate::PassContext;
@@ -114,19 +114,20 @@ pub(super) fn rewrite_in_expr(
     closure_names: &HashMap<LocalId, Atom>,
     ctx: &mut PassContext,
 ) {
-    if let HirExpr::Call { callee, .. } = expr
+    if let HirExpr::Call { callee, span, .. } = expr
         && let HirCallee::Closure(id) = callee
     {
         if let Some(name) = closure_names.get(id) {
             *callee = HirCallee::Indirect(Box::new(HirExpr::Global {
                 name: name.clone(),
                 ty: TypeId::from_raw(0),
+                span: *span,
             }));
         } else {
             ctx.error(
                 "P0005",
                 "call to undeclared closure (lower_closures did not produce a fn for it)",
-                Span::new(0, 0),
+                *span,
             );
         }
     }
@@ -215,13 +216,13 @@ pub(super) fn rewrite_in_expr(
             rewrite_in_expr(target, closure_names, ctx);
             rewrite_in_expr(rhs, closure_names, ctx);
         }
-        HirExpr::Unit
-        | HirExpr::Bool(_)
-        | HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Null
-        | HirExpr::Undefined
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::Yield { expr: None, .. }

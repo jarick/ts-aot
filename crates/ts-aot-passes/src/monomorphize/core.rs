@@ -334,13 +334,13 @@ fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCall
             visit_expr_callees(rhs, on_callee);
         }
         HirExpr::Import { source, .. } => visit_expr_callees(source, on_callee),
-        HirExpr::Unit
-        | HirExpr::Bool(_)
-        | HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Null
-        | HirExpr::Undefined
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::RegExp { .. }

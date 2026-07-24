@@ -1,5 +1,5 @@
 use ts_aot_backend::emit_decls;
-use ts_aot_core::{Atom, ModuleId, Type, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, Type, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirExpr, HirFunction, HirProgram, HirStmt};
 use ts_aot_ir_mir::MirStmt;
 use ts_aot_passes::{PassContext, convert_program, lower_result};
@@ -15,7 +15,7 @@ fn end_to_end_lower_result_rewrites_throw_to_return_result_err() {
         ret: types.intern(&Type::Void),
         throws: None,
         body: vec![HirStmt::Throw {
-            expr: HirExpr::Int(7),
+            expr: HirExpr::Int(7, Span::default()),
         }],
         is_async: false,
         is_generator: false,
@@ -54,7 +54,7 @@ fn end_to_end_throwing_function_emits_result_in_rust_signature() {
         ret: int_ty,
         throws: None,
         body: vec![HirStmt::Throw {
-            expr: HirExpr::Int(7),
+            expr: HirExpr::Int(7, Span::default()),
         }],
         is_async: false,
         is_generator: false,
@@ -124,14 +124,14 @@ fn end_to_end_throwing_function_with_success_return_emits_ok() {
         throws: None,
         body: vec![
             HirStmt::If {
-                cond: HirExpr::Bool(true),
+                cond: HirExpr::Bool(true, Span::default()),
                 then: Box::new(HirStmt::Throw {
-                    expr: HirExpr::Int(7),
+                    expr: HirExpr::Int(7, Span::default()),
                 }),
                 otherwise: None,
             },
             HirStmt::Return {
-                value: Some(HirExpr::Int(42)),
+                value: Some(HirExpr::Int(42, Span::default())),
             },
         ],
         is_async: false,
@@ -182,9 +182,9 @@ fn end_to_end_throwing_void_function_bare_return_emits_ok_unit() {
         throws: None,
         body: vec![
             HirStmt::If {
-                cond: HirExpr::Bool(true),
+                cond: HirExpr::Bool(true, Span::default()),
                 then: Box::new(HirStmt::Throw {
-                    expr: HirExpr::Int(7),
+                    expr: HirExpr::Int(7, Span::default()),
                 }),
                 otherwise: None,
             },

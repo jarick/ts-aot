@@ -1,5 +1,5 @@
 use super::*;
-use ts_aot_core::{Atom, LocalId, ModuleId, TypeId};
+use ts_aot_core::{Atom, LocalId, ModuleId, Span, TypeId};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirClass, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
 };
@@ -46,9 +46,11 @@ fn non_capturing_closure_is_emitted_as_top_level_fn() {
             params: vec![param("a", int_ty()), param("b", int_ty())],
             captures: Vec::new(),
             body: vec![HirStmt::Return {
-                value: Some(HirExpr::Int(0)),
+                value: Some(HirExpr::Int(0, Span::default())),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -102,16 +104,22 @@ fn call_to_closure_is_rewritten_to_indirect_global() {
                     value: Some(HirExpr::Local {
                         id: call_id,
                         ty: int_ty(),
+
+                        span: Span::default(),
                     }),
                 }],
                 ty: int_ty(),
+
+                span: Span::default(),
             }),
         },
         HirStmt::Expr {
             expr: HirExpr::Call {
                 callee: HirCallee::Closure(closure_id),
-                args: vec![HirExpr::Int(7)],
+                args: vec![HirExpr::Int(7, Span::default())],
                 ty: int_ty(),
+
+                span: Span::default(),
             },
         },
     ];
@@ -156,6 +164,8 @@ fn capturing_closure_emits_warning_and_is_unchanged() {
             captures: vec![HirExpr::Local {
                 id: LocalId::from_raw(1),
                 ty: int_ty(),
+
+                span: Span::default(),
             }],
             body: vec![HirStmt::Return {
                 value: Some(HirExpr::Binary {
@@ -163,15 +173,23 @@ fn capturing_closure_emits_warning_and_is_unchanged() {
                     lhs: Box::new(HirExpr::Local {
                         id: LocalId::from_raw(0),
                         ty: int_ty(),
+
+                        span: Span::default(),
                     }),
                     rhs: Box::new(HirExpr::Local {
                         id: LocalId::from_raw(1),
                         ty: int_ty(),
+
+                        span: Span::default(),
                     }),
                     ty: int_ty(),
+
+                    span: Span::default(),
                 }),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -218,9 +236,13 @@ fn two_functions_with_closure_at_local_zero_get_distinct_names() {
                 value: Some(HirExpr::Local {
                     id: LocalId::from_raw(1),
                     ty: int_ty(),
+
+                    span: Span::default(),
                 }),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
 
@@ -237,9 +259,13 @@ fn two_functions_with_closure_at_local_zero_get_distinct_names() {
                 value: Some(HirExpr::Local {
                     id: LocalId::from_raw(1),
                     ty: int_ty(),
+
+                    span: Span::default(),
                 }),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
 
@@ -285,9 +311,13 @@ fn closure_inside_namespace_is_walked_and_emitted() {
                 value: Some(HirExpr::Local {
                     id: LocalId::from_raw(1),
                     ty: int_ty(),
+
+                    span: Span::default(),
                 }),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
 
@@ -374,12 +404,18 @@ fn nested_non_capturing_closure_is_walked_and_rewritten() {
                         value: Some(HirExpr::Local {
                             id: LocalId::from_raw(2),
                             ty: int_ty(),
+
+                            span: Span::default(),
                         }),
                     }],
                     ty: int_ty(),
+
+                    span: Span::default(),
                 }),
             }],
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -473,6 +509,8 @@ fn generated_name_skips_names_already_taken_by_user_decls() {
             captures: Vec::new(),
             body: Vec::new(),
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -583,6 +621,8 @@ fn generated_name_skips_names_taken_by_class_methods() {
             captures: Vec::new(),
             body: Vec::new(),
             ty: int_ty(),
+
+            span: Span::default(),
         }),
     }];
 

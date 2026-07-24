@@ -1,5 +1,5 @@
 use ts_aot_backend::emit_decls;
-use ts_aot_core::{Atom, LocalId, ModuleId, Type, TypeTable};
+use ts_aot_core::{Atom, LocalId, ModuleId, Span, Type, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirDecl, MirFieldDecl, MirStructDecl};
 use ts_aot_passes::{PassContext, convert_program, lower_result};
@@ -29,8 +29,11 @@ fn end_to_end_optional_chain_field_emit_uses_as_ref_map() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Field {
+                span: Span::default(),
                 owner: Box::new(HirExpr::OptionalChain {
+                    span: Span::default(),
                     base: Box::new(HirExpr::Local {
+                        span: Span::default(),
                         id: obj_local,
                         ty: opt_point,
                     }),

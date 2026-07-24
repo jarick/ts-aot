@@ -9,6 +9,7 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
             owner,
             field_name,
             ty,
+            span,
             ..
         } => {
             let enum_name = match owner.as_ref() {
@@ -21,6 +22,7 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
                 *expr = HirExpr::Global {
                     name: namespaced.clone(),
                     ty: *ty,
+                    span: *span,
                 };
             } else {
                 rewrite_expr(owner, map);
@@ -114,13 +116,13 @@ pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>
         HirExpr::TypeAssertion { expr, .. } => rewrite_expr(expr, map),
         HirExpr::Global { .. }
         | HirExpr::Local { .. }
-        | HirExpr::Unit
-        | HirExpr::Bool(_)
-        | HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Null
-        | HirExpr::Undefined
+        | HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. } => {}
         HirExpr::Import { source, .. } => rewrite_expr(source, map),

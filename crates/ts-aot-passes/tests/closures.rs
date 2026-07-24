@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 use ts_aot_passes::{PassContext, convert_program, lower_closures};
@@ -10,6 +10,8 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
 
     let outer_name = Atom::new_inline("outer");
     let cb_local = LocalId::from_raw(0);
+    let closure_span = Span::new(20, 60);
+    let call_span = Span::new(80, 92);
     let outer = HirFunction {
         name: outer_name.clone(),
         params: Vec::new(),
@@ -21,6 +23,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                 name: Atom::new_inline("add"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: closure_span,
                     id: cb_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -29,6 +32,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -38,8 +42,9 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: call_span,
                     callee: HirCallee::Closure(cb_local),
-                    args: vec![HirExpr::Int(7)],
+                    args: vec![HirExpr::Int(7, Span::default())],
                     ty: i64_ty,
                 },
             },
@@ -61,6 +66,68 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
     assert!(
         !ctx.has_errors(),
         "lower_closures must not error on non-capturing closure"
+    );
+
+    let HirDecl::Function(f) = &hir.declarations[0] else {
+        panic!("expected outer Function after lower_closures");
+    };
+    let HirStmt::Let {
+        init: Some(let_init),
+        ..
+    } = &f.body[0]
+    else {
+        panic!(
+            "outer body's first stmt must remain HirStmt::Let with init after lower_closures, got {:?}",
+            f.body[0]
+        );
+    };
+    let HirExpr::Global {
+        span: lifted_span, ..
+    } = let_init
+    else {
+        panic!(
+            "let-init must be rewritten to HirExpr::Global pointing at the hoisted fn, got {let_init:?}"
+        );
+    };
+    assert_eq!(
+        *lifted_span, closure_span,
+        "lifted HirExpr::Global must inherit the original closure's span (20..60), not Span::default()"
+    );
+
+    let HirStmt::Expr {
+        expr:
+            HirExpr::Call {
+                callee: outer_callee,
+                span: post_call_span,
+                ..
+            },
+    } = &f.body[1]
+    else {
+        panic!(
+            "outer body's second stmt must be Expr(Call) after lower_closures, got {:?}",
+            f.body[1]
+        );
+    };
+    assert_eq!(
+        *post_call_span, call_span,
+        "Call expression's own span must survive lower_closures unchanged (80..92)"
+    );
+    let HirCallee::Indirect(indirect) = outer_callee else {
+        panic!(
+            "after lower_closures the outer Call.callee must be HirCallee::Indirect wrapping a Global, got {outer_callee:?}"
+        );
+    };
+    let HirExpr::Global {
+        span: callee_span, ..
+    } = indirect.as_ref()
+    else {
+        panic!(
+            "rewritten callee must wrap HirExpr::Global pointing at the hoisted fn, got {indirect:?}"
+        );
+    };
+    assert_eq!(
+        *callee_span, call_span,
+        "rewritten HirCallee::Indirect(Global).span must inherit the original Call's span (80..92), not Span::default()"
     );
 
     let mir = convert_program(&hir, &mut types, &mut ctx);
@@ -94,12 +161,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
     let outer_mir = outer_mir.expect("outer fn present");
     let hoisted_id = hoisted_mir.unwrap().id;
 
-    let MirStmt::Expr(MirExpr::Call {
-        callee,
-        args,
-        ty: _,
-    }) = &outer_mir.body.block.stmts[1]
-    else {
+    let MirStmt::Expr(MirExpr::Call { callee, args, .. }) = &outer_mir.body.block.stmts[1] else {
         panic!(
             "outer fn second stmt must be Expr(Call) after lower_closures rewrite, got {:?}",
             outer_mir.body.block.stmts[1]
@@ -145,6 +207,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                 name: Atom::new_inline("add"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: Span::default(),
                     id: add_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -153,6 +216,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -165,6 +229,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                 name: Atom::new_inline("sub"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: Span::default(),
                     id: sub_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("y"),
@@ -173,6 +238,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(2),
                             ty: i64_ty,
                         }),
@@ -182,15 +248,17 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Closure(add_local),
-                    args: vec![HirExpr::Int(3)],
+                    args: vec![HirExpr::Int(3, Span::default())],
                     ty: i64_ty,
                 },
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Closure(sub_local),
-                    args: vec![HirExpr::Int(2)],
+                    args: vec![HirExpr::Int(2, Span::default())],
                     ty: i64_ty,
                 },
             },
@@ -239,7 +307,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
     let MirStmt::Expr(MirExpr::Call {
         callee: callee_add,
         args: args_add,
-        ty: _,
+        ..
     }) = &outer_mir.body.block.stmts[2]
     else {
         panic!(
@@ -250,7 +318,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
     let MirStmt::Expr(MirExpr::Call {
         callee: callee_sub,
         args: args_sub,
-        ty: _,
+        ..
     }) = &outer_mir.body.block.stmts[3]
     else {
         panic!(
@@ -264,8 +332,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
         "first hoisted-closure call must preserve the original single arg, got {args_add:?}"
     );
     let MirExpr::Int {
-        value: value_add,
-        ty: _,
+        value: value_add, ..
     } = &args_add[0]
     else {
         panic!(
@@ -283,8 +350,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
         "second hoisted-closure call must preserve the original single arg, got {args_sub:?}"
     );
     let MirExpr::Int {
-        value: value_sub,
-        ty: _,
+        value: value_sub, ..
     } = &args_sub[0]
     else {
         panic!(
@@ -326,6 +392,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Local {
+                span: Span::default(),
                 id: LocalId::from_raw(1),
                 ty: i64_ty,
             }),
@@ -346,8 +413,10 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: vec![HirExpr::Closure {
+                    span: Span::default(),
                     id: cb_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -356,6 +425,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -439,6 +509,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
         name: closure_name.clone(),
         ty: i64_ty,
         init: Some(HirExpr::Closure {
+            span: Span::default(),
             id: closure_local,
             params: vec![HirParam {
                 name: Atom::from("x"),
@@ -447,6 +518,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
             captures: Vec::new(),
             body: vec![HirStmt::Return {
                 value: Some(HirExpr::Local {
+                    span: Span::default(),
                     id: LocalId::from_raw(1),
                     ty: i64_ty,
                 }),

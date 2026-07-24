@@ -282,10 +282,14 @@ impl HirCatchClause {
 mod tests {
     use super::*;
     use crate::expr::{HirBinaryOp, HirExpr};
+    use ts_aot_core::Span;
 
     #[test]
     fn block_holds_statements() {
-        let stmts = vec![HirStmt::ret(None), HirStmt::expr(HirExpr::Int(0))];
+        let stmts = vec![
+            HirStmt::ret(None),
+            HirStmt::expr(HirExpr::Int(0, Span::default())),
+        ];
         let block = HirStmt::block(stmts.clone());
         match block {
             HirStmt::Block(b) => assert_eq!(b.len(), 2),
@@ -298,12 +302,17 @@ mod tests {
         let id = LocalId::from_raw(3);
         let name = Atom::new_inline("7");
         let ty = TypeId::from_raw(0);
-        let s = HirStmt::let_(id, name.clone(), ty, Some(HirExpr::Int(42)));
+        let s = HirStmt::let_(
+            id,
+            name.clone(),
+            ty,
+            Some(HirExpr::Int(42, Span::default())),
+        );
         match s {
             HirStmt::Let {
                 id: got_id,
                 name: got_name,
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => {
                 assert_eq!(got_id, id);
@@ -316,7 +325,7 @@ mod tests {
 
     #[test]
     fn if_stmt_supports_optional_else() {
-        let cond = HirExpr::Bool(true);
+        let cond = HirExpr::Bool(true, Span::default());
         let then = Box::new(HirStmt::ret(None));
         let otherwise = Box::new(HirStmt::ret(None));
         let with_else = HirStmt::If {
@@ -345,8 +354,8 @@ mod tests {
 
     #[test]
     fn while_and_dowhile_are_distinct() {
-        let cond = HirExpr::Bool(true);
-        let body = Box::new(HirStmt::expr(HirExpr::Unit));
+        let cond = HirExpr::Bool(true, Span::default());
+        let body = Box::new(HirStmt::expr(HirExpr::Unit(Span::default())));
         let w = HirStmt::While {
             cond: cond.clone(),
             body: body.clone(),
@@ -358,8 +367,8 @@ mod tests {
     #[test]
     fn forof_carries_binding_and_iter() {
         let binding = LocalId::from_raw(2);
-        let iter = HirExpr::String(ts_aot_core::Atom::new_inline("9"));
-        let body = Box::new(HirStmt::expr(HirExpr::Unit));
+        let iter = HirExpr::String(ts_aot_core::Atom::new_inline("9"), Span::default());
+        let body = Box::new(HirStmt::expr(HirExpr::Unit(Span::default())));
         let s = HirStmt::ForOf {
             binding,
             iter: iter.clone(),
@@ -381,7 +390,7 @@ mod tests {
     #[test]
     fn return_with_and_without_value() {
         let r1 = HirStmt::ret(None);
-        let r2 = HirStmt::ret(Some(HirExpr::Int(1)));
+        let r2 = HirStmt::ret(Some(HirExpr::Int(1, Span::default())));
         assert_ne!(r1, r2);
         match r1 {
             HirStmt::Return { value: None } => {}
@@ -405,11 +414,11 @@ mod tests {
     #[test]
     fn throw_holds_expression() {
         let s = HirStmt::Throw {
-            expr: HirExpr::String(ts_aot_core::Atom::new_inline("11")),
+            expr: HirExpr::String(ts_aot_core::Atom::new_inline("11"), Span::default()),
         };
         match s {
             HirStmt::Throw {
-                expr: HirExpr::String(id),
+                expr: HirExpr::String(id, _),
             } => {
                 assert_eq!(id, ts_aot_core::Atom::new_inline("11"));
             }
@@ -419,7 +428,7 @@ mod tests {
 
     #[test]
     fn switch_case_default_detection() {
-        let case = HirSwitchCase::new(Some(HirExpr::Int(1)), vec![]);
+        let case = HirSwitchCase::new(Some(HirExpr::Int(1, Span::default())), vec![]);
         let default = HirSwitchCase::new(None, vec![]);
         assert!(!case.is_default());
         assert!(default.is_default());
@@ -427,7 +436,7 @@ mod tests {
 
     #[test]
     fn try_with_catch_and_finally() {
-        let body = Box::new(HirStmt::expr(HirExpr::Unit));
+        let body = Box::new(HirStmt::expr(HirExpr::Unit(Span::default())));
         let binding = (LocalId::from_raw(0), Atom::new_inline("1"));
         let catch_body = Box::new(HirStmt::ret(None));
         let catch = HirCatchClause::new(Some(binding), catch_body);
@@ -454,12 +463,12 @@ mod tests {
         assert!(HirStmt::ret(None).is_terminal());
         assert!(
             HirStmt::Throw {
-                expr: HirExpr::Unit
+                expr: HirExpr::Unit(Span::default())
             }
             .is_terminal()
         );
-        assert!(!HirStmt::expr(HirExpr::Unit).is_terminal());
-        assert!(HirStmt::ret(Some(HirExpr::Int(0))).is_terminal());
+        assert!(!HirStmt::expr(HirExpr::Unit(Span::default())).is_terminal());
+        assert!(HirStmt::ret(Some(HirExpr::Int(0, Span::default()))).is_terminal());
     }
 
     #[test]
@@ -477,7 +486,7 @@ mod tests {
     #[test]
     fn block_ending_in_break_is_not_terminal() {
         let block = HirStmt::block(vec![
-            HirStmt::expr(HirExpr::Int(1)),
+            HirStmt::expr(HirExpr::Int(1, Span::default())),
             HirStmt::Break { label: None },
         ]);
         assert!(!block.is_terminal());
@@ -486,7 +495,7 @@ mod tests {
     #[test]
     fn if_with_break_branch_is_not_terminal() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: Some(Box::new(HirStmt::Break { label: None })),
         };
@@ -496,7 +505,7 @@ mod tests {
     #[test]
     fn nested_block_and_if() {
         let inner_if = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: None,
         };
@@ -513,9 +522,9 @@ mod tests {
     #[test]
     fn stmt_supports_equality_and_hash() {
         use std::collections::HashSet;
-        let a = HirStmt::ret(Some(HirExpr::Int(1)));
-        let b = HirStmt::ret(Some(HirExpr::Int(1)));
-        let c = HirStmt::ret(Some(HirExpr::Int(2)));
+        let a = HirStmt::ret(Some(HirExpr::Int(1, Span::default())));
+        let b = HirStmt::ret(Some(HirExpr::Int(1, Span::default())));
+        let c = HirStmt::ret(Some(HirExpr::Int(2, Span::default())));
         assert_eq!(a, b);
         assert_ne!(a, c);
 
@@ -530,9 +539,10 @@ mod tests {
     fn binary_expr_inside_expr_stmt() {
         let expr = HirExpr::Binary {
             op: HirBinaryOp::Add,
-            lhs: Box::new(HirExpr::Int(1)),
-            rhs: Box::new(HirExpr::Int(2)),
+            lhs: Box::new(HirExpr::Int(1, Span::default())),
+            rhs: Box::new(HirExpr::Int(2, Span::default())),
             ty: TypeId::from_raw(0),
+            span: Span::default(),
         };
         let s = HirStmt::expr(expr.clone());
         match s {
@@ -543,13 +553,19 @@ mod tests {
 
     #[test]
     fn block_with_terminal_tail_is_terminal() {
-        let block = HirStmt::block(vec![HirStmt::expr(HirExpr::Int(1)), HirStmt::ret(None)]);
+        let block = HirStmt::block(vec![
+            HirStmt::expr(HirExpr::Int(1, Span::default())),
+            HirStmt::ret(None),
+        ]);
         assert!(block.is_terminal());
     }
 
     #[test]
     fn block_with_non_terminal_tail_is_not_terminal() {
-        let block = HirStmt::block(vec![HirStmt::ret(None), HirStmt::expr(HirExpr::Int(1))]);
+        let block = HirStmt::block(vec![
+            HirStmt::ret(None),
+            HirStmt::expr(HirExpr::Int(1, Span::default())),
+        ]);
         assert!(!block.is_terminal());
     }
 
@@ -562,10 +578,10 @@ mod tests {
     #[test]
     fn if_with_both_branches_terminal_is_terminal() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: Some(Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             })),
         };
         assert!(s.is_terminal());
@@ -574,7 +590,7 @@ mod tests {
     #[test]
     fn if_without_else_is_not_terminal_even_with_terminal_then() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: None,
         };
@@ -584,9 +600,9 @@ mod tests {
     #[test]
     fn if_with_non_terminal_otherwise_is_not_terminal() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
-            otherwise: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            otherwise: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(!s.is_terminal());
     }
@@ -594,11 +610,14 @@ mod tests {
     #[test]
     fn switch_with_all_terminal_cases_is_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::ret(None)]),
+            HirSwitchCase::new(
+                Some(HirExpr::Int(1, Span::default())),
+                vec![HirStmt::ret(None)],
+            ),
             HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ];
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases,
         };
         assert!(s.is_terminal());
@@ -607,11 +626,14 @@ mod tests {
     #[test]
     fn switch_with_non_terminal_case_is_not_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::ret(None)]),
-            HirSwitchCase::new(None, vec![HirStmt::expr(HirExpr::Unit)]),
+            HirSwitchCase::new(
+                Some(HirExpr::Int(1, Span::default())),
+                vec![HirStmt::ret(None)],
+            ),
+            HirSwitchCase::new(None, vec![HirStmt::expr(HirExpr::Unit(Span::default()))]),
         ];
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases,
         };
         assert!(!s.is_terminal());
@@ -633,7 +655,7 @@ mod tests {
             body: Box::new(HirStmt::ret(None)),
             catch: Some(HirCatchClause::new(
                 None,
-                Box::new(HirStmt::expr(HirExpr::Int(0))),
+                Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             )),
             finally: None,
         };
@@ -645,11 +667,11 @@ mod tests {
     fn try_with_throw_body_and_non_terminal_catch_is_not_terminal() {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             }),
             catch: Some(HirCatchClause::new(
                 None,
-                Box::new(HirStmt::expr(HirExpr::Int(0))),
+                Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             )),
             finally: None,
         };
@@ -661,7 +683,7 @@ mod tests {
     fn try_with_throw_body_and_return_catch_is_terminal() {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             }),
             catch: Some(HirCatchClause::new(None, Box::new(HirStmt::ret(None)))),
             finally: None,
@@ -672,7 +694,7 @@ mod tests {
 
     #[test]
     fn return_with_value_completes_as_returns() {
-        let s = HirStmt::ret(Some(HirExpr::Int(1)));
+        let s = HirStmt::ret(Some(HirExpr::Int(1, Span::default())));
         assert_eq!(s.completion(), Completion::Returns);
     }
 
@@ -684,7 +706,7 @@ mod tests {
     #[test]
     fn throw_completes_as_throws() {
         let s = HirStmt::Throw {
-            expr: HirExpr::Unit,
+            expr: HirExpr::Unit(Span::default()),
         };
         assert_eq!(s.completion(), Completion::Throws);
     }
@@ -692,7 +714,7 @@ mod tests {
     #[test]
     fn expr_completes_as_may_fall_through() {
         assert_eq!(
-            HirStmt::expr(HirExpr::Unit).completion(),
+            HirStmt::expr(HirExpr::Unit(Span::default())).completion(),
             Completion::MayFallThrough
         );
     }
@@ -712,10 +734,10 @@ mod tests {
     #[test]
     fn if_with_return_and_throw_completes_as_throws() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: Some(Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             })),
         };
         assert_eq!(s.completion(), Completion::Throws);
@@ -725,11 +747,11 @@ mod tests {
     #[test]
     fn switch_without_default_is_not_terminal() {
         let cases = vec![HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
+            Some(HirExpr::Int(1, Span::default())),
             vec![HirStmt::ret(None)],
         )];
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases,
         };
         assert!(!s.is_terminal());
@@ -738,7 +760,7 @@ mod tests {
     #[test]
     fn try_with_terminal_finally_is_terminal_even_with_non_terminal_body() {
         let s = HirStmt::Try {
-            body: Box::new(HirStmt::expr(HirExpr::Int(0))),
+            body: Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             catch: None,
             finally: Some(Box::new(HirStmt::ret(None))),
         };
@@ -751,10 +773,10 @@ mod tests {
             body: Box::new(HirStmt::ret(None)),
             catch: Some(HirCatchClause::new(
                 None,
-                Box::new(HirStmt::expr(HirExpr::Int(0))),
+                Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             )),
             finally: Some(Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             })),
         };
         assert!(s.is_terminal());
@@ -765,7 +787,7 @@ mod tests {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::ret(None)),
             catch: None,
-            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(s.is_terminal());
     }
@@ -775,7 +797,7 @@ mod tests {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::ret(None)),
             catch: Some(HirCatchClause::new(None, Box::new(HirStmt::ret(None)))),
-            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(s.is_terminal());
     }
@@ -783,9 +805,9 @@ mod tests {
     #[test]
     fn try_with_non_terminal_body_and_non_terminal_finally_is_not_terminal() {
         let s = HirStmt::Try {
-            body: Box::new(HirStmt::expr(HirExpr::Int(0))),
+            body: Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             catch: None,
-            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(!s.is_terminal());
     }
@@ -793,12 +815,12 @@ mod tests {
     #[test]
     fn try_with_non_terminal_body_and_non_terminal_catch_is_not_terminal() {
         let s = HirStmt::Try {
-            body: Box::new(HirStmt::expr(HirExpr::Int(0))),
+            body: Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             catch: Some(HirCatchClause::new(
                 None,
-                Box::new(HirStmt::expr(HirExpr::Int(0))),
+                Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
             )),
-            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(!s.is_terminal());
     }
@@ -807,10 +829,10 @@ mod tests {
     fn try_throw_with_non_terminal_finally_is_terminal() {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             }),
             catch: None,
-            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0)))),
+            finally: Some(Box::new(HirStmt::expr(HirExpr::Int(0, Span::default())))),
         };
         assert!(s.is_terminal());
     }
@@ -818,8 +840,11 @@ mod tests {
     #[test]
     fn switchcase_with_terminal_last_stmt_is_terminal() {
         let case = HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
-            vec![HirStmt::expr(HirExpr::Int(0)), HirStmt::ret(None)],
+            Some(HirExpr::Int(1, Span::default())),
+            vec![
+                HirStmt::expr(HirExpr::Int(0, Span::default())),
+                HirStmt::ret(None),
+            ],
         );
         assert!(case.is_terminal());
     }
@@ -827,22 +852,25 @@ mod tests {
     #[test]
     fn switchcase_with_non_terminal_last_stmt_is_not_terminal() {
         let case = HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
-            vec![HirStmt::ret(None), HirStmt::expr(HirExpr::Int(0))],
+            Some(HirExpr::Int(1, Span::default())),
+            vec![
+                HirStmt::ret(None),
+                HirStmt::expr(HirExpr::Int(0, Span::default())),
+            ],
         );
         assert!(!case.is_terminal());
     }
 
     #[test]
     fn switchcase_empty_body_is_not_terminal() {
-        let case = HirSwitchCase::new(Some(HirExpr::Int(1)), vec![]);
+        let case = HirSwitchCase::new(Some(HirExpr::Int(1, Span::default())), vec![]);
         assert!(!case.is_terminal());
     }
 
     #[test]
     fn switch_case_fallthrough_to_terminal_default_is_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![]),
+            HirSwitchCase::new(Some(HirExpr::Int(1, Span::default())), vec![]),
             HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ];
         assert!(cases[0].is_terminal_in_switch(&cases, 0));
@@ -852,7 +880,7 @@ mod tests {
     #[test]
     fn switch_case_fallthrough_to_break_default_is_not_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![]),
+            HirSwitchCase::new(Some(HirExpr::Int(1, Span::default())), vec![]),
             HirSwitchCase::new(None, vec![HirStmt::Break { label: None }]),
         ];
         assert!(!cases[0].is_terminal_in_switch(&cases, 0));
@@ -863,7 +891,7 @@ mod tests {
     fn switch_case_breaking_inside_block_is_not_terminal() {
         let cases = vec![
             HirSwitchCase::new(
-                Some(HirExpr::Int(1)),
+                Some(HirExpr::Int(1, Span::default())),
                 vec![HirStmt::block(vec![HirStmt::Break { label: None }])],
             ),
             HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
@@ -874,8 +902,14 @@ mod tests {
     #[test]
     fn switch_chain_fallthrough_through_non_terminal_to_return() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::expr(HirExpr::Unit)]),
-            HirSwitchCase::new(Some(HirExpr::Int(2)), vec![HirStmt::expr(HirExpr::Unit)]),
+            HirSwitchCase::new(
+                Some(HirExpr::Int(1, Span::default())),
+                vec![HirStmt::expr(HirExpr::Unit(Span::default()))],
+            ),
+            HirSwitchCase::new(
+                Some(HirExpr::Int(2, Span::default())),
+                vec![HirStmt::expr(HirExpr::Unit(Span::default()))],
+            ),
             HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ];
         assert!(cases[0].is_terminal_in_switch(&cases, 0));
@@ -886,8 +920,8 @@ mod tests {
     #[test]
     fn switch_case_last_non_terminal_with_no_following_case_is_not_terminal() {
         let cases = vec![HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
-            vec![HirStmt::expr(HirExpr::Unit)],
+            Some(HirExpr::Int(1, Span::default())),
+            vec![HirStmt::expr(HirExpr::Unit(Span::default()))],
         )];
         assert!(!cases[0].is_terminal_in_switch(&cases, 0));
     }
@@ -895,11 +929,14 @@ mod tests {
     #[test]
     fn switch_breaks_only_is_not_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::Break { label: None }]),
+            HirSwitchCase::new(
+                Some(HirExpr::Int(1, Span::default())),
+                vec![HirStmt::Break { label: None }],
+            ),
             HirSwitchCase::new(None, vec![HirStmt::Break { label: None }]),
         ];
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases,
         };
         assert!(!s.is_terminal());
@@ -908,11 +945,11 @@ mod tests {
     #[test]
     fn switch_fallthrough_to_return_is_terminal() {
         let cases = vec![
-            HirSwitchCase::new(Some(HirExpr::Int(1)), vec![]),
+            HirSwitchCase::new(Some(HirExpr::Int(1, Span::default())), vec![]),
             HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ];
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases,
         };
         assert!(s.is_terminal());
@@ -922,7 +959,7 @@ mod tests {
     fn dowhile_with_return_body_is_terminal() {
         let s = HirStmt::DoWhile {
             body: Box::new(HirStmt::ret(None)),
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
         };
         assert!(s.is_terminal());
         assert_eq!(s.completion(), Completion::Returns);
@@ -932,9 +969,9 @@ mod tests {
     fn dowhile_with_throw_body_is_terminal() {
         let s = HirStmt::DoWhile {
             body: Box::new(HirStmt::Throw {
-                expr: HirExpr::Unit,
+                expr: HirExpr::Unit(Span::default()),
             }),
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
         };
         assert!(s.is_terminal());
         assert_eq!(s.completion(), Completion::Throws);
@@ -943,8 +980,8 @@ mod tests {
     #[test]
     fn dowhile_with_fallthrough_body_is_not_terminal() {
         let s = HirStmt::DoWhile {
-            body: Box::new(HirStmt::expr(HirExpr::Int(0))),
-            cond: HirExpr::Bool(false),
+            body: Box::new(HirStmt::expr(HirExpr::Int(0, Span::default()))),
+            cond: HirExpr::Bool(false, Span::default()),
         };
         assert!(!s.is_terminal());
         assert_eq!(s.completion(), Completion::MayFallThrough);
@@ -958,7 +995,7 @@ mod tests {
                 catch: None,
                 finally: None,
             }),
-            cond: HirExpr::Bool(false),
+            cond: HirExpr::Bool(false, Span::default()),
         };
         assert!(s.is_terminal());
         assert_eq!(s.completion(), Completion::Returns);
@@ -968,11 +1005,11 @@ mod tests {
     fn dowhile_with_if_return_body_is_terminal() {
         let s = HirStmt::DoWhile {
             body: Box::new(HirStmt::If {
-                cond: HirExpr::Bool(false),
+                cond: HirExpr::Bool(false, Span::default()),
                 then: Box::new(HirStmt::ret(None)),
                 otherwise: Some(Box::new(HirStmt::ret(None))),
             }),
-            cond: HirExpr::Bool(false),
+            cond: HirExpr::Bool(false, Span::default()),
         };
         assert!(s.is_terminal());
         assert_eq!(s.completion(), Completion::Returns);

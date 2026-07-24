@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Atom, GenericParamId, LocalId, Severity, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, GenericParamId, LocalId, Severity, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirStmt, ObjectLiteralField,
 };
@@ -40,14 +40,96 @@ fn function_declaration_is_scanned_with_signature() {
         HirDecl::Function(f) => {
             assert_eq!(f.name, Atom::from("add"));
             assert_eq!(f.params.len(), 2);
-            assert_eq!(
-                f.body,
-                vec![HirStmt::Return {
-                    value: Some(HirExpr::Int(0)),
-                }],
-                "walker fills the body with the `return 0;` statement"
-            );
+            assert_eq!(f.body.len(), 1);
+            match &f.body[0] {
+                HirStmt::Return {
+                    value: Some(HirExpr::Int(v, span)),
+                } => {
+                    assert_eq!(
+                        *v, 0,
+                        "walker fills the body with the `return 0;` statement"
+                    );
+                    assert_eq!(
+                        *span,
+                        Span::new(43, 44),
+                        "Int literal `0` in `return 0;` must carry its source span (offset 43..44)"
+                    );
+                }
+                other => panic!("expected Return(Int(0)), got {other:?}"),
+            }
             assert!(!f.is_async);
+        }
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn function_declaration_preserves_compound_expression_source_spans() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function calc(a: i32, b: i32): i32 { return a + b * 2; }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => {
+            assert_eq!(f.body.len(), 1);
+            match &f.body[0] {
+                HirStmt::Return {
+                    value:
+                        Some(HirExpr::Binary {
+                            op, lhs, rhs, span, ..
+                        }),
+                } => {
+                    assert_eq!(*op, HirBinaryOp::Add);
+                    assert_eq!(
+                        *span,
+                        Span::new(44, 53),
+                        "outer Add expression must span `a + b * 2` (44..53)"
+                    );
+                    let HirExpr::Local { span: a_span, .. } = lhs.as_ref() else {
+                        panic!("expected Local `a` on lhs, got {lhs:?}");
+                    };
+                    assert_eq!(
+                        *a_span,
+                        Span::new(44, 45),
+                        "Local `a` must carry its source span (44..45)"
+                    );
+                    let HirExpr::Binary {
+                        op: inner_op,
+                        lhs: inner_lhs,
+                        rhs: inner_rhs,
+                        span: inner_span,
+                        ..
+                    } = rhs.as_ref()
+                    else {
+                        panic!("expected nested Binary on rhs, got {rhs:?}");
+                    };
+                    assert_eq!(*inner_op, HirBinaryOp::Mul);
+                    assert_eq!(
+                        *inner_span,
+                        Span::new(48, 53),
+                        "nested Mul expression must span `b * 2` (48..53)"
+                    );
+                    let HirExpr::Local { span: b_span, .. } = inner_lhs.as_ref() else {
+                        panic!("expected Local `b` on nested lhs, got {inner_lhs:?}");
+                    };
+                    assert_eq!(
+                        *b_span,
+                        Span::new(48, 49),
+                        "Local `b` must carry its source span (48..49)"
+                    );
+                    let HirExpr::Int(v, two_span) = inner_rhs.as_ref() else {
+                        panic!("expected Int `2` on nested rhs, got {inner_rhs:?}");
+                    };
+                    assert_eq!(*v, 2, "rightmost literal must be 2");
+                    assert_eq!(
+                        *two_span,
+                        Span::new(52, 53),
+                        "Int literal `2` must carry its source span (52..53)"
+                    );
+                }
+                other => panic!("expected Return(Binary), got {other:?}"),
+            }
         }
         other => panic!("expected Function, got {other:?}"),
     }
@@ -92,13 +174,16 @@ fn class_declaration_is_scanned_with_fields() {
                 Atom::from("this"),
                 "method receives `this` as params[0]"
             );
-            assert_eq!(
-                c.methods[0].body,
-                vec![HirStmt::Return {
-                    value: Some(HirExpr::Int(0)),
-                }],
-                "method bodies are walked now that `this` is the receiver param"
-            );
+            assert_eq!(c.methods[0].body.len(), 1);
+            match &c.methods[0].body[0] {
+                HirStmt::Return {
+                    value: Some(HirExpr::Int(v, _)),
+                } => assert_eq!(
+                    *v, 0,
+                    "method bodies are walked now that `this` is the receiver param"
+                ),
+                other => panic!("expected Return(Int(0)), got {other:?}"),
+            }
         }
         other => panic!("expected Class, got {other:?}"),
     }
@@ -2113,23 +2198,30 @@ fn body_walker_lets_binding_gets_local_id_and_init() {
         HirStmt::Let { ty, .. } => *ty,
         other => panic!("expected first stmt to be Let, got {other:?}"),
     };
-    assert_eq!(
-        f.body,
-        vec![
-            HirStmt::Let {
-                id: LocalId::from_raw(0),
-                name: Atom::from("x"),
-                ty: let_ty,
-                init: Some(HirExpr::Int(5)),
-            },
-            HirStmt::Return {
-                value: Some(HirExpr::Local {
-                    id: LocalId::from_raw(0),
-                    ty: let_ty,
-                }),
-            },
-        ],
-    );
+    assert_eq!(f.body.len(), 2);
+    match &f.body[0] {
+        HirStmt::Let {
+            id,
+            name,
+            ty,
+            init: Some(HirExpr::Int(v, _)),
+        } => {
+            assert_eq!(*id, LocalId::from_raw(0));
+            assert_eq!(*name, Atom::from("x"));
+            assert_eq!(*ty, let_ty);
+            assert_eq!(*v, 5);
+        }
+        other => panic!("expected Let {{ x = 5 }}, got {other:?}"),
+    }
+    match &f.body[1] {
+        HirStmt::Return {
+            value: Some(HirExpr::Local { id, ty, .. }),
+        } => {
+            assert_eq!(*id, LocalId::from_raw(0));
+            assert_eq!(*ty, let_ty);
+        }
+        other => panic!("expected Return(Local(0)), got {other:?}"),
+    }
 }
 
 #[test]
@@ -2269,7 +2361,10 @@ fn body_walker_compound_assignment_uses_compound_update() {
                 !*post,
                 "compound assignment is pre-style (returns new value)"
             );
-            assert_eq!(**rhs, HirExpr::Int(2));
+            match rhs.as_ref() {
+                HirExpr::Int(v, _) => assert_eq!(*v, 2),
+                other => panic!("expected Int(2), got {other:?}"),
+            }
         }
         other => panic!("expected Expr(CompoundUpdate), got {other:?}"),
     }
@@ -2291,7 +2386,7 @@ fn body_walker_update_lowers_post_increment_to_compound_update() {
         } => {
             assert!(matches!(**target, HirExpr::Local { id, .. } if id == LocalId::from_raw(0)));
             assert_eq!(*op, HirBinaryOp::Add);
-            assert_eq!(**rhs, HirExpr::Int(1));
+            assert_eq!(**rhs, HirExpr::Int(1, Span::default()));
             assert!(*post, "post-increment must be flagged post=true");
         }
         other => panic!("expected Expr(CompoundUpdate), got {other:?}"),
@@ -2314,7 +2409,7 @@ fn body_walker_update_lowers_pre_increment_with_post_false() {
         } => {
             assert!(matches!(**target, HirExpr::Local { id, .. } if id == LocalId::from_raw(0)));
             assert_eq!(*op, HirBinaryOp::Add);
-            assert_eq!(**rhs, HirExpr::Int(1));
+            assert_eq!(**rhs, HirExpr::Int(1, Span::default()));
             assert!(!*post, "pre-increment must be flagged post=false");
         }
         other => panic!("expected Expr(CompoundUpdate), got {other:?}"),
@@ -2348,7 +2443,7 @@ fn body_walker_compound_update_does_not_clone_target_side_effects() {
         matches!(**callee_inner, HirExpr::Local { id, .. } if id == LocalId::from_raw(1)),
         "callee must be the local `k`, got {callee_inner:?}"
     );
-    assert_eq!(**rhs, HirExpr::Int(1));
+    assert_eq!(**rhs, HirExpr::Int(1, Span::default()));
 
     let mut calls = 0u32;
     count_calls_in_stmts(&f.body, &mut calls);
@@ -2610,7 +2705,7 @@ fn body_walker_dynamic_import_emits_import_expr() {
         panic!("expected Import, got {ret:?}");
     };
     match source.as_ref() {
-        HirExpr::String(s) => assert_eq!(s.as_str(), "./mod.js"),
+        HirExpr::String(s, _) => assert_eq!(s.as_str(), "./mod.js"),
         other => panic!("expected String source, got {other:?}"),
     }
 }
@@ -3172,9 +3267,9 @@ fn body_walker_array_expression_with_literals_walks_each_element() {
         panic!("expected ArrayLiteral, got {expr:?}");
     };
     assert_eq!(elements.len(), 3, "[1, 2, 3] has 3 elements");
-    assert!(matches!(&elements[0], HirExpr::Int(1)));
-    assert!(matches!(&elements[1], HirExpr::Int(2)));
-    assert!(matches!(&elements[2], HirExpr::Int(3)));
+    assert!(matches!(&elements[0], HirExpr::Int(1, _)));
+    assert!(matches!(&elements[1], HirExpr::Int(2, _)));
+    assert!(matches!(&elements[2], HirExpr::Int(3, _)));
 }
 
 #[test]
@@ -3217,8 +3312,8 @@ fn body_walker_array_expression_nested_walks_inner_array() {
         panic!("expected nested ArrayLiteral, got {inner0:?}");
     };
     assert_eq!(inner0_elements.len(), 2);
-    assert!(matches!(&inner0_elements[0], HirExpr::Int(1)));
-    assert!(matches!(&inner0_elements[1], HirExpr::Int(2)));
+    assert!(matches!(&inner0_elements[0], HirExpr::Int(1, _)));
+    assert!(matches!(&inner0_elements[1], HirExpr::Int(2, _)));
     let HirExpr::ArrayLiteral {
         elements: inner1_elements,
         ..
@@ -3227,7 +3322,7 @@ fn body_walker_array_expression_nested_walks_inner_array() {
         panic!("expected nested ArrayLiteral, got {inner1:?}");
     };
     assert_eq!(inner1_elements.len(), 1);
-    assert!(matches!(&inner1_elements[0], HirExpr::Int(3)));
+    assert!(matches!(&inner1_elements[0], HirExpr::Int(3, _)));
 }
 
 #[test]
@@ -3244,13 +3339,13 @@ fn body_walker_array_expression_elision_becomes_undefined() {
         3,
         "[1, , 3] has 3 elements (elision counted)"
     );
-    assert!(matches!(&elements[0], HirExpr::Int(1)));
+    assert!(matches!(&elements[0], HirExpr::Int(1, _)));
     assert!(
-        matches!(&elements[1], HirExpr::Undefined),
+        matches!(&elements[1], HirExpr::Undefined(_)),
         "elision becomes Undefined per JS spec, got: {:?}",
         elements[1]
     );
-    assert!(matches!(&elements[2], HirExpr::Int(3)));
+    assert!(matches!(&elements[2], HirExpr::Int(3, _)));
 }
 
 #[test]
@@ -3288,7 +3383,7 @@ fn body_walker_array_expression_spread_walks_inner_but_warns() {
         "spread inner is walked as local ref to `a` (PR 7.7 will do concat), got: {:?}",
         elements[0]
     );
-    assert!(matches!(&elements[1], HirExpr::Int(1)));
+    assert!(matches!(&elements[1], HirExpr::Int(1, _)));
 }
 
 #[test]
@@ -3352,7 +3447,7 @@ fn body_walker_object_expression_with_string_key_records_atom_name() {
         "key",
         "string-literal key resolves to its text"
     );
-    assert!(matches!(value, HirExpr::Int(1)));
+    assert!(matches!(value, HirExpr::Int(1, _)));
 }
 
 #[test]
@@ -3434,7 +3529,7 @@ fn body_walker_object_expression_spread_walks_inner_but_warns() {
         ObjectLiteralField::Spread(_) => panic!("expected Property, got Spread"),
     };
     assert_eq!(name.as_str(), "x");
-    assert!(matches!(value, HirExpr::Int(1)));
+    assert!(matches!(value, HirExpr::Int(1, _)));
 }
 
 #[test]
@@ -3514,8 +3609,8 @@ fn body_walker_conditional_expression_basic_true_branch() {
         panic!("expected Ternary, got {expr:?}");
     };
     assert!(matches!(cond.as_ref(), HirExpr::Binary { .. }));
-    assert!(matches!(then_branch.as_ref(), HirExpr::Int(1)));
-    assert!(matches!(else_branch.as_ref(), HirExpr::Int(2)));
+    assert!(matches!(then_branch.as_ref(), HirExpr::Int(1, _)));
+    assert!(matches!(else_branch.as_ref(), HirExpr::Int(2, _)));
 }
 
 #[test]
@@ -3535,7 +3630,7 @@ fn body_walker_conditional_expression_nested() {
         panic!("expected outer Ternary, got {expr:?}");
     };
     assert!(matches!(cond.as_ref(), HirExpr::Binary { .. }));
-    assert!(matches!(else_branch.as_ref(), HirExpr::Int(3)));
+    assert!(matches!(else_branch.as_ref(), HirExpr::Int(3, _)));
     let HirExpr::Ternary {
         cond: inner_cond,
         then_branch: inner_then,
@@ -3546,8 +3641,8 @@ fn body_walker_conditional_expression_nested() {
         panic!("expected inner Ternary in then_branch, got {then_branch:?}");
     };
     assert!(matches!(inner_cond.as_ref(), HirExpr::Binary { .. }));
-    assert!(matches!(inner_then.as_ref(), HirExpr::Int(1)));
-    assert!(matches!(inner_else.as_ref(), HirExpr::Int(2)));
+    assert!(matches!(inner_then.as_ref(), HirExpr::Int(1, _)));
+    assert!(matches!(inner_else.as_ref(), HirExpr::Int(2, _)));
 }
 
 #[test]
@@ -3584,9 +3679,9 @@ fn body_walker_sequence_expression_returns_last_value() {
         panic!("expected Sequence, got {expr:?}");
     };
     assert_eq!(exprs.len(), 3, "sequence must hold all 3 elements");
-    assert!(matches!(exprs[0], HirExpr::Int(1)));
-    assert!(matches!(exprs[1], HirExpr::Int(2)));
-    assert!(matches!(exprs[2], HirExpr::Int(3)));
+    assert!(matches!(exprs[0], HirExpr::Int(1, _)));
+    assert!(matches!(exprs[1], HirExpr::Int(2, _)));
+    assert!(matches!(exprs[2], HirExpr::Int(3, _)));
 }
 
 #[test]
@@ -3619,9 +3714,9 @@ fn body_walker_sequence_expression_nested() {
         panic!("expected inner Sequence, got {inner_seq:?}");
     };
     assert_eq!(inner.len(), 2);
-    assert!(matches!(inner[0], HirExpr::Int(1)));
-    assert!(matches!(inner[1], HirExpr::Int(2)));
-    assert!(matches!(exprs[1], HirExpr::Int(3)));
+    assert!(matches!(inner[0], HirExpr::Int(1, _)));
+    assert!(matches!(inner[1], HirExpr::Int(2, _)));
+    assert!(matches!(exprs[1], HirExpr::Int(3, _)));
 }
 
 #[test]
@@ -3775,7 +3870,7 @@ fn body_walker_yield_expression_in_non_generator_returns_unit_placeholder() {
         panic!("expected first stmt to be Expr, got {:?}", f.body[0]);
     };
     assert!(
-        matches!(expr, HirExpr::Unit),
+        matches!(expr, HirExpr::Unit(_)),
         "rejected `yield` must produce HirExpr::Unit placeholder, not propagate to MIR; got {expr:?}"
     );
 }
@@ -3836,7 +3931,7 @@ fn body_walker_yield_expression_in_generator_walks_into_hir_yield() {
     };
     let inner = inner.as_deref().expect("yield 42 must have inner");
     assert!(
-        matches!(inner, HirExpr::Int(42)),
+        matches!(inner, HirExpr::Int(42, _)),
         "yield argument must be walked in generator context, got {inner:?}"
     );
 }

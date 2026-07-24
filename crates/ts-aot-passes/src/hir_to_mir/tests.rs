@@ -21,7 +21,7 @@ fn ctx() -> PassContext {
 }
 
 fn int_lit(v: i64) -> HirExpr {
-    HirExpr::Int(v)
+    HirExpr::Int(v, Span::default())
 }
 
 fn unit_ty() -> TypeId {
@@ -182,7 +182,7 @@ fn convert_expr_unit_passes_through() {
     let mut cx = ctx();
     assert_eq!(
         c.convert_expr(
-            &HirExpr::Unit,
+            &HirExpr::Unit(Span::default()),
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
@@ -201,7 +201,7 @@ fn convert_expr_bool_passes_through() {
     let mut cx = ctx();
     assert_eq!(
         c.convert_expr(
-            &HirExpr::Bool(true),
+            &HirExpr::Bool(true, Span::default()),
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
@@ -238,7 +238,7 @@ fn convert_expr_string_emits_string() {
     let out = &mut Vec::new();
     let mut cx = ctx();
     let mir = c.convert_expr(
-        &HirExpr::String(Atom::new_inline("5")),
+        &HirExpr::String(Atom::new_inline("5"), Span::default()),
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
@@ -257,7 +257,7 @@ fn convert_expr_null_emits_null() {
     let out = &mut Vec::new();
     let mut cx = ctx();
     let mir = c.convert_expr(
-        &HirExpr::Null,
+        &HirExpr::Null(Span::default()),
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
@@ -274,7 +274,7 @@ fn convert_expr_undefined_becomes_unit() {
     let mut cx = ctx();
     assert_eq!(
         c.convert_expr(
-            &HirExpr::Undefined,
+            &HirExpr::Undefined(Span::default()),
             out,
             &mut empty_struct_ids(),
             &mut empty_next_struct(),
@@ -294,6 +294,8 @@ fn convert_expr_local_remaps_id() {
     let expr = HirExpr::Local {
         id: old,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -318,6 +320,8 @@ fn convert_expr_global_passes_through() {
     let expr = HirExpr::Global {
         name: Atom::new_inline("13"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -340,6 +344,8 @@ fn convert_expr_binary_converts_op() {
         lhs: Box::new(int_lit(1)),
         rhs: Box::new(int_lit(2)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -365,8 +371,10 @@ fn convert_expr_unary_converts_op() {
     let mut cx = ctx();
     let expr = HirExpr::Unary {
         op: HirUnaryOp::Not,
-        expr: Box::new(HirExpr::Bool(true)),
+        expr: Box::new(HirExpr::Bool(true, Span::default())),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -395,6 +403,8 @@ fn convert_expr_field_converts_owner() {
         field: FieldId::from_raw(3),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -416,6 +426,8 @@ fn convert_expr_index_converts_parts() {
         owner: Box::new(int_lit(0)),
         index: Box::new(int_lit(1)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -437,6 +449,8 @@ fn convert_expr_call_resolves_callee() {
         callee: HirCallee::Function(FunctionId::from_raw(2)),
         args: vec![int_lit(1)],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -463,6 +477,8 @@ fn convert_expr_struct_literal_converts_fields() {
     let expr = HirExpr::StructLiteral {
         ty: unit_ty(),
         fields: vec![(FieldId::from_raw(0), int_lit(7))],
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -488,6 +504,8 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         &HirExpr::StructLiteral {
             ty: type_a,
             fields: Vec::new(),
+
+            span: Span::default(),
         },
         out,
         &mut shared_ids,
@@ -499,6 +517,8 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         &HirExpr::StructLiteral {
             ty: type_b,
             fields: Vec::new(),
+
+            span: Span::default(),
         },
         out,
         &mut shared_ids,
@@ -522,6 +542,8 @@ fn convert_expr_distinct_struct_literal_types_get_distinct_struct_ids() {
         &HirExpr::StructLiteral {
             ty: type_a,
             fields: Vec::new(),
+
+            span: Span::default(),
         },
         out,
         &mut shared_ids,
@@ -547,6 +569,8 @@ fn convert_expr_array_emits_runtime_stmt() {
     let expr = HirExpr::ArrayLiteral {
         elements: vec![int_lit(1), int_lit(2)],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -575,6 +599,8 @@ fn convert_expr_array_returns_local_to_dest() {
     let expr = HirExpr::ArrayLiteral {
         elements: vec![int_lit(1)],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -602,6 +628,8 @@ fn convert_expr_template_returns_local_to_dest() {
         cooked_parts: vec![None, None],
         raw_parts: vec![None, None],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -647,6 +675,8 @@ fn convert_expr_await_emits_mir_await_expr() {
     let expr = HirExpr::Await {
         expr: Box::new(int_lit(1)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -671,6 +701,8 @@ fn convert_expr_closure_returns_unit_and_diagnostics() {
         captures: Vec::new(),
         body: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     assert_eq!(
         c.convert_expr(
@@ -700,11 +732,15 @@ fn convert_expr_assignment_to_local_emits_local_place() {
     let local = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(local),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -766,11 +802,15 @@ fn convert_expr_assignment_returns_assigned_value() {
     let local = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(local),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -805,11 +845,15 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(call),
         value: Box::new(int_lit(1)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -840,17 +884,23 @@ fn convert_expr_assignment_to_field_emits_field_place() {
     let base = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let field = HirExpr::Field {
         owner: Box::new(base),
         field: FieldId::from_raw(2),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -885,26 +935,36 @@ fn convert_expr_assignment_to_indexed_field_emits_field_with_index_base() {
     let arr = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let idx = HirExpr::Local {
         id: LocalId::from_raw(1),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let indexed = HirExpr::Index {
         owner: Box::new(arr),
         index: Box::new(idx),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let field = HirExpr::Field {
         owner: Box::new(indexed),
         field: FieldId::from_raw(3),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -942,8 +1002,12 @@ fn convert_expr_optional_chain_wraps_ty_as_optional_of_inner_ty() {
         base: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: unit_ty(),
+
+            span: Span::default(),
         }),
         ty: TypeId::from_raw(7),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -977,21 +1041,29 @@ fn convert_expr_assignment_to_optional_chain_field_emits_chain_base() {
     let obj = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let chain_base = HirExpr::OptionalChain {
         base: Box::new(obj),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Field {
         owner: Box::new(chain_base),
         field: FieldId::from_raw(2),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(target),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -1037,15 +1109,21 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
     let obj = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: opt_fn_ty,
+
+        span: Span::default(),
     };
     let optional_chain_callee = HirExpr::OptionalChain {
         base: Box::new(obj),
         ty: opt_fn_ty,
+
+        span: Span::default(),
     };
     let expr = HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(optional_chain_callee)),
         args: vec![int_lit(7)],
         ty: fn_ty,
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -1084,11 +1162,15 @@ fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_u
     let cb = HirExpr::Global {
         name: Atom::from("cb"),
         ty: fn_ty,
+
+        span: Span::default(),
     };
     let expr = HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(cb)),
         args: vec![int_lit(42)],
         ty: i64_ty,
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -1131,6 +1213,8 @@ fn convert_block_await_emits_mir_await_expr_without_temp_local() {
         value: Some(HirExpr::Await {
             expr: Box::new(int_lit(1)),
             ty: unit_ty(),
+
+            span: Span::default(),
         }),
     }]);
     let (mir, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -1158,9 +1242,13 @@ fn convert_block_direct_drains_new_alloc_temp_local() {
             callee: Box::new(HirExpr::Global {
                 name: Atom::new_inline("99"),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
             args: Vec::new(),
             ty: unit_ty(),
+
+            span: Span::default(),
         }),
     }]);
     let (_, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -1212,7 +1300,7 @@ fn convert_block_if_emits_if_stmt() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::If {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         then: Box::new(HirStmt::Expr { expr: int_lit(1) }),
         otherwise: None,
     }]);
@@ -1228,7 +1316,7 @@ fn convert_function_nested_let_in_if_appears_in_body_locals() {
         ret: unit_ty(),
         throws: None,
         body: vec![HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::Let {
                 id: LocalId::from_raw(7),
                 name: Atom::new_inline("99"),
@@ -1272,7 +1360,7 @@ fn convert_function_nested_let_in_while_appears_in_body_locals() {
         ret: unit_ty(),
         throws: None,
         body: vec![HirStmt::While {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             body: Box::new(HirStmt::Let {
                 id: LocalId::from_raw(11),
                 name: Atom::new_inline("33"),
@@ -1366,7 +1454,7 @@ fn convert_block_while_emits_while() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::While {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -1382,6 +1470,8 @@ fn convert_block_while_cond_with_side_effects_keeps_cond_as_loop_condition() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let block = HirBlock(vec![HirStmt::While {
         cond,
@@ -1417,7 +1507,7 @@ fn convert_block_while_false_does_not_loop_forever() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::While {
-        cond: HirExpr::Bool(false),
+        cond: HirExpr::Bool(false, Span::default()),
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -1439,6 +1529,8 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
         cooked_parts: vec![None],
         raw_parts: vec![None],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let block = HirBlock(vec![HirStmt::While {
         cond,
@@ -1483,7 +1575,7 @@ fn convert_block_while_break_breaks_outer_via_sentinel() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::While {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         body: Box::new(HirStmt::Break { label: None }),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -1517,7 +1609,7 @@ fn convert_block_dowhile_executes_body_at_least_once() {
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::DoWhile {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-        cond: HirExpr::Bool(false),
+        cond: HirExpr::Bool(false, Span::default()),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
@@ -1545,7 +1637,7 @@ fn convert_block_dowhile_continue_still_evaluates_cond() {
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::DoWhile {
         body: Box::new(HirStmt::Continue { label: None }),
-        cond: HirExpr::Bool(false),
+        cond: HirExpr::Bool(false, Span::default()),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
@@ -1590,6 +1682,8 @@ fn convert_block_while_call_cond_evaluated_once_per_iteration() {
             callee: HirCallee::Function(FunctionId::from_raw(0)),
             args: Vec::new(),
             ty: unit_ty(),
+
+            span: Span::default(),
         },
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
@@ -1636,7 +1730,7 @@ fn convert_block_dowhile_false_runs_body_exactly_once_not_infinite() {
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::DoWhile {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
-        cond: HirExpr::Bool(false),
+        cond: HirExpr::Bool(false, Span::default()),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
@@ -1736,9 +1830,12 @@ fn convert_block_switch_emits_switch_stmt() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![
-            ts_aot_ir_hir::HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::ret(None)]),
+            ts_aot_ir_hir::HirSwitchCase::new(
+                Some(HirExpr::Int(1, Span::default())),
+                vec![HirStmt::ret(None)],
+            ),
             ts_aot_ir_hir::HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
         ],
     }]);
@@ -1765,9 +1862,9 @@ fn convert_block_switch_non_terminating_case_inserts_implicit_break() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
+            Some(HirExpr::Int(1, Span::default())),
             vec![HirStmt::expr(int_lit(0))],
         )],
     }]);
@@ -1796,9 +1893,9 @@ fn convert_block_switch_terminating_case_does_not_insert_break() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
-            Some(HirExpr::Int(1)),
+            Some(HirExpr::Int(1, Span::default())),
             vec![HirStmt::ret(None)],
         )],
     }]);
@@ -1822,9 +1919,9 @@ fn convert_block_switch_case_preserves_full_i128_int_value() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
-            Some(HirExpr::Int(7)),
+            Some(HirExpr::Int(7, Span::default())),
             vec![HirStmt::ret(None)],
         )],
     }]);
@@ -1850,13 +1947,15 @@ fn convert_block_switch_non_const_case_value_emits_p0006_error() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
     let block = HirBlock(vec![HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![ts_aot_ir_hir::HirSwitchCase::new(
             Some(HirExpr::Binary {
                 op: ts_aot_ir_hir::HirBinaryOp::Add,
-                lhs: Box::new(HirExpr::Int(1)),
-                rhs: Box::new(HirExpr::Int(2)),
+                lhs: Box::new(HirExpr::Int(1, Span::default())),
+                rhs: Box::new(HirExpr::Int(2, Span::default())),
                 ty: TypeId::from_raw(0),
+
+                span: Span::default(),
             }),
             vec![HirStmt::ret(None)],
         )],
@@ -2081,6 +2180,8 @@ fn convert_function_body_references_param_id_resolves_to_param() {
             expr: HirExpr::Local {
                 id: LocalId::from_raw(0),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -2180,9 +2281,13 @@ fn convert_program_resolves_indirect_global_callee_to_function_id() {
                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
                     name: Atom::new_inline("callee"),
                     ty: unit_ty(),
+
+                    span: Span::default(),
                 })),
                 args: Vec::new(),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -2262,6 +2367,8 @@ fn convert_program_struct_id_consistent_across_functions_for_same_type() {
             value: Some(HirExpr::StructLiteral {
                 ty,
                 fields: Vec::new(),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -2376,15 +2483,21 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
                     callee: Box::new(HirExpr::Global {
                         name: Atom::new_inline("1"),
                         ty: class_ty,
+
+                        span: Span::default(),
                     }),
                     args: Vec::new(),
                     ty: class_ty,
+
+                    span: Span::default(),
                 },
             },
             HirStmt::Return {
                 value: Some(HirExpr::StructLiteral {
                     ty: class_ty,
                     fields: vec![(FieldId::from_raw(0), int_lit(1))],
+
+                    span: Span::default(),
                 }),
             },
         ],
@@ -2444,9 +2557,13 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
                 callee: Box::new(HirExpr::Global {
                     name: Atom::new_inline("1"),
                     ty: class_ty,
+
+                    span: Span::default(),
                 }),
                 args: Vec::new(),
                 ty: class_ty,
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -2495,11 +2612,15 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let body = vec![HirStmt::Return {
         value: Some(HirExpr::StructLiteral {
             ty: throwing_call_ty,
             fields: vec![(FieldId::from_raw(0), call)],
+
+            span: Span::default(),
         }),
     }];
     let f = HirFunction {
@@ -2541,6 +2662,8 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         value: Some(HirExpr::StructLiteral {
             ty: unit_ty(),
             fields: vec![(FieldId::from_raw(0), int_lit(1))],
+
+            span: Span::default(),
         }),
     }];
     let f = HirFunction {
@@ -2583,18 +2706,24 @@ fn body_can_throw_propagates_through_assignment_target() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
         field_name: Atom::new_inline("0"),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let body = vec![HirStmt::Expr {
         expr: HirExpr::Assignment {
             target: Box::new(field_target),
             value: Box::new(int_lit(1)),
             ty: throwing_call_ty,
+
+            span: Span::default(),
         },
     }];
     let f = HirFunction {
@@ -2637,22 +2766,30 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         callee: HirCallee::Function(FunctionId::from_raw(77)),
         args: Vec::new(),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let idx_target = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(78)),
         args: Vec::new(),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let index_lhs = HirExpr::Index {
         owner: Box::new(arr_target),
         index: Box::new(idx_target),
         ty: throwing_call_ty,
+
+        span: Span::default(),
     };
     let body = vec![HirStmt::Expr {
         expr: HirExpr::Assignment {
             target: Box::new(index_lhs),
             value: Box::new(int_lit(1)),
             ty: throwing_call_ty,
+
+            span: Span::default(),
         },
     }];
     let f = HirFunction {
@@ -2722,6 +2859,8 @@ fn convert_function_await_emits_mir_await_expr_without_body_locals() {
             value: Some(HirExpr::Await {
                 expr: Box::new(int_lit(1)),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
         }],
         is_async: true,
@@ -2766,9 +2905,13 @@ fn convert_function_new_alloc_appears_in_body_locals() {
                 callee: Box::new(HirExpr::Global {
                     name: Atom::new_inline("99"),
                     ty: unit_ty(),
+
+                    span: Span::default(),
                 }),
                 args: Vec::new(),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -2811,6 +2954,8 @@ fn convert_function_temp_locals_drained_only_once() {
             value: Some(HirExpr::Await {
                 expr: Box::new(int_lit(1)),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -2915,7 +3060,7 @@ fn convert_function_can_throw_recurses_into_nested_blocks() {
         ret: unit_ty(),
         throws: None,
         body: vec![HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::Throw { expr: int_lit(0) }),
             otherwise: None,
         }],
@@ -3016,6 +3161,8 @@ fn convert_function_with_remap_uses_remap_only_for_call_sites() {
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: Vec::new(),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -3107,6 +3254,8 @@ fn convert_binop_unsupported_variants_emit_diagnostic_at_call_site() {
         lhs: Box::new(int_lit(1)),
         rhs: Box::new(int_lit(2)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -3154,6 +3303,8 @@ fn convert_expr_typeof_lowers_to_mir_typeof_without_diagnostic() {
         op: HirUnaryOp::TypeOf,
         expr: Box::new(int_lit(1)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -3247,9 +3398,13 @@ fn convert_expr_new_lowers_callee_for_side_effects() {
             callee: HirCallee::Function(callee_fn_id),
             args: Vec::new(),
             ty: global_ty,
+
+            span: Span::default(),
         }),
         args: Vec::new(),
         ty: global_ty,
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -3289,17 +3444,23 @@ fn convert_expr_assignment_to_field_with_call_base_materializes_call() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(7),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field_target),
         value: Box::new(int_lit(42)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -3351,17 +3512,23 @@ fn convert_expr_assignment_to_field_with_call_base_keeps_call_in_order() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field_target),
         value: Box::new(int_lit(1)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -3399,17 +3566,23 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let field_target = HirExpr::Field {
         owner: Box::new(call_target),
         field: FieldId::from_raw(0),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let value_expr = HirExpr::Template {
         tag: None,
@@ -3417,11 +3590,15 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         cooked_parts: vec![None, None],
         raw_parts: vec![None, None],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field_target),
         value: Box::new(value_expr),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -3469,6 +3646,8 @@ fn body_can_throw_propagates_through_if_condition_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3511,6 +3690,8 @@ fn body_can_throw_propagates_through_ternary_branches() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3519,10 +3700,12 @@ fn body_can_throw_propagates_through_ternary_branches() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Ternary {
-                cond: Box::new(HirExpr::Bool(true)),
+                cond: Box::new(HirExpr::Bool(true, Span::default())),
                 then_branch: Box::new(throwing_call),
-                else_branch: Box::new(HirExpr::Int(0)),
+                else_branch: Box::new(HirExpr::Int(0, Span::default())),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -3556,6 +3739,8 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3564,10 +3749,12 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::Ternary {
-                cond: Box::new(HirExpr::Bool(false)),
+                cond: Box::new(HirExpr::Bool(false, Span::default())),
                 then_branch: Box::new(side_effect_call),
-                else_branch: Box::new(HirExpr::Int(0)),
+                else_branch: Box::new(HirExpr::Int(0, Span::default())),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -3671,11 +3858,15 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let second_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(8)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3686,6 +3877,8 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
             value: Some(HirExpr::Sequence {
                 exprs: vec![first_call, second_call],
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -3736,6 +3929,8 @@ fn body_can_throw_propagates_through_while_condition_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3777,6 +3972,8 @@ fn body_can_throw_propagates_through_for_of_iter_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3819,6 +4016,8 @@ fn body_can_throw_propagates_through_switch_discriminant_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3863,6 +4062,8 @@ fn body_can_throw_propagates_through_catch_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3908,6 +4109,8 @@ fn body_can_throw_propagates_through_finally_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -3955,6 +4158,8 @@ fn body_can_throw_await_alone_is_throwing() {
             expr: HirExpr::Await {
                 expr: Box::new(int_lit(0)),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -3994,9 +4199,13 @@ fn body_can_throw_new_alone_is_throwing() {
                 callee: Box::new(HirExpr::Global {
                     name: Atom::new_inline("Ctor"),
                     ty: unit_ty(),
+
+                    span: Span::default(),
                 }),
                 args: Vec::new(),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -4035,6 +4244,8 @@ fn body_can_throw_yield_alone_is_throwing() {
             expr: HirExpr::Yield {
                 expr: Some(Box::new(int_lit(0))),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -4083,7 +4294,7 @@ fn convert_global_with_string_init_lowers_to_string() {
     prog.push_decl(HirDecl::Global {
         name: Atom::new_inline("GREETING"),
         ty: unit_ty(),
-        init: Some(HirExpr::String(Atom::new_inline("hi"))),
+        init: Some(HirExpr::String(Atom::new_inline("hi"), Span::default())),
     });
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);
@@ -4101,6 +4312,8 @@ fn convert_global_with_complex_init_emits_warning_and_drops_init() {
             callee: HirCallee::Function(FunctionId::from_raw(0)),
             args: Vec::new(),
             ty: unit_ty(),
+
+            span: Span::default(),
         }),
     });
     let mut cx = ctx();
@@ -4180,6 +4393,8 @@ fn infer_throws_is_none_for_call_only_function() {
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: Vec::new(),
                 ty: unit_ty(),
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -4218,6 +4433,8 @@ fn infer_throws_is_none_for_if_with_throwing_cond_only() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("1"),
@@ -4267,6 +4484,8 @@ fn infer_throws_uses_real_source_when_throwing_typed_expr() {
             expr: HirExpr::Local {
                 id: LocalId::from_raw(0),
                 ty: custom_err_ty,
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -4305,13 +4524,16 @@ fn infer_throws_uses_ternary_ty_not_sentinel() {
         throws: None,
         body: vec![HirStmt::Throw {
             expr: HirExpr::Ternary {
-                cond: Box::new(HirExpr::Bool(true)),
+                cond: Box::new(HirExpr::Bool(true, Span::default())),
                 then_branch: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: custom_err_ty,
+
+                    span: Span::default(),
                 }),
-                else_branch: Box::new(HirExpr::Int(0)),
+                else_branch: Box::new(HirExpr::Int(0, Span::default())),
                 ty: custom_err_ty,
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -4451,10 +4673,14 @@ fn convert_program_resolves_field_id_for_non_first_field() {
                 owner: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: class_ty,
+
+                    span: Span::default(),
                 }),
                 field: FieldId::from_raw(0),
                 field_name: Atom::new_inline("b"),
                 ty: field_b_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -4523,10 +4749,14 @@ fn convert_program_resolves_field_id_after_lower_classes_flatten() {
                 owner: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: child_ty,
+
+                    span: Span::default(),
                 }),
                 field: FieldId::from_raw(0),
                 field_name: Atom::new_inline("c"),
                 ty: child_field_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -4583,10 +4813,14 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
                 owner: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: class_ty,
+
+                    span: Span::default(),
                 }),
                 field: FieldId::from_raw(0),
                 field_name: Atom::new_inline("missing"),
                 ty: TypeId::from_raw(0),
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -4625,6 +4859,8 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -4632,6 +4868,8 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
         rhs: Box::new(int_lit(1)),
         post: true,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -4709,6 +4947,8 @@ fn convert_expr_compound_update_prefix_returns_new_value_via_local() {
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -4716,6 +4956,8 @@ fn convert_expr_compound_update_prefix_returns_new_value_via_local() {
         rhs: Box::new(int_lit(2)),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let mir = c.convert_expr(
         &expr,
@@ -4811,11 +5053,15 @@ fn convert_expr_compound_update_rhs_call_evaluated_only_once() {
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -4823,6 +5069,8 @@ fn convert_expr_compound_update_rhs_call_evaluated_only_once() {
         rhs: Box::new(rhs_call),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -4903,11 +5151,15 @@ fn convert_block_expr_compound_update_emits_local_expr_stmt_not_binary() {
             target: Box::new(HirExpr::Local {
                 id: LocalId::from_raw(0),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
             op: HirBinaryOp::Add,
             rhs: Box::new(int_lit(1)),
             post: true,
             ty: unit_ty(),
+
+            span: Span::default(),
         },
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -4937,16 +5189,22 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let i_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(9)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Index {
         owner: Box::new(arr_call),
         index: Box::new(i_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -4954,6 +5212,8 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
         rhs: Box::new(int_lit(1)),
         post: true,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5047,16 +5307,22 @@ fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index(
         callee: HirCallee::Function(FunctionId::from_raw(11)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let i_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(13)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Index {
         owner: Box::new(arr_call),
         index: Box::new(i_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -5064,6 +5330,8 @@ fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index(
         rhs: Box::new(int_lit(1)),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5109,22 +5377,30 @@ fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all
         callee: HirCallee::Function(FunctionId::from_raw(17)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let i_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(19)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let index_target = HirExpr::Index {
         owner: Box::new(arr_call),
         index: Box::new(i_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Field {
         owner: Box::new(index_target),
         field: FieldId::from_raw(0),
         field_name: Atom::new_inline("0"),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -5132,6 +5408,8 @@ fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all
         rhs: Box::new(int_lit(1)),
         post: true,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5181,21 +5459,29 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         callee: HirCallee::Function(FunctionId::from_raw(21)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let i_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(23)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(25)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Index {
         owner: Box::new(arr_call),
         index: Box::new(i_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -5203,6 +5489,8 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         rhs: Box::new(rhs_call),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5306,11 +5594,15 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let f_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(101)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_template = HirExpr::Template {
         tag: None,
@@ -5318,6 +5610,8 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
         cooked_parts: vec![None, None],
         raw_parts: vec![None, None],
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -5325,6 +5619,8 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
         rhs: Box::new(rhs_template),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5407,17 +5703,23 @@ fn convert_expr_assignment_value_temp_carries_rhs_ty_not_type_zero() {
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_ty = TypeId::from_raw(17);
     let rhs_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(505)),
         args: Vec::new(),
         ty: rhs_ty,
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(target),
         value: Box::new(rhs_call),
         ty: rhs_ty,
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5466,16 +5768,22 @@ fn convert_expr_assignment_rhs_call_materialized_once_for_statement_and_return()
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let rhs_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(303)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(target),
         value: Box::new(rhs_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5534,15 +5842,21 @@ fn convert_block_expr_plain_assignment_returns_local_not_rhs() {
         callee: HirCallee::Function(FunctionId::from_raw(404)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let block = HirBlock(vec![HirStmt::Expr {
         expr: HirExpr::Assignment {
             target: Box::new(HirExpr::Local {
                 id: LocalId::from_raw(0),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
             value: Box::new(rhs_call),
             ty: unit_ty(),
+
+            span: Span::default(),
         },
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
@@ -5635,17 +5949,23 @@ fn convert_expr_assignment_field_target_with_call_base_materializes_call_with_ca
         callee: HirCallee::Function(FunctionId::from_raw(606)),
         args: Vec::new(),
         ty: obj_ty,
+
+        span: Span::default(),
     };
     let field_target = HirExpr::Field {
         owner: Box::new(obj_call),
         field: FieldId::from_raw(0),
         field_name: Atom::new_inline("x"),
         ty: obj_ty,
+
+        span: Span::default(),
     };
     let expr = HirExpr::Assignment {
         target: Box::new(field_target),
         value: Box::new(int_lit(7)),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5688,16 +6008,22 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
         callee: HirCallee::Function(FunctionId::from_raw(707)),
         args: Vec::new(),
         ty: arr_ty,
+
+        span: Span::default(),
     };
     let i_call = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(709)),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let target = HirExpr::Index {
         owner: Box::new(arr_call),
         index: Box::new(i_call),
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let expr = HirExpr::CompoundUpdate {
         target: Box::new(target),
@@ -5705,6 +6031,8 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
         rhs: Box::new(int_lit(1)),
         post: false,
         ty: unit_ty(),
+
+        span: Span::default(),
     };
     let _ = c.convert_expr(
         &expr,
@@ -5750,6 +6078,8 @@ fn resolve_field_id_call_owner_with_registered_struct_id_resolves_field() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: call_ret_ty,
+
+        span: Span::default(),
     };
     let resolved = c.resolve_field_id(
         &owner,
@@ -5777,7 +6107,7 @@ fn resolve_field_id_non_typed_owner_emits_p0011() {
     let struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
     c.set_field_id_lookup(HashMap::new());
 
-    let owner = HirExpr::Int(0);
+    let owner = HirExpr::Int(0, Span::default());
     let resolved = c.resolve_field_id(
         &owner,
         &Atom::new_inline("x"),
@@ -5818,8 +6148,12 @@ fn resolve_field_id_type_assertion_owner_with_registered_target_resolves_field()
         expr: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: TypeId::from_raw(0),
+
+            span: Span::default(),
         }),
         target: target_ty,
+
+        span: Span::default(),
     };
     let resolved = c.resolve_field_id(
         &owner,
@@ -5851,8 +6185,12 @@ fn resolve_field_id_type_assertion_owner_without_registered_target_emits_p0012()
         expr: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: TypeId::from_raw(0),
+
+            span: Span::default(),
         }),
         target: TypeId::from_raw(202),
+
+        span: Span::default(),
     };
     let resolved = c.resolve_field_id(
         &owner,
@@ -5894,12 +6232,18 @@ fn resolve_field_id_assignment_owner_with_registered_ty_resolves_field() {
         target: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: TypeId::from_raw(0),
+
+            span: Span::default(),
         }),
         value: Box::new(HirExpr::Local {
             id: LocalId::from_raw(1),
             ty: assign_ty,
+
+            span: Span::default(),
         }),
         ty: assign_ty,
+
+        span: Span::default(),
     };
     let resolved = c.resolve_field_id(
         &owner,
@@ -5937,11 +6281,14 @@ fn resolve_field_id_compound_update_owner_with_registered_ty_resolves_field() {
         target: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: target_ty,
+
+            span: Span::default(),
         }),
         op: HirBinaryOp::Add,
-        rhs: Box::new(HirExpr::Int(1)),
+        rhs: Box::new(HirExpr::Int(1, Span::default())),
         post: false,
         ty: target_ty,
+        span: Span::default(),
     };
     let resolved = c.resolve_field_id(
         &owner,
@@ -5968,13 +6315,19 @@ fn object_method_call(field_name: &str) -> HirExpr {
             owner: Box::new(HirExpr::Global {
                 name: Atom::new_inline("Object"),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
             field: FieldId::from_raw(0),
             field_name: Atom::new_inline(field_name),
             ty: unit_ty(),
+
+            span: Span::default(),
         })),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     }
 }
 
@@ -5984,13 +6337,19 @@ fn local_method_call(field_name: &str) -> HirExpr {
             owner: Box::new(HirExpr::Local {
                 id: LocalId::from_raw(0),
                 ty: unit_ty(),
+
+                span: Span::default(),
             }),
             field: FieldId::from_raw(0),
             field_name: Atom::new_inline(field_name),
             ty: unit_ty(),
+
+            span: Span::default(),
         })),
         args: Vec::new(),
         ty: unit_ty(),
+
+        span: Span::default(),
     }
 }
 

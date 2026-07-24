@@ -1,7 +1,9 @@
 use super::*;
 use crate::PassContext;
 use crate::hir_to_mir::convert_program;
-use ts_aot_core::{Atom, FunctionId, GenericParamId, LocalId, ModuleId, Type, TypeId, TypeTable};
+use ts_aot_core::{
+    Atom, FunctionId, GenericParamId, LocalId, ModuleId, Span, Type, TypeId, TypeTable,
+};
 use ts_aot_ir_hir::{
     HirCallee, HirCatchClause, HirClass, HirDecl, HirExpr, HirFunction, HirParam, HirProgram,
     HirStmt,
@@ -118,8 +120,9 @@ fn generic_function_with_one_call_creates_one_mono_copy() {
     )));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::new(200, 220),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(42)],
+            args: vec![HirExpr::Int(42, Span::new(210, 212))],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -135,6 +138,25 @@ fn generic_function_with_one_call_creates_one_mono_copy() {
     let mono =
         find_mono_for(&program, "identity").expect("mono copy must be appended with mangled name");
     assert!(mono.type_params.is_empty(), "mono copy has no type_params");
+
+    let caller = find_fn(&program, "caller").expect("caller must exist");
+    let HirStmt::Expr {
+        expr: HirExpr::Call {
+            span: caller_call_span,
+            ..
+        },
+    } = &caller.body[0]
+    else {
+        panic!(
+            "caller body[0] must be Expr(Call), got {:?}",
+            caller.body[0]
+        );
+    };
+    assert_eq!(
+        *caller_call_span,
+        Span::new(200, 220),
+        "caller Call span must be preserved (monomorphize rewrites callee but keeps span)"
+    );
 }
 
 #[test]
@@ -147,8 +169,9 @@ fn call_to_generic_rewrites_callee_to_mono() {
     )));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(42)],
+            args: vec![HirExpr::Int(42, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -186,15 +209,17 @@ fn multiple_calls_to_same_generic_share_one_mono_copy() {
     let caller_body = vec![
         HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(1)],
+                args: vec![HirExpr::Int(1, Span::default())],
                 ty: TypeId::from_raw(0),
             },
         },
         HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(2)],
+                args: vec![HirExpr::Int(2, Span::default())],
                 ty: TypeId::from_raw(0),
             },
         },
@@ -222,8 +247,9 @@ fn generic_calling_generic_rewrites_inner_call_to_inner_mono() {
 
     let a_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(1)),
-            args: vec![HirExpr::Int(42)],
+            args: vec![HirExpr::Int(42, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -239,8 +265,9 @@ fn generic_calling_generic_rewrites_inner_call_to_inner_mono() {
     )));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(1)],
+            args: vec![HirExpr::Int(1, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -331,8 +358,9 @@ fn generic_class_method_with_call_is_monomorphized() {
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(7)],
+            args: vec![HirExpr::Int(7, Span::default())],
             ty: t_ty,
         },
     }];
@@ -368,8 +396,9 @@ fn empty_param_generic_class_method_is_not_monomorphized() {
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(7)],
+            args: vec![HirExpr::Int(7, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -421,8 +450,9 @@ fn monomorphize_class_method_with_call_e2e_keeps_function_ids_aligned() {
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(7)],
+            args: vec![HirExpr::Int(7, Span::default())],
             ty: t_ty,
         },
     }];
@@ -477,8 +507,9 @@ fn generic_function_inside_namespace_is_not_classified() {
     });
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(1)],
+            args: vec![HirExpr::Int(1, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -508,8 +539,9 @@ fn monomorphize_then_convert_program_keeps_function_ids_aligned() {
     )));
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(42)],
+            args: vec![HirExpr::Int(42, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -580,8 +612,9 @@ fn monomorphize_namespace_skips_does_not_break_convert_program() {
     });
     let caller_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(1)],
+            args: vec![HirExpr::Int(1, Span::default())],
             ty: TypeId::from_raw(0),
         },
     }];
@@ -642,8 +675,12 @@ fn inference_with_concrete_param_before_generic_binds_to_generic() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(42), HirExpr::String(Atom::from("hi"))],
+                args: vec![
+                    HirExpr::Int(42, Span::default()),
+                    HirExpr::String(Atom::from("hi"), Span::default()),
+                ],
                 ty: t_ty,
             },
         }],
@@ -698,9 +735,14 @@ fn inference_with_array_param_binds_to_element_not_whole_array() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: vec![HirExpr::ArrayLiteral {
-                    elements: vec![HirExpr::Int(1), HirExpr::Int(2)],
+                    span: Span::default(),
+                    elements: vec![
+                        HirExpr::Int(1, Span::default()),
+                        HirExpr::Int(2, Span::default()),
+                    ],
                     ty: array_i64,
                 }],
                 ty: t_ty,
@@ -752,8 +794,9 @@ fn fallback_does_not_bind_unrelated_concrete_param_to_generic() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(1)],
+                args: vec![HirExpr::Int(1, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -807,8 +850,10 @@ fn composite_type_with_generic_param_inside_is_not_resolved() {
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: vec![HirExpr::Local {
+                    span: Span::default(),
                     id: LocalId::from_raw(0),
                     ty: array_t,
                 }],
@@ -826,8 +871,9 @@ fn composite_type_with_generic_param_inside_is_not_resolved() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(1)),
-                args: vec![HirExpr::Int(42)],
+                args: vec![HirExpr::Int(42, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -853,8 +899,10 @@ fn worklist_creates_transitive_specialization_for_generic_calling_generic() {
 
     let a_body = vec![HirStmt::Expr {
         expr: HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(1)),
             args: vec![HirExpr::Local {
+                span: Span::default(),
                 id: x_local,
                 ty: t_ty,
             }],
@@ -897,8 +945,9 @@ fn worklist_creates_transitive_specialization_for_generic_calling_generic() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(42)],
+                args: vec![HirExpr::Int(42, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -979,12 +1028,14 @@ fn indirect_callee_with_nested_generic_call_is_monomorphized() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Indirect(Box::new(HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Function(FunctionId::from_raw(0)),
-                    args: vec![HirExpr::Int(42)],
+                    args: vec![HirExpr::Int(42, Span::default())],
                     ty: t_ty,
                 })),
-                args: vec![HirExpr::Int(3)],
+                args: vec![HirExpr::Int(3, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -1020,6 +1071,8 @@ fn closure_params_in_mono_copy_are_type_substituted() {
         captures: vec![],
         body: vec![HirStmt::Return { value: None }],
         ty: t_ty,
+
+        span: Span::default(),
     };
 
     program.push_decl(HirDecl::Function(HirFunction {
@@ -1044,8 +1097,9 @@ fn closure_params_in_mono_copy_are_type_substituted() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(42)],
+                args: vec![HirExpr::Int(42, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -1085,8 +1139,9 @@ fn throw_stmt_with_generic_call_triggers_specialization() {
         "caller",
         vec![HirStmt::Throw {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(42)],
+                args: vec![HirExpr::Int(42, Span::default())],
                 ty: TypeId::from_raw(0),
             },
         }],
@@ -1112,8 +1167,9 @@ fn try_catch_finally_with_call_in_each_branch_is_visited() {
     )));
 
     let call = |fid: u32, ty: TypeId| HirExpr::Call {
+        span: Span::default(),
         callee: HirCallee::Function(FunctionId::from_raw(fid)),
-        args: vec![HirExpr::Int(1)],
+        args: vec![HirExpr::Int(1, Span::default())],
         ty,
     };
 
@@ -1160,12 +1216,14 @@ fn new_expression_with_generic_call_callee_is_visited() {
 
     let new_expr = HirExpr::New {
         callee: Box::new(HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Function(FunctionId::from_raw(0)),
-            args: vec![HirExpr::Int(7)],
+            args: vec![HirExpr::Int(7, Span::default())],
             ty: TypeId::from_raw(0),
         }),
         args: vec![],
         ty: TypeId::from_raw(0),
+        span: Span::default(),
     };
 
     program.push_decl(HirDecl::Function(simple_fn(
@@ -1199,6 +1257,7 @@ fn class_method_body_types_are_substituted_in_mono_copy() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Local {
+                span: Span::default(),
                 id: LocalId::from_raw(0),
                 ty: t_ty,
             }),
@@ -1223,8 +1282,9 @@ fn class_method_body_types_are_substituted_in_mono_copy() {
         "caller",
         vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(7)],
+                args: vec![HirExpr::Int(7, Span::default())],
                 ty: t_ty,
             },
         }],
@@ -1268,8 +1328,10 @@ fn global_init_with_call_is_visited() {
 
     let init_expr = HirExpr::Call {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
-        args: vec![HirExpr::Int(5)],
+        args: vec![HirExpr::Int(5, Span::default())],
         ty: TypeId::from_raw(0),
+
+        span: Span::default(),
     };
 
     program.push_decl(HirDecl::Global {
@@ -1301,8 +1363,9 @@ fn enum_decl_is_skipped_from_callee_visit() {
         variants: vec![ts_aot_ir_hir::HirEnumVariant {
             name: Atom::from("Red"),
             value: Some(HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
-                args: vec![HirExpr::Int(0)],
+                args: vec![HirExpr::Int(0, Span::default())],
                 ty: TypeId::from_raw(0),
             }),
         }],

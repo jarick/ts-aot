@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, GenericParamId, LocalId, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, GenericParamId, LocalId, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirExpr, HirFunction, HirParam};
 
 use super::infer::{
@@ -161,25 +161,44 @@ fn hir_expr_ty_returns_inner_ty_for_typed_variants() {
     let local = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: i32,
+
+        span: Span::default(),
     };
     assert_eq!(hir_expr_ty(&local, &mut types), Some(i32));
 
     let global = HirExpr::Global {
         name: Atom::from("g"),
         ty: i32,
+
+        span: Span::default(),
     };
     assert_eq!(hir_expr_ty(&global, &mut types), Some(i32));
 
-    assert_eq!(hir_expr_ty(&HirExpr::Bool(true), &mut types), Some(bool_ty));
-    assert_eq!(hir_expr_ty(&HirExpr::Int(0), &mut types), Some(i64));
-    assert_eq!(hir_expr_ty(&HirExpr::Null, &mut types), Some(null_ty));
+    assert_eq!(
+        hir_expr_ty(&HirExpr::Bool(true, Span::default()), &mut types),
+        Some(bool_ty)
+    );
+    assert_eq!(
+        hir_expr_ty(&HirExpr::Int(0, Span::default()), &mut types),
+        Some(i64)
+    );
+    assert_eq!(
+        hir_expr_ty(&HirExpr::Null(Span::default()), &mut types),
+        Some(null_ty)
+    );
 }
 
 #[test]
 fn hir_expr_ty_returns_none_for_unit_and_undefined() {
     let mut types = TypeTable::new();
-    assert_eq!(hir_expr_ty(&HirExpr::Unit, &mut types), None);
-    assert_eq!(hir_expr_ty(&HirExpr::Undefined, &mut types), None);
+    assert_eq!(
+        hir_expr_ty(&HirExpr::Unit(Span::default()), &mut types),
+        None
+    );
+    assert_eq!(
+        hir_expr_ty(&HirExpr::Undefined(Span::default()), &mut types),
+        None
+    );
 }
 
 #[test]
@@ -191,8 +210,12 @@ fn hir_expr_ty_returns_target_for_type_assertion() {
         expr: Box::new(HirExpr::Local {
             id: LocalId::from_raw(0),
             ty: i32,
+
+            span: Span::default(),
         }),
         target: f64,
+
+        span: Span::default(),
     };
     assert_eq!(hir_expr_ty(&expr, &mut types), Some(f64));
 }
@@ -376,7 +399,10 @@ fn infer_type_args_with_multiple_type_params() {
         ret_ty,
         vec![gp0, gp1],
     );
-    let args = vec![HirExpr::Int(1), HirExpr::Bool(true)];
+    let args = vec![
+        HirExpr::Int(1, Span::default()),
+        HirExpr::Bool(true, Span::default()),
+    ];
     let inferred = infer_type_args(&f, &args, &mut types);
     assert_eq!(inferred.len(), 2);
     let expected_i64 = types.intern(&Type::I64);
@@ -450,7 +476,10 @@ fn infer_type_args_conflict_blocks_single_param_arg_fallback() {
         i32,
         vec![gp],
     );
-    let args = vec![HirExpr::Int(1), HirExpr::String(Atom::from("x"))];
+    let args = vec![
+        HirExpr::Int(1, Span::default()),
+        HirExpr::String(Atom::from("x"), Span::default()),
+    ];
     let inferred = infer_type_args(&f, &args, &mut types);
     assert_eq!(inferred.len(), 1);
     let expected_gp = types.intern(&Type::GenericParam { id: gp });
