@@ -6,6 +6,7 @@ use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
 use crate::util::core_span_from_oxc;
 
 mod aggregate;
+mod conditional;
 mod function;
 mod mapped;
 mod reference;
@@ -138,6 +139,13 @@ pub(crate) fn resolve_simple_type(
         }
         TSType::TSMappedType(m) => Some(mapped::resolve_mapped(
             m,
+            types,
+            aliases,
+            type_params,
+            &mut diagnostics,
+        )),
+        TSType::TSConditionalType(c) => Some(conditional::resolve_conditional(
+            c,
             types,
             aliases,
             type_params,
