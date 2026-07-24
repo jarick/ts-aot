@@ -643,7 +643,7 @@ impl ExprConverter {
                 }));
                 MirExpr::Local(alloc_id)
             }
-            HirExpr::OptionalChain { base, ty: _, .. } => {
+            HirExpr::OptionalChain { base, .. } => {
                 let inner =
                     self.convert_expr(base, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let base_ty = crate::monomorphize::hir_expr_ty(base, types)

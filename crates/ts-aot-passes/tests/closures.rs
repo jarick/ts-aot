@@ -97,12 +97,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
     let outer_mir = outer_mir.expect("outer fn present");
     let hoisted_id = hoisted_mir.unwrap().id;
 
-    let MirStmt::Expr(MirExpr::Call {
-        callee,
-        args,
-        ty: _,
-    }) = &outer_mir.body.block.stmts[1]
-    else {
+    let MirStmt::Expr(MirExpr::Call { callee, args, .. }) = &outer_mir.body.block.stmts[1] else {
         panic!(
             "outer fn second stmt must be Expr(Call) after lower_closures rewrite, got {:?}",
             outer_mir.body.block.stmts[1]
@@ -248,7 +243,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
     let MirStmt::Expr(MirExpr::Call {
         callee: callee_add,
         args: args_add,
-        ty: _,
+        ..
     }) = &outer_mir.body.block.stmts[2]
     else {
         panic!(
@@ -259,7 +254,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
     let MirStmt::Expr(MirExpr::Call {
         callee: callee_sub,
         args: args_sub,
-        ty: _,
+        ..
     }) = &outer_mir.body.block.stmts[3]
     else {
         panic!(
@@ -273,8 +268,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
         "first hoisted-closure call must preserve the original single arg, got {args_add:?}"
     );
     let MirExpr::Int {
-        value: value_add,
-        ty: _,
+        value: value_add, ..
     } = &args_add[0]
     else {
         panic!(
@@ -292,8 +286,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
         "second hoisted-closure call must preserve the original single arg, got {args_sub:?}"
     );
     let MirExpr::Int {
-        value: value_sub,
-        ty: _,
+        value: value_sub, ..
     } = &args_sub[0]
     else {
         panic!(
