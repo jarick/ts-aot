@@ -23,6 +23,19 @@ fn has_e0404(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
         .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0404")
 }
 
+fn has_e0407(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
+    diagnostics
+        .iter()
+        .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0407")
+}
+
+fn count_e0400(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0400")
+        .count()
+}
+
 #[test]
 fn empty_source_yields_empty_program_without_errors() {
     let output = FrontendPass::new().run("test.ts", "");
@@ -4223,5 +4236,125 @@ fn function_type_with_rest_param_emits_e0404_and_resolves_to_type_error() {
         Some(&Type::Error),
         "function type with rest parameter must resolve to Type::Error after E0404 (not Type::Fn) — \
          Type::Fn has no field for variadic, silently dropping the rest param would lose information"
+    );
+}
+
+#[test]
+fn conditional_type_in_param_annotation_emits_e0407_and_resolves_to_never() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: T extends U ? A : B): i64 { return 0; }\n\
+         type T = i64;\n\
+         type U = i32;\n\
+         type A = i64;\n\
+         type B = string;",
+        &mut types,
+    );
+    assert!(
+        has_e0407(&output.diagnostics),
+        "conditional type in param annotation must produce an E0407 warning, got: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "E0407 is a warning and must NOT block HIR emit, got errors: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Never),
+        "conditional type param annotation must resolve to Type::Never (per PR 4.7 plan: warning + never fallback)"
+    );
+}
+
+#[test]
+fn conditional_type_in_alias_emits_e0407_and_resolves_to_never() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "type Conditional<T> = T extends i64 ? string : i32;\n\
+         function f(x: Conditional<i64>): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0407(&output.diagnostics),
+        "conditional type in alias must produce an E0407 warning, got: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "E0407 is a warning and must NOT block HIR emit, got errors: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Never),
+        "conditional type used via alias must resolve to Type::Never"
+    );
+}
+
+#[test]
+fn conditional_type_with_branch_resolving_to_type_error_emits_e0400_per_branch() {
+    // Regression: resolve_simple_type returns Some(Type::Error) for unsupported
+    // type forms (wildcard fallback, e.g. `keyof T`). Conditional resolver must
+    // treat Some(Type::Error) the same as None and emit E0400 per branch — not
+    // silently swallow the error.
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: T extends keyof U ? i64 : i32): i64 { return 0; }\n\
+         type T = i64;\n\
+         type U = { a: i64, b: string };",
+        &mut types,
+    );
+    assert!(
+        has_e0407(&output.diagnostics),
+        "conditional type itself must produce E0407, got: {:?}",
+        output.diagnostics
+    );
+    let e0400_count = count_e0400(&output.diagnostics);
+    assert!(
+        e0400_count >= 1,
+        "at least one branch (extends_type) resolves via wildcard to Type::Error and must emit E0400, \
+         got E0400 count = {e0400_count}, diagnostics: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "E0400/E0407 are warnings and must NOT block HIR emit, got errors: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Never),
+        "conditional with Type::Error branch must still resolve to Type::Never"
     );
 }
