@@ -26,24 +26,24 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> MirExpr {
         match e {
-            HirExpr::Unit => MirExpr::Unit,
-            HirExpr::Bool(b) => MirExpr::Bool(*b),
-            HirExpr::Int(v) => MirExpr::Int {
+            HirExpr::Unit(_) => MirExpr::Unit,
+            HirExpr::Bool(b, _) => MirExpr::Bool(*b),
+            HirExpr::Int(v, _) => MirExpr::Int {
                 value: i128::from(*v),
                 ty: TypeId::from_raw(0),
             },
-            HirExpr::Float(bits) => MirExpr::Float {
+            HirExpr::Float(bits, _) => MirExpr::Float {
                 value: f64::from_bits(*bits),
                 ty: TypeId::from_raw(0),
             },
-            HirExpr::String(id) => MirExpr::String {
+            HirExpr::String(id, _) => MirExpr::String {
                 id: id.clone(),
                 ty: TypeId::from_raw(0),
             },
-            HirExpr::Null => MirExpr::Null {
+            HirExpr::Null(_) => MirExpr::Null {
                 ty: TypeId::from_raw(0),
             },
-            HirExpr::Undefined => MirExpr::Unit,
+            HirExpr::Undefined(_) => MirExpr::Unit,
             HirExpr::Local { id, .. } => self.map_local(*id),
             HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),
             HirExpr::Field {
@@ -89,7 +89,9 @@ impl ExprConverter {
                 )),
                 ty: *ty,
             },
-            HirExpr::Call { callee, args, ty } => {
+            HirExpr::Call {
+                callee, args, ty, ..
+            } => {
                 let callee_id = self.resolve_callee(callee, ctx);
                 let mir_args: Vec<MirExpr> = args
                     .iter()
@@ -153,7 +155,9 @@ impl ExprConverter {
                     ty: *ty,
                 }
             }
-            HirExpr::Binary { op, lhs, rhs, ty } => match op {
+            HirExpr::Binary {
+                op, lhs, rhs, ty, ..
+            } => match op {
                 HirBinaryOp::In => {
                     let lhs_mir = self.convert_expr(
                         lhs,
@@ -253,7 +257,7 @@ impl ExprConverter {
                     ty: *ty,
                 },
             },
-            HirExpr::Unary { op, expr, ty } => match op {
+            HirExpr::Unary { op, expr, ty, .. } => match op {
                 HirUnaryOp::TypeOf => {
                     let inner = self.convert_expr(
                         expr,
@@ -310,7 +314,7 @@ impl ExprConverter {
                     ty: *ty,
                 },
             },
-            HirExpr::StructLiteral { ty, fields } => {
+            HirExpr::StructLiteral { ty, fields, .. } => {
                 let struct_id =
                     self.lookup_or_alloc_struct_id(*ty, shared_struct_ids, shared_next_struct);
                 MirExpr::StructLiteral {
@@ -363,16 +367,18 @@ impl ExprConverter {
                     MirExpr::Unit
                 }
             }
-            HirExpr::RegExp { pattern, flags, ty } => MirExpr::RegExp {
+            HirExpr::RegExp {
+                pattern, flags, ty, ..
+            } => MirExpr::RegExp {
                 pattern: pattern.to_string(),
                 flags: flags.to_string(),
                 ty: *ty,
             },
-            HirExpr::BigInt { value, ty } => MirExpr::BigInt {
+            HirExpr::BigInt { value, ty, .. } => MirExpr::BigInt {
                 value: value.to_string(),
                 ty: *ty,
             },
-            HirExpr::Import { source, ty } => {
+            HirExpr::Import { source, ty, .. } => {
                 let mut sub_out = Vec::new();
                 let source_mir = self.convert_expr(
                     source,
@@ -393,6 +399,7 @@ impl ExprConverter {
                 then_branch,
                 else_branch,
                 ty,
+                ..
             } => {
                 let cond_mir =
                     self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
@@ -437,7 +444,7 @@ impl ExprConverter {
                 });
                 MirExpr::Local(dest)
             }
-            HirExpr::ArrayLiteral { elements, ty } => {
+            HirExpr::ArrayLiteral { elements, ty, .. } => {
                 let args: Vec<MirExpr> = elements
                     .iter()
                     .map(|e| {
@@ -463,7 +470,7 @@ impl ExprConverter {
                 let _ = ty;
                 MirExpr::Unit
             }
-            HirExpr::Await { expr, ty } => {
+            HirExpr::Await { expr, ty, .. } => {
                 let inner =
                     self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 MirExpr::Await {
@@ -471,7 +478,7 @@ impl ExprConverter {
                     ty: *ty,
                 }
             }
-            HirExpr::Yield { expr, ty } => {
+            HirExpr::Yield { expr, ty, .. } => {
                 let inner = expr
                     .as_ref()
                     .map(|e| {
@@ -590,7 +597,9 @@ impl ExprConverter {
                     }
                 }
             }
-            HirExpr::New { callee, args, ty } => {
+            HirExpr::New {
+                callee, args, ty, ..
+            } => {
                 let callee_mir = self.convert_expr(
                     callee,
                     out,
@@ -634,7 +643,7 @@ impl ExprConverter {
                 }));
                 MirExpr::Local(alloc_id)
             }
-            HirExpr::OptionalChain { base, ty: _ } => {
+            HirExpr::OptionalChain { base, ty: _, .. } => {
                 let inner =
                     self.convert_expr(base, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let base_ty = crate::monomorphize::hir_expr_ty(base, types)
@@ -649,13 +658,15 @@ impl ExprConverter {
                     ty: opt_ty,
                 }
             }
-            HirExpr::TypeAssertion { expr, target } => {
+            HirExpr::TypeAssertion { expr, target, .. } => {
                 let inner =
                     self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let _ = target;
                 inner
             }
-            HirExpr::Assignment { target, value, ty } => {
+            HirExpr::Assignment {
+                target, value, ty, ..
+            } => {
                 let target_mir = self.convert_expr(
                     target,
                     out,
@@ -707,6 +718,7 @@ impl ExprConverter {
                 rhs,
                 post,
                 ty,
+                ..
             } => {
                 let target_mir = self.convert_expr(
                     target,

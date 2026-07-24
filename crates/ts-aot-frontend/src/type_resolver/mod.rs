@@ -104,26 +104,34 @@ pub(crate) fn resolve_simple_type(
             }
             Some(types.intern(&Type::Error))
         }
-        TSType::TSUnionType(u) => {
-            aggregate::resolve_union(&u.types, types, aliases, type_params, &mut diagnostics)
-        }
-        TSType::TSIntersectionType(i) => {
-            aggregate::resolve_intersection(&i.types, types, aliases, type_params, &mut diagnostics)
-        }
-        TSType::TSTupleType(t) => aggregate::resolve_tuple(
+        TSType::TSUnionType(u) => Some(aggregate::resolve_union(
+            &u.types,
+            types,
+            aliases,
+            type_params,
+            &mut diagnostics,
+        )),
+        TSType::TSIntersectionType(i) => Some(aggregate::resolve_intersection(
+            &i.types,
+            types,
+            aliases,
+            type_params,
+            &mut diagnostics,
+        )),
+        TSType::TSTupleType(t) => Some(aggregate::resolve_tuple(
             &t.element_types,
             types,
             aliases,
             type_params,
             &mut diagnostics,
-        ),
-        TSType::TSArrayType(a) => aggregate::resolve_array(
+        )),
+        TSType::TSArrayType(a) => Some(aggregate::resolve_array(
             &a.element_type,
             types,
             aliases,
             type_params,
             &mut diagnostics,
-        ),
+        )),
         TSType::TSFunctionType(f) => {
             function::resolve_function(f, types, aliases, type_params, &mut diagnostics)
         }

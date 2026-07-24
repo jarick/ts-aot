@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, ModuleId, Severity, TypeId, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Severity, Span, TypeId, TypeTable};
 use ts_aot_ir_hir::{
     HirCatchClause, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase,
 };
@@ -11,12 +11,14 @@ fn lower_generators_creates_dispatch_function_for_simple_yield() {
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let yield_stmt = HirStmt::Expr {
         expr: HirExpr::Yield {
-            expr: Some(Box::new(HirExpr::Int(1))),
+            expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
             ty: i64_ty,
+
+            span: Span::default(),
         },
     };
     let return_stmt = HirStmt::Return {
-        value: Some(HirExpr::Int(2)),
+        value: Some(HirExpr::Int(2, Span::default())),
     };
     push_generator(&mut hir, "gen", i64_ty, vec![yield_stmt, return_stmt]);
 
@@ -58,7 +60,7 @@ fn lower_generators_skips_non_generator_functions() {
         ret: i64_ty,
         throws: None,
         body: vec![HirStmt::Return {
-            value: Some(HirExpr::Int(0)),
+            value: Some(HirExpr::Int(0, Span::default())),
         }],
         is_async: false,
         is_generator: false,
@@ -82,11 +84,13 @@ fn lower_generators_rejects_yield_inside_if_with_diagnostic() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let if_with_yield = HirStmt::If {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         then: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(1))),
+                expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
         otherwise: None,
@@ -125,11 +129,13 @@ fn lower_generators_rejects_yield_inside_while_with_diagnostic() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let while_with_yield = HirStmt::While {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         body: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(7))),
+                expr: Some(Box::new(HirExpr::Int(7, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
     };
@@ -159,11 +165,13 @@ fn lower_generators_rejects_yield_inside_dowhile() {
     let stmt = HirStmt::DoWhile {
         body: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(1))),
+                expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
     };
     push_generator(
         &mut hir,
@@ -187,11 +195,13 @@ fn lower_generators_rejects_yield_inside_forof() {
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let stmt = HirStmt::ForOf {
         binding: ts_aot_core::LocalId::from_raw(0),
-        iter: HirExpr::Unit,
+        iter: HirExpr::Unit(Span::default()),
         body: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(1))),
+                expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
     };
@@ -217,11 +227,13 @@ fn lower_generators_rejects_yield_inside_forin() {
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let stmt = HirStmt::ForIn {
         binding: ts_aot_core::LocalId::from_raw(0),
-        iter: HirExpr::Unit,
+        iter: HirExpr::Unit(Span::default()),
         body: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(1))),
+                expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
     };
@@ -246,16 +258,18 @@ fn lower_generators_rejects_yield_inside_switch_case() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let case = HirSwitchCase::new(
-        Some(HirExpr::Int(1)),
+        Some(HirExpr::Int(1, Span::default())),
         vec![HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(9))),
+                expr: Some(Box::new(HirExpr::Int(9, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }],
     );
     let stmt = HirStmt::Switch {
-        disc: HirExpr::Int(0),
+        disc: HirExpr::Int(0, Span::default()),
         cases: vec![case],
     };
     push_generator(
@@ -281,8 +295,10 @@ fn lower_generators_rejects_yield_inside_try_body() {
     let stmt = HirStmt::Try {
         body: Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(1))),
+                expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }),
         catch: None,
@@ -314,8 +330,10 @@ fn lower_generators_rejects_yield_inside_catch_clause() {
             None,
             Box::new(HirStmt::Expr {
                 expr: HirExpr::Yield {
-                    expr: Some(Box::new(HirExpr::Int(2))),
+                    expr: Some(Box::new(HirExpr::Int(2, Span::default()))),
                     ty: i64_ty,
+
+                    span: Span::default(),
                 },
             }),
         )),
@@ -341,8 +359,10 @@ fn lower_generators_rejects_yield_inside_finally_clause() {
         catch: None,
         finally: Some(Box::new(HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(3))),
+                expr: Some(Box::new(HirExpr::Int(3, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         })),
     };
@@ -362,12 +382,12 @@ fn lower_generators_preserves_non_yield_if_inside_state_block() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let stmt = HirStmt::If {
-        cond: HirExpr::Bool(true),
+        cond: HirExpr::Bool(true, Span::default()),
         then: Box::new(HirStmt::Expr {
-            expr: HirExpr::Int(0),
+            expr: HirExpr::Int(0, Span::default()),
         }),
         otherwise: Some(Box::new(HirStmt::Expr {
-            expr: HirExpr::Int(1),
+            expr: HirExpr::Int(1, Span::default()),
         })),
     };
     push_generator(
@@ -409,9 +429,9 @@ fn lower_generators_preserves_non_yield_while_inside_state_block() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let stmt = HirStmt::While {
-        cond: HirExpr::Bool(false),
+        cond: HirExpr::Bool(false, Span::default()),
         body: Box::new(HirStmt::Expr {
-            expr: HirExpr::Int(0),
+            expr: HirExpr::Int(0, Span::default()),
         }),
     };
     push_generator(
@@ -454,12 +474,14 @@ fn lower_generators_finds_yield_inside_nested_block() {
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let nested_block = HirStmt::Block(vec![
         HirStmt::Expr {
-            expr: HirExpr::Int(0),
+            expr: HirExpr::Int(0, Span::default()),
         },
         HirStmt::Expr {
             expr: HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(42))),
+                expr: Some(Box::new(HirExpr::Int(42, Span::default()))),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         },
     ]);
@@ -494,18 +516,22 @@ fn lower_generators_dispatch_body_has_state_branches() {
         vec![
             HirStmt::Expr {
                 expr: HirExpr::Yield {
-                    expr: Some(Box::new(HirExpr::Int(1))),
+                    expr: Some(Box::new(HirExpr::Int(1, Span::default()))),
                     ty: i64_ty,
+
+                    span: Span::default(),
                 },
             },
             HirStmt::Expr {
                 expr: HirExpr::Yield {
-                    expr: Some(Box::new(HirExpr::Int(2))),
+                    expr: Some(Box::new(HirExpr::Int(2, Span::default()))),
                     ty: i64_ty,
+
+                    span: Span::default(),
                 },
             },
             HirStmt::Return {
-                value: Some(HirExpr::Int(3)),
+                value: Some(HirExpr::Int(3, Span::default())),
             },
         ],
     );

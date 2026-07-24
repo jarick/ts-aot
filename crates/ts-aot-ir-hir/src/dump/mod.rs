@@ -113,7 +113,7 @@ mod tests {
     use super::*;
     use crate::decl::{HirClass, HirDecl, HirField, HirFunction};
     use crate::program::HirProgram;
-    use ts_aot_core::{Atom, ModuleId, TypeId};
+    use ts_aot_core::{Atom, ModuleId, Span, TypeId};
 
     fn empty_func(name: &str) -> HirFunction {
         HirFunction {
@@ -266,7 +266,7 @@ mod tests {
                 },
                 HirEnumVariant {
                     name: Atom::new_inline("Green"),
-                    value: Some(HirExpr::Int(0)),
+                    value: Some(HirExpr::Int(0, Span::default())),
                 },
             ],
         });
@@ -359,12 +359,17 @@ mod tests {
             throws: None,
             body: vec![HirStmt::ret(Some(HirExpr::Binary {
                 op: crate::expr::HirBinaryOp::Add,
-                lhs: Box::new(HirExpr::String(Atom::new_inline("Hello, "))),
+                lhs: Box::new(HirExpr::String(
+                    Atom::new_inline("Hello, "),
+                    Span::default(),
+                )),
                 rhs: Box::new(HirExpr::Local {
                     id: ts_aot_core::LocalId::from_raw(0),
                     ty: TypeId::from_raw(1),
+                    span: Span::default(),
                 }),
                 ty: TypeId::from_raw(2),
+                span: Span::default(),
             }))],
             is_async: false,
             is_generator: false,

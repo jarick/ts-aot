@@ -69,18 +69,22 @@ pub fn lower_generators(
             let cond = HirExpr::Binary {
                 op: HirBinaryOp::Eq,
                 lhs: Box::new(HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                        span: Span::default(),
                         name: Atom::new_inline(GENERATOR_GET_STATE_NAME),
                         ty: type_id_zero,
                     })),
                     args: vec![HirExpr::Local {
+                        span: Span::default(),
                         id: LocalId::from_raw(0),
                         ty: generator_ty,
                     }],
                     ty: type_id_zero,
                 }),
-                rhs: Box::new(HirExpr::Int(state as i64)),
+                rhs: Box::new(HirExpr::Int(state as i64, Span::default())),
                 ty: type_id_zero,
+                span: Span::default(),
             };
             let mut then_stmts: Vec<HirStmt> = block.0.clone();
             match &block.1 {
@@ -89,12 +93,15 @@ pub fn lower_generators(
                     if let Some(value_expr) = expr_opt.clone() {
                         then_stmts.push(HirStmt::Expr {
                             expr: HirExpr::Call {
+                                span: Span::default(),
                                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                    span: Span::default(),
                                     name: Atom::new_inline(GENERATOR_STORE_NAME),
                                     ty: type_id_zero,
                                 })),
                                 args: vec![
                                     HirExpr::Local {
+                                        span: Span::default(),
                                         id: LocalId::from_raw(0),
                                         ty: generator_ty,
                                     },
@@ -106,27 +113,33 @@ pub fn lower_generators(
                     }
                     then_stmts.push(HirStmt::Expr {
                         expr: HirExpr::Call {
+                            span: Span::default(),
                             callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                span: Span::default(),
                                 name: Atom::new_inline(GENERATOR_SET_STATE_NAME),
                                 ty: type_id_zero,
                             })),
                             args: vec![
                                 HirExpr::Local {
+                                    span: Span::default(),
                                     id: LocalId::from_raw(0),
                                     ty: generator_ty,
                                 },
-                                HirExpr::Int(next_state as i64),
+                                HirExpr::Int(next_state as i64, Span::default()),
                             ],
                             ty: type_id_zero,
                         },
                     });
                     then_stmts.push(HirStmt::Return {
                         value: Some(HirExpr::Call {
+                            span: Span::default(),
                             callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                span: Span::default(),
                                 name: Atom::new_inline(GENERATOR_YIELDED_NAME),
                                 ty: result_ty,
                             })),
                             args: vec![HirExpr::Local {
+                                span: Span::default(),
                                 id: LocalId::from_raw(0),
                                 ty: generator_ty,
                             }],
@@ -137,23 +150,28 @@ pub fn lower_generators(
                 BlockEnd::Return(ret_expr) => {
                     then_stmts.push(HirStmt::Expr {
                         expr: HirExpr::Call {
+                            span: Span::default(),
                             callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                span: Span::default(),
                                 name: Atom::new_inline(GENERATOR_SET_STATE_NAME),
                                 ty: type_id_zero,
                             })),
                             args: vec![
                                 HirExpr::Local {
+                                    span: Span::default(),
                                     id: LocalId::from_raw(0),
                                     ty: generator_ty,
                                 },
-                                HirExpr::Int(u32::MAX as i64),
+                                HirExpr::Int(u32::MAX as i64, Span::default()),
                             ],
                             ty: type_id_zero,
                         },
                     });
                     let return_call = if let Some(ret_expr) = ret_expr.as_ref() {
                         HirExpr::Call {
+                            span: Span::default(),
                             callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                span: Span::default(),
                                 name: Atom::new_inline(GENERATOR_DONE_WITH_NAME),
                                 ty: result_ty,
                             })),
@@ -162,7 +180,9 @@ pub fn lower_generators(
                         }
                     } else {
                         HirExpr::Call {
+                            span: Span::default(),
                             callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                span: Span::default(),
                                 name: Atom::new_inline(GENERATOR_DONE_NAME),
                                 ty: result_ty,
                             })),
@@ -203,11 +223,14 @@ pub fn lower_generators(
         let _ = FunctionId::from_raw(0);
         let constructor_body = vec![HirStmt::Return {
             value: Some(HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    span: Span::default(),
                     name: Atom::new_inline(GENERATOR_NEW_RUNTIME_NAME),
                     ty: generator_ty,
                 })),
                 args: vec![HirExpr::Global {
+                    span: Span::default(),
                     name: dispatch_name,
                     ty: generator_ty,
                 }],

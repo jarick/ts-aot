@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, ModuleId, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 use ts_aot_passes::{PassContext, convert_program, lower_async};
@@ -12,9 +12,13 @@ fn await_promise_resolve_call(
     let resolve_sym = Atom::new_inline("resolve");
     let promise_ty = types.intern(&ts_aot_core::Type::I64);
     HirExpr::Await {
+        span: Span::default(),
         expr: Box::new(HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                span: Span::default(),
                 owner: Box::new(HirExpr::Global {
+                    span: Span::default(),
                     name: promise_sym,
                     ty: promise_ty,
                 }),
@@ -42,7 +46,7 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(await_promise_resolve_call(
-                HirExpr::Int(42),
+                HirExpr::Int(42, Span::default()),
                 typed_id,
                 &mut types,
             )),
@@ -97,8 +101,11 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Await {
+                span: Span::default(),
                 expr: Box::new(HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                        span: Span::default(),
                         name: callee_sym,
                         ty: typed_id,
                     })),

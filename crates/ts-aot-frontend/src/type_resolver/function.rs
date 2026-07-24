@@ -17,8 +17,7 @@ pub(super) fn resolve_function(
     if f.params.rest.is_some() {
         return Some(types.intern(&Type::Error));
     }
-    let params =
-        resolve_function_params(&f.params.items, types, aliases, type_params, diagnostics)?;
+    let params = resolve_function_params(&f.params.items, types, aliases, type_params, diagnostics);
     let ret = resolve_function_return(&f.return_type, types, aliases, type_params, diagnostics)?;
     Some(types.intern(&Type::Fn {
         params,
@@ -62,7 +61,7 @@ fn resolve_function_params(
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Option<Vec<TypeId>> {
+) -> Vec<TypeId> {
     let mut out: Vec<TypeId> = Vec::with_capacity(items.len());
     for p in items {
         if let Some(ann) = p.type_annotation.as_deref() {
@@ -72,7 +71,8 @@ fn resolve_function_params(
                 aliases,
                 type_params,
                 diagnostics.as_deref_mut(),
-            )?;
+            )
+            .unwrap_or_else(|| types.intern(&Type::Error));
             out.push(id);
         } else {
             if let Some(diag) = diagnostics.as_deref_mut() {
@@ -85,7 +85,7 @@ fn resolve_function_params(
             out.push(types.intern(&Type::Error));
         }
     }
-    Some(out)
+    out
 }
 
 fn resolve_function_return(

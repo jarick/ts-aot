@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 use ts_aot_passes::{PassContext, convert_program, lower_closures};
@@ -21,6 +21,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                 name: Atom::new_inline("add"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: Span::default(),
                     id: cb_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -29,6 +30,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -38,8 +40,9 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Closure(cb_local),
-                    args: vec![HirExpr::Int(7)],
+                    args: vec![HirExpr::Int(7, Span::default())],
                     ty: i64_ty,
                 },
             },
@@ -145,6 +148,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                 name: Atom::new_inline("add"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: Span::default(),
                     id: add_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -153,6 +157,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -165,6 +170,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                 name: Atom::new_inline("sub"),
                 ty: i64_ty,
                 init: Some(HirExpr::Closure {
+                    span: Span::default(),
                     id: sub_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("y"),
@@ -173,6 +179,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(2),
                             ty: i64_ty,
                         }),
@@ -182,15 +189,17 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Closure(add_local),
-                    args: vec![HirExpr::Int(3)],
+                    args: vec![HirExpr::Int(3, Span::default())],
                     ty: i64_ty,
                 },
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Closure(sub_local),
-                    args: vec![HirExpr::Int(2)],
+                    args: vec![HirExpr::Int(2, Span::default())],
                     ty: i64_ty,
                 },
             },
@@ -326,6 +335,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Local {
+                span: Span::default(),
                 id: LocalId::from_raw(1),
                 ty: i64_ty,
             }),
@@ -346,8 +356,10 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: vec![HirExpr::Closure {
+                    span: Span::default(),
                     id: cb_local,
                     params: vec![HirParam {
                         name: Atom::new_inline("x"),
@@ -356,6 +368,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
                     captures: Vec::new(),
                     body: vec![HirStmt::Return {
                         value: Some(HirExpr::Local {
+                            span: Span::default(),
                             id: LocalId::from_raw(1),
                             ty: i64_ty,
                         }),
@@ -439,6 +452,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
         name: closure_name.clone(),
         ty: i64_ty,
         init: Some(HirExpr::Closure {
+            span: Span::default(),
             id: closure_local,
             params: vec![HirParam {
                 name: Atom::from("x"),
@@ -447,6 +461,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
             captures: Vec::new(),
             body: vec![HirStmt::Return {
                 value: Some(HirExpr::Local {
+                    span: Span::default(),
                     id: LocalId::from_raw(1),
                     ty: i64_ty,
                 }),

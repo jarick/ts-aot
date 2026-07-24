@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, FunctionId, ModuleId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 use ts_aot_passes::{PassContext, convert_program};
@@ -18,11 +18,13 @@ fn convert_program_unresolved_global_name_falls_through_to_placeholder() {
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    span: Span::default(),
                     name: user_global_name.clone(),
                     ty: i64_ty,
                 })),
-                args: vec![HirExpr::Int(1)],
+                args: vec![HirExpr::Int(1, Span::default())],
                 ty: i64_ty,
             },
         }],
@@ -113,11 +115,13 @@ fn indirect_call_to_resolved_global_uses_direct_call_not_runtime_fallback() {
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    span: Span::default(),
                     name: Atom::new_inline("add"),
                     ty: i64_ty,
                 })),
-                args: vec![HirExpr::Int(1)],
+                args: vec![HirExpr::Int(1, Span::default())],
                 ty: i64_ty,
             },
         }],
@@ -171,16 +175,19 @@ fn indirect_call_to_non_global_callee_emits_p0005_warning_for_runtime_dispatch_f
         throws: None,
         body: vec![HirStmt::Expr {
             expr: HirExpr::Call {
+                span: Span::default(),
                 callee: HirCallee::Indirect(Box::new(HirExpr::Binary {
+                    span: Span::default(),
                     op: ts_aot_ir_hir::HirBinaryOp::Add,
                     lhs: Box::new(HirExpr::Global {
+                        span: Span::default(),
                         name: Atom::new_inline("x"),
                         ty: i64_ty,
                     }),
-                    rhs: Box::new(HirExpr::Int(1)),
+                    rhs: Box::new(HirExpr::Int(1, Span::default())),
                     ty: i64_ty,
                 })),
-                args: vec![HirExpr::Int(2)],
+                args: vec![HirExpr::Int(2, Span::default())],
                 ty: i64_ty,
             },
         }],

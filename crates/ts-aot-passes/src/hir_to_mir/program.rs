@@ -455,23 +455,23 @@ fn throw_expr_type(expr: &HirExpr) -> TypeId {
 
 fn lower_global_init(init: &HirExpr, ctx: &mut PassContext) -> Option<MirExpr> {
     let mir_init = match init {
-        HirExpr::Int(v) => MirExpr::Int {
+        HirExpr::Int(v, _) => MirExpr::Int {
             value: i128::from(*v),
             ty: TypeId::from_raw(0),
         },
-        HirExpr::Float(bits) => MirExpr::Float {
+        HirExpr::Float(bits, _) => MirExpr::Float {
             value: f64::from_bits(*bits),
             ty: TypeId::from_raw(0),
         },
-        HirExpr::Bool(b) => MirExpr::Bool(*b),
-        HirExpr::String(id) => MirExpr::String {
+        HirExpr::Bool(b, _) => MirExpr::Bool(*b),
+        HirExpr::String(id, _) => MirExpr::String {
             id: id.clone(),
             ty: TypeId::from_raw(0),
         },
-        HirExpr::Null => MirExpr::Null {
+        HirExpr::Null(_) => MirExpr::Null {
             ty: TypeId::from_raw(0),
         },
-        HirExpr::Undefined | HirExpr::Unit => MirExpr::Unit,
+        HirExpr::Undefined(_) | HirExpr::Unit(_) => MirExpr::Unit,
         HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),
         other => {
             ctx.warning(

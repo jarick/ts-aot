@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, ModuleId, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirEnumVariant, HirExpr, HirFunction, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirGlobalDecl, MirStmt};
 use ts_aot_passes::{PassContext, convert_program, lower_enums};
@@ -8,7 +8,7 @@ fn build_enum_decl(name: &str, variants: Vec<(&str, Option<i64>)>) -> HirDecl {
         .into_iter()
         .map(|(n, v)| HirEnumVariant {
             name: Atom::new_inline(n),
-            value: v.map(HirExpr::Int),
+            value: v.map(|v| HirExpr::Int(v, Span::default())),
         })
         .collect();
     HirDecl::Enum {
@@ -26,7 +26,7 @@ fn build_enum_decl_returning_sym(
         .into_iter()
         .map(|(n, v)| HirEnumVariant {
             name: Atom::new_inline(n),
-            value: v.map(HirExpr::Int),
+            value: v.map(|v| HirExpr::Int(v, Span::default())),
         })
         .collect();
     (
@@ -149,10 +149,14 @@ fn enum_member_use_in_function_body_is_rewritten_to_namespaced_global() {
                 owner: Box::new(HirExpr::Global {
                     name: color_sym.clone(),
                     ty: typed_id,
+
+                    span: Span::default(),
                 }),
                 field: ts_aot_core::FieldId::from_raw(0),
                 field_name: green_name.clone(),
                 ty: typed_id,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,

@@ -71,12 +71,12 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::BigInt { ty, .. }
         | HirExpr::Import { ty, .. } => Some(*ty),
         HirExpr::TypeAssertion { target, .. } => Some(*target),
-        HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Bool(_)
-        | HirExpr::Null
-        | HirExpr::Unit
-        | HirExpr::Undefined => None,
+        HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Unit(_)
+        | HirExpr::Undefined(_) => None,
     }
 }

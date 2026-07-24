@@ -1,5 +1,5 @@
 use ts_aot_backend::emit_decls;
-use ts_aot_core::{Atom, ModuleId, Type, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, Type, TypeTable};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirUnaryOp,
 };
@@ -20,8 +20,10 @@ fn end_to_end_typeof_int_literal_emits_runtime_typeof_call() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Unary {
                 op: HirUnaryOp::TypeOf,
-                expr: Box::new(HirExpr::Int(42)),
+                expr: Box::new(HirExpr::Int(42, Span::default())),
                 ty: string_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -89,8 +91,10 @@ fn end_to_end_typeof_unit_emits_typeof_unit_helper() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Unary {
                 op: HirUnaryOp::TypeOf,
-                expr: Box::new(HirExpr::Undefined),
+                expr: Box::new(HirExpr::Undefined(Span::default())),
                 ty: string_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -141,8 +145,10 @@ fn end_to_end_typeof_null_emits_typeof_null_helper() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Unary {
                 op: HirUnaryOp::TypeOf,
-                expr: Box::new(HirExpr::Null),
+                expr: Box::new(HirExpr::Null(Span::default())),
                 ty: string_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -193,8 +199,10 @@ fn end_to_end_void_call_drops_result_to_unit() {
         body: vec![HirStmt::Expr {
             expr: HirExpr::Unary {
                 op: HirUnaryOp::Void,
-                expr: Box::new(HirExpr::Int(7)),
+                expr: Box::new(HirExpr::Int(7, Span::default())),
                 ty: i64_ty,
+
+                span: Span::default(),
             },
         }],
         is_async: false,
@@ -234,8 +242,10 @@ fn end_to_end_delete_non_property_returns_true() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Unary {
                 op: HirUnaryOp::Delete,
-                expr: Box::new(HirExpr::Int(7)),
+                expr: Box::new(HirExpr::Int(7, Span::default())),
                 ty: bool_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -280,9 +290,11 @@ fn end_to_end_in_emits_runtime_call() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Binary {
                 op: HirBinaryOp::In,
-                lhs: Box::new(HirExpr::String(Atom::new_inline("foo"))),
-                rhs: Box::new(HirExpr::Int(0)),
+                lhs: Box::new(HirExpr::String(Atom::new_inline("foo"), Span::default())),
+                rhs: Box::new(HirExpr::Int(0, Span::default())),
                 ty: bool_ty,
+
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -349,12 +361,15 @@ fn end_to_end_instanceof_preserves_rhs_and_dispatches_real_check() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Binary {
                 op: HirBinaryOp::InstanceOf,
-                lhs: Box::new(HirExpr::Int(0)),
+                lhs: Box::new(HirExpr::Int(0, Span::default())),
                 rhs: Box::new(HirExpr::Global {
                     name: Atom::new_inline("Object"),
                     ty: i64_ty,
+
+                    span: Span::default(),
                 }),
                 ty: bool_ty,
+                span: Span::default(),
             }),
         }],
         is_async: false,
@@ -439,16 +454,21 @@ fn end_to_end_instanceof_side_effectful_rhs_is_preserved() {
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Binary {
                 op: HirBinaryOp::InstanceOf,
-                lhs: Box::new(HirExpr::Int(0)),
+                lhs: Box::new(HirExpr::Int(0, Span::default())),
                 rhs: Box::new(HirExpr::Call {
                     callee: HirCallee::Indirect(Box::new(HirExpr::Global {
                         name: Atom::new_inline("ctor"),
                         ty: i64_ty,
+
+                        span: Span::default(),
                     })),
                     args: Vec::new(),
                     ty: i64_ty,
+
+                    span: Span::default(),
                 }),
                 ty: bool_ty,
+                span: Span::default(),
             }),
         }],
         is_async: false,

@@ -189,20 +189,23 @@ fn dump_catch(catch: &HirCatchClause, d: &mut Dumper) {
 
 pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
     match expr {
-        HirExpr::Unit => d.write("()"),
-        HirExpr::Bool(v) => d.write(if *v { "true" } else { "false" }),
-        HirExpr::Int(v) => d.write(&format!("{v}")),
-        HirExpr::Float(bits) => d.write(&format!("float({bits})")),
-        HirExpr::String(atom) => d.write(&format!("string({:?})", atom.as_str())),
-        HirExpr::Null => d.write("null"),
-        HirExpr::Undefined => d.write("undefined"),
-        HirExpr::Local { id, ty } => d.write(&format!("local({}):{}", id.raw(), ty.raw())),
-        HirExpr::Global { name, ty } => d.write(&format!("global({}):{}", name.as_str(), ty.raw())),
+        HirExpr::Unit(_) => d.write("()"),
+        HirExpr::Bool(v, _) => d.write(if *v { "true" } else { "false" }),
+        HirExpr::Int(v, _) => d.write(&format!("{v}")),
+        HirExpr::Float(bits, _) => d.write(&format!("float({bits})")),
+        HirExpr::String(atom, _) => d.write(&format!("string({:?})", atom.as_str())),
+        HirExpr::Null(_) => d.write("null"),
+        HirExpr::Undefined(_) => d.write("undefined"),
+        HirExpr::Local { id, ty, .. } => d.write(&format!("local({}):{}", id.raw(), ty.raw())),
+        HirExpr::Global { name, ty, .. } => {
+            d.write(&format!("global({}):{}", name.as_str(), ty.raw()))
+        }
         HirExpr::Field {
             owner,
             field,
             field_name,
             ty,
+            ..
         } => {
             dump_expr_inline(owner, d);
             d.write(&format!(
@@ -212,13 +215,17 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
                 ty.raw()
             ));
         }
-        HirExpr::Index { owner, index, ty } => {
+        HirExpr::Index {
+            owner, index, ty, ..
+        } => {
             dump_expr_inline(owner, d);
             d.write("[");
             dump_expr_inline(index, d);
             d.write(&format!("]:{}", ty.raw()));
         }
-        HirExpr::Call { callee, args, ty } => {
+        HirExpr::Call {
+            callee, args, ty, ..
+        } => {
             dump_callee(callee, d);
             d.write("(");
             for (i, arg) in args.iter().enumerate() {
@@ -229,19 +236,21 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::Binary { op, lhs, rhs, ty } => {
+        HirExpr::Binary {
+            op, lhs, rhs, ty, ..
+        } => {
             d.write("(");
             dump_expr_inline(lhs, d);
             d.write(&format!(" {} ", fmt_bin_op(*op)));
             dump_expr_inline(rhs, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::Unary { op, expr, ty } => {
+        HirExpr::Unary { op, expr, ty, .. } => {
             d.write(&format!("{}(", fmt_un_op(*op)));
             dump_expr_inline(expr, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::StructLiteral { ty, fields } => {
+        HirExpr::StructLiteral { ty, fields, .. } => {
             d.write("struct{");
             for (i, (fid, val)) in fields.iter().enumerate() {
                 if i > 0 {
@@ -252,7 +261,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("}}:{}", ty.raw()));
         }
-        HirExpr::ObjectLiteral { fields, ty } => {
+        HirExpr::ObjectLiteral { fields, ty, .. } => {
             d.write("{");
             for (i, field) in fields.iter().enumerate() {
                 if i > 0 {
@@ -276,6 +285,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             then_branch,
             else_branch,
             ty,
+            ..
         } => {
             d.write("ternary(");
             dump_expr_inline(cond, d);
@@ -285,7 +295,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             dump_expr_inline(else_branch, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::ArrayLiteral { elements, ty } => {
+        HirExpr::ArrayLiteral { elements, ty, .. } => {
             d.write("[");
             for (i, e) in elements.iter().enumerate() {
                 if i > 0 {
@@ -301,6 +311,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             captures,
             body,
             ty,
+            ..
         } => {
             d.write(&format!("closure(id={})[", id.raw()));
             for (i, p) in params.iter().enumerate() {
@@ -320,12 +331,12 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             dump_inline_body(body, d);
             d.write(&format!(":{}", ty.raw()));
         }
-        HirExpr::Await { expr, ty } => {
+        HirExpr::Await { expr, ty, .. } => {
             d.write("await(");
             dump_expr_inline(expr, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::Yield { expr, ty } => {
+        HirExpr::Yield { expr, ty, .. } => {
             d.write("yield(");
             if let Some(e) = expr {
                 dump_expr_inline(e, d);
@@ -340,6 +351,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             cooked_parts,
             raw_parts,
             ty,
+            ..
         } => {
             match tag {
                 Some(t) => {
@@ -384,7 +396,9 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("]:{}", ty.raw()));
         }
-        HirExpr::New { callee, args, ty } => {
+        HirExpr::New {
+            callee, args, ty, ..
+        } => {
             d.write("new ");
             dump_expr_inline(callee, d);
             d.write("(");
@@ -396,18 +410,20 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::OptionalChain { base, ty } => {
+        HirExpr::OptionalChain { base, ty, .. } => {
             d.write("opt(");
             dump_expr_inline(base, d);
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::TypeAssertion { expr, target } => {
+        HirExpr::TypeAssertion { expr, target, .. } => {
             d.write("assert<");
             d.write(&format!("{}>(", target.raw()));
             dump_expr_inline(expr, d);
             d.write(")");
         }
-        HirExpr::Assignment { target, value, ty } => {
+        HirExpr::Assignment {
+            target, value, ty, ..
+        } => {
             d.write("assign(");
             dump_expr_inline(target, d);
             d.write(" = ");
@@ -420,6 +436,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             rhs,
             post,
             ty,
+            ..
         } => {
             d.write("compound_update(");
             dump_expr_inline(target, d);
@@ -427,7 +444,7 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             dump_expr_inline(rhs, d);
             d.write(&format!(", post={}):{}", post, ty.raw()));
         }
-        HirExpr::Sequence { exprs, ty } => {
+        HirExpr::Sequence { exprs, ty, .. } => {
             d.write("seq(");
             for (i, e) in exprs.iter().enumerate() {
                 if i > 0 {
@@ -437,16 +454,18 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
             }
             d.write(&format!("):{}", ty.raw()));
         }
-        HirExpr::RegExp { pattern, flags, ty } => d.write(&format!(
+        HirExpr::RegExp {
+            pattern, flags, ty, ..
+        } => d.write(&format!(
             "regexp({:?}, {:?}):{}",
             pattern.as_str(),
             flags.as_str(),
             ty.raw()
         )),
-        HirExpr::BigInt { value, ty } => {
+        HirExpr::BigInt { value, ty, .. } => {
             d.write(&format!("bigint({:?}):{}", value.as_str(), ty.raw()))
         }
-        HirExpr::Import { source, ty } => {
+        HirExpr::Import { source, ty, .. } => {
             d.write("import(");
             dump_expr_inline(source, d);
             d.write(&format!("):{}", ty.raw()));
@@ -517,7 +536,7 @@ mod tests {
     use super::*;
     use crate::decl::{HirDecl, HirFunction};
     use crate::program::HirProgram;
-    use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, TypeId};
+    use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId};
 
     fn wrap(stmts: Vec<HirStmt>) -> HirStmt {
         HirStmt::Block(stmts)
@@ -571,7 +590,7 @@ mod tests {
             LocalId::from_raw(2),
             Atom::new_inline("y"),
             TypeId::from_raw(3),
-            Some(HirExpr::Int(42)),
+            Some(HirExpr::Int(42, Span::default())),
         );
         let text = dump(vec![s]);
         assert!(text.contains("let y (id=2): 3 = 42"));
@@ -579,16 +598,19 @@ mod tests {
 
     #[test]
     fn dump_expr_stmt() {
-        let text = dump(vec![HirStmt::expr(HirExpr::Int(7))]);
+        let text = dump(vec![HirStmt::expr(HirExpr::Int(7, Span::default()))]);
         assert!(text.contains("expr 7"));
     }
 
     #[test]
     fn dump_if_stmt_with_else() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(true),
+            cond: HirExpr::Bool(true, Span::default()),
             then: Box::new(HirStmt::ret(None)),
-            otherwise: Some(Box::new(HirStmt::ret(Some(HirExpr::Int(0))))),
+            otherwise: Some(Box::new(HirStmt::ret(Some(HirExpr::Int(
+                0,
+                Span::default(),
+            ))))),
         };
         let text = dump(vec![s]);
         assert!(text.contains("if (true)"));
@@ -599,7 +621,7 @@ mod tests {
     #[test]
     fn dump_if_stmt_without_else() {
         let s = HirStmt::If {
-            cond: HirExpr::Bool(false),
+            cond: HirExpr::Bool(false, Span::default()),
             then: Box::new(HirStmt::ret(None)),
             otherwise: None,
         };
@@ -610,8 +632,8 @@ mod tests {
     #[test]
     fn dump_while_stmt() {
         let s = HirStmt::While {
-            cond: HirExpr::Bool(true),
-            body: Box::new(HirStmt::expr(HirExpr::Unit)),
+            cond: HirExpr::Bool(true, Span::default()),
+            body: Box::new(HirStmt::expr(HirExpr::Unit(Span::default()))),
         };
         let text = dump(vec![s]);
         assert!(text.contains("while (true)"));
@@ -621,7 +643,7 @@ mod tests {
     fn dump_dowhile_stmt() {
         let s = HirStmt::DoWhile {
             body: Box::new(HirStmt::ret(None)),
-            cond: HirExpr::Bool(false),
+            cond: HirExpr::Bool(false, Span::default()),
         };
         let text = dump(vec![s]);
         assert!(text.contains("do {"));
@@ -632,8 +654,8 @@ mod tests {
     fn dump_for_of_stmt() {
         let s = HirStmt::ForOf {
             binding: LocalId::from_raw(1),
-            iter: HirExpr::Unit,
-            body: Box::new(HirStmt::expr(HirExpr::Unit)),
+            iter: HirExpr::Unit(Span::default()),
+            body: Box::new(HirStmt::expr(HirExpr::Unit(Span::default()))),
         };
         let text = dump(vec![s]);
         assert!(text.contains("for_of (id=1) in"));
@@ -643,8 +665,8 @@ mod tests {
     fn dump_for_in_stmt() {
         let s = HirStmt::ForIn {
             binding: LocalId::from_raw(2),
-            iter: HirExpr::Unit,
-            body: Box::new(HirStmt::expr(HirExpr::Unit)),
+            iter: HirExpr::Unit(Span::default()),
+            body: Box::new(HirStmt::expr(HirExpr::Unit(Span::default()))),
         };
         let text = dump(vec![s]);
         assert!(text.contains("for_in (id=2) in"));
@@ -653,9 +675,9 @@ mod tests {
     #[test]
     fn dump_switch_stmt() {
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases: vec![HirSwitchCase::new(
-                Some(HirExpr::Int(1)),
+                Some(HirExpr::Int(1, Span::default())),
                 vec![HirStmt::ret(None)],
             )],
         };
@@ -672,14 +694,14 @@ mod tests {
 
     #[test]
     fn dump_return_with_value() {
-        let text = dump(vec![HirStmt::ret(Some(HirExpr::Int(5)))]);
+        let text = dump(vec![HirStmt::ret(Some(HirExpr::Int(5, Span::default())))]);
         assert!(text.contains("return 5"));
     }
 
     #[test]
     fn dump_throw_stmt() {
         let text = dump(vec![HirStmt::Throw {
-            expr: HirExpr::Int(8),
+            expr: HirExpr::Int(8, Span::default()),
         }]);
         assert!(text.contains("throw 8"));
     }
@@ -752,48 +774,51 @@ mod tests {
     #[test]
     fn dump_unit_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Unit, &mut d);
+        dump_expr_inline(&HirExpr::Unit(Span::default()), &mut d);
         assert_eq!(d.buf, "()");
     }
 
     #[test]
     fn dump_bool_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Bool(true), &mut d);
+        dump_expr_inline(&HirExpr::Bool(true, Span::default()), &mut d);
         assert_eq!(d.buf, "true");
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Bool(false), &mut d);
+        dump_expr_inline(&HirExpr::Bool(false, Span::default()), &mut d);
         assert_eq!(d.buf, "false");
     }
 
     #[test]
     fn dump_int_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Int(123), &mut d);
+        dump_expr_inline(&HirExpr::Int(123, Span::default()), &mut d);
         assert_eq!(d.buf, "123");
     }
 
     #[test]
     fn dump_float_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Float(7), &mut d);
+        dump_expr_inline(&HirExpr::Float(7, Span::default()), &mut d);
         assert!(d.buf.contains("float(7)"));
     }
 
     #[test]
     fn dump_string_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::String(Atom::new_inline("hello")), &mut d);
+        dump_expr_inline(
+            &HirExpr::String(Atom::new_inline("hello"), Span::default()),
+            &mut d,
+        );
         assert!(d.buf.contains("string(\"hello\")"));
     }
 
     #[test]
     fn dump_null_and_undefined_expr() {
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Null, &mut d);
+        dump_expr_inline(&HirExpr::Null(Span::default()), &mut d);
         assert_eq!(d.buf, "null");
         let mut d = Dumper::new();
-        dump_expr_inline(&HirExpr::Undefined, &mut d);
+        dump_expr_inline(&HirExpr::Undefined(Span::default()), &mut d);
         assert_eq!(d.buf, "undefined");
     }
 
@@ -804,6 +829,7 @@ mod tests {
             &HirExpr::Local {
                 id: LocalId::from_raw(4),
                 ty: TypeId::from_raw(7),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -817,6 +843,7 @@ mod tests {
             &HirExpr::Global {
                 name: Atom::new_inline("MyG"),
                 ty: TypeId::from_raw(2),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -831,10 +858,12 @@ mod tests {
                 owner: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: TypeId::from_raw(1),
+                    span: Span::default(),
                 }),
                 field: FieldId::from_raw(2),
                 field_name: Atom::new_inline("name"),
                 ty: TypeId::from_raw(3),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -850,9 +879,11 @@ mod tests {
                 owner: Box::new(HirExpr::Local {
                     id: LocalId::from_raw(0),
                     ty: TypeId::from_raw(1),
+                    span: Span::default(),
                 }),
-                index: Box::new(HirExpr::Int(2)),
+                index: Box::new(HirExpr::Int(2, Span::default())),
                 ty: TypeId::from_raw(3),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -866,8 +897,12 @@ mod tests {
         dump_expr_inline(
             &HirExpr::Call {
                 callee: HirCallee::Function(FunctionId::from_raw(5)),
-                args: vec![HirExpr::Int(1), HirExpr::Bool(true)],
+                args: vec![
+                    HirExpr::Int(1, Span::default()),
+                    HirExpr::Bool(true, Span::default()),
+                ],
                 ty: TypeId::from_raw(8),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -882,9 +917,11 @@ mod tests {
                 callee: HirCallee::Indirect(Box::new(HirExpr::Global {
                     name: Atom::new_inline("f"),
                     ty: TypeId::from_raw(0),
+                    span: Span::default(),
                 })),
                 args: vec![],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -899,6 +936,7 @@ mod tests {
                 callee: HirCallee::Closure(LocalId::from_raw(3)),
                 args: vec![],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -916,6 +954,7 @@ mod tests {
                 },
                 args: vec![],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -928,9 +967,10 @@ mod tests {
         dump_expr_inline(
             &HirExpr::Binary {
                 op: HirBinaryOp::Add,
-                lhs: Box::new(HirExpr::Int(1)),
-                rhs: Box::new(HirExpr::Int(2)),
+                lhs: Box::new(HirExpr::Int(1, Span::default())),
+                rhs: Box::new(HirExpr::Int(2, Span::default())),
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -943,8 +983,9 @@ mod tests {
         dump_expr_inline(
             &HirExpr::Unary {
                 op: HirUnaryOp::Neg,
-                expr: Box::new(HirExpr::Int(5)),
+                expr: Box::new(HirExpr::Int(5, Span::default())),
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -957,7 +998,8 @@ mod tests {
         dump_expr_inline(
             &HirExpr::StructLiteral {
                 ty: TypeId::from_raw(0),
-                fields: vec![(FieldId::from_raw(0), HirExpr::Int(7))],
+                fields: vec![(FieldId::from_raw(0), HirExpr::Int(7, Span::default()))],
+                span: Span::default(),
             },
             &mut d,
         );
@@ -969,8 +1011,12 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::ArrayLiteral {
-                elements: vec![HirExpr::Int(1), HirExpr::Int(2)],
+                elements: vec![
+                    HirExpr::Int(1, Span::default()),
+                    HirExpr::Int(2, Span::default()),
+                ],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -987,9 +1033,10 @@ mod tests {
                     name: Atom::new_inline("a"),
                     ty: TypeId::from_raw(1),
                 }],
-                captures: vec![HirExpr::Int(2)],
-                body: vec![HirStmt::ret(Some(HirExpr::Int(3)))],
+                captures: vec![HirExpr::Int(2, Span::default())],
+                body: vec![HirStmt::ret(Some(HirExpr::Int(3, Span::default())))],
                 ty: TypeId::from_raw(4),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1004,8 +1051,9 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::Await {
-                expr: Box::new(HirExpr::Int(1)),
+                expr: Box::new(HirExpr::Int(1, Span::default())),
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1017,8 +1065,9 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::Yield {
-                expr: Some(Box::new(HirExpr::Int(2))),
+                expr: Some(Box::new(HirExpr::Int(2, Span::default()))),
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1029,6 +1078,7 @@ mod tests {
             &HirExpr::Yield {
                 expr: None,
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1041,10 +1091,11 @@ mod tests {
         dump_expr_inline(
             &HirExpr::Template {
                 tag: None,
-                expressions: vec![HirExpr::Int(1)],
+                expressions: vec![HirExpr::Int(1, Span::default())],
                 cooked_parts: vec![None, None],
                 raw_parts: vec![None, None],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1060,11 +1111,13 @@ mod tests {
                 tag: Some(Box::new(HirExpr::Global {
                     name: Atom::new_inline("tag"),
                     ty: TypeId::from_raw(0),
+                    span: Span::default(),
                 })),
-                expressions: vec![HirExpr::Int(1)],
+                expressions: vec![HirExpr::Int(1, Span::default())],
                 cooked_parts: vec![None, None],
                 raw_parts: vec![None, None],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1079,9 +1132,11 @@ mod tests {
                 callee: Box::new(HirExpr::Global {
                     name: Atom::new_inline("Ctor"),
                     ty: TypeId::from_raw(0),
+                    span: Span::default(),
                 }),
-                args: vec![HirExpr::Int(1)],
+                args: vec![HirExpr::Int(1, Span::default())],
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1093,8 +1148,9 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::OptionalChain {
-                base: Box::new(HirExpr::Int(1)),
+                base: Box::new(HirExpr::Int(1, Span::default())),
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1107,8 +1163,9 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::TypeAssertion {
-                expr: Box::new(HirExpr::Int(3)),
+                expr: Box::new(HirExpr::Int(3, Span::default())),
                 target: TypeId::from_raw(5),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1120,9 +1177,10 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::Assignment {
-                target: Box::new(HirExpr::Int(0)),
-                value: Box::new(HirExpr::Int(7)),
+                target: Box::new(HirExpr::Int(0, Span::default())),
+                value: Box::new(HirExpr::Int(7, Span::default())),
                 ty: TypeId::from_raw(3),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1136,11 +1194,12 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::CompoundUpdate {
-                target: Box::new(HirExpr::Int(0)),
+                target: Box::new(HirExpr::Int(0, Span::default())),
                 op: HirBinaryOp::Add,
-                rhs: Box::new(HirExpr::Int(1)),
+                rhs: Box::new(HirExpr::Int(1, Span::default())),
                 post: false,
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1154,11 +1213,12 @@ mod tests {
         let mut d = Dumper::new();
         dump_expr_inline(
             &HirExpr::CompoundUpdate {
-                target: Box::new(HirExpr::Int(0)),
+                target: Box::new(HirExpr::Int(0, Span::default())),
                 op: HirBinaryOp::Sub,
-                rhs: Box::new(HirExpr::Int(1)),
+                rhs: Box::new(HirExpr::Int(1, Span::default())),
                 post: true,
                 ty: TypeId::from_raw(0),
+                span: Span::default(),
             },
             &mut d,
         );
@@ -1210,9 +1270,10 @@ mod tests {
         let mut f = empty_func("compute");
         f.body = vec![HirStmt::ret(Some(HirExpr::Binary {
             op: HirBinaryOp::Add,
-            lhs: Box::new(HirExpr::Int(1)),
-            rhs: Box::new(HirExpr::Int(2)),
+            lhs: Box::new(HirExpr::Int(1, Span::default())),
+            rhs: Box::new(HirExpr::Int(2, Span::default())),
             ty: TypeId::from_raw(0),
+            span: Span::default(),
         }))];
         let mut prog = HirProgram::new(ModuleId::from_raw(0));
         prog.push_decl(HirDecl::Function(f));
@@ -1223,7 +1284,7 @@ mod tests {
 
     #[test]
     fn dump_nested_block() {
-        let inner = HirStmt::Block(vec![HirStmt::ret(Some(HirExpr::Int(1)))]);
+        let inner = HirStmt::Block(vec![HirStmt::ret(Some(HirExpr::Int(1, Span::default())))]);
         let outer = HirStmt::Block(vec![inner]);
         let text = dump(vec![outer]);
         assert!(text.contains("{"));
@@ -1234,9 +1295,12 @@ mod tests {
     #[test]
     fn dump_switch_default_case() {
         let s = HirStmt::Switch {
-            disc: HirExpr::Int(0),
+            disc: HirExpr::Int(0, Span::default()),
             cases: vec![
-                HirSwitchCase::new(Some(HirExpr::Int(1)), vec![HirStmt::ret(None)]),
+                HirSwitchCase::new(
+                    Some(HirExpr::Int(1, Span::default())),
+                    vec![HirStmt::ret(None)],
+                ),
                 HirSwitchCase::new(None, vec![HirStmt::ret(None)]),
             ],
         };
