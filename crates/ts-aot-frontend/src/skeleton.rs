@@ -162,6 +162,34 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
             TSType::TSArrayType(a) => {
                 self.pre_resolve_aliases_in_type(&a.element_type, alias_set, visiting, program);
             }
+            TSType::TSFunctionType(f) => {
+                for p in &f.params.items {
+                    if let Some(ann) = p.type_annotation.as_deref() {
+                        self.pre_resolve_aliases_in_type(
+                            &ann.type_annotation,
+                            alias_set,
+                            visiting,
+                            program,
+                        );
+                    }
+                }
+                if let Some(rest) = &f.params.rest
+                    && let Some(ann) = rest.type_annotation.as_deref()
+                {
+                    self.pre_resolve_aliases_in_type(
+                        &ann.type_annotation,
+                        alias_set,
+                        visiting,
+                        program,
+                    );
+                }
+                self.pre_resolve_aliases_in_type(
+                    &f.return_type.type_annotation,
+                    alias_set,
+                    visiting,
+                    program,
+                );
+            }
             _ => {}
         }
     }

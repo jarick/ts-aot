@@ -1070,6 +1070,50 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
 }
 
 #[test]
+fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_unit_expr() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = empty_types();
+    let i64_ty = types.intern(&ts_aot_core::Type::I64);
+    let fn_ty = types.intern(&ts_aot_core::Type::Fn {
+        params: vec![i64_ty],
+        ret: i64_ty,
+        err: None,
+    });
+    let cb = HirExpr::Global {
+        name: Atom::from("cb"),
+        ty: fn_ty,
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(cb)),
+        args: vec![int_lit(42)],
+        ty: i64_ty,
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Unit),
+        "function-typed indirect call must lower to MirExpr::Unit (Type::Fn cannot be called), got {mir:?}"
+    );
+    let has_e0405 = cx
+        .diagnostics()
+        .iter()
+        .any(|d| d.code.as_str() == "E0405" && d.severity == ts_aot_core::Severity::Error);
+    assert!(
+        has_e0405,
+        "function-typed indirect call must emit E0405 error, got: {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
 fn convert_block_empty_produces_empty() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();

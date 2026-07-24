@@ -17,6 +17,12 @@ fn has_e0403(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
         .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0403")
 }
 
+fn has_e0404(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
+    diagnostics
+        .iter()
+        .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0404")
+}
+
 #[test]
 fn empty_source_yields_empty_program_without_errors() {
     let output = FrontendPass::new().run("test.ts", "");
@@ -3853,5 +3859,274 @@ fn body_walker_bare_yield_in_generator_produces_hir_yield_with_none() {
     assert!(
         matches!(expr, HirExpr::Yield { expr: None, .. }),
         "bare `yield` in generator must produce HirExpr::Yield with expr=None; got {expr:?}"
+    );
+}
+
+#[test]
+fn function_type_in_param_resolves_to_type_fn() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (a: i64) => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Fn {
+            params: vec![i64_id],
+            ret: i64_id,
+            err: None,
+        }),
+        "param type `(a: i64) => i64` must resolve to Type::Fn with single i64 param and i64 return"
+    );
+}
+
+#[test]
+fn function_type_in_return_position_resolves_to_type_fn() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): (a: i64) => i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.ret),
+        Some(&Type::Fn {
+            params: vec![i64_id],
+            ret: i64_id,
+            err: None,
+        }),
+        "return type `(a: i64) => i64` must resolve to Type::Fn with single i64 param and i64 return"
+    );
+}
+
+#[test]
+fn function_type_with_no_params_resolves_to_type_fn() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: () => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Fn {
+            params: vec![],
+            ret: i64_id,
+            err: None,
+        }),
+        "param type `() => i64` must resolve to Type::Fn with empty params and i64 return"
+    );
+}
+
+#[test]
+fn function_type_as_alias_body_resolves_to_same_type_as_inline() {
+    let mut types = TypeTable::new();
+    let output_alias = FrontendPass::new().run_with_types(
+        "test.ts",
+        "type F = (a: i64) => i64; function f(cb: F): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        !output_alias.diagnostics.has_errors(),
+        "{:?}",
+        output_alias.diagnostics
+    );
+    let mut types2 = TypeTable::new();
+    let output_inline = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (a: i64) => i64): i64 { return 0; }",
+        &mut types2,
+    );
+    assert!(
+        !output_inline.diagnostics.has_errors(),
+        "{:?}",
+        output_inline.diagnostics
+    );
+    let ty_alias = output_alias
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present")
+        .params[0]
+        .ty;
+    let ty_inline = output_inline
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present")
+        .params[0]
+        .ty;
+    assert_eq!(
+        types.resolve(ty_alias),
+        types2.resolve(ty_inline),
+        "function type as alias body must resolve to the same Type::Fn as inline syntax"
+    );
+}
+
+#[test]
+fn function_type_with_nested_array_param_resolves_recursively() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (a: i64[]) => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let i64_id = types.intern(&Type::I64);
+    let array_id = types.intern(&Type::Array { element: i64_id });
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Fn {
+            params: vec![array_id],
+            ret: i64_id,
+            err: None,
+        }),
+        "function type with array param must resolve nested TSArrayType to Type::Array inside Type::Fn.params"
+    );
+}
+
+#[test]
+fn function_type_with_generic_params_emits_e0404_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: <T>(a: T) => T): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0404(&output.diagnostics),
+        "function type with `<T>` generics must produce an E0404 warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn function_type_with_this_param_emits_e0404_warning() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (this: string, a: i64) => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0404(&output.diagnostics),
+        "function type with `this:` parameter must produce an E0404 warning, got: {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn function_type_with_untyped_param_emits_e0404_and_resolves_param_to_type_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (a, b) => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0404(&output.diagnostics),
+        "function type with parameters lacking type annotation must produce an E0404 warning, got: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let error_id = types.intern(&Type::Error);
+    let i64_id = types.intern(&Type::I64);
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Fn {
+            params: vec![error_id, error_id],
+            ret: i64_id,
+            err: None,
+        }),
+        "function type with two untyped params must produce Type::Fn with two Type::Error params (preserves arity, downstream passes can detect by checking params[0]==Type::Error)"
+    );
+}
+
+#[test]
+fn function_type_with_rest_param_emits_e0404_and_resolves_to_type_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(cb: (...args: i64[]) => i64): i64 { return 0; }",
+        &mut types,
+    );
+    assert!(
+        has_e0404(&output.diagnostics),
+        "function type with rest parameter `...args: T` must produce an E0404 warning, got: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(
+        types.resolve(fn_decl.params[0].ty),
+        Some(&Type::Error),
+        "function type with rest parameter must resolve to Type::Error after E0404 (not Type::Fn) — \
+         Type::Fn has no field for variadic, silently dropping the rest param would lose information"
     );
 }
