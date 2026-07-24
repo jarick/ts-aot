@@ -2678,3 +2678,119 @@ fn continue_outside_dowhile_uses_bare_continue() {
         "Continue in a regular While must NOT carry a __do_while_ label, got: {s}"
     );
 }
+
+#[test]
+fn function_typed_param_and_return_exclude_function_from_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let fn_param_ty = types.intern(&Type::Fn {
+        params: vec![i64_ty],
+        ret: i64_ty,
+        err: None,
+    });
+    let fn_return_ty = types.intern(&Type::Fn {
+        params: vec![],
+        ret: i64_ty,
+        err: None,
+    });
+
+    let mut with_fn_param = empty_func("with_fn_param");
+    with_fn_param.ret = i64_ty;
+    with_fn_param.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("cb"),
+        ty: fn_param_ty,
+    }];
+
+    let mut with_fn_return = empty_func("with_fn_return");
+    with_fn_return.id = FunctionId::from_raw(1);
+    with_fn_return.ret = fn_return_ty;
+    with_fn_return.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(with_fn_param));
+    prog.push_decl(MirDecl::Function(with_fn_return));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_fn_param"),
+        "function-typed param => Type::Fn not in is_u64_arg_packable set => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_dispatch_with_fn_return"),
+        "function-typed return => Type::Fn not in is_u64_ret_packable set => no `fn(&[u64]) -> u64` wrapper. Got: {s}"
+    );
+    assert!(
+        !s.contains("__TS_AOT_DISPATCH_TABLE"),
+        "no sync dispatchable function (both excluded by function types) => no dispatch table. Got: {s}"
+    );
+}
+
+#[test]
+fn function_typed_param_emits_unit_placeholder() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let fn_ty = types.intern(&Type::Fn {
+        params: vec![i64_ty],
+        ret: i64_ty,
+        err: None,
+    });
+
+    let mut f = empty_func("take_fn");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("cb"),
+        ty: fn_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn take_fn")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("cb:()"),
+        "param typed `(a: i64) => i64` must emit as `cb:()` (unit placeholder) in the function signature \n         until Phase 5 introduces a real function-typed runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn function_typed_return_emits_unit_placeholder() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let fn_ty = types.intern(&Type::Fn {
+        params: vec![i64_ty],
+        ret: i64_ty,
+        err: None,
+    });
+
+    let mut f = empty_func("make_fn");
+    f.ret = fn_ty;
+    f.params = vec![];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = s
+        .split("fn make_fn")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("");
+    let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        sig_norm.contains("->()"),
+        "return type `(a: i64) => i64` must emit as `->()` (unit placeholder) in the function signature \n         until Phase 5 introduces a real function-typed runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+    );
+}

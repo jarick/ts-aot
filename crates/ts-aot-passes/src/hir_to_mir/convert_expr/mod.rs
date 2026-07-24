@@ -13,7 +13,7 @@ mod place;
 mod util;
 
 use place::{mir_expr_to_place, mir_place_to_expr};
-use util::{has_potential_side_effects, mir_expr_ty};
+use util::{has_potential_side_effects, hir_expr_type_id, mir_expr_ty};
 
 impl ExprConverter {
     pub(super) fn convert_expr(
@@ -100,6 +100,18 @@ impl ExprConverter {
                 if callee_id == PLACEHOLDER_FUNCTION
                     && let HirCallee::Indirect(inner) = callee
                 {
+                    if let Some(callee_ty) = hir_expr_type_id(inner.as_ref())
+                        && let Some(Type::Fn { .. }) = types.resolve(callee_ty)
+                    {
+                        ctx.error(
+                            "E0405",
+                            "function-typed value cannot be called in Phase 4 — \
+                             Type::Fn lowers to `()` and `()` is not callable. \
+                             Use a named function declaration or call through a known callee instead.",
+                            Span::new(0, 0),
+                        );
+                        return MirExpr::Unit;
+                    }
                     if let HirExpr::Field {
                         owner, field_name, ..
                     } = inner.as_ref()
