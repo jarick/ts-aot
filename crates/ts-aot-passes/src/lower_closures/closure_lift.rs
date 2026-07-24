@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId, TypeId};
+use ts_aot_core::{Atom, LocalId, Span, TypeId};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirStmt};
 
 use super::LowerClosuresStats;
@@ -46,6 +46,7 @@ pub(super) fn lift_non_capturing_closure(
     params: &[HirParam],
     body: &mut [HirStmt],
     ty: TypeId,
+    span: Span,
     next_id: &mut u32,
     closure_names: &mut HashMap<LocalId, Atom>,
     new_decls: &mut Vec<HirDecl>,
@@ -77,7 +78,7 @@ pub(super) fn lift_non_capturing_closure(
     generated.push(name.clone());
     stats.emitted_fns += 1;
 
-    HirExpr::Global { name, ty }
+    HirExpr::Global { name, ty, span }
 }
 
 pub(super) type WalkBodyFn = fn(
@@ -105,6 +106,7 @@ pub(super) fn closure_callee_ty(new_decls: &[HirDecl], name: &Atom) -> TypeId {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn rewrite_closure_callee(
     callee: &mut HirCallee,
+    span: Span,
     closure_names: &HashMap<LocalId, Atom>,
     new_decls: &[HirDecl],
     ctx: &mut PassContext,
@@ -116,6 +118,7 @@ pub(super) fn rewrite_closure_callee(
         *callee = HirCallee::Indirect(Box::new(HirExpr::Global {
             name: name.clone(),
             ty,
+            span,
         }));
         return;
     }

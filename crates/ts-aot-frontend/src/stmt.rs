@@ -4,7 +4,7 @@ use oxc_ast::ast::{
     match_expression,
 };
 use oxc_span::GetSpan;
-use ts_aot_core::{Atom, LocalId};
+use ts_aot_core::{Atom, LocalId, Span};
 use ts_aot_ir_hir::{HirExpr, HirStmt, HirSwitchCase};
 
 use crate::ops::{label_atom, left_span};
@@ -228,7 +228,7 @@ impl SkeletonBuilder<'_, '_> {
         }
         let cond = match &f.test {
             Some(e) => self.walk_expr(e, scope),
-            None => HirExpr::Bool(true),
+            None => HirExpr::Bool(true, Span::default()),
         };
         let mut loop_body = Vec::new();
         self.walk_stmt(&f.body, &mut loop_body, scope);

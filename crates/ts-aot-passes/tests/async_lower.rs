@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, ModuleId, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 use ts_aot_passes::{PassContext, convert_program, lower_async};
@@ -12,9 +12,13 @@ fn await_promise_resolve_call(
     let resolve_sym = Atom::new_inline("resolve");
     let promise_ty = types.intern(&ts_aot_core::Type::I64);
     HirExpr::Await {
+        span: Span::default(),
         expr: Box::new(HirExpr::Call {
+            span: Span::default(),
             callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                span: Span::default(),
                 owner: Box::new(HirExpr::Global {
+                    span: Span::default(),
                     name: promise_sym,
                     ty: promise_ty,
                 }),
@@ -34,6 +38,7 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::default());
     let typed_id = types.intern(&ts_aot_core::Type::I64);
     let fn_name = Atom::new_inline("greet");
+    let inner_span = Span::new(100, 102);
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
@@ -42,7 +47,7 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(await_promise_resolve_call(
-                HirExpr::Int(42),
+                HirExpr::Int(42, inner_span),
                 typed_id,
                 &mut types,
             )),
@@ -61,6 +66,32 @@ fn end_to_end_lower_async_strips_promise_resolve_but_keeps_mir_await() {
     let stats = lower_async(&mut hir, &mut types, &mut ctx);
     assert_eq!(stats.inlined_promise_resolve, 1);
     assert_eq!(stats.cleared_async_info, 1);
+
+    let HirDecl::Function(f) = &hir.declarations[0] else {
+        panic!("expected Function at hir.declarations[0]");
+    };
+    let await_expr = match &f.body[0] {
+        HirStmt::Return { value: Some(expr) } => expr,
+        other => panic!("expected Return(Some) at f.body[0], got {other:?}"),
+    };
+    let HirExpr::Await {
+        expr: hir_inner, ..
+    } = await_expr
+    else {
+        panic!(
+            "HIR-side f.body[0].Return must be an Await wrapper after lower_async, got {await_expr:?}"
+        );
+    };
+    let HirExpr::Int(v, hir_inner_span) = hir_inner.as_ref() else {
+        panic!(
+            "HIR-side Await.expr must now be the bare Int(42, _) carrying inner_span, got {hir_inner:?}"
+        );
+    };
+    assert_eq!(*v, 42, "HIR inner literal value must round-trip");
+    assert_eq!(
+        *hir_inner_span, inner_span,
+        "HIR-side Await.expr must preserve the original inner span (100..102) after lower_async, before MIR conversion"
+    );
 
     let mir = convert_program(&hir, &mut types, &mut ctx);
     assert!(
@@ -97,8 +128,11 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
         throws: None,
         body: vec![HirStmt::Return {
             value: Some(HirExpr::Await {
+                span: Span::default(),
                 expr: Box::new(HirExpr::Call {
+                    span: Span::default(),
                     callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                        span: Span::default(),
                         name: callee_sym,
                         ty: typed_id,
                     })),

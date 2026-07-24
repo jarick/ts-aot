@@ -1,5 +1,5 @@
 use super::*;
-use ts_aot_core::{Atom, LocalId, ModuleId, TypeId};
+use ts_aot_core::{Atom, LocalId, ModuleId, Span, TypeId};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirStmt};
 
 fn fixture() -> (TypeTable, PassContext) {
@@ -22,13 +22,19 @@ fn promise_resolve_call(arg: HirExpr, arg_ty: TypeId, types: &mut TypeTable) -> 
             owner: Box::new(HirExpr::Global {
                 name: promise_sym,
                 ty: promise_ty,
+
+                span: Span::default(),
             }),
             field: ts_aot_core::FieldId::from_raw(0),
             field_name: resolve_sym,
             ty: promise_ty,
+
+            span: Span::default(),
         })),
         args: vec![arg],
         ty: promise_ty,
+
+        span: Span::default(),
     }
 }
 
@@ -36,6 +42,8 @@ fn await_promise_resolve(arg: HirExpr, arg_ty: TypeId, types: &mut TypeTable) ->
     HirExpr::Await {
         expr: Box::new(promise_resolve_call(arg, arg_ty, types)),
         ty: arg_ty,
+
+        span: Span::default(),
     }
 }
 
@@ -71,8 +79,9 @@ fn build_program(decl: HirDecl) -> HirProgram {
 fn rewrites_await_promise_resolve_literal_to_await_arg() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
+    let inner_span = Span::new(10, 12);
     let f = body_returning(await_promise_resolve(
-        HirExpr::Int(42),
+        HirExpr::Int(42, inner_span),
         typed_id,
         &mut types,
     ));
@@ -92,8 +101,18 @@ fn rewrites_await_promise_resolve_literal_to_await_arg() {
         );
     };
     assert!(
-        matches!(&**inner, HirExpr::Int(42)),
+        matches!(&**inner, HirExpr::Int(42, _)),
         "Await's inner expr must now be the bare Int(42), got {inner:?}"
+    );
+    let HirExpr::Int(v, preserved_span) = &**inner else {
+        panic!(
+            "Await's inner expr must remain HirExpr::Int(42, _) so its span is observable, got {inner:?}"
+        );
+    };
+    assert_eq!(*v, 42, "literal value must round-trip through rewriting");
+    assert_eq!(
+        *preserved_span, inner_span,
+        "rewritten inner expression must preserve the original non-default span (10..12)"
     );
 }
 
@@ -103,9 +122,11 @@ fn rewrites_await_promise_resolve_binary_expr_to_await_arg() {
     let typed_id = i64_type_id(&mut types);
     let inner = HirExpr::Binary {
         op: ts_aot_ir_hir::HirBinaryOp::Add,
-        lhs: Box::new(HirExpr::Int(1)),
-        rhs: Box::new(HirExpr::Int(2)),
+        lhs: Box::new(HirExpr::Int(1, Span::default())),
+        rhs: Box::new(HirExpr::Int(2, Span::default())),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_promise_resolve(inner, typed_id, &mut types));
     let mut program = build_program(HirDecl::Function(f));
@@ -133,15 +154,21 @@ fn does_not_inline_await_of_other_call() {
     let callee = HirExpr::Global {
         name: callee_sym,
         ty: typed_id,
+
+        span: Span::default(),
     };
     let non_promise_call = HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(callee)),
-        args: vec![HirExpr::Int(7)],
+        args: vec![HirExpr::Int(7, Span::default())],
         ty: typed_id,
+
+        span: Span::default(),
     };
     let await_other = HirExpr::Await {
         expr: Box::new(non_promise_call),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_other);
     let mut program = build_program(HirDecl::Function(f));
@@ -167,17 +194,24 @@ fn does_not_inline_promise_reject_or_then() {
             owner: Box::new(HirExpr::Global {
                 name: promise_sym,
                 ty: promise_ty,
+
+                span: Span::default(),
             }),
             field: ts_aot_core::FieldId::from_raw(0),
             field_name: reject_sym,
             ty: promise_ty,
+
+            span: Span::default(),
         })),
-        args: vec![HirExpr::Int(0)],
+        args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        span: Span::default(),
     };
     let await_reject = HirExpr::Await {
         expr: Box::new(reject_call),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_reject);
     let mut program = build_program(HirDecl::Function(f));
@@ -199,17 +233,25 @@ fn does_not_inline_await_promise_resolve_without_args() {
             owner: Box::new(HirExpr::Global {
                 name: promise_sym,
                 ty: promise_ty,
+
+                span: Span::default(),
             }),
             field: ts_aot_core::FieldId::from_raw(0),
             field_name: resolve_sym,
             ty: promise_ty,
+
+            span: Span::default(),
         })),
         args: Vec::new(),
         ty: promise_ty,
+
+        span: Span::default(),
     };
     let await_zero_args = HirExpr::Await {
         expr: Box::new(zero_args),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_zero_args);
     let mut program = build_program(HirDecl::Function(f));
@@ -223,22 +265,31 @@ fn does_not_inline_await_promise_resolve_without_args() {
 fn does_not_inline_await_promise_resolve_with_two_args() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let two_args_call = promise_resolve_call(HirExpr::Int(1), typed_id, &mut types);
-    let extra_arg = HirExpr::Int(2);
+    let two_args_call =
+        promise_resolve_call(HirExpr::Int(1, Span::default()), typed_id, &mut types);
+    let extra_arg = HirExpr::Int(2, Span::default());
     let augmented = match two_args_call {
         HirExpr::Call {
             callee,
             mut args,
             ty,
+            ..
         } => {
             args.push(extra_arg);
-            HirExpr::Call { callee, args, ty }
+            HirExpr::Call {
+                callee,
+                args,
+                ty,
+                span: Span::default(),
+            }
         }
         other => panic!("expected Call, got {other:?}"),
     };
     let await_two = HirExpr::Await {
         expr: Box::new(augmented),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_two);
     let mut program = build_program(HirDecl::Function(f));
@@ -253,7 +304,7 @@ fn pass_is_idempotent() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
     let mut program = build_program(HirDecl::Function(body_returning(await_promise_resolve(
-        HirExpr::Int(99),
+        HirExpr::Int(99, Span::default()),
         typed_id,
         &mut types,
     ))));
@@ -270,8 +321,14 @@ fn nested_await_promise_resolve_keeps_both_awaits() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
     let inner_await = HirExpr::Await {
-        expr: Box::new(promise_resolve_call(HirExpr::Int(7), typed_id, &mut types)),
+        expr: Box::new(promise_resolve_call(
+            HirExpr::Int(7, Span::default()),
+            typed_id,
+            &mut types,
+        )),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let outer = await_promise_resolve(inner_await, typed_id, &mut types);
     let f = body_returning(outer);
@@ -301,7 +358,7 @@ fn nested_await_promise_resolve_keeps_both_awaits() {
         );
     };
     assert!(
-        matches!(&**inner_inner, HirExpr::Int(7)),
+        matches!(&**inner_inner, HirExpr::Int(7, _)),
         "innermost expression must now be Int(7) (the bare arg), got {inner_inner:?}"
     );
 }
@@ -319,6 +376,8 @@ fn preserves_await_when_arg_is_promise_typed_local() {
     let p_local = HirExpr::Local {
         id: local_id,
         ty: promise_string_ty,
+
+        span: Span::default(),
     };
     let f = HirFunction {
         name: Atom::new_inline("__test_fn__"),
@@ -371,7 +430,11 @@ fn preserves_await_when_arg_is_promise_typed_local() {
 fn clears_async_info_on_function_with_async_info() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let mut f = body_returning(await_promise_resolve(HirExpr::Int(5), typed_id, &mut types));
+    let mut f = body_returning(await_promise_resolve(
+        HirExpr::Int(5, Span::default()),
+        typed_id,
+        &mut types,
+    ));
     f.async_info = Some(ts_aot_ir_hir::HirAsyncInfo::Promise {
         ok_ty: typed_id,
         err_ty: None,
@@ -393,7 +456,7 @@ fn clears_async_info_on_class_method() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
     let mut method = body_returning(await_promise_resolve(
-        HirExpr::Int(11),
+        HirExpr::Int(11, Span::default()),
         typed_id,
         &mut types,
     ));
@@ -426,7 +489,7 @@ fn clears_async_info_on_class_method() {
 fn walks_let_init_expr() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let init = await_promise_resolve(HirExpr::Int(3), typed_id, &mut types);
+    let init = await_promise_resolve(HirExpr::Int(3, Span::default()), typed_id, &mut types);
     let f = HirFunction {
         name: Atom::new_inline("__test_fn__"),
         params: Vec::<HirParam>::new(),
@@ -455,7 +518,7 @@ fn walks_let_init_expr() {
 fn walks_for_in_iter_expr() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let iter = await_promise_resolve(HirExpr::Int(1), typed_id, &mut types);
+    let iter = await_promise_resolve(HirExpr::Int(1, Span::default()), typed_id, &mut types);
     let f = HirFunction {
         name: Atom::new_inline("__test_fn__"),
         params: Vec::<HirParam>::new(),
@@ -465,7 +528,7 @@ fn walks_for_in_iter_expr() {
             binding: LocalId::from_raw(0),
             iter,
             body: Box::new(HirStmt::Expr {
-                expr: HirExpr::Int(0),
+                expr: HirExpr::Int(0, Span::default()),
             }),
         }],
         is_async: true,
@@ -496,7 +559,7 @@ fn walks_for_in_iter_expr() {
         );
     };
     assert!(
-        matches!(&**inner, HirExpr::Int(1)),
+        matches!(&**inner, HirExpr::Int(1, _)),
         "ForIn.iter's await's inner expr must now be the bare Int(1), got {inner:?}"
     );
 }
@@ -505,7 +568,7 @@ fn walks_for_in_iter_expr() {
 fn walks_global_init_expr() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let init = await_promise_resolve(HirExpr::Int(13), typed_id, &mut types);
+    let init = await_promise_resolve(HirExpr::Int(13, Span::default()), typed_id, &mut types);
     let global = HirDecl::Global {
         name: Atom::new_inline("G"),
         ty: typed_id,
@@ -522,7 +585,7 @@ fn walks_global_init_expr() {
 fn walks_into_namespace_members() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let inner_init = await_promise_resolve(HirExpr::Int(17), typed_id, &mut types);
+    let inner_init = await_promise_resolve(HirExpr::Int(17, Span::default()), typed_id, &mut types);
     let inner_fn = HirDecl::Function(HirFunction {
         name: Atom::new_inline("inner"),
         params: Vec::new(),
@@ -560,17 +623,24 @@ fn does_not_inline_when_owner_is_not_promise_global() {
             owner: Box::new(HirExpr::Global {
                 name: other_global_sym,
                 ty: promise_ty,
+
+                span: Span::default(),
             }),
             field: ts_aot_core::FieldId::from_raw(0),
             field_name: resolve_sym,
             ty: promise_ty,
+
+            span: Span::default(),
         })),
-        args: vec![HirExpr::Int(0)],
+        args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        span: Span::default(),
     };
     let await_other = HirExpr::Await {
         expr: Box::new(not_promise_call),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_other);
     let mut program = build_program(HirDecl::Function(f));
@@ -592,17 +662,24 @@ fn does_not_inline_when_field_name_is_other_method() {
             owner: Box::new(HirExpr::Global {
                 name: promise_sym,
                 ty: promise_ty,
+
+                span: Span::default(),
             }),
             field: ts_aot_core::FieldId::from_raw(0),
             field_name: then_sym,
             ty: promise_ty,
+
+            span: Span::default(),
         })),
-        args: vec![HirExpr::Int(0)],
+        args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        span: Span::default(),
     };
     let await_then = HirExpr::Await {
         expr: Box::new(call),
         ty: typed_id,
+
+        span: Span::default(),
     };
     let f = body_returning(await_then);
     let mut program = build_program(HirDecl::Function(f));
@@ -620,12 +697,12 @@ fn skips_when_user_declares_top_level_var_promise() {
     program.declarations.push(HirDecl::Global {
         name: Atom::new_inline("Promise"),
         ty: typed_id,
-        init: Some(HirExpr::Int(99)),
+        init: Some(HirExpr::Int(99, Span::default())),
     });
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(1),
+            HirExpr::Int(1, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -653,12 +730,12 @@ fn unrelated_top_level_var_does_not_block_rewrite() {
     program.declarations.push(HirDecl::Global {
         name: Atom::new_inline("Counter"),
         ty: typed_id,
-        init: Some(HirExpr::Int(0)),
+        init: Some(HirExpr::Int(0, Span::default())),
     });
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(13),
+            HirExpr::Int(13, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -684,7 +761,7 @@ fn skips_when_user_imports_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(11),
+            HirExpr::Int(11, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -715,15 +792,21 @@ fn skips_when_user_imports_promise_via_alias() {
                     owner: Box::new(HirExpr::Global {
                         name: Atom::new_inline("P"),
                         ty: typed_id,
+
+                        span: Span::default(),
                     }),
                     field: ts_aot_core::FieldId::from_raw(0),
                     field_name: Atom::new_inline("resolve"),
                     ty: typed_id,
+
+                    span: Span::default(),
                 })),
-                args: vec![HirExpr::Int(7)],
+                args: vec![HirExpr::Int(7, Span::default())],
                 ty: typed_id,
+                span: Span::default(),
             }),
             ty: typed_id,
+            span: Span::default(),
         })));
 
     let stats = lower_async(&mut program, &mut types, &mut ctx);
@@ -738,7 +821,11 @@ fn skips_when_user_imports_promise_via_alias() {
 fn still_clears_async_info_when_promise_globally_shadowed() {
     let (mut types, mut ctx) = fixture();
     let typed_id = i64_type_id(&mut types);
-    let mut f = body_returning(await_promise_resolve(HirExpr::Int(5), typed_id, &mut types));
+    let mut f = body_returning(await_promise_resolve(
+        HirExpr::Int(5, Span::default()),
+        typed_id,
+        &mut types,
+    ));
     f.is_async = true;
     f.async_info = Some(ts_aot_ir_hir::HirAsyncInfo::Promise {
         ok_ty: typed_id,
@@ -749,7 +836,7 @@ fn still_clears_async_info_when_promise_globally_shadowed() {
     program.declarations.push(HirDecl::Global {
         name: Atom::new_inline("Promise"),
         ty: typed_id,
-        init: Some(HirExpr::Int(7)),
+        init: Some(HirExpr::Int(7, Span::default())),
     });
     program.declarations.push(HirDecl::Function(f));
 
@@ -793,7 +880,7 @@ fn skips_when_user_declares_top_level_function_named_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(5),
+            HirExpr::Int(5, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -824,7 +911,7 @@ fn skips_when_user_declares_top_level_class_named_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(7),
+            HirExpr::Int(7, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -849,7 +936,7 @@ fn skips_when_user_declares_top_level_namespace_named_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(11),
+            HirExpr::Int(11, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -874,7 +961,7 @@ fn skips_when_user_declares_top_level_enum_named_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(3),
+            HirExpr::Int(3, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -899,7 +986,7 @@ fn does_not_skip_for_top_level_type_alias_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(13),
+            HirExpr::Int(13, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -923,7 +1010,7 @@ fn does_not_skip_for_top_level_interface_promise() {
     program
         .declarations
         .push(HirDecl::Function(body_returning(await_promise_resolve(
-            HirExpr::Int(17),
+            HirExpr::Int(17, Span::default()),
             typed_id,
             &mut types,
         ))));
@@ -952,7 +1039,11 @@ fn skips_when_nested_function_declares_promise() {
             ret: typed_id,
             throws: None,
             body: vec![HirStmt::Return {
-                value: Some(await_promise_resolve(HirExpr::Int(7), typed_id, &mut types)),
+                value: Some(await_promise_resolve(
+                    HirExpr::Int(7, Span::default()),
+                    typed_id,
+                    &mut types,
+                )),
             }],
             is_async: false,
             is_generator: false,
@@ -1000,7 +1091,7 @@ fn does_not_skip_when_inner_function_does_not_shadow_promise() {
             throws: None,
             body: vec![HirStmt::Return {
                 value: Some(await_promise_resolve(
-                    HirExpr::Int(11),
+                    HirExpr::Int(11, Span::default()),
                     typed_id,
                     &mut types,
                 )),

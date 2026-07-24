@@ -224,11 +224,11 @@ pub fn hir_expr_ty(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         | HirExpr::BigInt { ty, .. }
         | HirExpr::Import { ty, .. } => Some(*ty),
         HirExpr::TypeAssertion { target, .. } => Some(*target),
-        HirExpr::Int(_) => Some(types.intern(&Type::I64)),
-        HirExpr::Float(_) => Some(types.intern(&Type::F64)),
-        HirExpr::String(_) => Some(types.intern(&Type::String)),
-        HirExpr::Bool(_) => Some(types.intern(&Type::Bool)),
-        HirExpr::Null => Some(types.intern(&Type::Null)),
-        HirExpr::Unit | HirExpr::Undefined => None,
+        HirExpr::Int(_, _) => Some(types.intern(&Type::I64)),
+        HirExpr::Float(_, _) => Some(types.intern(&Type::F64)),
+        HirExpr::String(_, _) => Some(types.intern(&Type::String)),
+        HirExpr::Bool(_, _) => Some(types.intern(&Type::Bool)),
+        HirExpr::Null(_) => Some(types.intern(&Type::Null)),
+        HirExpr::Unit(_) | HirExpr::Undefined(_) => None,
     }
 }

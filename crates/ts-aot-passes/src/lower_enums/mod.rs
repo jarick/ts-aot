@@ -25,12 +25,12 @@ pub fn lower_enums(program: &mut HirProgram, types: &mut TypeTable, ctx: &mut Pa
                 });
                 let mut next_value: i128 = 0;
                 for variant in variants {
-                    let value: i64 = match variant.value {
-                        Some(HirExpr::Int(v)) => {
+                    let (value, init_span): (i64, Span) = match variant.value {
+                        Some(HirExpr::Int(v, span)) => {
                             next_value = i128::from(v) + 1;
-                            v
+                            (v, span)
                         }
-                        _ => {
+                        Some(_) | None => {
                             let v: i64 = match i64::try_from(next_value) {
                                 Ok(v) => v,
                                 Err(_) => {
@@ -45,7 +45,7 @@ pub fn lower_enums(program: &mut HirProgram, types: &mut TypeTable, ctx: &mut Pa
                                 }
                             };
                             next_value = next_value.saturating_add(1);
-                            v
+                            (v, Span::default())
                         }
                     };
                     let raw = variant.name.as_str();
@@ -55,7 +55,7 @@ pub fn lower_enums(program: &mut HirProgram, types: &mut TypeTable, ctx: &mut Pa
                     rewritten.push(HirDecl::Global {
                         name: namespaced_sym,
                         ty: i64_ty,
-                        init: Some(HirExpr::Int(value)),
+                        init: Some(HirExpr::Int(value, init_span)),
                     });
                 }
             }

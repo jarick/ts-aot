@@ -7,7 +7,7 @@ use oxc_ast::ast::{
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
-use ts_aot_core::{Atom, Diagnostic, FieldId};
+use ts_aot_core::{Atom, Diagnostic, FieldId, Span};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr};
 
 use crate::ops::{
@@ -18,21 +18,31 @@ use crate::skeleton::SkeletonBuilder;
 use crate::util::core_span_from_oxc;
 
 impl SkeletonBuilder<'_, '_> {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
         match e {
-            Expression::BooleanLiteral(b) => HirExpr::Bool(b.value),
-            Expression::NumericLiteral(n) => number_to_hir(n.value),
-            Expression::StringLiteral(s) => HirExpr::String(Atom::from(s.value.as_str())),
-            Expression::NullLiteral(_) => HirExpr::Null,
-            Expression::Identifier(id) => self.ident_to_expr(id.name.as_str(), scope),
-            Expression::ThisExpression(_) => {
+            Expression::BooleanLiteral(b) => HirExpr::Bool(b.value, core_span_from_oxc(b.span)),
+            Expression::NumericLiteral(n) => number_to_hir(n.value, core_span_from_oxc(n.span)),
+            Expression::StringLiteral(s) => {
+                HirExpr::String(Atom::from(s.value.as_str()), core_span_from_oxc(s.span))
+            }
+            Expression::NullLiteral(n) => HirExpr::Null(core_span_from_oxc(n.span)),
+            Expression::Identifier(id) => {
+                self.ident_to_expr(id.name.as_str(), scope, core_span_from_oxc(id.span))
+            }
+            Expression::ThisExpression(this_expr) => {
                 if let Some((id, ty)) = scope.lookup("this") {
-                    HirExpr::Local { id, ty }
+                    HirExpr::Local {
+                        id,
+                        ty,
+                        span: core_span_from_oxc(this_expr.span),
+                    }
                 } else {
                     let ty = self.error_ty();
                     HirExpr::Global {
                         name: Atom::from("this"),
                         ty,
+                        span: core_span_from_oxc(this_expr.span),
                     }
                 }
             }
@@ -52,6 +62,7 @@ impl SkeletonBuilder<'_, '_> {
                 HirExpr::Await {
                     expr: Box::new(inner),
                     ty,
+                    span: core_span_from_oxc(a.span),
                 }
             }
             Expression::YieldExpression(y) => self.walk_yield_expression(y, scope),
@@ -72,7 +83,12 @@ impl SkeletonBuilder<'_, '_> {
                 let pattern = Atom::from(re.regex.pattern.text.as_str());
                 let flags = Atom::from(re.regex.flags.to_string().as_str());
                 let ty = self.error_ty();
-                HirExpr::RegExp { pattern, flags, ty }
+                HirExpr::RegExp {
+                    pattern,
+                    flags,
+                    ty,
+                    span: core_span_from_oxc(re.span),
+                }
             }
             Expression::BigIntLiteral(big_int) => {
                 let value = big_int
@@ -82,7 +98,11 @@ impl SkeletonBuilder<'_, '_> {
                         |bi| Atom::from(bi.to_string()),
                     );
                 let ty = self.error_ty();
-                HirExpr::BigInt { value, ty }
+                HirExpr::BigInt {
+                    value,
+                    ty,
+                    span: core_span_from_oxc(big_int.span),
+                }
             }
             Expression::ImportExpression(imp) => {
                 if imp.options.is_some() {
@@ -102,6 +122,7 @@ impl SkeletonBuilder<'_, '_> {
                 HirExpr::Import {
                     source: Box::new(source),
                     ty,
+                    span: core_span_from_oxc(imp.span),
                 }
             }
             other => {
@@ -109,7 +130,7 @@ impl SkeletonBuilder<'_, '_> {
                     "expression form is not supported by the body walker",
                     other.span(),
                 );
-                HirExpr::Unit
+                HirExpr::Unit(core_span_from_oxc(other.span()))
             }
         }
     }
@@ -145,6 +166,7 @@ impl SkeletonBuilder<'_, '_> {
             cooked_parts,
             raw_parts,
             ty,
+            span: core_span_from_oxc(t.span),
         }
     }
 
@@ -160,13 +182,14 @@ impl SkeletonBuilder<'_, '_> {
                  `yield` in non-generator context is rejected by the body walker.",
                 core_span_from_oxc(y.span),
             ));
-            return HirExpr::Unit;
+            return HirExpr::Unit(core_span_from_oxc(y.span));
         }
         let inner = y.argument.as_ref().map(|a| self.walk_expr(a, scope));
         let ty = self.error_ty();
         HirExpr::Yield {
             expr: inner.map(Box::new),
             ty,
+            span: core_span_from_oxc(y.span),
         }
     }
 
@@ -185,6 +208,7 @@ impl SkeletonBuilder<'_, '_> {
             cooked_parts,
             raw_parts,
             ty,
+            span: core_span_from_oxc(t.span),
         }
     }
 
@@ -197,8 +221,8 @@ impl SkeletonBuilder<'_, '_> {
         let mut elements = Vec::with_capacity(arr.elements.len());
         for el in &arr.elements {
             match el {
-                ArrayExpressionElement::Elision(_) => {
-                    elements.push(HirExpr::Undefined);
+                ArrayExpressionElement::Elision(elision) => {
+                    elements.push(HirExpr::Undefined(core_span_from_oxc(elision.span)));
                 }
                 ArrayExpressionElement::SpreadElement(spread) => {
                     self.report_unwalked(
@@ -213,7 +237,11 @@ impl SkeletonBuilder<'_, '_> {
             }
         }
         let ty = self.error_ty();
-        HirExpr::ArrayLiteral { elements, ty }
+        HirExpr::ArrayLiteral {
+            elements,
+            ty,
+            span: core_span_from_oxc(arr.span),
+        }
     }
 
     fn walk_object_expression(
@@ -270,7 +298,11 @@ impl SkeletonBuilder<'_, '_> {
             }
         }
         let ty = self.error_ty();
-        HirExpr::ObjectLiteral { fields, ty }
+        HirExpr::ObjectLiteral {
+            fields,
+            ty,
+            span: core_span_from_oxc(obj.span),
+        }
     }
 
     fn walk_conditional_expression(
@@ -287,6 +319,7 @@ impl SkeletonBuilder<'_, '_> {
             then_branch: Box::new(then_branch),
             else_branch: Box::new(else_branch),
             ty,
+            span: core_span_from_oxc(c.span),
         }
     }
 
@@ -301,7 +334,11 @@ impl SkeletonBuilder<'_, '_> {
             .map(|e| self.walk_expr(e, scope))
             .collect();
         let ty = self.error_ty();
-        HirExpr::Sequence { exprs, ty }
+        HirExpr::Sequence {
+            exprs,
+            ty,
+            span: core_span_from_oxc(seq.span),
+        }
     }
 
     fn walk_class_expression(
@@ -321,20 +358,22 @@ impl SkeletonBuilder<'_, '_> {
         HirExpr::Global {
             name: unique_name,
             ty,
+            span: core_span_from_oxc(class_expr.span),
         }
     }
 
-    fn ident_to_expr(&mut self, name: &str, scope: &BodyScope) -> HirExpr {
+    fn ident_to_expr(&mut self, name: &str, scope: &BodyScope, span: Span) -> HirExpr {
         if name == "undefined" {
-            return HirExpr::Undefined;
+            return HirExpr::Undefined(span);
         }
         if let Some((id, ty)) = scope.lookup(name) {
-            HirExpr::Local { id, ty }
+            HirExpr::Local { id, ty, span }
         } else {
             let ty = self.error_ty();
             HirExpr::Global {
                 name: Atom::from(name),
                 ty,
+                span,
             }
         }
     }
@@ -349,13 +388,14 @@ impl SkeletonBuilder<'_, '_> {
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 ty,
+                span: core_span_from_oxc(b.span),
             }
         } else {
             self.report_unwalked(
                 "binary operator is not supported by the body walker",
                 b.span,
             );
-            HirExpr::Unit
+            HirExpr::Unit(core_span_from_oxc(b.span))
         }
     }
 
@@ -368,6 +408,7 @@ impl SkeletonBuilder<'_, '_> {
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
             ty,
+            span: core_span_from_oxc(l.span),
         }
     }
 
@@ -380,6 +421,7 @@ impl SkeletonBuilder<'_, '_> {
                     op,
                     expr: Box::new(inner),
                     ty,
+                    span: core_span_from_oxc(unary.span),
                 }
             }
             None => inner,
@@ -396,9 +438,10 @@ impl SkeletonBuilder<'_, '_> {
         HirExpr::CompoundUpdate {
             target: Box::new(target),
             op,
-            rhs: Box::new(HirExpr::Int(1)),
+            rhs: Box::new(HirExpr::Int(1, Span::default())),
             post: !update.prefix,
             ty,
+            span: core_span_from_oxc(update.span),
         }
     }
 
@@ -420,6 +463,7 @@ impl SkeletonBuilder<'_, '_> {
             callee: HirCallee::Indirect(Box::new(callee_expr)),
             args,
             ty,
+            span: core_span_from_oxc(call.span),
         }
     }
 
@@ -438,6 +482,7 @@ impl SkeletonBuilder<'_, '_> {
                     field: FieldId::from_raw(0),
                     field_name: Atom::from(s.property.name.as_str()),
                     ty,
+                    span: core_span_from_oxc(s.span),
                 }
             }
             ME::ComputedMemberExpression(computed) => {
@@ -448,11 +493,12 @@ impl SkeletonBuilder<'_, '_> {
                     owner: Box::new(owner),
                     index: Box::new(index),
                     ty,
+                    span: core_span_from_oxc(computed.span),
                 }
             }
             ME::PrivateFieldExpression(p) => {
                 self.report_unwalked("private field access is not supported", p.span);
-                HirExpr::Unit
+                HirExpr::Unit(core_span_from_oxc(p.span))
             }
         }
     }
@@ -466,6 +512,7 @@ impl SkeletonBuilder<'_, '_> {
                 target: Box::new(target),
                 value: Box::new(rhs),
                 ty,
+                span: core_span_from_oxc(a.span),
             },
             CompoundOp::Binary(op) => HirExpr::CompoundUpdate {
                 target: Box::new(target),
@@ -473,10 +520,11 @@ impl SkeletonBuilder<'_, '_> {
                 rhs: Box::new(rhs),
                 post: false,
                 ty,
+                span: core_span_from_oxc(a.span),
             },
             CompoundOp::Unsupported => {
                 self.report_unwalked("assignment operator is not supported", a.span);
-                HirExpr::Unit
+                HirExpr::Unit(core_span_from_oxc(a.span))
             }
         }
     }
@@ -492,7 +540,7 @@ impl SkeletonBuilder<'_, '_> {
             }
             t @ match_assignment_target_pattern!(AssignmentTarget) => {
                 self.report_unwalked("destructuring assignment target is not supported", t.span());
-                HirExpr::Unit
+                HirExpr::Unit(core_span_from_oxc(t.span()))
             }
         }
     }
@@ -504,13 +552,15 @@ impl SkeletonBuilder<'_, '_> {
     ) -> HirExpr {
         use oxc_ast::ast::SimpleAssignmentTarget as SAT;
         match s {
-            SAT::AssignmentTargetIdentifier(id) => self.ident_to_expr(id.name.as_str(), scope),
+            SAT::AssignmentTargetIdentifier(id) => {
+                self.ident_to_expr(id.name.as_str(), scope, core_span_from_oxc(id.span))
+            }
             m @ match_member_expression!(SimpleAssignmentTarget) => {
                 self.walk_member(m.to_member_expression(), scope)
             }
             _ => match s.get_expression() {
                 Some(inner) => self.walk_expr(inner, scope),
-                None => HirExpr::Unit,
+                None => HirExpr::Unit(Span::default()),
             },
         }
     }

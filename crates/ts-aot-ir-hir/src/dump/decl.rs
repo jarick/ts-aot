@@ -140,7 +140,7 @@ mod tests {
     use super::*;
     use crate::decl::HirDecl;
     use crate::program::HirProgram;
-    use ts_aot_core::{Atom, ModuleId, TypeId};
+    use ts_aot_core::{Atom, ModuleId, Span, TypeId};
 
     fn empty_func(name: &str) -> HirFunction {
         HirFunction {
@@ -196,7 +196,7 @@ mod tests {
         use crate::expr::HirExpr;
         use crate::stmt::HirStmt;
         let mut f = empty_func("withbody");
-        f.body = vec![HirStmt::ret(Some(HirExpr::Int(7)))];
+        f.body = vec![HirStmt::ret(Some(HirExpr::Int(7, Span::default())))];
         let mut d = Dumper::new();
         dump_function(&f, &mut d);
         assert!(d.buf.contains("body: {"));
@@ -237,7 +237,7 @@ mod tests {
         m.is_async = true;
         m.throws = Some(TypeId::from_raw(8));
         m.ret = TypeId::from_raw(3);
-        m.body = vec![HirStmt::ret(Some(HirExpr::Int(0)))];
+        m.body = vec![HirStmt::ret(Some(HirExpr::Int(0, Span::default())))];
         let class = HirClass {
             name: Atom::new_inline("K"),
             ty: TypeId::from_raw(0),
@@ -282,7 +282,7 @@ mod tests {
             },
             HirEnumVariant {
                 name: Atom::new_inline("B"),
-                value: Some(HirExpr::Int(11)),
+                value: Some(HirExpr::Int(11, Span::default())),
             },
         ];
         let mut d = Dumper::new();
@@ -299,7 +299,7 @@ mod tests {
         dump_global(
             &Atom::new_inline("g"),
             TypeId::from_raw(4),
-            Some(&HirExpr::Int(99)),
+            Some(&HirExpr::Int(99, Span::default())),
             &mut d,
         );
         assert!(d.buf.contains("global g: 4"));
@@ -443,7 +443,7 @@ mod tests {
         use crate::expr::HirExpr;
         use crate::stmt::HirStmt;
         let mut f = empty_func("body");
-        f.body = vec![HirStmt::ret(Some(HirExpr::Int(0)))];
+        f.body = vec![HirStmt::ret(Some(HirExpr::Int(0, Span::default())))];
         let mut d = Dumper::new();
         dump_function(&f, &mut d);
         assert!(d.buf.contains("body: {"));

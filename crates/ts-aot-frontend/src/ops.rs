@@ -1,7 +1,7 @@
 use oxc_ast::ast::ForStatementLeft;
 use oxc_span::GetSpan;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
-use ts_aot_core::Atom;
+use ts_aot_core::{Atom, Span};
 use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_992.0;
@@ -18,11 +18,11 @@ pub(crate) fn left_span(left: &ForStatementLeft<'_>) -> oxc_span::Span {
 }
 
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn number_to_hir(value: f64) -> HirExpr {
+pub(crate) fn number_to_hir(value: f64, span: Span) -> HirExpr {
     if value.is_finite() && value.fract() == 0.0 && value.abs() < MAX_SAFE_INTEGER {
-        HirExpr::Int(value as i64)
+        HirExpr::Int(value as i64, span)
     } else {
-        HirExpr::Float(value.to_bits())
+        HirExpr::Float(value.to_bits(), span)
     }
 }
 

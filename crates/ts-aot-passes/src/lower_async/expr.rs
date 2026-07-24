@@ -369,13 +369,13 @@ fn recurse_subexprs(
                 stats,
             );
         }
-        HirExpr::Unit
-        | HirExpr::Bool(_)
-        | HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Null
-        | HirExpr::Undefined
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::RegExp { .. }

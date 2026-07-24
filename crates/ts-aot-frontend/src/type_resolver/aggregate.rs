@@ -14,7 +14,7 @@ pub(super) fn resolve_union(
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Option<TypeId> {
+) -> TypeId {
     let mut variants: Vec<TypeId> = Vec::with_capacity(types_arena.len());
     for variant in types_arena {
         let id = resolve_simple_type(
@@ -23,10 +23,11 @@ pub(super) fn resolve_union(
             aliases,
             type_params,
             diagnostics.as_deref_mut(),
-        )?;
+        )
+        .unwrap_or_else(|| types.intern(&Type::Error));
         variants.push(id);
     }
-    Some(types.intern(&Type::Union { variants }))
+    types.intern(&Type::Union { variants })
 }
 
 pub(super) fn resolve_intersection(
@@ -35,7 +36,7 @@ pub(super) fn resolve_intersection(
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Option<TypeId> {
+) -> TypeId {
     let mut parts: Vec<TypeId> = Vec::with_capacity(types_arena.len());
     for part in types_arena {
         let id = resolve_simple_type(
@@ -44,12 +45,13 @@ pub(super) fn resolve_intersection(
             aliases,
             type_params,
             diagnostics.as_deref_mut(),
-        )?;
+        )
+        .unwrap_or_else(|| types.intern(&Type::Error));
         parts.push(id);
     }
     parts.sort_unstable_by_key(|id| id.raw());
     parts.dedup();
-    Some(types.intern(&Type::Intersection { parts }))
+    types.intern(&Type::Intersection { parts })
 }
 
 pub(super) fn resolve_tuple(
@@ -58,7 +60,7 @@ pub(super) fn resolve_tuple(
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Option<TypeId> {
+) -> TypeId {
     let mut elements: Vec<TypeId> = Vec::with_capacity(element_types.len());
     for element in element_types {
         if let Some(ty) = element.as_ts_type() {
@@ -68,14 +70,15 @@ pub(super) fn resolve_tuple(
                 aliases,
                 type_params,
                 diagnostics.as_deref_mut(),
-            )?;
+            )
+            .unwrap_or_else(|| types.intern(&Type::Error));
             elements.push(id);
         } else {
             report_unsupported_tuple_element(element, diagnostics.as_deref_mut());
             elements.push(types.intern(&Type::Error));
         }
     }
-    Some(types.intern(&Type::Tuple { elements }))
+    types.intern(&Type::Tuple { elements })
 }
 
 pub(super) fn resolve_array(
@@ -84,15 +87,16 @@ pub(super) fn resolve_array(
     aliases: Option<&HashMap<String, TypeId>>,
     type_params: Option<&TypeParamMap>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Option<TypeId> {
+) -> TypeId {
     let id = resolve_simple_type(
         Some(element_type),
         types,
         aliases,
         type_params,
         diagnostics.as_deref_mut(),
-    )?;
-    Some(types.intern(&Type::Array { element: id }))
+    )
+    .unwrap_or_else(|| types.intern(&Type::Error));
+    types.intern(&Type::Array { element: id })
 }
 
 fn report_unsupported_tuple_element(

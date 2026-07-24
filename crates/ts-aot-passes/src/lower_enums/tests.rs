@@ -1,6 +1,6 @@
 use super::*;
 use crate::PassContext;
-use ts_aot_core::{Atom, TypeTable};
+use ts_aot_core::{Atom, Span, TypeTable};
 use ts_aot_ir_hir::HirEnumVariant;
 
 fn enum_decl(name: u32, variants: Vec<(u32, Option<i64>)>) -> HirDecl {
@@ -10,7 +10,7 @@ fn enum_decl(name: u32, variants: Vec<(u32, Option<i64>)>) -> HirDecl {
             .into_iter()
             .map(|(n, v)| HirEnumVariant {
                 name: Atom::from(format!("v{}", n)),
-                value: v.map(HirExpr::Int),
+                value: v.map(|v| HirExpr::Int(v, Span::default())),
             })
             .collect(),
     }
@@ -67,7 +67,7 @@ fn variants_get_auto_incremented_values_starting_from_zero() {
         .iter()
         .map(|d| match d {
             HirDecl::Global {
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => *v,
             _ => panic!("expected Global with Int init"),
@@ -90,7 +90,7 @@ fn explicit_initialiser_advances_the_accumulator() {
         .iter()
         .map(|d| match d {
             HirDecl::Global {
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => *v,
             _ => panic!(),
@@ -132,7 +132,7 @@ fn multiple_enums_get_independent_accumulators() {
         .iter()
         .filter_map(|d| match d {
             HirDecl::Global {
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => Some(*v),
             _ => None,
@@ -158,7 +158,7 @@ fn variant_name_is_preserved_on_global() {
     let HirDecl::Global { init, .. } = &program.declarations[1] else {
         panic!("expected Global");
     };
-    assert!(matches!(init, Some(HirExpr::Int(7))));
+    assert!(matches!(init, Some(HirExpr::Int(7, _))));
 }
 
 #[test]
@@ -171,7 +171,10 @@ fn float_variant_initialiser_falls_back_to_accumulator() {
     if let HirDecl::Enum { variants, .. } = &mut program.declarations[0] {
         variants.push(HirEnumVariant {
             name: Atom::new_inline("12"),
-            value: Some(HirExpr::Float(value_str.as_str().parse().unwrap_or(0))),
+            value: Some(HirExpr::Float(
+                value_str.as_str().parse().unwrap_or(0),
+                Span::default(),
+            )),
         });
     }
 
@@ -182,7 +185,7 @@ fn float_variant_initialiser_falls_back_to_accumulator() {
         .iter()
         .filter_map(|d| match d {
             HirDecl::Global {
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => Some(*v),
             _ => None,
@@ -221,7 +224,7 @@ fn interned_enum_decl(enum_name: &str, variants: Vec<(&str, Option<i64>)>) -> Hi
         .into_iter()
         .map(|(n, v)| HirEnumVariant {
             name: Atom::new_inline(n),
-            value: v.map(HirExpr::Int),
+            value: v.map(|v| HirExpr::Int(v, Span::default())),
         })
         .collect();
     HirDecl::Enum {
@@ -264,7 +267,7 @@ fn accumulator_overflow_emits_diagnostic_and_saturates() {
     let variants = vec![
         HirEnumVariant {
             name: overflow_name.clone(),
-            value: Some(HirExpr::Int(i64::MAX - 1)),
+            value: Some(HirExpr::Int(i64::MAX - 1, Span::default())),
         },
         HirEnumVariant {
             name: overflow_name.clone(),
@@ -287,7 +290,7 @@ fn accumulator_overflow_emits_diagnostic_and_saturates() {
         .iter()
         .filter_map(|d| match d {
             HirDecl::Global {
-                init: Some(HirExpr::Int(v)),
+                init: Some(HirExpr::Int(v, _)),
                 ..
             } => Some(*v),
             _ => None,

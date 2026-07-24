@@ -1,4 +1,4 @@
-use ts_aot_core::{Atom, ModuleId, Type, TypeTable};
+use ts_aot_core::{Atom, ModuleId, Span, Type, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirExpr, HirFunction, HirProgram, HirStmt};
 use ts_aot_ir_mir::{MirDecl, MirExpr};
 use ts_aot_passes::{PassContext, convert_program};
@@ -11,7 +11,7 @@ fn convert_program_preserves_global_with_int_init() {
     hir.declarations.push(HirDecl::Global {
         name: name_sym.clone(),
         ty: types.intern(&ts_aot_core::Type::I64),
-        init: Some(HirExpr::Int(42)),
+        init: Some(HirExpr::Int(42, Span::default())),
     });
 
     let mir = convert_program(&hir, &mut types, &mut ctx);
@@ -44,7 +44,7 @@ fn convert_function_with_throw_sets_throws() {
         ret: types.intern(&Type::Void),
         throws: None,
         body: vec![HirStmt::Throw {
-            expr: HirExpr::Int(7),
+            expr: HirExpr::Int(7, Span::default()),
         }],
         is_async: false,
         is_generator: false,
@@ -75,7 +75,7 @@ fn convert_function_without_throw_leaves_throws_none() {
         ret: types.intern(&Type::Void),
         throws: None,
         body: vec![HirStmt::Expr {
-            expr: HirExpr::Int(1),
+            expr: HirExpr::Int(1, Span::default()),
         }],
         is_async: false,
         is_generator: false,

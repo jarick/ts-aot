@@ -24,6 +24,8 @@ pub(super) fn walk_expr(
         captures,
         body,
         ty,
+        span,
+        ..
     } = expr
     {
         if !captures.is_empty() {
@@ -42,6 +44,7 @@ pub(super) fn walk_expr(
             params,
             body,
             *ty,
+            *span,
             next_id,
             closure_names,
             new_decls,
@@ -65,9 +68,12 @@ pub(super) fn walk_expr(
             stats,
             ctx,
         ),
-        HirExpr::Call { callee, args, .. } => {
+        HirExpr::Call {
+            callee, args, span, ..
+        } => {
             walk_callee(
                 callee,
+                *span,
                 next_id,
                 closure_names,
                 new_decls,
@@ -376,13 +382,13 @@ pub(super) fn walk_expr(
                 ctx,
             );
         }
-        HirExpr::Unit
-        | HirExpr::Bool(_)
-        | HirExpr::Int(_)
-        | HirExpr::Float(_)
-        | HirExpr::String(_)
-        | HirExpr::Null
-        | HirExpr::Undefined
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
         | HirExpr::Local { .. }
         | HirExpr::Global { .. }
         | HirExpr::Yield { expr: None, .. }
@@ -406,6 +412,7 @@ pub(super) fn walk_expr(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn walk_callee(
     callee: &mut HirCallee,
+    span: Span,
     next_id: &mut u32,
     closure_names: &mut HashMap<LocalId, Atom>,
     new_decls: &mut Vec<HirDecl>,
@@ -415,7 +422,7 @@ pub(super) fn walk_callee(
     ctx: &mut PassContext,
 ) {
     if matches!(callee, HirCallee::Closure(_)) {
-        super::closure_lift::rewrite_closure_callee(callee, closure_names, new_decls, ctx);
+        super::closure_lift::rewrite_closure_callee(callee, span, closure_names, new_decls, ctx);
         return;
     }
     if let HirCallee::Indirect(inner) = callee {
