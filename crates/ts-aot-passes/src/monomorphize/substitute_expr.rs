@@ -78,6 +78,7 @@ pub fn substitute_expr(
         HirExpr::Call {
             callee,
             args,
+            type_args,
             ty,
             span,
         } => HirExpr::Call {
@@ -85,6 +86,10 @@ pub fn substitute_expr(
             args: args
                 .iter()
                 .map(|a| substitute_expr(a, mapping, types, result))
+                .collect(),
+            type_args: type_args
+                .iter()
+                .map(|t| substitute_type(*t, mapping, types, result))
                 .collect(),
             ty: substitute_type(*ty, mapping, types, result),
             span: *span,

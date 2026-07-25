@@ -449,6 +449,7 @@ fn convert_expr_call_resolves_callee() {
         callee: HirCallee::Function(FunctionId::from_raw(2)),
         args: vec![int_lit(1)],
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -845,6 +846,7 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -1122,6 +1124,7 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
         callee: HirCallee::Indirect(Box::new(optional_chain_callee)),
         args: vec![int_lit(7)],
         ty: fn_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -1169,6 +1172,7 @@ fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_u
         callee: HirCallee::Indirect(Box::new(cb)),
         args: vec![int_lit(42)],
         ty: i64_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -1470,6 +1474,7 @@ fn convert_block_while_cond_with_side_effects_keeps_cond_as_loop_condition() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -1682,6 +1687,7 @@ fn convert_block_while_call_cond_evaluated_once_per_iteration() {
             callee: HirCallee::Function(FunctionId::from_raw(0)),
             args: Vec::new(),
             ty: unit_ty(),
+            type_args: vec![],
 
             span: Span::default(),
         },
@@ -2286,6 +2292,7 @@ fn convert_program_resolves_indirect_global_callee_to_function_id() {
                 })),
                 args: Vec::new(),
                 ty: unit_ty(),
+                type_args: vec![],
 
                 span: Span::default(),
             },
@@ -2612,6 +2619,7 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: throwing_call_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -2706,6 +2714,7 @@ fn body_can_throw_propagates_through_assignment_target() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: throwing_call_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -2766,6 +2775,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         callee: HirCallee::Function(FunctionId::from_raw(77)),
         args: Vec::new(),
         ty: throwing_call_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -2773,6 +2783,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         callee: HirCallee::Function(FunctionId::from_raw(78)),
         args: Vec::new(),
         ty: throwing_call_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3161,6 +3172,7 @@ fn convert_function_with_remap_uses_remap_only_for_call_sites() {
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: Vec::new(),
                 ty: unit_ty(),
+                type_args: vec![],
 
                 span: Span::default(),
             },
@@ -3398,6 +3410,7 @@ fn convert_expr_new_lowers_callee_for_side_effects() {
             callee: HirCallee::Function(callee_fn_id),
             args: Vec::new(),
             ty: global_ty,
+            type_args: vec![],
 
             span: Span::default(),
         }),
@@ -3444,6 +3457,7 @@ fn convert_expr_assignment_to_field_with_call_base_materializes_call() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3512,6 +3526,7 @@ fn convert_expr_assignment_to_field_with_call_base_keeps_call_in_order() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3566,6 +3581,7 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3581,6 +3597,7 @@ fn convert_expr_assignment_lhs_base_materializes_before_rhs_side_effects() {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3646,6 +3663,7 @@ fn body_can_throw_propagates_through_if_condition_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3690,6 +3708,7 @@ fn body_can_throw_propagates_through_ternary_branches() {
         callee: HirCallee::Function(FunctionId::from_raw(99)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3739,6 +3758,7 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3858,6 +3878,7 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3865,6 +3886,7 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         callee: HirCallee::Function(FunctionId::from_raw(8)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3929,6 +3951,7 @@ fn body_can_throw_propagates_through_while_condition_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -3972,6 +3995,7 @@ fn body_can_throw_propagates_through_for_of_iter_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -4016,6 +4040,7 @@ fn body_can_throw_propagates_through_switch_discriminant_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -4062,6 +4087,7 @@ fn body_can_throw_propagates_through_catch_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -4109,6 +4135,7 @@ fn body_can_throw_propagates_through_finally_call() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -4312,6 +4339,7 @@ fn convert_global_with_complex_init_emits_warning_and_drops_init() {
             callee: HirCallee::Function(FunctionId::from_raw(0)),
             args: Vec::new(),
             ty: unit_ty(),
+            type_args: vec![],
 
             span: Span::default(),
         }),
@@ -4393,6 +4421,7 @@ fn infer_throws_is_none_for_call_only_function() {
                 callee: HirCallee::Function(FunctionId::from_raw(0)),
                 args: Vec::new(),
                 ty: unit_ty(),
+                type_args: vec![],
 
                 span: Span::default(),
             },
@@ -4433,6 +4462,7 @@ fn infer_throws_is_none_for_if_with_throwing_cond_only() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5060,6 +5090,7 @@ fn convert_expr_compound_update_rhs_call_evaluated_only_once() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5189,6 +5220,7 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
         callee: HirCallee::Function(FunctionId::from_raw(7)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5196,6 +5228,7 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
         callee: HirCallee::Function(FunctionId::from_raw(9)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5307,6 +5340,7 @@ fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index(
         callee: HirCallee::Function(FunctionId::from_raw(11)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5314,6 +5348,7 @@ fn convert_expr_compound_update_prefix_index_target_materializes_base_and_index(
         callee: HirCallee::Function(FunctionId::from_raw(13)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5377,6 +5412,7 @@ fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all
         callee: HirCallee::Function(FunctionId::from_raw(17)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5384,6 +5420,7 @@ fn convert_expr_compound_update_postfix_index_then_field_target_materializes_all
         callee: HirCallee::Function(FunctionId::from_raw(19)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5459,6 +5496,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         callee: HirCallee::Function(FunctionId::from_raw(21)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5466,6 +5504,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         callee: HirCallee::Function(FunctionId::from_raw(23)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5473,6 +5512,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
         callee: HirCallee::Function(FunctionId::from_raw(25)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5601,6 +5641,7 @@ fn convert_expr_compound_update_loads_old_value_before_rhs_runtime_stmt() {
         callee: HirCallee::Function(FunctionId::from_raw(101)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5711,6 +5752,7 @@ fn convert_expr_assignment_value_temp_carries_rhs_ty_not_type_zero() {
         callee: HirCallee::Function(FunctionId::from_raw(505)),
         args: Vec::new(),
         ty: rhs_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5775,6 +5817,7 @@ fn convert_expr_assignment_rhs_call_materialized_once_for_statement_and_return()
         callee: HirCallee::Function(FunctionId::from_raw(303)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5842,6 +5885,7 @@ fn convert_block_expr_plain_assignment_returns_local_not_rhs() {
         callee: HirCallee::Function(FunctionId::from_raw(404)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -5949,6 +5993,7 @@ fn convert_expr_assignment_field_target_with_call_base_materializes_call_with_ca
         callee: HirCallee::Function(FunctionId::from_raw(606)),
         args: Vec::new(),
         ty: obj_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -6008,6 +6053,7 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
         callee: HirCallee::Function(FunctionId::from_raw(707)),
         args: Vec::new(),
         ty: arr_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -6015,6 +6061,7 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
         callee: HirCallee::Function(FunctionId::from_raw(709)),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -6078,6 +6125,7 @@ fn resolve_field_id_call_owner_with_registered_struct_id_resolves_field() {
         callee: HirCallee::Function(FunctionId::from_raw(0)),
         args: Vec::new(),
         ty: call_ret_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -6326,6 +6374,7 @@ fn object_method_call(field_name: &str) -> HirExpr {
         })),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     }
@@ -6348,6 +6397,7 @@ fn local_method_call(field_name: &str) -> HirExpr {
         })),
         args: Vec::new(),
         ty: unit_ty(),
+        type_args: vec![],
 
         span: Span::default(),
     }

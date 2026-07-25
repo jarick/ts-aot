@@ -5,6 +5,8 @@ use oxc_span::GetSpan;
 use ts_aot_core::{Diagnostic, DiagnosticBag, Span as CoreSpan, Type, TypeId};
 use ts_aot_ir_hir::HirProgram;
 
+use crate::type_resolver::TypeParamMap;
+
 const ALIAS_CYCLE_CODE: &str = "E0401";
 
 pub(crate) struct SkeletonBuilder<'a, 'b> {
@@ -16,6 +18,7 @@ pub(crate) struct SkeletonBuilder<'a, 'b> {
     pub(crate) next_anon_class_id: u32,
     pub(crate) resolved_aliases: HashMap<String, TypeId>,
     pub(crate) is_generator_stack: Vec<bool>,
+    pub(crate) type_param_stack: Vec<TypeParamMap>,
 }
 
 impl<'a, 'b> SkeletonBuilder<'a, 'b> {
@@ -34,6 +37,7 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
             next_anon_class_id: 0,
             resolved_aliases: HashMap::new(),
             is_generator_stack: Vec::new(),
+            type_param_stack: Vec::new(),
         }
     }
 
@@ -241,5 +245,18 @@ impl<'a, 'b> SkeletonBuilder<'a, 'b> {
                 stmt.span(),
             );
         }
+    }
+
+    pub(crate) fn merged_type_params(&self) -> Option<TypeParamMap> {
+        if self.type_param_stack.is_empty() {
+            return None;
+        }
+        let mut merged = TypeParamMap::new();
+        for map in &self.type_param_stack {
+            for (k, v) in map.iter_bindings() {
+                merged.bind(k, v);
+            }
+        }
+        Some(merged)
     }
 }

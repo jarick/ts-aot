@@ -8,8 +8,19 @@ use super::substitute::TypeParamMap;
 pub fn infer_type_args(
     generic_fn: &HirFunction,
     args: &[HirExpr],
+    explicit_type_args: &[TypeId],
     types: &mut TypeTable,
 ) -> Vec<TypeId> {
+    if !explicit_type_args.is_empty() {
+        if explicit_type_args.len() == generic_fn.type_params.len() {
+            return explicit_type_args.to_vec();
+        }
+        return generic_fn
+            .type_params
+            .iter()
+            .map(|id| types.intern(&Type::GenericParam { id: *id }))
+            .collect();
+    }
     let mut found: HashMap<GenericParamId, TypeId> = HashMap::new();
     let mut conflicted: HashSet<GenericParamId> = HashSet::new();
     let mut has_resolved_non_generic_param = false;

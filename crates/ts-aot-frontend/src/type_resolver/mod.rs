@@ -11,6 +11,7 @@ mod function;
 mod mapped;
 mod reference;
 
+#[derive(Clone)]
 pub(crate) struct TypeParamMap {
     tys: HashMap<String, TypeId>,
 }

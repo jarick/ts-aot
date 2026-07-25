@@ -83,6 +83,7 @@ pub enum HirExpr {
     Call {
         callee: HirCallee,
         args: Vec<HirExpr>,
+        type_args: Vec<TypeId>,
         ty: TypeId,
         span: Span,
     },

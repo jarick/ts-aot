@@ -33,6 +33,7 @@ fn promise_resolve_call(arg: HirExpr, arg_ty: TypeId, types: &mut TypeTable) -> 
         })),
         args: vec![arg],
         ty: promise_ty,
+        type_args: vec![],
 
         span: Span::default(),
     }
@@ -161,6 +162,7 @@ fn does_not_inline_await_of_other_call() {
         callee: HirCallee::Indirect(Box::new(callee)),
         args: vec![HirExpr::Int(7, Span::default())],
         ty: typed_id,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -205,6 +207,7 @@ fn does_not_inline_promise_reject_or_then() {
         })),
         args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        type_args: vec![],
         span: Span::default(),
     };
     let await_reject = HirExpr::Await {
@@ -244,6 +247,7 @@ fn does_not_inline_await_promise_resolve_without_args() {
         })),
         args: Vec::new(),
         ty: promise_ty,
+        type_args: vec![],
 
         span: Span::default(),
     };
@@ -279,6 +283,7 @@ fn does_not_inline_await_promise_resolve_with_two_args() {
             HirExpr::Call {
                 callee,
                 args,
+                type_args: vec![],
                 ty,
                 span: Span::default(),
             }
@@ -634,6 +639,7 @@ fn does_not_inline_when_owner_is_not_promise_global() {
         })),
         args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        type_args: vec![],
         span: Span::default(),
     };
     let await_other = HirExpr::Await {
@@ -673,6 +679,7 @@ fn does_not_inline_when_field_name_is_other_method() {
         })),
         args: vec![HirExpr::Int(0, Span::default())],
         ty: promise_ty,
+        type_args: vec![],
         span: Span::default(),
     };
     let await_then = HirExpr::Await {
@@ -803,6 +810,7 @@ fn skips_when_user_imports_promise_via_alias() {
                 })),
                 args: vec![HirExpr::Int(7, Span::default())],
                 ty: typed_id,
+                type_args: vec![],
                 span: Span::default(),
             }),
             ty: typed_id,
