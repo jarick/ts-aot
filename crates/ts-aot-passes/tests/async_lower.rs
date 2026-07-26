@@ -28,6 +28,7 @@ fn await_promise_resolve_call(
             })),
             args: vec![arg],
             ty: promise_ty,
+            type_args: vec![],
         }),
         ty: arg_ty,
     }
@@ -138,6 +139,7 @@ fn end_to_end_lower_async_keeps_non_promise_resolve_await_as_mir_state() {
                     })),
                     args: Vec::new(),
                     ty: typed_id,
+                    type_args: vec![],
                 }),
                 ty: typed_id,
             }),

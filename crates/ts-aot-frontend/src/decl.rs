@@ -151,7 +151,9 @@ impl SkeletonBuilder<'_, '_> {
             Some(&type_param_map),
         );
 
+        self.type_param_stack.push(type_param_map.clone());
         let body = self.walk_function_body(func.body.as_deref(), &params, func.generator);
+        self.type_param_stack.pop();
 
         HirFunction {
             name,
@@ -301,7 +303,9 @@ impl SkeletonBuilder<'_, '_> {
             value.return_type.as_deref(),
             Some(&combined_map),
         );
+        self.type_param_stack.push(combined_map.clone());
         let body = self.walk_function_body(value.body.as_deref(), &params, value.generator);
+        self.type_param_stack.pop();
         Some(HirFunction {
             name: method_name,
             params,

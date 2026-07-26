@@ -4358,3 +4358,93 @@ fn conditional_type_with_branch_resolving_to_type_error_emits_e0400_per_branch()
         "conditional with Type::Error branch must still resolve to Type::Never"
     );
 }
+
+#[test]
+fn call_site_type_args_resolve_class_method_generic_param_not_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function bar<T>(x: T): T { return x; }\n\
+         class MyClass {\n\
+         \x20 method<T>(x: T): T { return bar<T>(x); }\n\
+         }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+
+    let method = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Class(c) => c.methods.first().cloned(),
+            _ => None,
+        })
+        .expect("class with one method");
+    let HirStmt::Return {
+        value: Some(expr), ..
+    } = &method.body[0]
+    else {
+        panic!("expected Return, got {:?}", method.body[0]);
+    };
+    let HirExpr::Call { type_args, .. } = expr else {
+        panic!("expected Call, got {expr:?}");
+    };
+    assert_eq!(
+        type_args.len(),
+        1,
+        "bar<T>(x) must have exactly one type arg: {type_args:?}"
+    );
+    let type_arg = types.resolve(type_args[0]);
+    assert_eq!(
+        type_arg,
+        Some(&Type::GenericParam {
+            id: GenericParamId::from_raw(1)
+        }),
+        "T in bar<T> must resolve to method<T>'s T (GenericParam(1)), not Type::Error; \
+         got {type_arg:?} (type_args[0] = {:?})",
+        type_args[0]
+    );
+}
+
+#[test]
+fn call_site_type_args_resolve_functions_generic_param_not_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function bar<T>(x: T): T { return x; }\n\
+         function foo<T>(x: T): T { return bar<T>(x); }",
+        &mut types,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    assert_eq!(output.program.decl_count(), 2);
+
+    let foo_decl = &output.program.declarations[1];
+    let HirDecl::Function(foo) = foo_decl else {
+        panic!("expected Function at decl[1], got {foo_decl:?}");
+    };
+    let HirStmt::Return {
+        value: Some(expr), ..
+    } = &foo.body[0]
+    else {
+        panic!("expected Return, got {:?}", foo.body[0]);
+    };
+    let HirExpr::Call { type_args, .. } = expr else {
+        panic!("expected Call, got {expr:?}");
+    };
+    assert_eq!(
+        type_args.len(),
+        1,
+        "bar<T>(x) must have exactly one type arg: {type_args:?}"
+    );
+    let type_arg = types.resolve(type_args[0]);
+    assert_eq!(
+        type_arg,
+        Some(&Type::GenericParam {
+            id: GenericParamId::from_raw(1)
+        }),
+        "T in bar<T> must resolve to foo<T>'s T (GenericParam(1)), not Type::Error; \
+         got {type_arg:?} (type_args[0] = {:?})",
+        type_args[0]
+    );
+}

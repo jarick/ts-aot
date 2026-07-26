@@ -118,6 +118,7 @@ fn call_to_closure_is_rewritten_to_indirect_global() {
                 callee: HirCallee::Closure(closure_id),
                 args: vec![HirExpr::Int(7, Span::default())],
                 ty: int_ty(),
+                type_args: vec![],
 
                 span: Span::default(),
             },

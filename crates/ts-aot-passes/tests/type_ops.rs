@@ -464,6 +464,7 @@ fn end_to_end_instanceof_side_effectful_rhs_is_preserved() {
                     })),
                     args: Vec::new(),
                     ty: i64_ty,
+                    type_args: vec![],
 
                     span: Span::default(),
                 }),

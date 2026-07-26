@@ -80,6 +80,7 @@ pub fn lower_generators(
                         id: LocalId::from_raw(0),
                         ty: generator_ty,
                     }],
+                    type_args: vec![],
                     ty: type_id_zero,
                 }),
                 rhs: Box::new(HirExpr::Int(state as i64, Span::default())),
@@ -107,6 +108,7 @@ pub fn lower_generators(
                                     },
                                     *value_expr,
                                 ],
+                                type_args: vec![],
                                 ty: type_id_zero,
                             },
                         });
@@ -127,6 +129,7 @@ pub fn lower_generators(
                                 },
                                 HirExpr::Int(next_state as i64, Span::default()),
                             ],
+                            type_args: vec![],
                             ty: type_id_zero,
                         },
                     });
@@ -143,6 +146,7 @@ pub fn lower_generators(
                                 id: LocalId::from_raw(0),
                                 ty: generator_ty,
                             }],
+                            type_args: vec![],
                             ty: result_ty,
                         }),
                     });
@@ -164,6 +168,7 @@ pub fn lower_generators(
                                 },
                                 HirExpr::Int(u32::MAX as i64, Span::default()),
                             ],
+                            type_args: vec![],
                             ty: type_id_zero,
                         },
                     });
@@ -176,6 +181,7 @@ pub fn lower_generators(
                                 ty: result_ty,
                             })),
                             args: vec![ret_expr.clone()],
+                            type_args: vec![],
                             ty: result_ty,
                         }
                     } else {
@@ -187,6 +193,7 @@ pub fn lower_generators(
                                 ty: result_ty,
                             })),
                             args: vec![],
+                            type_args: vec![],
                             ty: result_ty,
                         }
                     };
@@ -234,6 +241,7 @@ pub fn lower_generators(
                     name: dispatch_name,
                     ty: generator_ty,
                 }],
+                type_args: vec![],
                 ty: generator_ty,
             }),
         }];

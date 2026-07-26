@@ -12,6 +12,7 @@ use super::infer::{build_mapping, format_type_args, infer_type_args, type_args_r
 use super::substitute::{TypeSubstitutionResult, substitute_func};
 
 type SpecializationKey = (FunctionId, Vec<TypeId>);
+type OnCallee<'a> = &'a mut dyn FnMut(&mut HirCallee, &[HirExpr], &[TypeId]);
 
 pub fn monomorphize(
     program: &mut HirProgram,
@@ -33,17 +34,18 @@ pub fn monomorphize(
 
     let mut worklist: VecDeque<SpecializationKey> = VecDeque::new();
     {
-        let mut on_callee = |callee: &mut HirCallee, args: &[HirExpr]| {
-            if let HirCallee::Function(fid) = callee
-                && generic_fn_ids.contains(fid)
-                && let Some(generic_fn) = fn_index.get(fid)
-            {
-                let type_args = infer_type_args(generic_fn, args, types);
-                if type_args_resolved(&type_args, types) {
-                    worklist.push_back((*fid, type_args));
+        let mut on_callee =
+            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
+                if let HirCallee::Function(fid) = callee
+                    && generic_fn_ids.contains(fid)
+                    && let Some(generic_fn) = fn_index.get(fid)
+                {
+                    let type_args = infer_type_args(generic_fn, args, explicit_type_args, types);
+                    if type_args_resolved(&type_args, types) {
+                        worklist.push_back((*fid, type_args));
+                    }
                 }
-            }
-        };
+            };
         visit_callees(&mut program.declarations, &mut on_callee);
     }
 
@@ -72,17 +74,18 @@ pub fn monomorphize(
         let mono_decl = HirDecl::Function(mono);
 
         let mut mono_for_scan = mono_decl.clone();
-        let mut on_callee = |callee: &mut HirCallee, args: &[HirExpr]| {
-            if let HirCallee::Function(fid) = callee
-                && generic_fn_ids.contains(fid)
-                && let Some(target_fn) = fn_index.get(fid)
-            {
-                let type_args = infer_type_args(target_fn, args, types);
-                if type_args_resolved(&type_args, types) {
-                    worklist.push_back((*fid, type_args));
+        let mut on_callee =
+            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
+                if let HirCallee::Function(fid) = callee
+                    && generic_fn_ids.contains(fid)
+                    && let Some(target_fn) = fn_index.get(fid)
+                {
+                    let type_args = infer_type_args(target_fn, args, explicit_type_args, types);
+                    if type_args_resolved(&type_args, types) {
+                        worklist.push_back((*fid, type_args));
+                    }
                 }
-            }
-        };
+            };
         visit_decl_callees(&mut mono_for_scan, &mut on_callee);
 
         new_decls.push(mono_decl);
@@ -93,19 +96,20 @@ pub fn monomorphize(
     program.declarations.extend(new_decls);
 
     {
-        let mut on_callee = |callee: &mut HirCallee, args: &[HirExpr]| {
-            if let HirCallee::Function(fid) = callee
-                && generic_fn_ids.contains(fid)
-                && let Some(generic_fn) = fn_index.get(fid)
-            {
-                let type_args = infer_type_args(generic_fn, args, types);
-                let key: SpecializationKey = (*fid, type_args);
-                if let Some(&mono_fid) = mono_for_specialization.get(&key) {
-                    *callee = HirCallee::Function(mono_fid);
-                    stats.calls_rewritten += 1;
+        let mut on_callee =
+            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
+                if let HirCallee::Function(fid) = callee
+                    && generic_fn_ids.contains(fid)
+                    && let Some(generic_fn) = fn_index.get(fid)
+                {
+                    let type_args = infer_type_args(generic_fn, args, explicit_type_args, types);
+                    let key: SpecializationKey = (*fid, type_args);
+                    if let Some(&mono_fid) = mono_for_specialization.get(&key) {
+                        *callee = HirCallee::Function(mono_fid);
+                        stats.calls_rewritten += 1;
+                    }
                 }
-            }
-        };
+            };
         visit_callees(&mut program.declarations, &mut on_callee);
     }
 
@@ -150,13 +154,13 @@ fn classify_decls(
     }
 }
 
-fn visit_callees(decls: &mut [HirDecl], on_callee: &mut dyn FnMut(&mut HirCallee, &[HirExpr])) {
+fn visit_callees(decls: &mut [HirDecl], on_callee: OnCallee<'_>) {
     for decl in decls {
         visit_decl_callees(decl, on_callee);
     }
 }
 
-fn visit_decl_callees(decl: &mut HirDecl, on_callee: &mut dyn FnMut(&mut HirCallee, &[HirExpr])) {
+fn visit_decl_callees(decl: &mut HirDecl, on_callee: OnCallee<'_>) {
     match decl {
         HirDecl::Function(f) => visit_body_callees(&mut f.body, on_callee),
         HirDecl::Class(c) => {
@@ -175,13 +179,13 @@ fn visit_decl_callees(decl: &mut HirDecl, on_callee: &mut dyn FnMut(&mut HirCall
     }
 }
 
-fn visit_body_callees(body: &mut [HirStmt], on_callee: &mut dyn FnMut(&mut HirCallee, &[HirExpr])) {
+fn visit_body_callees(body: &mut [HirStmt], on_callee: OnCallee<'_>) {
     for stmt in body {
         visit_stmt_callees(stmt, on_callee);
     }
 }
 
-fn visit_stmt_callees(stmt: &mut HirStmt, on_callee: &mut dyn FnMut(&mut HirCallee, &[HirExpr])) {
+fn visit_stmt_callees(stmt: &mut HirStmt, on_callee: OnCallee<'_>) {
     match stmt {
         HirStmt::Block(stmts) => visit_body_callees(stmts, on_callee),
         HirStmt::Let {
@@ -238,13 +242,18 @@ fn visit_stmt_callees(stmt: &mut HirStmt, on_callee: &mut dyn FnMut(&mut HirCall
     }
 }
 
-fn visit_expr_callees(expr: &mut HirExpr, on_callee: &mut dyn FnMut(&mut HirCallee, &[HirExpr])) {
+fn visit_expr_callees(expr: &mut HirExpr, on_callee: OnCallee<'_>) {
     match expr {
-        HirExpr::Call { callee, args, .. } => {
+        HirExpr::Call {
+            callee,
+            args,
+            type_args,
+            ..
+        } => {
             if let HirCallee::Indirect(inner) = callee {
                 visit_expr_callees(inner, on_callee);
             }
-            on_callee(callee, args);
+            on_callee(callee, args, type_args);
             for arg in args {
                 visit_expr_callees(arg, on_callee);
             }

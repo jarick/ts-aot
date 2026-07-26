@@ -458,10 +458,21 @@ impl SkeletonBuilder<'_, '_> {
                 }
             }
         }
+        let type_args = if let Some(type_params) = &call.type_arguments {
+            let merged = self.merged_type_params();
+            type_params
+                .params
+                .iter()
+                .map(|tp| self.resolve_ts_type_with_params(Some(tp), merged.as_ref()))
+                .collect()
+        } else {
+            vec![]
+        };
         let ty = self.error_ty();
         HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(callee_expr)),
             args,
+            type_args,
             ty,
             span: core_span_from_oxc(call.span),
         }
