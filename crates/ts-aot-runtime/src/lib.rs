@@ -6,6 +6,8 @@ use std::hash::BuildHasher;
 use std::panic::panic_any;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
+
 pub fn __ts_aot_host_console_log(s: &str) {
     println!("{s}");
 }
@@ -283,24 +285,67 @@ pub fn __ts_aot_array_len<T>(arr: &[T]) -> i64 {
 }
 
 #[must_use]
-pub fn __ts_aot_map_create<S: BuildHasher + Default>() -> HashMap<String, String, S> {
-    HashMap::default()
+pub fn __ts_aot_map_create<S: BuildHasher + Default>() -> IndexMap<String, String, S> {
+    IndexMap::default()
 }
 
 #[must_use]
 pub fn __ts_aot_map_get<S: BuildHasher>(
-    map: &HashMap<String, String, S>,
+    map: &IndexMap<String, String, S>,
     key: &str,
 ) -> Option<String> {
     map.get(key).cloned()
 }
 
 pub fn __ts_aot_map_set<S: BuildHasher>(
-    map: &mut HashMap<String, String, S>,
+    map: &mut IndexMap<String, String, S>,
     key: String,
     value: String,
 ) {
     map.insert(key, value);
+}
+
+#[must_use]
+pub fn __ts_aot_object_keys<S: BuildHasher>(map: &IndexMap<String, String, S>) -> Vec<String> {
+    let mut int_indices: Vec<(u64, String)> = Vec::new();
+    let mut string_keys: Vec<String> = Vec::new();
+    for key in map.keys() {
+        if let Some(n) = canonical_integer_index(key) {
+            int_indices.push((n, key.clone()));
+        } else {
+            string_keys.push(key.clone());
+        }
+    }
+    int_indices.sort_by_key(|(n, _)| *n);
+    int_indices
+        .into_iter()
+        .map(|(_, s)| s)
+        .chain(string_keys)
+        .collect()
+}
+
+fn canonical_integer_index(s: &str) -> Option<u64> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    if bytes[0] == b'0' {
+        return if bytes.len() == 1 { Some(0) } else { None };
+    }
+    if !bytes[0].is_ascii_digit() {
+        return None;
+    }
+    for &b in &bytes[1..] {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+    }
+    s.parse::<u64>().ok().filter(|&n| n < u64::from(u32::MAX))
+}
+
+#[must_use]
+pub fn __ts_aot_object_get_prototype_of(_receiver: i64) -> i64 {
+    0
 }
 
 #[must_use]
@@ -350,8 +395,7 @@ pub fn __ts_aot_op_in<L: 'static, R: 'static>(value: &L, object: &R) -> bool {
     {
         return arr.iter().any(|s| s == needle);
     }
-    if let Some(map) =
-        (object as &dyn std::any::Any).downcast_ref::<std::collections::HashMap<String, String>>()
+    if let Some(map) = (object as &dyn std::any::Any).downcast_ref::<IndexMap<String, String>>()
         && let Some(key) = (value as &dyn std::any::Any).downcast_ref::<String>()
     {
         return map.contains_key(key);
@@ -455,7 +499,7 @@ impl<T> TsClassId for Vec<T> {
         PRIMITIVE_CLASS_ID_BASE + 17
     }
 }
-impl<K, V, S: BuildHasher> TsClassId for HashMap<K, V, S> {
+impl<K, V, S: BuildHasher> TsClassId for IndexMap<K, V, S> {
     fn class_id() -> u32 {
         PRIMITIVE_CLASS_ID_BASE + 18
     }

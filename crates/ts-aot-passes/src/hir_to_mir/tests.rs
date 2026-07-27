@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{
-    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, TypeId, TypeTable, Visibility,
+    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, StructId, Type, TypeId, TypeTable,
+    Visibility,
 };
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
@@ -6380,6 +6381,61 @@ fn object_method_call(field_name: &str) -> HirExpr {
     }
 }
 
+fn object_method_call_with_arg(field_name: &str, arg: HirExpr) -> HirExpr {
+    object_method_call_with_args(field_name, vec![arg])
+}
+
+fn object_method_call_with_args(field_name: &str, args: Vec<HirExpr>) -> HirExpr {
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Object"),
+                ty: unit_ty(),
+
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline(field_name),
+            ty: unit_ty(),
+
+            span: Span::default(),
+        })),
+        args,
+        ty: unit_ty(),
+        type_args: vec![],
+
+        span: Span::default(),
+    }
+}
+
+fn receiver_has_own_property_call(
+    types: &mut TypeTable,
+    receiver_ty: TypeId,
+    key: &str,
+) -> HirExpr {
+    let bool_ty = types.intern(&Type::Bool);
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: receiver_ty,
+
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("hasOwnProperty"),
+            ty: bool_ty,
+
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::String(Atom::new_inline(key), Span::default())],
+        ty: bool_ty,
+        type_args: vec![],
+
+        span: Span::default(),
+    }
+}
+
 fn local_method_call(field_name: &str) -> HirExpr {
     HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(HirExpr::Field {
@@ -6411,12 +6467,19 @@ fn e0404_count(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
 }
 
 #[test]
-fn e0404_emits_for_object_keys_call() {
+fn object_keys_call_emits_object_keys_runtime_op() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
     let mir = c.convert_expr(
-        &object_method_call("keys"),
+        &object_method_call_with_arg(
+            "keys",
+            HirExpr::Local {
+                id: LocalId::from_raw(7),
+                ty: unit_ty(),
+                span: Span::default(),
+            },
+        ),
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
@@ -6424,47 +6487,337 @@ fn e0404_emits_for_object_keys_call() {
         &mut cx,
     );
     assert!(
-        matches!(mir, MirExpr::Unit),
-        "E0404 path must lower to MirExpr::Unit, got {mir:?}"
+        matches!(mir, MirExpr::Local(_)),
+        "Object.keys(map) must return a Local, got {mir:?}"
     );
     assert_eq!(
         e0404_count(cx.diagnostics()),
+        0,
+        "Object.keys(map) must not emit E0404, got {:?}",
+        cx.diagnostics()
+    );
+    let has_object_keys = out.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ObjectKeys,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_object_keys,
+        "Object.keys(map) must emit MirStmt::Runtime {{ op: ObjectKeys, .. }}, got: {out:?}"
+    );
+    let object_keys_args = out.iter().find_map(|s| {
+        if let MirStmt::Runtime {
+            op: RuntimeOp::ObjectKeys,
+            args,
+            ..
+        } = s
+        {
+            Some(args)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        object_keys_args.map(Vec::len),
+        Some(1),
+        "Object.keys(map) must pass exactly 1 arg to __ts_aot_object_keys \
+         (the map, no implicit receiver); got args={object_keys_args:?}, full out: {out:?}"
+    );
+}
+
+#[test]
+fn object_get_prototype_of_call_emits_object_get_prototype_of_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    c.convert_expr(
+        &object_method_call_with_arg(
+            "getPrototypeOf",
+            HirExpr::Local {
+                id: LocalId::from_raw(7),
+                ty: unit_ty(),
+                span: Span::default(),
+            },
+        ),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        0,
+        "Object.getPrototypeOf(map) must not emit E0404, got {:?}",
+        cx.diagnostics()
+    );
+    let has_op = out.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ObjectGetPrototypeOf,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_op,
+        "Object.getPrototypeOf(map) must emit MirStmt::Runtime {{ op: ObjectGetPrototypeOf, .. }}, got: {out:?}"
+    );
+    let get_proto_args = out.iter().find_map(|s| {
+        if let MirStmt::Runtime {
+            op: RuntimeOp::ObjectGetPrototypeOf,
+            args,
+            ..
+        } = s
+        {
+            Some(args)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        get_proto_args.map(Vec::len),
+        Some(1),
+        "Object.getPrototypeOf(map) must pass exactly 1 arg (the map); got args={get_proto_args:?}"
+    );
+}
+
+#[test]
+fn object_set_prototype_of_call_inlines_assign_no_runtime_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call_with_args(
+            "setPrototypeOf",
+            vec![
+                HirExpr::Int(0, Span::default()),
+                HirExpr::Int(1, Span::default()),
+            ],
+        ),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(
+        e0404_count(cx.diagnostics()),
+        0,
+        "Object.setPrototypeOf(target, proto) must not emit E0404, got {:?}",
+        cx.diagnostics()
+    );
+    let has_runtime = out.iter().any(|s| matches!(s, MirStmt::Runtime { .. }));
+    assert!(
+        !has_runtime,
+        "Object.setPrototypeOf(target, proto) is a no-op in AOT; must inline via MirStmt::Assign, \
+         no MirStmt::Runtime, got: {out:?}"
+    );
+    let has_assign = out.iter().any(|s| matches!(s, MirStmt::Assign { .. }));
+    assert!(
+        has_assign,
+        "Object.setPrototypeOf(target, proto) must emit MirStmt::Assign copying the first arg to dest, got: {out:?}"
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "Object.setPrototypeOf(target, proto) must return a Local, got {mir:?}"
+    );
+}
+
+#[test]
+fn receiver_has_own_property_returns_true_for_known_struct_field() {
+    let mut types = TypeTable::new();
+    let receiver_ty = types.intern(&Type::Named {
+        symbol: Atom::new_inline("Point"),
+    });
+    let struct_id = StructId::from_raw(7);
+    let mut c = ExprConverter::new();
+    c.struct_ids.insert(receiver_ty, struct_id);
+    c.field_id_lookup
+        .insert((struct_id, Atom::new_inline("x")), FieldId::from_raw(0));
+    c.field_id_lookup
+        .insert((struct_id, Atom::new_inline("y")), FieldId::from_raw(1));
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &receiver_has_own_property_call(&mut types, receiver_ty, "x"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Bool(true)),
+        "obj.hasOwnProperty('x') on Point{{x,y}} must lower to MirExpr::Bool(true), got {mir:?}"
+    );
+}
+
+#[test]
+fn receiver_has_own_property_returns_false_for_unknown_struct_field() {
+    let mut types = TypeTable::new();
+    let receiver_ty = types.intern(&Type::Named {
+        symbol: Atom::new_inline("Point"),
+    });
+    let struct_id = StructId::from_raw(8);
+    let mut c = ExprConverter::new();
+    c.struct_ids.insert(receiver_ty, struct_id);
+    c.field_id_lookup
+        .insert((struct_id, Atom::new_inline("x")), FieldId::from_raw(0));
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &receiver_has_own_property_call(&mut types, receiver_ty, "missing"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Bool(false)),
+        "obj.hasOwnProperty('missing') on Point{{x}} must lower to MirExpr::Bool(false), got {mir:?}"
+    );
+}
+
+#[test]
+fn receiver_has_own_property_falls_through_to_indirect_call_for_non_struct_receiver() {
+    let mut types = TypeTable::new();
+    let receiver_ty = types.intern(&Type::I64);
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &receiver_has_own_property_call(&mut types, receiver_ty, "x"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
+        0,
+        "non-struct receiver must NOT trigger hasOwnProperty special-case (E0406), \
+         must fall through to indirect-call; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        matches!(mir, MirExpr::IndirectCall { .. }),
+        "non-struct receiver hasOwnProperty call must lower to MirExpr::IndirectCall, got {mir:?}"
+    );
+}
+
+#[test]
+fn receiver_has_own_property_emits_e0406_for_dynamic_key() {
+    let mut types = TypeTable::new();
+    let receiver_ty = types.intern(&Type::Named {
+        symbol: Atom::new_inline("Point"),
+    });
+    let struct_id = StructId::from_raw(9);
+    let mut c = ExprConverter::new();
+    c.struct_ids.insert(receiver_ty, struct_id);
+    c.field_id_lookup
+        .insert((struct_id, Atom::new_inline("x")), FieldId::from_raw(0));
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: receiver_ty,
+
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("hasOwnProperty"),
+            ty: types.intern(&Type::Bool),
+
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::Local {
+            id: LocalId::from_raw(1),
+            ty: types.intern(&Type::String),
+
+            span: Span::default(),
+        }],
+        ty: types.intern(&Type::Bool),
+        type_args: vec![],
+
+        span: Span::default(),
+    };
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
         1,
-        "Object.keys() must emit exactly one E0404, got {:?}",
+        "dynamic (non-literal) key must emit E0406, got {:?}",
         cx.diagnostics()
     );
 }
 
 #[test]
-fn e0404_emits_for_object_get_prototype_of_call() {
+fn bare_has_own_property_field_access_emits_e0407() {
+    let mut types = TypeTable::new();
+    let receiver_ty = types.intern(&Type::Named {
+        symbol: Atom::new_inline("Point"),
+    });
+    let struct_id = StructId::from_raw(10);
     let mut c = ExprConverter::new();
+    c.struct_ids.insert(receiver_ty, struct_id);
+    let expr = HirExpr::Field {
+        owner: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: receiver_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("hasOwnProperty"),
+        ty: types.intern(&Type::Bool),
+        span: Span::default(),
+    };
     let out = &mut Vec::new();
     let mut cx = ctx();
     c.convert_expr(
-        &object_method_call("getPrototypeOf"),
+        &expr,
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut empty_types(),
         &mut cx,
     );
-    assert_eq!(e0404_count(cx.diagnostics()), 1);
-}
-
-#[test]
-fn e0404_emits_for_object_set_prototype_of_call() {
-    let mut c = ExprConverter::new();
-    let out = &mut Vec::new();
-    let mut cx = ctx();
-    c.convert_expr(
-        &object_method_call("setPrototypeOf"),
-        out,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx,
+    let e0407_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0407")
+        .count();
+    assert_eq!(
+        e0407_count,
+        1,
+        "bare `obj.hasOwnProperty` (no call) must emit E0407, got {:?}",
+        cx.diagnostics()
     );
-    assert_eq!(e0404_count(cx.diagnostics()), 1);
 }
 
 #[test]
@@ -6528,4 +6881,126 @@ fn e0404_not_emitted_for_object_local_global_other_method() {
         "Object.assign() (not in banned set) must not trigger E0404, got {:?}",
         cx.diagnostics()
     );
+}
+
+#[test]
+fn object_set_prototype_of_no_args_emits_e0406_no_panic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call("setPrototypeOf"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
+        1,
+        "Object.setPrototypeOf() with no args must emit E0406 (not panic), got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        matches!(mir, MirExpr::Unit),
+        "must return MirExpr::Unit on arity error, got {mir:?}"
+    );
+    assert!(
+        out.is_empty(),
+        "no stmts should be emitted on arity error, got: {out:?}"
+    );
+}
+
+#[test]
+fn object_keys_no_args_emits_e0406() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call("keys"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
+        1,
+        "Object.keys() with no args must emit E0406, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Unit));
+    assert!(out.is_empty());
+}
+
+#[test]
+fn object_keys_too_many_args_emits_e0406() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut expr = object_method_call_with_arg("keys", HirExpr::Int(1, Span::default()));
+    if let HirExpr::Call { args, .. } = &mut expr {
+        args.push(HirExpr::Int(2, Span::default()));
+    }
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
+        1,
+        "Object.keys(a, b) with 2 args must emit E0406, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Unit));
+    assert!(out.is_empty());
+}
+
+#[test]
+fn object_get_prototype_of_no_args_emits_e0406() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call("getPrototypeOf"),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    let e0406_count = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
+    assert_eq!(
+        e0406_count,
+        1,
+        "Object.getPrototypeOf() with no args must emit E0406, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Unit));
+    assert!(out.is_empty());
 }

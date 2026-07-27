@@ -18,4 +18,5 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
+indexmap = { workspace = true }
 regex = "1"

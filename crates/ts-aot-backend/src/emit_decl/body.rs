@@ -784,5 +784,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
+        RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
+        RuntimeOp::ObjectGetPrototypeOf => format_ident!("__ts_aot_object_get_prototype_of"),
     }
 }

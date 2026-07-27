@@ -88,6 +88,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::HostConsoleLog => &[HostIo, Console],
         RuntimeOp::MathSqrt => &[Math],
         RuntimeOp::OpIn | RuntimeOp::OpInstanceof => &[],
+        RuntimeOp::ObjectKeys | RuntimeOp::ObjectGetPrototypeOf => &[],
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime")
         }

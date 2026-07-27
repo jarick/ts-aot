@@ -361,6 +361,8 @@ pub enum RuntimeOp {
     TypeOf,
     OpIn,
     OpInstanceof,
+    ObjectKeys,
+    ObjectGetPrototypeOf,
 }
 
 #[cfg(test)]

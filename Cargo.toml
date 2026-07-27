@@ -20,6 +20,7 @@ publish = false
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+indexmap = "2"
 oxc_allocator = "0.139"
 oxc_ast = "0.139"
 oxc_diagnostics = "0.139"
