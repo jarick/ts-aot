@@ -224,6 +224,18 @@ impl ExprConverter {
         };
         match self.field_id_lookup.get(&(sid, field_name.clone())) {
             Some(id) => *id,
+            None if is_object_prototype_method(field_name) => {
+                ctx.error(
+                    "E0407",
+                    format!(
+                        "Object.prototype method `{}` cannot be used as a bare field value; \
+                         invoke it on a struct receiver instead",
+                        field_name.as_str()
+                    ),
+                    Span::new(0, 0),
+                );
+                placeholder
+            }
             None => {
                 ctx.error(
                     "P0010",
@@ -243,4 +255,10 @@ impl Default for ExprConverter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const OBJECT_PROTOTYPE_METHODS: &[&str] = &["hasOwnProperty"];
+
+fn is_object_prototype_method(field_name: &Atom) -> bool {
+    OBJECT_PROTOTYPE_METHODS.contains(&field_name.as_str())
 }

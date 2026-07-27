@@ -470,6 +470,8 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpInstanceof => "op_instanceof",
         RuntimeOp::HostConsoleLog => "host_console_log",
         RuntimeOp::MathSqrt => "math_sqrt",
+        RuntimeOp::ObjectKeys => "object_keys",
+        RuntimeOp::ObjectGetPrototypeOf => "object_get_prototype_of",
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use ts_aot_runtime::{
     __ts_aot_array_get, __ts_aot_array_len, __ts_aot_array_set, __ts_aot_host_console_log,
     __ts_aot_map_get, __ts_aot_map_set, __ts_aot_op_in, __ts_aot_op_instanceof,
@@ -66,16 +66,16 @@ fn runtime_op_in_string_in_string_vec_non_member_returns_false() {
 }
 
 #[test]
-fn runtime_op_in_hashmap_key_present_returns_true() {
-    let mut map: HashMap<String, String> = HashMap::new();
+fn runtime_op_in_indexmap_key_present_returns_true() {
+    let mut map: IndexMap<String, String> = IndexMap::new();
     __ts_aot_map_set(&mut map, "k".to_owned(), "v".to_owned());
     let key: String = "k".to_owned();
     assert!(__ts_aot_op_in(&key, &map));
 }
 
 #[test]
-fn runtime_op_in_hashmap_key_absent_returns_false() {
-    let map: HashMap<String, String> = HashMap::new();
+fn runtime_op_in_indexmap_key_absent_returns_false() {
+    let map: IndexMap<String, String> = IndexMap::new();
     let key: String = "missing".to_owned();
     assert!(!__ts_aot_op_in(&key, &map));
 }
@@ -158,7 +158,7 @@ fn runtime_array_get_set_and_len() {
 
 #[test]
 fn runtime_map_get_returns_stored_value() {
-    let mut map: HashMap<String, String> = HashMap::new();
+    let mut map: IndexMap<String, String> = IndexMap::new();
     __ts_aot_map_set(&mut map, "k".to_owned(), "v".to_owned());
     assert_eq!(__ts_aot_map_get(&map, "k").as_deref(), Some("v"));
     assert_eq!(__ts_aot_map_get(&map, "missing"), None);
