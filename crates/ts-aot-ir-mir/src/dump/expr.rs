@@ -453,9 +453,15 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::StringEquals => "string_equals",
         RuntimeOp::StringLen => "string_len",
         RuntimeOp::ArrayCreate => "array_create",
+        RuntimeOp::ArrayCreateWithLen => "array_create_with_len",
         RuntimeOp::ArrayGet => "array_get",
         RuntimeOp::ArraySet => "array_set",
         RuntimeOp::ArrayLen => "array_len",
+        RuntimeOp::ArrayPush => "array_push",
+        RuntimeOp::ArrayFrom => "array_from",
+        RuntimeOp::ArrayFromString => "array_from_string",
+        RuntimeOp::ArrayFromMapped => "array_from_mapped",
+        RuntimeOp::ArrayFromLengthMapped => "array_from_length_mapped",
         RuntimeOp::MapGet => "map_get",
         RuntimeOp::MapSet => "map_set",
         RuntimeOp::ResultOk => "result_ok",
@@ -472,6 +478,8 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::MathSqrt => "math_sqrt",
         RuntimeOp::ObjectKeys => "object_keys",
         RuntimeOp::ObjectGetPrototypeOf => "object_get_prototype_of",
+        RuntimeOp::ArrayIsArray => "array_is_array",
+        RuntimeOp::ArrayIsArrayFalse => "array_is_array_false",
     }
 }
 

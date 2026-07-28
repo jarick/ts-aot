@@ -18,5 +18,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [dependencies]
+ts-aot-core = { path = "../ts-aot-core" }
 indexmap = { workspace = true }
 regex = "1"

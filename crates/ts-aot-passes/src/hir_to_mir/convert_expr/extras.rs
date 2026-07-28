@@ -4,12 +4,36 @@ use std::collections::HashMap;
 
 use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
-use ts_aot_ir_mir::{MirExpr, MirStmt};
+use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
-use crate::hir_to_mir::convert_expr::util::has_potential_side_effects;
+use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
+
+fn is_numeric_type_for_array_len(arg: &HirExpr, types: &TypeTable) -> bool {
+    if matches!(arg, HirExpr::Int(_, _) | HirExpr::Float(_, _)) {
+        return true;
+    }
+    let Some(ty) = hir_expr_type_id(arg) else {
+        return false;
+    };
+    matches!(
+        types.resolve(ty),
+        Some(
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::F32
+                | Type::F64
+        )
+    )
+}
 
 impl ExprConverter {
     pub(super) fn convert_new(
@@ -23,6 +47,18 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "Array") {
+            return self.convert_new_array(
+                callee,
+                args,
+                ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+        }
         let callee_mir = self.convert_expr(
             callee,
             out,
@@ -65,6 +101,65 @@ impl ExprConverter {
             args: ctor_args,
             ty,
         }));
+        MirExpr::Local(alloc_id)
+    }
+
+    fn convert_new_array(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let _ = callee;
+        let alloc_id = self.fresh_local();
+        self.push_temp_local(alloc_id, ty);
+        if args.is_empty() {
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ArrayCreate,
+                args: Vec::new(),
+                dest: Some(alloc_id),
+                ty,
+            });
+            return MirExpr::Local(alloc_id);
+        }
+        if args.len() == 1 && is_numeric_type_for_array_len(&args[0], types) {
+            let len_mir = self.convert_expr(
+                &args[0],
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ArrayCreateWithLen,
+                args: vec![len_mir],
+                dest: Some(alloc_id),
+                ty,
+            });
+            return MirExpr::Local(alloc_id);
+        }
+        out.push(MirStmt::Runtime {
+            op: RuntimeOp::ArrayCreate,
+            args: Vec::new(),
+            dest: Some(alloc_id),
+            ty,
+        });
+        for a in args {
+            let item_mir =
+                self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ArrayPush,
+                args: vec![MirExpr::Local(alloc_id), item_mir],
+                dest: None,
+                ty: TypeId::from_raw(0),
+            });
+        }
         MirExpr::Local(alloc_id)
     }
 

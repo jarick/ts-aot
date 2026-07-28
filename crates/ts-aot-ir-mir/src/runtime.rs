@@ -79,16 +79,25 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     match op {
         RuntimeOp::StringConcat | RuntimeOp::StringEquals | RuntimeOp::StringLen => &[StringFeat],
         RuntimeOp::ArrayCreate
+        | RuntimeOp::ArrayCreateWithLen
         | RuntimeOp::ArrayGet
         | RuntimeOp::ArraySet
-        | RuntimeOp::ArrayLen => &[Array],
+        | RuntimeOp::ArrayLen
+        | RuntimeOp::ArrayPush
+        | RuntimeOp::ArrayFrom
+        | RuntimeOp::ArrayFromString
+        | RuntimeOp::ArrayFromMapped
+        | RuntimeOp::ArrayFromLengthMapped => &[Array],
         RuntimeOp::MapGet | RuntimeOp::MapSet => &[Map],
         RuntimeOp::ResultOk | RuntimeOp::ResultErr | RuntimeOp::ResultUnwrapOk => &[ResultFeat],
         RuntimeOp::PromiseCreate | RuntimeOp::PromiseResolve => &[Promise, Scheduler],
         RuntimeOp::HostConsoleLog => &[HostIo, Console],
         RuntimeOp::MathSqrt => &[Math],
         RuntimeOp::OpIn | RuntimeOp::OpInstanceof => &[],
-        RuntimeOp::ObjectKeys | RuntimeOp::ObjectGetPrototypeOf => &[],
+        RuntimeOp::ObjectKeys
+        | RuntimeOp::ObjectGetPrototypeOf
+        | RuntimeOp::ArrayIsArray
+        | RuntimeOp::ArrayIsArrayFalse => &[],
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime")
         }
