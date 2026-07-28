@@ -603,6 +603,11 @@ fn emit_runtime_call(
             let item = emit_expr(&args[1], ctx, body_ctx)?;
             Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
         }
+        RuntimeOp::MathMax | RuntimeOp::MathMin => {
+            let name = runtime_op_ident(op);
+            let args = emit_exprs(args, ctx, body_ctx)?;
+            Ok(quote!(#name(&[#(#args),*])))
+        }
         _ => {
             let name = runtime_op_ident(op);
             let args = emit_exprs(args, ctx, body_ctx)?;
@@ -792,6 +797,25 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
         RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
         RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
+        RuntimeOp::MathAbs => format_ident!("__ts_aot_math_abs"),
+        RuntimeOp::MathFloor => format_ident!("__ts_aot_math_floor"),
+        RuntimeOp::MathCeil => format_ident!("__ts_aot_math_ceil"),
+        RuntimeOp::MathRound => format_ident!("__ts_aot_math_round"),
+        RuntimeOp::MathTrunc => format_ident!("__ts_aot_math_trunc"),
+        RuntimeOp::MathSign => format_ident!("__ts_aot_math_sign"),
+        RuntimeOp::MathPow => format_ident!("__ts_aot_math_pow"),
+        RuntimeOp::MathLog => format_ident!("__ts_aot_math_log"),
+        RuntimeOp::MathExp => format_ident!("__ts_aot_math_exp"),
+        RuntimeOp::MathSin => format_ident!("__ts_aot_math_sin"),
+        RuntimeOp::MathCos => format_ident!("__ts_aot_math_cos"),
+        RuntimeOp::MathTan => format_ident!("__ts_aot_math_tan"),
+        RuntimeOp::MathAsin => format_ident!("__ts_aot_math_asin"),
+        RuntimeOp::MathAcos => format_ident!("__ts_aot_math_acos"),
+        RuntimeOp::MathAtan => format_ident!("__ts_aot_math_atan"),
+        RuntimeOp::MathAtan2 => format_ident!("__ts_aot_math_atan2"),
+        RuntimeOp::MathMax => format_ident!("__ts_aot_math_max"),
+        RuntimeOp::MathMin => format_ident!("__ts_aot_math_min"),
+        RuntimeOp::MathRandom => format_ident!("__ts_aot_math_random"),
         RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),

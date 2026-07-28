@@ -92,7 +92,26 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::ResultOk | RuntimeOp::ResultErr | RuntimeOp::ResultUnwrapOk => &[ResultFeat],
         RuntimeOp::PromiseCreate | RuntimeOp::PromiseResolve => &[Promise, Scheduler],
         RuntimeOp::HostConsoleLog => &[HostIo, Console],
-        RuntimeOp::MathSqrt => &[Math],
+        RuntimeOp::MathSqrt
+        | RuntimeOp::MathAbs
+        | RuntimeOp::MathFloor
+        | RuntimeOp::MathCeil
+        | RuntimeOp::MathRound
+        | RuntimeOp::MathTrunc
+        | RuntimeOp::MathSign
+        | RuntimeOp::MathPow
+        | RuntimeOp::MathLog
+        | RuntimeOp::MathExp
+        | RuntimeOp::MathSin
+        | RuntimeOp::MathCos
+        | RuntimeOp::MathTan
+        | RuntimeOp::MathAsin
+        | RuntimeOp::MathAcos
+        | RuntimeOp::MathAtan
+        | RuntimeOp::MathAtan2
+        | RuntimeOp::MathMax
+        | RuntimeOp::MathMin
+        | RuntimeOp::MathRandom => &[Math],
         RuntimeOp::OpIn | RuntimeOp::OpInstanceof => &[],
         RuntimeOp::ObjectKeys
         | RuntimeOp::ObjectGetPrototypeOf

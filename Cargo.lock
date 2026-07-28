@@ -1026,6 +1026,7 @@ dependencies = [
 name = "ts-aot-runtime"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "indexmap",
  "regex",
  "ts-aot-core",
