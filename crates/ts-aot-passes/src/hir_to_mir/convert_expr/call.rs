@@ -21,6 +21,10 @@ pub(super) fn is_global_array_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Array")
 }
 
+pub(super) fn is_global_math_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Math")
+}
+
 fn is_string_typed_source(arg: &HirExpr, types: &TypeTable) -> bool {
     if matches!(arg, HirExpr::String(_, _)) {
         return true;
@@ -406,6 +410,71 @@ impl ExprConverter {
                     });
                 }
                 return MirExpr::Local(alloc_id);
+            }
+            if let HirExpr::Field {
+                owner: math_owner,
+                field_name: math_field,
+                ..
+            } = inner.as_ref()
+                && is_global_math_reference(math_owner)
+            {
+                let op = match math_field.as_str() {
+                    "abs" => Some(RuntimeOp::MathAbs),
+                    "floor" => Some(RuntimeOp::MathFloor),
+                    "ceil" => Some(RuntimeOp::MathCeil),
+                    "round" => Some(RuntimeOp::MathRound),
+                    "trunc" => Some(RuntimeOp::MathTrunc),
+                    "sign" => Some(RuntimeOp::MathSign),
+                    "sqrt" => Some(RuntimeOp::MathSqrt),
+                    "pow" => Some(RuntimeOp::MathPow),
+                    "log" => Some(RuntimeOp::MathLog),
+                    "exp" => Some(RuntimeOp::MathExp),
+                    "sin" => Some(RuntimeOp::MathSin),
+                    "cos" => Some(RuntimeOp::MathCos),
+                    "tan" => Some(RuntimeOp::MathTan),
+                    "asin" => Some(RuntimeOp::MathAsin),
+                    "acos" => Some(RuntimeOp::MathAcos),
+                    "atan" => Some(RuntimeOp::MathAtan),
+                    "atan2" => Some(RuntimeOp::MathAtan2),
+                    "max" => Some(RuntimeOp::MathMax),
+                    "min" => Some(RuntimeOp::MathMin),
+                    "random" => Some(RuntimeOp::MathRandom),
+                    _ => None,
+                };
+                if let Some(op) = op {
+                    let expected_arity = match op {
+                        RuntimeOp::MathRandom => Some(0),
+                        RuntimeOp::MathPow | RuntimeOp::MathAtan2 => Some(2),
+                        RuntimeOp::MathMax | RuntimeOp::MathMin => None,
+                        _ => Some(1),
+                    };
+                    let arity_ok = match expected_arity {
+                        Some(n) => mir_args.len() == n,
+                        None => true,
+                    };
+                    if !arity_ok {
+                        ctx.error(
+                            "E0406",
+                            format!(
+                                "Math.{} requires exactly {} argument(s); got {}",
+                                math_field.as_str(),
+                                expected_arity.expect("checked above"),
+                                mir_args.len()
+                            ),
+                            Span::new(0, 0),
+                        );
+                        return MirExpr::Unit;
+                    }
+                    let dest = self.fresh_local();
+                    self.push_temp_local(dest, ty);
+                    out.push(MirStmt::Runtime {
+                        op,
+                        args: mir_args,
+                        dest: Some(dest),
+                        ty,
+                    });
+                    return MirExpr::Local(dest);
+                }
             }
             if let HirExpr::Field {
                 owner: has_own_owner,

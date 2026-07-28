@@ -21,3 +21,4 @@ missing_panics_doc = "allow"
 ts-aot-core = { path = "../ts-aot-core" }
 indexmap = { workspace = true }
 regex = "1"
+fastrand = { workspace = true }

@@ -4,15 +4,130 @@ use ts_aot_runtime::{
     __ts_aot_array_from_mapped, __ts_aot_array_from_string, __ts_aot_array_get,
     __ts_aot_array_is_array, __ts_aot_array_is_array_false, __ts_aot_array_len,
     __ts_aot_array_push, __ts_aot_array_set, __ts_aot_host_console_log, __ts_aot_map_get,
-    __ts_aot_map_set, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_len, __ts_aot_throw,
-    __ts_aot_typeof, __ts_aot_typeof_null, __ts_aot_typeof_unit, TsArrayMarker,
+    __ts_aot_map_set, __ts_aot_math_abs, __ts_aot_math_acos, __ts_aot_math_asin,
+    __ts_aot_math_atan, __ts_aot_math_atan2, __ts_aot_math_ceil, __ts_aot_math_cos,
+    __ts_aot_math_exp, __ts_aot_math_floor, __ts_aot_math_log, __ts_aot_math_max,
+    __ts_aot_math_min, __ts_aot_math_pow, __ts_aot_math_random, __ts_aot_math_round,
+    __ts_aot_math_sign, __ts_aot_math_sin, __ts_aot_math_sqrt, __ts_aot_math_tan,
+    __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_len,
+    __ts_aot_throw, __ts_aot_typeof, __ts_aot_typeof_null, __ts_aot_typeof_unit, TsArrayMarker,
 };
+
+fn assert_f64_exact(actual: f64, expected: f64) {
+    let equal = if actual.is_nan() || expected.is_nan() {
+        actual.is_nan() && expected.is_nan()
+    } else {
+        actual.to_bits() == expected.to_bits()
+    };
+    assert!(equal, "f64 mismatch: actual={actual} expected={expected}");
+}
 
 #[test]
 fn runtime_string_len_returns_utf16_code_unit_count() {
     assert_eq!(__ts_aot_string_len("hello"), 5);
     assert_eq!(__ts_aot_string_len(""), 0);
     assert_eq!(__ts_aot_string_len("café"), 4);
+}
+
+#[test]
+fn runtime_math_abs_floor_ceil_round_trunc_sign() {
+    assert_f64_exact(__ts_aot_math_abs(-3.5), 3.5);
+    assert_f64_exact(__ts_aot_math_abs(3.5), 3.5);
+    assert_f64_exact(__ts_aot_math_floor(3.7), 3.0);
+    assert_f64_exact(__ts_aot_math_floor(-3.2), -4.0);
+    assert_f64_exact(__ts_aot_math_ceil(3.2), 4.0);
+    assert_f64_exact(__ts_aot_math_ceil(-3.7), -3.0);
+    assert_f64_exact(__ts_aot_math_round(3.5), 4.0);
+    assert_f64_exact(__ts_aot_math_round(3.4), 3.0);
+    assert_f64_exact(__ts_aot_math_round(-0.0), -0.0);
+    assert_f64_exact(__ts_aot_math_round(-0.1), -0.0);
+    assert_f64_exact(__ts_aot_math_round(-0.5), -0.0);
+    assert_f64_exact(__ts_aot_math_round(-1.5), -1.0);
+    assert_f64_exact(__ts_aot_math_round(-2.5), -2.0);
+    assert_f64_exact(
+        __ts_aot_math_round(4_503_599_627_370_497.0),
+        4_503_599_627_370_497.0,
+    );
+    assert_f64_exact(
+        __ts_aot_math_round(-4_503_599_627_370_497.0),
+        -4_503_599_627_370_497.0,
+    );
+    assert_f64_exact(__ts_aot_math_trunc(3.7), 3.0);
+    assert_f64_exact(__ts_aot_math_trunc(-3.7), -3.0);
+    assert_f64_exact(__ts_aot_math_sign(5.0), 1.0);
+    assert_f64_exact(__ts_aot_math_sign(-5.0), -1.0);
+    assert_f64_exact(__ts_aot_math_sign(0.0), 0.0);
+}
+
+#[test]
+fn runtime_math_sqrt_pow_log_exp() {
+    assert_f64_exact(__ts_aot_math_sqrt(16.0), 4.0);
+    assert_f64_exact(__ts_aot_math_sqrt(2.0), 2.0_f64.sqrt());
+    assert_f64_exact(__ts_aot_math_pow(2.0, 10.0), 1024.0);
+    assert_f64_exact(__ts_aot_math_pow(9.0, 0.5), 3.0);
+    assert_f64_exact(__ts_aot_math_log(1.0), 0.0);
+    assert_f64_exact(__ts_aot_math_log(std::f64::consts::E), 1.0);
+    assert_f64_exact(__ts_aot_math_exp(0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_exp(1.0), std::f64::consts::E);
+}
+
+#[test]
+fn runtime_math_trig_functions() {
+    assert_f64_exact(__ts_aot_math_sin(0.0), 0.0);
+    assert_f64_exact(__ts_aot_math_cos(0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_tan(0.0), 0.0);
+    assert_f64_exact(__ts_aot_math_asin(0.0), 0.0);
+    assert_f64_exact(__ts_aot_math_acos(1.0), 0.0);
+    assert_f64_exact(__ts_aot_math_atan(0.0), 0.0);
+    assert_f64_exact(__ts_aot_math_atan2(0.0, 1.0), 0.0);
+    assert_f64_exact(__ts_aot_math_atan2(1.0, 0.0), std::f64::consts::FRAC_PI_2);
+}
+
+#[test]
+fn runtime_math_max_min_returns_nan_on_nan_input() {
+    assert!(__ts_aot_math_max(&[1.0, f64::NAN]).is_nan());
+    assert!(__ts_aot_math_max(&[f64::NAN, 1.0]).is_nan());
+    assert!(__ts_aot_math_max(&[1.0, 2.0, f64::NAN, 4.0]).is_nan());
+    assert_f64_exact(__ts_aot_math_max(&[3.0, 5.0]), 5.0);
+    assert_f64_exact(__ts_aot_math_max(&[5.0, 3.0]), 5.0);
+    assert!(__ts_aot_math_min(&[1.0, f64::NAN]).is_nan());
+    assert!(__ts_aot_math_min(&[f64::NAN, 1.0]).is_nan());
+    assert!(__ts_aot_math_min(&[1.0, 2.0, f64::NAN, 4.0]).is_nan());
+    assert_f64_exact(__ts_aot_math_min(&[3.0, 5.0]), 3.0);
+    assert_f64_exact(__ts_aot_math_min(&[5.0, 3.0]), 3.0);
+}
+
+#[test]
+fn runtime_math_max_min_accept_variadic_args() {
+    assert_f64_exact(__ts_aot_math_max(&[1.0, 2.0, 3.0, 4.0, 5.0]), 5.0);
+    assert_f64_exact(__ts_aot_math_max(&[5.0, 3.0, 9.0, 1.0]), 9.0);
+    assert_f64_exact(__ts_aot_math_min(&[1.0, 2.0, 3.0, 4.0, 5.0]), 1.0);
+    assert_f64_exact(__ts_aot_math_min(&[5.0, 3.0, 9.0, 1.0]), 1.0);
+}
+
+#[test]
+fn runtime_math_max_with_single_arg_returns_that_arg() {
+    assert_f64_exact(__ts_aot_math_max(&[42.0]), 42.0);
+    assert_f64_exact(__ts_aot_math_min(&[42.0]), 42.0);
+    assert_f64_exact(__ts_aot_math_max(&[-3.5]), -3.5);
+    assert_f64_exact(__ts_aot_math_min(&[-3.5]), -3.5);
+}
+
+#[test]
+fn runtime_math_max_with_zero_args_returns_negative_infinity() {
+    assert_f64_exact(__ts_aot_math_max(&[]), f64::NEG_INFINITY);
+    assert_f64_exact(__ts_aot_math_min(&[]), f64::INFINITY);
+}
+
+#[test]
+fn runtime_math_random_returns_value_in_unit_interval() {
+    for _ in 0..16 {
+        let r = __ts_aot_math_random();
+        assert!(
+            (0.0..1.0).contains(&r),
+            "Math.random() must return value in [0.0, 1.0); got {r}"
+        );
+    }
 }
 
 #[test]
