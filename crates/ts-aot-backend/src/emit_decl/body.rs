@@ -598,6 +598,11 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_op_instanceof(&#value, #target_type_id)))
         }
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, body_ctx),
+        RuntimeOp::ArrayPush => {
+            let arr = emit_expr(&args[0], ctx, body_ctx)?;
+            let item = emit_expr(&args[1], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
+        }
         _ => {
             let name = runtime_op_ident(op);
             let args = emit_exprs(args, ctx, body_ctx)?;
@@ -769,9 +774,15 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::StringEquals => format_ident!("__ts_aot_string_equals"),
         RuntimeOp::StringLen => format_ident!("__ts_aot_string_len"),
         RuntimeOp::ArrayCreate => format_ident!("__ts_aot_array_create"),
+        RuntimeOp::ArrayCreateWithLen => format_ident!("__ts_aot_array_create_with_len"),
         RuntimeOp::ArrayGet => format_ident!("__ts_aot_array_get"),
         RuntimeOp::ArraySet => format_ident!("__ts_aot_array_set"),
         RuntimeOp::ArrayLen => format_ident!("__ts_aot_array_len"),
+        RuntimeOp::ArrayPush => format_ident!("__ts_aot_array_push"),
+        RuntimeOp::ArrayFrom => format_ident!("__ts_aot_array_from"),
+        RuntimeOp::ArrayFromString => format_ident!("__ts_aot_array_from_string"),
+        RuntimeOp::ArrayFromMapped => format_ident!("__ts_aot_array_from_mapped"),
+        RuntimeOp::ArrayFromLengthMapped => format_ident!("__ts_aot_array_from_length_mapped"),
         RuntimeOp::MapGet => format_ident!("__ts_aot_map_get"),
         RuntimeOp::MapSet => format_ident!("__ts_aot_map_set"),
         RuntimeOp::ResultOk => format_ident!("__ts_aot_result_ok"),
@@ -786,5 +797,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
         RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
         RuntimeOp::ObjectGetPrototypeOf => format_ident!("__ts_aot_object_get_prototype_of"),
+        RuntimeOp::ArrayIsArray => format_ident!("__ts_aot_array_is_array"),
+        RuntimeOp::ArrayIsArrayFalse => format_ident!("__ts_aot_array_is_array_false"),
     }
 }

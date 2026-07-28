@@ -7,6 +7,9 @@ use std::panic::panic_any;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use ts_aot_core::canonical_integer_index;
+
+pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
 pub fn __ts_aot_host_console_log(s: &str) {
     println!("{s}");
@@ -261,6 +264,60 @@ pub fn __ts_aot_array_create<T>() -> Vec<T> {
 }
 
 #[must_use]
+pub fn __ts_aot_array_create_with_len<T: Default + Clone>(len: i64) -> Vec<T> {
+    assert!(
+        !(len < 0 || len >= i64::from(MAX_DENSE_ARRAY_LEN)),
+        "__ts_aot_array_create_with_len: out-of-range length {len} \
+         (expected 0 <= len < {MAX_DENSE_ARRAY_LEN}, the AOT dense-Vec cap; \
+         lengths above this would attempt to allocate billions of bytes and OOM)"
+    );
+    vec![T::default(); usize::try_from(len).expect("checked above")]
+}
+
+pub fn __ts_aot_array_push<T>(arr: &mut Vec<T>, item: T) {
+    arr.push(item);
+}
+
+#[must_use]
+pub fn __ts_aot_array_from<T: Clone>(arr: &[T]) -> Vec<T> {
+    arr.to_owned()
+}
+
+#[must_use]
+pub fn __ts_aot_array_from_string(s: &str) -> Vec<String> {
+    s.chars().map(|c| c.to_string()).collect()
+}
+
+#[must_use]
+pub fn __ts_aot_array_from_mapped<T, R, F>(arr: &[T], mut mapfn: F) -> Vec<R>
+where
+    T: Clone,
+    F: FnMut(T, i64) -> R,
+{
+    arr.iter()
+        .enumerate()
+        .map(|(i, x)| mapfn(x.clone(), i64::try_from(i).unwrap_or(0)))
+        .collect()
+}
+
+#[must_use]
+pub fn __ts_aot_array_from_length_mapped<T, R, F>(len: i64, mut mapfn: F) -> Vec<R>
+where
+    T: Default,
+    F: FnMut(T, i64) -> R,
+{
+    assert!(
+        !(len < 0 || len >= i64::from(MAX_DENSE_ARRAY_LEN)),
+        "__ts_aot_array_from_length_mapped: out-of-range length {len} \
+         (expected 0 <= len < {MAX_DENSE_ARRAY_LEN})"
+    );
+    let n = usize::try_from(len).expect("checked above");
+    (0..n)
+        .map(|i| mapfn(T::default(), i64::try_from(i).unwrap_or(0)))
+        .collect()
+}
+
+#[must_use]
 pub fn __ts_aot_array_get<T: Clone>(arr: &[T], idx: i64) -> Option<T> {
     let i = usize::try_from(idx).ok()?;
     arr.get(i).cloned()
@@ -282,6 +339,34 @@ pub fn __ts_aot_array_set<T>(arr: &mut [T], idx: i64, value: T) -> bool {
 #[must_use]
 pub fn __ts_aot_array_len<T>(arr: &[T]) -> i64 {
     i64::try_from(arr.len()).unwrap_or(0)
+}
+
+pub struct TsArrayMarker;
+
+pub trait IsArray {
+    fn is_array(&self) -> bool;
+}
+
+impl<T> IsArray for Vec<T> {
+    fn is_array(&self) -> bool {
+        true
+    }
+}
+
+impl IsArray for TsArrayMarker {
+    fn is_array(&self) -> bool {
+        true
+    }
+}
+
+#[must_use]
+pub fn __ts_aot_array_is_array<T: IsArray + ?Sized>(value: &T) -> bool {
+    value.is_array()
+}
+
+#[must_use]
+pub fn __ts_aot_array_is_array_false() -> bool {
+    false
 }
 
 #[must_use]
@@ -322,25 +407,6 @@ pub fn __ts_aot_object_keys<S: BuildHasher>(map: &IndexMap<String, String, S>) -
         .map(|(_, s)| s)
         .chain(string_keys)
         .collect()
-}
-
-fn canonical_integer_index(s: &str) -> Option<u64> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    if bytes[0] == b'0' {
-        return if bytes.len() == 1 { Some(0) } else { None };
-    }
-    if !bytes[0].is_ascii_digit() {
-        return None;
-    }
-    for &b in &bytes[1..] {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-    }
-    s.parse::<u64>().ok().filter(|&n| n < u64::from(u32::MAX))
 }
 
 #[must_use]

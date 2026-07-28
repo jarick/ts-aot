@@ -346,9 +346,15 @@ pub enum RuntimeOp {
     StringEquals,
     StringLen,
     ArrayCreate,
+    ArrayCreateWithLen,
     ArrayGet,
     ArraySet,
     ArrayLen,
+    ArrayPush,
+    ArrayFrom,
+    ArrayFromString,
+    ArrayFromMapped,
+    ArrayFromLengthMapped,
     MapGet,
     MapSet,
     ResultOk,
@@ -363,6 +369,8 @@ pub enum RuntimeOp {
     OpInstanceof,
     ObjectKeys,
     ObjectGetPrototypeOf,
+    ArrayIsArray,
+    ArrayIsArrayFalse,
 }
 
 #[cfg(test)]
