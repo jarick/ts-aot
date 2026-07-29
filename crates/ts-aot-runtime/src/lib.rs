@@ -395,6 +395,117 @@ pub fn __ts_aot_string_equals(a: &str, b: &str) -> bool {
 }
 
 #[must_use]
+pub fn __ts_aot_string_index_of(haystack: &str, needle: &str, from_index: i64) -> i64 {
+    let utf16: Vec<u16> = haystack.encode_utf16().collect();
+    let len_utf16 = utf16.len();
+    if from_index < 0 {
+        return __ts_aot_string_index_of(haystack, needle, 0);
+    }
+    let start = usize::try_from(from_index)
+        .unwrap_or(len_utf16)
+        .min(len_utf16);
+    if needle.is_empty() {
+        return i64::try_from(start).unwrap_or(-1);
+    }
+    if start >= len_utf16 {
+        return -1;
+    }
+    let needle_utf16: Vec<u16> = needle.encode_utf16().collect();
+    if needle_utf16.is_empty() {
+        return i64::try_from(start).unwrap_or(-1);
+    }
+    utf16[start..]
+        .windows(needle_utf16.len())
+        .position(|w| w == needle_utf16.as_slice())
+        .map_or(-1, |i| i64::try_from(start + i).unwrap_or(-1))
+}
+
+#[must_use]
+pub fn __ts_aot_string_char_at(s: &str, idx: i64) -> String {
+    if idx < 0 {
+        return String::new();
+    }
+    let Ok(i) = usize::try_from(idx) else {
+        return String::new();
+    };
+    let utf16: Vec<u16> = s.encode_utf16().collect();
+    match utf16.get(i) {
+        Some(&code) => utf16_to_string_lossy(&[code]),
+        None => String::new(),
+    }
+}
+
+#[must_use]
+pub fn __ts_aot_string_substring_utf16(s: &str, start: i64, end: i64) -> String {
+    let utf16: Vec<u16> = s.encode_utf16().collect();
+    let len = utf16.len();
+    let clamp = |n: i64| -> usize { usize::try_from(n.max(0)).unwrap_or(len).min(len) };
+    let lo = clamp(start);
+    let hi = clamp(end);
+    let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+    utf16_to_string_lossy(&utf16[lo..hi])
+}
+
+#[must_use]
+pub fn __ts_aot_string_from_char_code(codes: &[i64]) -> String {
+    let chars: Vec<u16> = codes.iter().map(|&c| i64_to_char_code_u16(c)).collect();
+    utf16_to_string_lossy(&chars)
+}
+
+#[must_use]
+pub fn __ts_aot_string_from_code_point(points: &[i64]) -> String {
+    for &p in points {
+        if !(0..=0x10_FFFF).contains(&p) || (0xD800..=0xDFFF).contains(&p) {
+            __ts_aot_throw(format!("RangeError: Invalid code point {p}"));
+        }
+    }
+    let mut result = String::new();
+    for &p in points {
+        let Ok(as_u32) = u32::try_from(p) else {
+            __ts_aot_throw(format!("RangeError: Invalid code point {p}"));
+        };
+        if let Some(c) = char::from_u32(as_u32) {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn utf16_to_string_lossy(code_units: &[u16]) -> String {
+    let mut result = String::with_capacity(code_units.len());
+    let mut i = 0;
+    while i < code_units.len() {
+        let cu = code_units[i];
+        if (0xD800..=0xDBFF).contains(&cu) {
+            if let Some(&low) = code_units.get(i + 1)
+                && (0xDC00..=0xDFFF).contains(&low)
+            {
+                let astral = 0x10000 + ((u32::from(cu) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
+                if let Some(c) = char::from_u32(astral) {
+                    result.push(c);
+                    i += 2;
+                    continue;
+                }
+            }
+            result.push('\u{FFFD}');
+            i += 1;
+        } else if (0xDC00..=0xDFFF).contains(&cu) {
+            result.push('\u{FFFD}');
+            i += 1;
+        } else {
+            result.push(char::from_u32(u32::from(cu)).unwrap_or('\u{FFFD}'));
+            i += 1;
+        }
+    }
+    result
+}
+
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn i64_to_char_code_u16(c: i64) -> u16 {
+    (c as u32 & 0xFFFF) as u16
+}
+
+#[must_use]
 pub fn __ts_aot_string_len(s: &str) -> i64 {
     i64::try_from(s.encode_utf16().count()).unwrap_or(0)
 }
