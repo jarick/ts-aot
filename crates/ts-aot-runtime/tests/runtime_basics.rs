@@ -12,8 +12,12 @@ use ts_aot_runtime::{
     __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_char_at,
     __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
     __ts_aot_string_len, __ts_aot_string_substring_utf16, __ts_aot_throw, __ts_aot_typeof,
-    __ts_aot_typeof_null, __ts_aot_typeof_unit, TsArrayMarker,
+    __ts_aot_typeof_null, __ts_aot_typeof_unit, JsString, TsArrayMarker,
 };
+
+fn js(s: &str) -> JsString {
+    JsString::from(s)
+}
 
 fn assert_f64_exact(actual: f64, expected: f64) {
     let equal = if actual.is_nan() || expected.is_nan() {
@@ -26,9 +30,9 @@ fn assert_f64_exact(actual: f64, expected: f64) {
 
 #[test]
 fn runtime_string_len_returns_utf16_code_unit_count() {
-    assert_eq!(__ts_aot_string_len("hello"), 5);
-    assert_eq!(__ts_aot_string_len(""), 0);
-    assert_eq!(__ts_aot_string_len("café"), 4);
+    assert_eq!(__ts_aot_string_len(&js("hello")), 5);
+    assert_eq!(__ts_aot_string_len(&js("")), 0);
+    assert_eq!(__ts_aot_string_len(&js("café")), 4);
 }
 
 #[test]
@@ -59,6 +63,8 @@ fn runtime_math_abs_floor_ceil_round_trunc_sign() {
     assert_f64_exact(__ts_aot_math_sign(5.0), 1.0);
     assert_f64_exact(__ts_aot_math_sign(-5.0), -1.0);
     assert_f64_exact(__ts_aot_math_sign(0.0), 0.0);
+    assert_f64_exact(__ts_aot_math_sign(-0.0), -0.0);
+    assert!(__ts_aot_math_sign(f64::NAN).is_nan());
 }
 
 #[test]
@@ -71,6 +77,29 @@ fn runtime_math_sqrt_pow_log_exp() {
     assert_f64_exact(__ts_aot_math_log(std::f64::consts::E), 1.0);
     assert_f64_exact(__ts_aot_math_exp(0.0), 1.0);
     assert_f64_exact(__ts_aot_math_exp(1.0), std::f64::consts::E);
+}
+
+#[test]
+fn runtime_math_pow_zero_exponent_returns_one() {
+    assert_f64_exact(__ts_aot_math_pow(2.0, 0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(2.0, -0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(0.0, 0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(-0.0, 0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(f64::INFINITY, 0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(f64::NEG_INFINITY, 0.0), 1.0);
+    assert_f64_exact(__ts_aot_math_pow(f64::NAN, 0.0), 1.0);
+}
+
+#[test]
+fn runtime_math_pow_one_with_infinite_exponent_returns_nan() {
+    assert!(__ts_aot_math_pow(1.0, f64::INFINITY).is_nan());
+    assert!(__ts_aot_math_pow(1.0, f64::NEG_INFINITY).is_nan());
+}
+
+#[test]
+fn runtime_math_pow_neg_one_with_infinite_exponent_returns_nan() {
+    assert!(__ts_aot_math_pow(-1.0, f64::INFINITY).is_nan());
+    assert!(__ts_aot_math_pow(-1.0, f64::NEG_INFINITY).is_nan());
 }
 
 #[test]
@@ -108,6 +137,20 @@ fn runtime_math_max_min_accept_variadic_args() {
 }
 
 #[test]
+fn runtime_math_max_signed_zero_tie_returns_positive_zero() {
+    assert_f64_exact(__ts_aot_math_max(&[-0.0, 0.0]), 0.0);
+    assert_f64_exact(__ts_aot_math_max(&[0.0, -0.0]), 0.0);
+    assert_f64_exact(__ts_aot_math_max(&[1.0, -0.0, 0.0]), 1.0);
+}
+
+#[test]
+fn runtime_math_min_signed_zero_tie_returns_negative_zero() {
+    assert_f64_exact(__ts_aot_math_min(&[-0.0, 0.0]), -0.0);
+    assert_f64_exact(__ts_aot_math_min(&[0.0, -0.0]), -0.0);
+    assert_f64_exact(__ts_aot_math_min(&[-1.0, -0.0, 0.0]), -1.0);
+}
+
+#[test]
 fn runtime_math_max_with_single_arg_returns_that_arg() {
     assert_f64_exact(__ts_aot_math_max(&[42.0]), 42.0);
     assert_f64_exact(__ts_aot_math_min(&[42.0]), 42.0);
@@ -137,7 +180,7 @@ fn runtime_typeof_dispatches_on_concrete_type() {
     let n_int: i64 = 42;
     let n_float: f64 = 1.5;
     let n_bool: bool = true;
-    let n_str: String = "x".to_owned();
+    let n_str = js("x");
     assert_eq!(__ts_aot_typeof(&n_int), "number");
     assert_eq!(__ts_aot_typeof(&n_float), "number");
     assert_eq!(__ts_aot_typeof(&n_bool), "boolean");
@@ -171,39 +214,70 @@ fn runtime_op_in_array_index_out_of_range_returns_false() {
 }
 
 #[test]
-fn runtime_op_in_string_in_string_vec_member_returns_true() {
-    let arr: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
-    let needle: String = "b".to_owned();
-    assert!(__ts_aot_op_in(&needle, &arr));
+fn runtime_op_in_string_in_string_vec_index_returns_true() {
+    let arr: Vec<JsString> = vec![js("a"), js("b"), js("c")];
+    assert!(__ts_aot_op_in(&js("0"), &arr));
+    assert!(__ts_aot_op_in(&js("1"), &arr));
+    assert!(__ts_aot_op_in(&js("2"), &arr));
 }
 
 #[test]
-fn runtime_op_in_string_in_string_vec_non_member_returns_false() {
-    let arr: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
-    let needle: String = "z".to_owned();
-    assert!(!__ts_aot_op_in(&needle, &arr));
+fn runtime_op_in_string_in_string_vec_index_out_of_range_returns_false() {
+    let arr: Vec<JsString> = vec![js("a"), js("b"), js("c")];
+    assert!(!__ts_aot_op_in(&js("3"), &arr));
+    assert!(!__ts_aot_op_in(&js("100"), &arr));
+}
+
+#[test]
+fn runtime_op_in_string_in_string_vec_non_integer_index_returns_false() {
+    let arr: Vec<JsString> = vec![js("a"), js("b")];
+    assert!(!__ts_aot_op_in(&js("a"), &arr));
+    assert!(!__ts_aot_op_in(&js("abc"), &arr));
+    assert!(!__ts_aot_op_in(&js(""), &arr));
+    assert!(!__ts_aot_op_in(&js("-1"), &arr));
+    assert!(!__ts_aot_op_in(&js("01"), &arr));
+    assert!(!__ts_aot_op_in(&js("1.5"), &arr));
 }
 
 #[test]
 fn runtime_op_in_indexmap_key_present_returns_true() {
-    let mut map: IndexMap<String, String> = IndexMap::new();
-    __ts_aot_map_set(&mut map, "k".to_owned(), "v".to_owned());
-    let key: String = "k".to_owned();
+    let mut map: IndexMap<JsString, JsString> = IndexMap::new();
+    __ts_aot_map_set(&mut map, js("k"), js("v"));
+    let key = js("k");
     assert!(__ts_aot_op_in(&key, &map));
+    let key_str: String = "k".to_owned();
+    assert!(__ts_aot_op_in(&key_str, &map));
 }
 
 #[test]
 fn runtime_op_in_indexmap_key_absent_returns_false() {
-    let map: IndexMap<String, String> = IndexMap::new();
-    let key: String = "missing".to_owned();
+    let map: IndexMap<JsString, JsString> = IndexMap::new();
+    let key = js("missing");
     assert!(!__ts_aot_op_in(&key, &map));
 }
 
 #[test]
-fn runtime_op_in_non_container_returns_false() {
+#[should_panic(expected = "unsupported container type")]
+fn runtime_op_in_non_container_panics() {
     let n_int: i64 = 42;
     let n_str: String = "x".to_owned();
-    assert!(!__ts_aot_op_in(&n_str, &n_int));
+    let _ = __ts_aot_op_in(&n_str, &n_int);
+}
+
+#[test]
+#[should_panic(expected = "requires i64 key")]
+fn runtime_op_in_vec_i64_with_string_key_panics() {
+    let arr: Vec<i64> = vec![1, 2, 3];
+    let key: String = "x".to_owned();
+    let _ = __ts_aot_op_in(&key, &arr);
+}
+
+#[test]
+#[should_panic(expected = "requires JsString or String key")]
+fn runtime_op_in_indexmap_with_wrong_key_type_panics() {
+    let map: IndexMap<JsString, JsString> = IndexMap::new();
+    let key: i64 = 42;
+    let _ = __ts_aot_op_in(&key, &map);
 }
 
 #[test]
@@ -385,34 +459,41 @@ fn runtime_array_from_clones_source_vec() {
 
 #[test]
 fn runtime_array_from_string_returns_code_point_strings() {
-    let scalars: Vec<String> = __ts_aot_array_from_string("abc");
-    assert_eq!(
-        scalars,
-        vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]
-    );
-    let empty: Vec<String> = __ts_aot_array_from_string("");
+    let scalars: Vec<JsString> = __ts_aot_array_from_string(&js("abc"));
+    assert_eq!(scalars, vec![js("a"), js("b"), js("c")]);
+    let empty: Vec<JsString> = __ts_aot_array_from_string(&js(""));
     assert!(empty.is_empty());
-    let cafe: Vec<String> = __ts_aot_array_from_string("café");
-    assert_eq!(
-        cafe,
-        vec![
-            "c".to_owned(),
-            "a".to_owned(),
-            "f".to_owned(),
-            "é".to_owned()
-        ]
-    );
+    let cafe: Vec<JsString> = __ts_aot_array_from_string(&js("café"));
+    assert_eq!(cafe, vec![js("c"), js("a"), js("f"), js("é")]);
 }
 
 #[test]
 fn runtime_array_from_string_with_astral_char_yields_one_string_element() {
-    let scalars: Vec<String> = __ts_aot_array_from_string("😀");
+    let scalars: Vec<JsString> = __ts_aot_array_from_string(&js("😀"));
     assert_eq!(
         scalars.len(),
         1,
         "astral char must yield 1 Unicode scalar element (not 2 UTF-16 code units), got {scalars:?}"
     );
-    assert_eq!(scalars[0], "😀");
+    assert_eq!(scalars[0], js("😀"));
+}
+
+#[test]
+fn runtime_array_from_string_preserves_lone_surrogates_as_raw_units() {
+    let raw = JsString::from_units(vec![
+        u16::from(b'a'),
+        0xD83D,
+        u16::from(b'b'),
+        0xDE00,
+        u16::from(b'c'),
+    ]);
+    let scalars: Vec<JsString> = __ts_aot_array_from_string(&raw);
+    assert_eq!(scalars.len(), 5, "got {scalars:?}");
+    assert_eq!(scalars[0], js("a"));
+    assert_eq!(scalars[1], JsString::from_units(vec![0xD83D]));
+    assert_eq!(scalars[2], js("b"));
+    assert_eq!(scalars[3], JsString::from_units(vec![0xDE00]));
+    assert_eq!(scalars[4], js("c"));
 }
 
 #[test]
@@ -495,101 +576,121 @@ fn runtime_array_from_length_mapped_accepts_fnmut_with_mutable_state() {
 
 #[test]
 fn runtime_map_get_returns_stored_value() {
-    let mut map: IndexMap<String, String> = IndexMap::new();
-    __ts_aot_map_set(&mut map, "k".to_owned(), "v".to_owned());
-    assert_eq!(__ts_aot_map_get(&map, "k").as_deref(), Some("v"));
-    assert_eq!(__ts_aot_map_get(&map, "missing"), None);
+    let mut map: IndexMap<JsString, JsString> = IndexMap::new();
+    __ts_aot_map_set(&mut map, js("k"), js("v"));
+    assert_eq!(__ts_aot_map_get(&map, &js("k")), Some(js("v")));
+    assert_eq!(__ts_aot_map_get(&map, &js("missing")), None);
 }
 
 #[test]
 fn runtime_host_console_log_does_not_panic() {
-    __ts_aot_host_console_log("hello from runtime_basics");
+    __ts_aot_host_console_log(&js("hello from runtime_basics"));
 }
 
 #[test]
 fn runtime_string_index_of_returns_offset_when_needle_found() {
-    assert_eq!(__ts_aot_string_index_of("hello world", "world", 0), 6);
-    assert_eq!(__ts_aot_string_index_of("hello world", "hello", 0), 0);
-    assert_eq!(__ts_aot_string_index_of("hello world", "o", 0), 4);
-    assert_eq!(__ts_aot_string_index_of("hello world", "o", 5), 7);
+    assert_eq!(
+        __ts_aot_string_index_of(&js("hello world"), &js("world"), 0),
+        6
+    );
+    assert_eq!(
+        __ts_aot_string_index_of(&js("hello world"), &js("hello"), 0),
+        0
+    );
+    assert_eq!(__ts_aot_string_index_of(&js("hello world"), &js("o"), 0), 4);
+    assert_eq!(__ts_aot_string_index_of(&js("hello world"), &js("o"), 5), 7);
 }
 
 #[test]
 fn runtime_string_index_of_returns_minus_one_when_needle_absent() {
-    assert_eq!(__ts_aot_string_index_of("hello", "xyz", 0), -1);
-    assert_eq!(__ts_aot_string_index_of("hello", "xyz", 100), -1);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js("xyz"), 0), -1);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js("xyz"), 100), -1);
 }
 
 #[test]
 fn runtime_string_index_of_empty_needle_matches_at_from_index() {
-    assert_eq!(__ts_aot_string_index_of("hello", "", 0), 0);
-    assert_eq!(__ts_aot_string_index_of("hello", "", 3), 3);
-    assert_eq!(__ts_aot_string_index_of("", "", 0), 0);
-    assert_eq!(__ts_aot_string_index_of("hello", "", 100), 5);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js(""), 0), 0);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js(""), 3), 3);
+    assert_eq!(__ts_aot_string_index_of(&js(""), &js(""), 0), 0);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js(""), 100), 5);
 }
 
 #[test]
 fn runtime_string_index_of_negative_from_index_treated_as_zero() {
-    assert_eq!(__ts_aot_string_index_of("hello", "hello", -1), 0);
-    assert_eq!(__ts_aot_string_index_of("hello", "ell", -100), 1);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js("hello"), -1), 0);
+    assert_eq!(__ts_aot_string_index_of(&js("hello"), &js("ell"), -100), 1);
 }
 
 #[test]
 fn runtime_string_char_at_returns_scalar_at_index() {
-    assert_eq!(__ts_aot_string_char_at("hello", 0), "h");
-    assert_eq!(__ts_aot_string_char_at("hello", 4), "o");
-    assert_eq!(__ts_aot_string_char_at("café", 3), "é");
+    assert_eq!(__ts_aot_string_char_at(&js("hello"), 0), js("h"));
+    assert_eq!(__ts_aot_string_char_at(&js("hello"), 4), js("o"));
+    assert_eq!(__ts_aot_string_char_at(&js("café"), 3), js("é"));
 }
 
 #[test]
 fn runtime_string_char_at_out_of_range_returns_empty_string() {
-    assert_eq!(__ts_aot_string_char_at("hello", 5), "");
-    assert_eq!(__ts_aot_string_char_at("hello", 100), "");
-    assert_eq!(__ts_aot_string_char_at("hello", -1), "");
+    assert_eq!(__ts_aot_string_char_at(&js("hello"), 5), js(""));
+    assert_eq!(__ts_aot_string_char_at(&js("hello"), 100), js(""));
+    assert_eq!(__ts_aot_string_char_at(&js("hello"), -1), js(""));
 }
 
 #[test]
 fn runtime_string_from_char_code_builds_string_from_codes() {
-    assert_eq!(__ts_aot_string_from_char_code(&[72, 105]), "Hi");
-    assert_eq!(__ts_aot_string_from_char_code(&[]), "");
-    assert_eq!(__ts_aot_string_from_char_code(&[65, 66, 67]), "ABC");
+    assert_eq!(__ts_aot_string_from_char_code(&[72, 105]), js("Hi"));
+    assert_eq!(__ts_aot_string_from_char_code(&[]), js(""));
+    assert_eq!(__ts_aot_string_from_char_code(&[65, 66, 67]), js("ABC"));
 }
 
 #[test]
 fn runtime_string_from_char_code_masks_to_sixteen_bits() {
     let codes = vec![0x1_F0001_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&codes), "\u{0001}");
+    assert_eq!(__ts_aot_string_from_char_code(&codes), js("\u{0001}"));
     let codes = vec![0x1_FFFF_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&codes), "\u{FFFF}");
+    assert_eq!(__ts_aot_string_from_char_code(&codes), js("\u{FFFF}"));
 }
 
 #[test]
-fn runtime_string_from_char_code_preserves_lone_surrogates() {
-    let high = vec![0xD83D_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&high), "\u{FFFD}");
-    let low = vec![0xDE00_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&low), "\u{FFFD}");
-    let split_pair = vec![0xD83D_i64, 0xD83D_i64];
-    assert_eq!(
-        __ts_aot_string_from_char_code(&split_pair),
-        "\u{FFFD}\u{FFFD}"
-    );
-    let valid_pair = vec![0xD83D_i64, 0xDE00_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&valid_pair), "\u{1F600}");
-    assert_eq!(
-        __ts_aot_string_from_char_code(&[65_i64, 0xD83D, 66, 0xDE00]),
-        "A\u{FFFD}B\u{FFFD}"
-    );
+fn runtime_string_from_char_code_preserves_lone_surrogates_as_raw_units() {
+    let high = __ts_aot_string_from_char_code(&[0xD83D_i64]);
+    assert_eq!(high, JsString::from_units(vec![0xD83D]));
+    let low = __ts_aot_string_from_char_code(&[0xDE00_i64]);
+    assert_eq!(low, JsString::from_units(vec![0xDE00]));
+    let split_pair = __ts_aot_string_from_char_code(&[0xD83D_i64, 0xD83D_i64]);
+    assert_eq!(split_pair, JsString::from_units(vec![0xD83D, 0xD83D]));
+    let valid_pair = __ts_aot_string_from_char_code(&[0xD83D_i64, 0xDE00_i64]);
+    assert_eq!(valid_pair, js("\u{1F600}"));
+    let mixed = __ts_aot_string_from_char_code(&[65_i64, 0xD83D, 66, 0xDE00]);
+    assert_eq!(mixed, JsString::from_units(vec![65, 0xD83D, 66, 0xDE00]));
+}
+
+#[test]
+fn runtime_jsstring_to_string_lossy_returns_inner_string_for_valid() {
+    assert_eq!(js("hello").to_string_lossy(), "hello");
+    assert_eq!(js("").to_string_lossy(), "");
+    assert_eq!(js("😀").to_string_lossy(), "😀");
+}
+
+#[test]
+fn runtime_jsstring_to_string_lossy_decodes_raw_via_from_utf16_lossy() {
+    let raw_valid_pair = JsString::from_units(vec![0xD83D, 0xDE00]);
+    assert_eq!(raw_valid_pair.to_string_lossy(), "\u{1F600}");
+    let raw_lone_high = JsString::from_units(vec![0xD83D]);
+    assert_eq!(raw_lone_high.to_string_lossy(), "\u{FFFD}");
+    let raw_lone_low = JsString::from_units(vec![0xDE00]);
+    assert_eq!(raw_lone_low.to_string_lossy(), "\u{FFFD}");
+    let raw_bmp = JsString::from_units(vec![u16::from(b'a'), u16::from(b'b')]);
+    assert_eq!(raw_bmp.to_string_lossy(), "ab");
 }
 
 #[test]
 fn runtime_string_from_code_point_handles_bmp_and_astral() {
-    assert_eq!(__ts_aot_string_from_code_point(&[65, 66, 67]), "ABC");
+    assert_eq!(__ts_aot_string_from_code_point(&[65, 66, 67]), js("ABC"));
     assert_eq!(
         __ts_aot_string_from_code_point(&[0x1_F600_i64]),
-        "\u{1F600}"
+        js("\u{1F600}")
     );
-    assert_eq!(__ts_aot_string_from_code_point(&[]), "");
+    assert_eq!(__ts_aot_string_from_code_point(&[]), js(""));
 }
 
 #[test]
@@ -599,15 +700,22 @@ fn runtime_string_from_code_point_throws_on_negative_code_point() {
 }
 
 #[test]
-#[should_panic(expected = "RangeError")]
-fn runtime_string_from_code_point_throws_on_surrogate_code_point() {
-    let _ = __ts_aot_string_from_code_point(&[0xD800_i64]);
+fn runtime_string_from_code_point_preserves_lone_surrogates_as_raw_units() {
+    let lone_high = __ts_aot_string_from_code_point(&[0xD800_i64]);
+    assert_eq!(lone_high, JsString::from_units(vec![0xD800]));
+    let lone_low = __ts_aot_string_from_code_point(&[0xDFFF_i64]);
+    assert_eq!(lone_low, JsString::from_units(vec![0xDFFF]));
+    let mixed = __ts_aot_string_from_code_point(&[0x41_i64, 0xD800, 0x42, 0xDFFF]);
+    assert_eq!(
+        mixed,
+        JsString::from_units(vec![0x41, 0xD800, 0x42, 0xDFFF])
+    );
 }
 
 #[test]
-#[should_panic(expected = "RangeError")]
-fn runtime_string_from_code_point_throws_on_high_surrogate_boundary() {
-    let _ = __ts_aot_string_from_code_point(&[0xDFFF_i64]);
+fn runtime_string_from_code_point_preserves_valid_pair_among_surrogates() {
+    let r = __ts_aot_string_from_code_point(&[0xD83D, 0xDE00]);
+    assert_eq!(r, js("\u{1F600}"));
 }
 
 #[test]
@@ -619,75 +727,108 @@ fn runtime_string_from_code_point_throws_on_code_point_above_max() {
 #[test]
 fn runtime_string_index_of_uses_utf16_code_unit_indexing() {
     assert_eq!(
-        __ts_aot_string_index_of("\u{1F600}x\u{1F600}", "\u{1F600}", 0),
+        __ts_aot_string_index_of(&js("\u{1F600}x\u{1F600}"), &js("\u{1F600}"), 0),
         0
     );
-    assert_eq!(__ts_aot_string_index_of("\u{1F600}x\u{1F600}", "x", 0), 2);
     assert_eq!(
-        __ts_aot_string_index_of("\u{1F600}x\u{1F600}", "\u{1F600}", 1),
+        __ts_aot_string_index_of(&js("\u{1F600}x\u{1F600}"), &js("x"), 0),
+        2
+    );
+    assert_eq!(
+        __ts_aot_string_index_of(&js("\u{1F600}x\u{1F600}"), &js("\u{1F600}"), 1),
         3
     );
-    assert_eq!(__ts_aot_string_index_of("a\u{1F600}b", "b", 0), 3);
-    assert_eq!(__ts_aot_string_index_of("a\u{1F600}b", "b", 2), 3);
-    assert_eq!(__ts_aot_string_index_of("café", "é", 0), 3);
-    assert_eq!(__ts_aot_string_index_of("café", "é", 4), -1);
+    assert_eq!(__ts_aot_string_index_of(&js("a\u{1F600}b"), &js("b"), 0), 3);
+    assert_eq!(__ts_aot_string_index_of(&js("a\u{1F600}b"), &js("b"), 2), 3);
+    assert_eq!(__ts_aot_string_index_of(&js("café"), &js("é"), 0), 3);
+    assert_eq!(__ts_aot_string_index_of(&js("café"), &js("é"), 4), -1);
 }
 
 #[test]
 fn runtime_string_char_at_uses_utf16_code_unit_indexing() {
-    assert_eq!(__ts_aot_string_char_at("\u{1F600}", 0), "\u{FFFD}");
-    assert_eq!(__ts_aot_string_char_at("\u{1F600}", 1), "\u{FFFD}");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 0), "a");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 1), "\u{FFFD}");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 2), "\u{FFFD}");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 3), "b");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 4), "");
-    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", -1), "");
-    assert_eq!(__ts_aot_string_char_at("café", 3), "é");
-    assert_eq!(__ts_aot_string_char_at("café", 4), "");
+    assert_eq!(
+        __ts_aot_string_char_at(&js("\u{1F600}"), 0),
+        JsString::from_units(vec![0xD83D])
+    );
+    assert_eq!(
+        __ts_aot_string_char_at(&js("\u{1F600}"), 1),
+        JsString::from_units(vec![0xDE00])
+    );
+    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 0), js("a"));
+    assert_eq!(
+        __ts_aot_string_char_at(&js("a\u{1F600}b"), 1),
+        JsString::from_units(vec![0xD83D])
+    );
+    assert_eq!(
+        __ts_aot_string_char_at(&js("a\u{1F600}b"), 2),
+        JsString::from_units(vec![0xDE00])
+    );
+    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 3), js("b"));
+    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 4), js(""));
+    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), -1), js(""));
+    assert_eq!(__ts_aot_string_char_at(&js("café"), 3), js("é"));
+    assert_eq!(__ts_aot_string_char_at(&js("café"), 4), js(""));
 }
 
 #[test]
 fn runtime_string_substring_utf16_uses_utf16_code_unit_indices() {
     let s = "é=value";
-    assert_eq!(__ts_aot_string_substring_utf16(s, 2, 7), "value");
-    assert_eq!(__ts_aot_string_substring_utf16(s, 0, 100), s);
-    assert_eq!(__ts_aot_string_substring_utf16(s, -5, 3), "é=v");
-    assert_eq!(__ts_aot_string_substring_utf16(s, 2, 2), "");
+    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 2, 7), js("value"));
+    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 0, 100), js(s));
+    assert_eq!(__ts_aot_string_substring_utf16(&js(s), -5, 3), js("é=v"));
+    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 2, 2), js(""));
     let astral = "😀ab";
-    assert_eq!(__ts_aot_string_substring_utf16(astral, 0, 2), "😀");
-    assert_eq!(__ts_aot_string_substring_utf16(astral, 2, 4), "ab");
+    assert_eq!(__ts_aot_string_substring_utf16(&js(astral), 0, 2), js("😀"));
+    assert_eq!(__ts_aot_string_substring_utf16(&js(astral), 2, 4), js("ab"));
 }
 
 #[test]
-fn runtime_string_substring_utf16_preserves_lone_surrogates_as_replacements() {
+fn runtime_string_substring_utf16_preserves_lone_surrogates_as_raw_units() {
     let s = "\u{1F600}";
-    assert_eq!(__ts_aot_string_substring_utf16(s, 0, 1), "\u{FFFD}");
-    assert_eq!(__ts_aot_string_substring_utf16(s, 1, 2), "\u{FFFD}");
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&js(s), 0, 1),
+        JsString::from_units(vec![0xD83D])
+    );
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&js(s), 1, 2),
+        JsString::from_units(vec![0xDE00])
+    );
     let s2 = "a\u{1F600}b";
-    assert_eq!(__ts_aot_string_substring_utf16(s2, 0, 2), "a\u{FFFD}");
-    assert_eq!(__ts_aot_string_substring_utf16(s2, 2, 4), "\u{FFFD}b");
-    let s3 = String::from_utf16_lossy(&[
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&js(s2), 0, 2),
+        JsString::from_units(vec![0x61, 0xD83D])
+    );
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&js(s2), 2, 4),
+        JsString::from_units(vec![0xDE00, 0x62])
+    );
+    let s3 = JsString::from_units(vec![
         u16::from(b'x'),
         0xD83D,
         u16::from(b'y'),
         0xDE00,
         u16::from(b'z'),
     ]);
-    assert_eq!(__ts_aot_string_substring_utf16(&s3, 0, 2), "x\u{FFFD}");
-    assert_eq!(__ts_aot_string_substring_utf16(&s3, 2, 4), "y\u{FFFD}");
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&s3, 0, 2),
+        JsString::from_units(vec![u16::from(b'x'), 0xD83D])
+    );
+    assert_eq!(
+        __ts_aot_string_substring_utf16(&s3, 2, 4),
+        JsString::from_units(vec![u16::from(b'y'), 0xDE00])
+    );
 }
 
 #[test]
 fn runtime_string_index_of_and_char_at_compose_on_non_ascii() {
-    let haystack = "é=value\u{1F600}";
-    let eq_idx = __ts_aot_string_index_of(haystack, "=", 0);
+    let haystack = js("é=value\u{1F600}");
+    let eq_idx = __ts_aot_string_index_of(&haystack, &js("="), 0);
     assert_eq!(eq_idx, 1);
     let value =
-        __ts_aot_string_substring_utf16(haystack, eq_idx + 1, __ts_aot_string_len(haystack));
-    assert_eq!(value, "value\u{1F600}");
-    let emoji_idx = __ts_aot_string_index_of(&value, "\u{1F600}", 0);
+        __ts_aot_string_substring_utf16(&haystack, eq_idx + 1, __ts_aot_string_len(&haystack));
+    assert_eq!(value, js("value\u{1F600}"));
+    let emoji_idx = __ts_aot_string_index_of(&value, &js("\u{1F600}"), 0);
     assert_eq!(emoji_idx, 5);
     let next = __ts_aot_string_char_at(&value, emoji_idx);
-    assert_eq!(next, "\u{FFFD}");
+    assert_eq!(next, JsString::from_units(vec![0xD83D]));
 }

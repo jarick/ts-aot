@@ -6471,6 +6471,20 @@ fn math_method_call_with_2_args(field_name: &str, arg1: HirExpr, arg2: HirExpr) 
     }
 }
 
+fn box_constructor_call(ns: &str, arg: HirExpr, ty: TypeId) -> HirExpr {
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+            name: Atom::new_inline(ns),
+            ty,
+            span: Span::default(),
+        })),
+        args: vec![arg],
+        ty,
+        type_args: vec![],
+        span: Span::default(),
+    }
+}
+
 fn receiver_has_own_property_call(
     types: &mut TypeTable,
     receiver_ty: TypeId,
@@ -6593,7 +6607,7 @@ fn object_keys_call_emits_object_keys_runtime_op() {
 }
 
 #[test]
-fn object_get_prototype_of_call_emits_object_get_prototype_of_runtime_op() {
+fn object_get_prototype_of_call_emits_unsupported_builtin_diagnostic() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -6612,41 +6626,36 @@ fn object_get_prototype_of_call_emits_object_get_prototype_of_runtime_op() {
         &mut empty_types(),
         &mut cx,
     );
-    assert_eq!(
-        e0404_count(cx.diagnostics()),
-        0,
-        "Object.getPrototypeOf(map) must not emit E0404, got {:?}",
-        cx.diagnostics()
-    );
     let has_op = out.iter().any(|s| {
         matches!(
             s,
             MirStmt::Runtime {
-                op: RuntimeOp::ObjectGetPrototypeOf,
+                op: RuntimeOp::ObjectKeys,
                 ..
             }
         )
     });
     assert!(
-        has_op,
-        "Object.getPrototypeOf(map) must emit MirStmt::Runtime {{ op: ObjectGetPrototypeOf, .. }}, got: {out:?}"
+        !has_op,
+        "Object.getPrototypeOf(map) must NOT lower to a runtime op (no prototype chain in AOT); got: {out:?}"
     );
-    let get_proto_args = out.iter().find_map(|s| {
-        if let MirStmt::Runtime {
-            op: RuntimeOp::ObjectGetPrototypeOf,
-            args,
-            ..
-        } = s
-        {
-            Some(args)
-        } else {
-            None
-        }
-    });
+    let e0406 = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0406")
+        .count();
     assert_eq!(
-        get_proto_args.map(Vec::len),
-        Some(1),
-        "Object.getPrototypeOf(map) must pass exactly 1 arg (the map); got args={get_proto_args:?}"
+        e0406,
+        1,
+        "Object.getPrototypeOf(map) must emit exactly one E0406 unsupported-builtin diagnostic, got: {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        cx.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("getPrototypeOf is not supported")),
+        "E0406 message must mention Object.getPrototypeOf unavailability, got: {:?}",
+        cx.diagnostics()
     );
 }
 
@@ -7399,32 +7408,18 @@ fn math_call_with_wrong_arity_emits_e0406() {
     let out = &mut Vec::new();
     let mut cx = ctx();
     let _mir = c.convert_expr(
-        &math_method_call_with_arg("floor", HirExpr::Float(1.0_f64.to_bits(), Span::default())),
+        &math_method_call_with_2_args(
+            "floor",
+            HirExpr::Float(1.0_f64.to_bits(), Span::default()),
+            HirExpr::Float(2.0_f64.to_bits(), Span::default()),
+        ),
         out,
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &mut empty_types(),
         &mut cx,
     );
-    let mut expr = math_method_call_with_2_args(
-        "floor",
-        HirExpr::Float(1.0_f64.to_bits(), Span::default()),
-        HirExpr::Float(2.0_f64.to_bits(), Span::default()),
-    );
-    if let HirExpr::Call { ty, .. } = &mut expr {
-        *ty = unit_ty();
-    }
-    let mut out2 = Vec::new();
-    let mut cx2 = ctx();
-    c.convert_expr(
-        &expr,
-        &mut out2,
-        &mut empty_struct_ids(),
-        &mut empty_next_struct(),
-        &mut empty_types(),
-        &mut cx2,
-    );
-    let e0406_count = cx2
+    let e0406_count = cx
         .diagnostics()
         .iter()
         .filter(|d| d.code.as_str() == "E0406")
@@ -7432,8 +7427,8 @@ fn math_call_with_wrong_arity_emits_e0406() {
     assert_eq!(
         e0406_count,
         1,
-        "Math.floor(1, 2) (2 args, expected 1) must emit E0406, got {:?}",
-        cx2.diagnostics()
+        "Math.floor(1.0, 2.0) (2 args, expected 1) must emit E0406, got {:?}",
+        cx.diagnostics()
     );
 }
 

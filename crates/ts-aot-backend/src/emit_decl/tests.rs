@@ -1085,7 +1085,7 @@ fn emit_type_array_resolves_element_via_table() {
     let str_id = types.intern(&Type::String);
     let arr_id = types.intern(&Type::Array { element: str_id });
     let tokens = emit_type_id(arr_id, &types);
-    assert_eq!(tokens.to_string(), "Vec < String >");
+    assert_eq!(tokens.to_string(), "Vec < ts_aot_runtime :: JsString >");
 }
 
 #[test]
@@ -1098,7 +1098,10 @@ fn emit_type_result_resolves_ok_and_err_via_table() {
         err: str_id,
     });
     let tokens = emit_type_id(res_id, &types);
-    assert_eq!(tokens.to_string(), "Result < i32 , String >");
+    assert_eq!(
+        tokens.to_string(),
+        "Result < i32 , ts_aot_runtime :: JsString >"
+    );
 }
 
 #[test]
@@ -1138,8 +1141,8 @@ fn function_returning_result_emits_result_type_with_ok_and_err_stmts() {
     let tokens = emit_function(&f, &types).expect("function should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("-> Result < i32 , String >"),
-        "ret type must be Result<i32, String>, got: {s}"
+        s.contains("-> Result < i32 , ts_aot_runtime :: JsString >"),
+        "ret type must be Result<i32, JsString>, got: {s}"
     );
     assert!(
         s.contains("Err (") && s.contains("\"oops\""),
@@ -2792,5 +2795,41 @@ fn function_typed_return_emits_unit_placeholder() {
     assert!(
         sig_norm.contains("->()"),
         "return type `(a: i64) => i64` must emit as `->()` (unit placeholder) in the function signature \n         until Phase 5 introduces a real function-typed runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn dynamic_import_emits_turbofish_for_unused_namespace() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let str_ty = types.intern(&Type::String);
+    let mut f = empty_func("load_module");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Expr(MirExpr::Import {
+                    source: Box::new(MirExpr::String {
+                        id: Atom::from("./mod.js"),
+                        ty: str_ty,
+                    }),
+                    ty: i64_ty,
+                }),
+                MirStmt::Return(Some(MirExpr::Int {
+                    value: 0,
+                    ty: i64_ty,
+                })),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("__ts_aot_dynamic_import :: < i64 >"),
+        "Standalone (unused) dynamic import must carry the resolved namespace type as a turbofish, \
+         otherwise the generic parameter is unconstrained and the call fails to type-check. Got: {s}"
     );
 }

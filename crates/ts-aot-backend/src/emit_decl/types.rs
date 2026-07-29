@@ -44,7 +44,7 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
         Type::U64 => quote!(u64),
         Type::F32 => quote!(f32),
         Type::F64 => quote!(f64),
-        Type::String => quote!(String),
+        Type::String => quote!(ts_aot_runtime::JsString),
         Type::Optional { inner } => {
             let inner_tokens = emit_type_id_with_ctx(*inner, ctx);
             quote!(Option<#inner_tokens>)

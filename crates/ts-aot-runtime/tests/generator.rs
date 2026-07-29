@@ -170,6 +170,29 @@ fn generator_bare_yield_yields_none_not_done() {
 }
 
 #[test]
+fn generator_successive_yields_consume_stored_value() {
+    let mut g = Generator::<i64>::new(|g| {
+        if g.state == 0 {
+            g.set_state(1);
+            g.store(1);
+            __ts_aot_generator_yielded(g)
+        } else if g.state == 1 {
+            g.set_state(GENERATOR_DONE_STATE);
+            __ts_aot_generator_yielded(g)
+        } else {
+            __ts_aot_generator_done()
+        }
+    });
+    assert_eq!(g.next(), GeneratorResult::Yielded(Some(1)));
+    assert_eq!(
+        g.next(),
+        GeneratorResult::Yielded(None),
+        "bare `yield;` after a stored yield must consume the prior value, not re-emit it"
+    );
+    assert_eq!(g.next(), GeneratorResult::Done(None));
+}
+
+#[test]
 fn generator_done_with_and_done_are_distinct_variants() {
     assert_ne!(
         GeneratorResult::Done(None),

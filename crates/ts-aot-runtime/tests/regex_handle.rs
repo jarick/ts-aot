@@ -18,12 +18,6 @@ fn regexp_handle_new_no_flags_works() {
 }
 
 #[test]
-fn regexp_handle_new_ignores_unsupported_flags_silently() {
-    let h = __ts_aot_regex_new("x", "gy");
-    let _ = h.source();
-}
-
-#[test]
 fn regexp_handle_is_cloneable() {
     let h = __ts_aot_regex_new("foo", "");
     let _h2 = h.clone();
@@ -42,7 +36,49 @@ fn regexp_handle_new_combines_i_s_and_m_flags() {
 }
 
 #[test]
-fn regexp_handle_new_dedupes_recognized_flags() {
-    let h = __ts_aot_regex_new("foo", "iimm");
-    let _ = h.source();
+fn regexp_handle_new_accepts_global_flag() {
+    let h = __ts_aot_regex_new("foo", "g");
+    assert_eq!(h.source(), "foo");
+}
+
+#[test]
+fn regexp_handle_new_accepts_unicode_flag() {
+    let h = __ts_aot_regex_new("foo", "u");
+    assert_eq!(h.source(), "foo");
+}
+
+#[test]
+fn regexp_handle_new_accepts_sticky_flag() {
+    let h = __ts_aot_regex_new("foo", "y");
+    assert_eq!(h.source(), "foo");
+}
+
+#[test]
+fn regexp_handle_new_accepts_combined_g_u_y_flags() {
+    let h = __ts_aot_regex_new("foo", "guy");
+    assert_eq!(h.source(), "foo");
+}
+
+#[test]
+#[should_panic(expected = "invalid flag 'x'")]
+fn regexp_handle_new_rejects_unknown_flag() {
+    let _h = __ts_aot_regex_new("foo", "x");
+}
+
+#[test]
+#[should_panic(expected = "duplicate flag 'g'")]
+fn regexp_handle_new_rejects_duplicate_global_flag() {
+    let _h = __ts_aot_regex_new("foo", "gg");
+}
+
+#[test]
+#[should_panic(expected = "duplicate flag 'i'")]
+fn regexp_handle_new_rejects_duplicate_flag() {
+    let _h = __ts_aot_regex_new("foo", "ii");
+}
+
+#[test]
+#[should_panic(expected = "SyntaxError")]
+fn regexp_handle_new_rejects_invalid_pattern() {
+    let _h = __ts_aot_regex_new("(unclosed", "");
 }
