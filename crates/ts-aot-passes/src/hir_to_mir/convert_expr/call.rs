@@ -25,6 +25,10 @@ pub(super) fn is_global_math_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Math")
 }
 
+pub(super) fn is_global_string_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "String")
+}
+
 fn is_string_typed_source(arg: &HirExpr, types: &TypeTable) -> bool {
     if matches!(arg, HirExpr::String(_, _)) {
         return true;
@@ -88,6 +92,89 @@ fn array_from_object_literal(
     let length = length?;
     indexed.sort_by_key(|(idx, _)| *idx);
     Some(ArrayLikeObjectLiteral { length, indexed })
+}
+
+impl ExprConverter {
+    fn try_string_instance_method_dispatch(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner: method_owner,
+            field_name: method_field,
+            ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        if !is_string_typed_source(method_owner, types) {
+            return None;
+        }
+        let op = match method_field.as_str() {
+            "indexOf" => Some(RuntimeOp::StringIndexOf),
+            "charAt" => Some(RuntimeOp::StringCharAt),
+            _ => None,
+        }?;
+        let (min_arity, max_arity) = match op {
+            RuntimeOp::StringIndexOf => (1, 2),
+            RuntimeOp::StringCharAt => (1, 1),
+            _ => unreachable!("string method arity"),
+        };
+        if args.len() < min_arity || args.len() > max_arity {
+            ctx.error(
+                "E0406",
+                format!(
+                    "String.prototype.{} requires {}..={} argument(s); got {}",
+                    method_field.as_str(),
+                    min_arity,
+                    max_arity,
+                    args.len()
+                ),
+                Span::new(0, 0),
+            );
+            return Some(MirExpr::Unit);
+        }
+        let receiver_mir = self.convert_expr(
+            method_owner,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        let converted_args: Vec<MirExpr> = args
+            .iter()
+            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .collect();
+        let mut full_args = Vec::with_capacity(1 + max_arity);
+        full_args.push(receiver_mir);
+        full_args.extend(converted_args);
+        if op == RuntimeOp::StringIndexOf && full_args.len() == 2 {
+            full_args.push(MirExpr::Int {
+                value: 0,
+                ty: TypeId::from_raw(0),
+            });
+        }
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, ty);
+        out.push(MirStmt::Runtime {
+            op,
+            args: full_args,
+            dest: Some(dest),
+            ty,
+        });
+        Some(MirExpr::Local(dest))
+    }
 }
 
 impl ExprConverter {
@@ -206,6 +293,18 @@ impl ExprConverter {
                 ty,
             });
             return MirExpr::Local(final_dest);
+        }
+        if let Some(mir) = self.try_string_instance_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
         }
         let callee_id = self.resolve_callee(callee, ctx);
         let mir_args: Vec<MirExpr> = args
@@ -465,6 +564,30 @@ impl ExprConverter {
                         );
                         return MirExpr::Unit;
                     }
+                    let dest = self.fresh_local();
+                    self.push_temp_local(dest, ty);
+                    out.push(MirStmt::Runtime {
+                        op,
+                        args: mir_args,
+                        dest: Some(dest),
+                        ty,
+                    });
+                    return MirExpr::Local(dest);
+                }
+            }
+            if let HirExpr::Field {
+                owner: string_owner,
+                field_name: string_field,
+                ..
+            } = inner.as_ref()
+                && is_global_string_reference(string_owner)
+            {
+                let op = match string_field.as_str() {
+                    "fromCharCode" => Some(RuntimeOp::StringFromCharCode),
+                    "fromCodePoint" => Some(RuntimeOp::StringFromCodePoint),
+                    _ => None,
+                };
+                if let Some(op) = op {
                     let dest = self.fresh_local();
                     self.push_temp_local(dest, ty);
                     out.push(MirStmt::Runtime {

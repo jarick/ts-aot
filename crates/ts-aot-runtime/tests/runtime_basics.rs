@@ -9,8 +9,10 @@ use ts_aot_runtime::{
     __ts_aot_math_exp, __ts_aot_math_floor, __ts_aot_math_log, __ts_aot_math_max,
     __ts_aot_math_min, __ts_aot_math_pow, __ts_aot_math_random, __ts_aot_math_round,
     __ts_aot_math_sign, __ts_aot_math_sin, __ts_aot_math_sqrt, __ts_aot_math_tan,
-    __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_len,
-    __ts_aot_throw, __ts_aot_typeof, __ts_aot_typeof_null, __ts_aot_typeof_unit, TsArrayMarker,
+    __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_char_at,
+    __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
+    __ts_aot_string_len, __ts_aot_string_substring_utf16, __ts_aot_throw, __ts_aot_typeof,
+    __ts_aot_typeof_null, __ts_aot_typeof_unit, TsArrayMarker,
 };
 
 fn assert_f64_exact(actual: f64, expected: f64) {
@@ -502,4 +504,190 @@ fn runtime_map_get_returns_stored_value() {
 #[test]
 fn runtime_host_console_log_does_not_panic() {
     __ts_aot_host_console_log("hello from runtime_basics");
+}
+
+#[test]
+fn runtime_string_index_of_returns_offset_when_needle_found() {
+    assert_eq!(__ts_aot_string_index_of("hello world", "world", 0), 6);
+    assert_eq!(__ts_aot_string_index_of("hello world", "hello", 0), 0);
+    assert_eq!(__ts_aot_string_index_of("hello world", "o", 0), 4);
+    assert_eq!(__ts_aot_string_index_of("hello world", "o", 5), 7);
+}
+
+#[test]
+fn runtime_string_index_of_returns_minus_one_when_needle_absent() {
+    assert_eq!(__ts_aot_string_index_of("hello", "xyz", 0), -1);
+    assert_eq!(__ts_aot_string_index_of("hello", "xyz", 100), -1);
+}
+
+#[test]
+fn runtime_string_index_of_empty_needle_matches_at_from_index() {
+    assert_eq!(__ts_aot_string_index_of("hello", "", 0), 0);
+    assert_eq!(__ts_aot_string_index_of("hello", "", 3), 3);
+    assert_eq!(__ts_aot_string_index_of("", "", 0), 0);
+    assert_eq!(__ts_aot_string_index_of("hello", "", 100), 5);
+}
+
+#[test]
+fn runtime_string_index_of_negative_from_index_treated_as_zero() {
+    assert_eq!(__ts_aot_string_index_of("hello", "hello", -1), 0);
+    assert_eq!(__ts_aot_string_index_of("hello", "ell", -100), 1);
+}
+
+#[test]
+fn runtime_string_char_at_returns_scalar_at_index() {
+    assert_eq!(__ts_aot_string_char_at("hello", 0), "h");
+    assert_eq!(__ts_aot_string_char_at("hello", 4), "o");
+    assert_eq!(__ts_aot_string_char_at("café", 3), "é");
+}
+
+#[test]
+fn runtime_string_char_at_out_of_range_returns_empty_string() {
+    assert_eq!(__ts_aot_string_char_at("hello", 5), "");
+    assert_eq!(__ts_aot_string_char_at("hello", 100), "");
+    assert_eq!(__ts_aot_string_char_at("hello", -1), "");
+}
+
+#[test]
+fn runtime_string_from_char_code_builds_string_from_codes() {
+    assert_eq!(__ts_aot_string_from_char_code(&[72, 105]), "Hi");
+    assert_eq!(__ts_aot_string_from_char_code(&[]), "");
+    assert_eq!(__ts_aot_string_from_char_code(&[65, 66, 67]), "ABC");
+}
+
+#[test]
+fn runtime_string_from_char_code_masks_to_sixteen_bits() {
+    let codes = vec![0x1_F0001_i64];
+    assert_eq!(__ts_aot_string_from_char_code(&codes), "\u{0001}");
+    let codes = vec![0x1_FFFF_i64];
+    assert_eq!(__ts_aot_string_from_char_code(&codes), "\u{FFFF}");
+}
+
+#[test]
+fn runtime_string_from_char_code_preserves_lone_surrogates() {
+    let high = vec![0xD83D_i64];
+    assert_eq!(__ts_aot_string_from_char_code(&high), "\u{FFFD}");
+    let low = vec![0xDE00_i64];
+    assert_eq!(__ts_aot_string_from_char_code(&low), "\u{FFFD}");
+    let split_pair = vec![0xD83D_i64, 0xD83D_i64];
+    assert_eq!(
+        __ts_aot_string_from_char_code(&split_pair),
+        "\u{FFFD}\u{FFFD}"
+    );
+    let valid_pair = vec![0xD83D_i64, 0xDE00_i64];
+    assert_eq!(__ts_aot_string_from_char_code(&valid_pair), "\u{1F600}");
+    assert_eq!(
+        __ts_aot_string_from_char_code(&[65_i64, 0xD83D, 66, 0xDE00]),
+        "A\u{FFFD}B\u{FFFD}"
+    );
+}
+
+#[test]
+fn runtime_string_from_code_point_handles_bmp_and_astral() {
+    assert_eq!(__ts_aot_string_from_code_point(&[65, 66, 67]), "ABC");
+    assert_eq!(
+        __ts_aot_string_from_code_point(&[0x1_F600_i64]),
+        "\u{1F600}"
+    );
+    assert_eq!(__ts_aot_string_from_code_point(&[]), "");
+}
+
+#[test]
+#[should_panic(expected = "RangeError")]
+fn runtime_string_from_code_point_throws_on_negative_code_point() {
+    let _ = __ts_aot_string_from_code_point(&[-1_i64, 65]);
+}
+
+#[test]
+#[should_panic(expected = "RangeError")]
+fn runtime_string_from_code_point_throws_on_surrogate_code_point() {
+    let _ = __ts_aot_string_from_code_point(&[0xD800_i64]);
+}
+
+#[test]
+#[should_panic(expected = "RangeError")]
+fn runtime_string_from_code_point_throws_on_high_surrogate_boundary() {
+    let _ = __ts_aot_string_from_code_point(&[0xDFFF_i64]);
+}
+
+#[test]
+#[should_panic(expected = "RangeError")]
+fn runtime_string_from_code_point_throws_on_code_point_above_max() {
+    let _ = __ts_aot_string_from_code_point(&[0x11_0000_i64]);
+}
+
+#[test]
+fn runtime_string_index_of_uses_utf16_code_unit_indexing() {
+    assert_eq!(
+        __ts_aot_string_index_of("\u{1F600}x\u{1F600}", "\u{1F600}", 0),
+        0
+    );
+    assert_eq!(__ts_aot_string_index_of("\u{1F600}x\u{1F600}", "x", 0), 2);
+    assert_eq!(
+        __ts_aot_string_index_of("\u{1F600}x\u{1F600}", "\u{1F600}", 1),
+        3
+    );
+    assert_eq!(__ts_aot_string_index_of("a\u{1F600}b", "b", 0), 3);
+    assert_eq!(__ts_aot_string_index_of("a\u{1F600}b", "b", 2), 3);
+    assert_eq!(__ts_aot_string_index_of("café", "é", 0), 3);
+    assert_eq!(__ts_aot_string_index_of("café", "é", 4), -1);
+}
+
+#[test]
+fn runtime_string_char_at_uses_utf16_code_unit_indexing() {
+    assert_eq!(__ts_aot_string_char_at("\u{1F600}", 0), "\u{FFFD}");
+    assert_eq!(__ts_aot_string_char_at("\u{1F600}", 1), "\u{FFFD}");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 0), "a");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 1), "\u{FFFD}");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 2), "\u{FFFD}");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 3), "b");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", 4), "");
+    assert_eq!(__ts_aot_string_char_at("a\u{1F600}b", -1), "");
+    assert_eq!(__ts_aot_string_char_at("café", 3), "é");
+    assert_eq!(__ts_aot_string_char_at("café", 4), "");
+}
+
+#[test]
+fn runtime_string_substring_utf16_uses_utf16_code_unit_indices() {
+    let s = "é=value";
+    assert_eq!(__ts_aot_string_substring_utf16(s, 2, 7), "value");
+    assert_eq!(__ts_aot_string_substring_utf16(s, 0, 100), s);
+    assert_eq!(__ts_aot_string_substring_utf16(s, -5, 3), "é=v");
+    assert_eq!(__ts_aot_string_substring_utf16(s, 2, 2), "");
+    let astral = "😀ab";
+    assert_eq!(__ts_aot_string_substring_utf16(astral, 0, 2), "😀");
+    assert_eq!(__ts_aot_string_substring_utf16(astral, 2, 4), "ab");
+}
+
+#[test]
+fn runtime_string_substring_utf16_preserves_lone_surrogates_as_replacements() {
+    let s = "\u{1F600}";
+    assert_eq!(__ts_aot_string_substring_utf16(s, 0, 1), "\u{FFFD}");
+    assert_eq!(__ts_aot_string_substring_utf16(s, 1, 2), "\u{FFFD}");
+    let s2 = "a\u{1F600}b";
+    assert_eq!(__ts_aot_string_substring_utf16(s2, 0, 2), "a\u{FFFD}");
+    assert_eq!(__ts_aot_string_substring_utf16(s2, 2, 4), "\u{FFFD}b");
+    let s3 = String::from_utf16_lossy(&[
+        u16::from(b'x'),
+        0xD83D,
+        u16::from(b'y'),
+        0xDE00,
+        u16::from(b'z'),
+    ]);
+    assert_eq!(__ts_aot_string_substring_utf16(&s3, 0, 2), "x\u{FFFD}");
+    assert_eq!(__ts_aot_string_substring_utf16(&s3, 2, 4), "y\u{FFFD}");
+}
+
+#[test]
+fn runtime_string_index_of_and_char_at_compose_on_non_ascii() {
+    let haystack = "é=value\u{1F600}";
+    let eq_idx = __ts_aot_string_index_of(haystack, "=", 0);
+    assert_eq!(eq_idx, 1);
+    let value =
+        __ts_aot_string_substring_utf16(haystack, eq_idx + 1, __ts_aot_string_len(haystack));
+    assert_eq!(value, "value\u{1F600}");
+    let emoji_idx = __ts_aot_string_index_of(&value, "\u{1F600}", 0);
+    assert_eq!(emoji_idx, 5);
+    let next = __ts_aot_string_char_at(&value, emoji_idx);
+    assert_eq!(next, "\u{FFFD}");
 }

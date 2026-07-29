@@ -77,7 +77,13 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         String as StringFeat,
     };
     match op {
-        RuntimeOp::StringConcat | RuntimeOp::StringEquals | RuntimeOp::StringLen => &[StringFeat],
+        RuntimeOp::StringConcat
+        | RuntimeOp::StringEquals
+        | RuntimeOp::StringLen
+        | RuntimeOp::StringIndexOf
+        | RuntimeOp::StringCharAt
+        | RuntimeOp::StringFromCharCode
+        | RuntimeOp::StringFromCodePoint => &[StringFeat],
         RuntimeOp::ArrayCreate
         | RuntimeOp::ArrayCreateWithLen
         | RuntimeOp::ArrayGet
