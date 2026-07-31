@@ -377,7 +377,7 @@ fn emit_expr(
         MirExpr::Float { value, .. } => Ok(emit_float(*value)),
         MirExpr::String { id, .. } => {
             let literal = Literal::string(id.as_str());
-            Ok(quote!(String::from(#literal)))
+            Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
         MirExpr::Local(id) => Ok(body_ctx.local_ref(*id)),
         MirExpr::Global(name) => {
@@ -474,7 +474,7 @@ fn emit_expr(
                 .iter()
                 .map(|p| {
                     let lit = Literal::string(p.as_str());
-                    quote!(String::from(#lit))
+                    quote!(ts_aot_runtime::JsString::from(#lit))
                 })
                 .collect();
             Ok(quote!(vec![#(#cooked_lits),*]))
@@ -488,9 +488,14 @@ fn emit_expr(
             let value_lit = Literal::string(value);
             Ok(quote!(ts_aot_runtime::__ts_aot_bigint_new(#value_lit)))
         }
-        MirExpr::Import { source, .. } => {
+        MirExpr::Import { source, ty } => {
             let source = emit_expr(source, ctx, body_ctx)?;
-            Ok(quote!(ts_aot_runtime::__ts_aot_dynamic_import(#source.as_str())))
+            let payload_ty = emit_type_id_with_ctx(*ty, ctx);
+            Ok(
+                quote!(ts_aot_runtime::__ts_aot_dynamic_import::<#payload_ty>(
+                    &#source.to_string_lossy()
+                )),
+            )
         }
         MirExpr::Yield { expr, .. } => match expr {
             Some(inner) => emit_expr(inner, ctx, body_ctx),
@@ -608,12 +613,105 @@ fn emit_runtime_call(
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#name(&[#(#args),*])))
         }
+        RuntimeOp::StringConcat
+        | RuntimeOp::StringEquals
+        | RuntimeOp::StringLen
+        | RuntimeOp::StringIndexOf
+        | RuntimeOp::StringCharAt => {
+            let string_arg_indices = string_op_string_arg_indices(op);
+            let name = runtime_op_ident(op);
+            let emitted: Vec<TokenStream> = args
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    if string_arg_indices.contains(&i) {
+                        emit_js_string_arg(a, ctx, body_ctx)
+                    } else {
+                        emit_expr(a, ctx, body_ctx)
+                    }
+                })
+                .collect::<Result<Vec<_>, BackendError>>()?;
+            Ok(quote!(#name(#(#emitted),*)))
+        }
+        RuntimeOp::MapSet => {
+            let name = runtime_op_ident(op);
+            let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
+            let key_expr = emit_js_string_owned(&args[1], ctx, body_ctx)?;
+            let value_expr = emit_js_string_owned(&args[2], ctx, body_ctx)?;
+            Ok(quote!(#name(&mut #map_expr, #key_expr, #value_expr)))
+        }
+        RuntimeOp::MapGet => {
+            let name = runtime_op_ident(op);
+            let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
+            let key_expr = emit_js_string_arg(&args[1], ctx, body_ctx)?;
+            Ok(quote!(#name(&#map_expr, #key_expr)))
+        }
+        RuntimeOp::ArrayFromString => {
+            let name = runtime_op_ident(op);
+            let source_expr = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+            Ok(quote!(#name(#source_expr)))
+        }
+        RuntimeOp::HostConsoleLog => {
+            let name = runtime_op_ident(op);
+            let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+            Ok(quote!(#name(#arg)))
+        }
         _ => {
             let name = runtime_op_ident(op);
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#name(#(#args),*)))
         }
     }
+}
+
+fn string_op_string_arg_indices(op: RuntimeOp) -> &'static [usize] {
+    match op {
+        RuntimeOp::StringLen | RuntimeOp::StringCharAt => &[0],
+        RuntimeOp::StringConcat | RuntimeOp::StringEquals | RuntimeOp::StringIndexOf => &[0, 1],
+        _ => &[],
+    }
+}
+
+fn emit_js_string_arg(
+    arg: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    emit_js_string_expr(arg, StringOwnership::Borrowed, ctx, body_ctx)
+}
+
+fn emit_js_string_owned(
+    arg: &MirExpr,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    emit_js_string_expr(arg, StringOwnership::Owned, ctx, body_ctx)
+}
+
+#[derive(Clone, Copy)]
+enum StringOwnership {
+    Borrowed,
+    Owned,
+}
+
+fn emit_js_string_expr(
+    arg: &MirExpr,
+    ownership: StringOwnership,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let core = match arg {
+        MirExpr::String { id, .. } => {
+            let lit = Literal::string(id.as_str());
+            quote!(ts_aot_runtime::JsString::from(#lit))
+        }
+        MirExpr::Local(id) => body_ctx.local_ref(*id),
+        _ => emit_expr(arg, ctx, body_ctx)?,
+    };
+    Ok(match ownership {
+        StringOwnership::Borrowed => quote!(&#core),
+        StringOwnership::Owned => quote!(#core.clone()),
+    })
 }
 
 fn emit_switch(
@@ -824,7 +922,6 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
         RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
-        RuntimeOp::ObjectGetPrototypeOf => format_ident!("__ts_aot_object_get_prototype_of"),
         RuntimeOp::ArrayIsArray => format_ident!("__ts_aot_array_is_array"),
         RuntimeOp::ArrayIsArrayFalse => format_ident!("__ts_aot_array_is_array_false"),
     }

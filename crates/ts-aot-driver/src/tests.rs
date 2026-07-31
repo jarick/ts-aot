@@ -209,9 +209,9 @@ fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
         .rust_source
         .expect("emit-rust must populate rust_source for e2e tagged template Rust check");
     assert!(
-        rust.contains("vec ! [String :: from (\"hi \") , String :: from (\"!\")]")
-            || rust.contains("vec![String::from(\"hi \"), String::from(\"!\")]"),
-        "tag's first arg must be a typed vec![String::from(\"hi \"), String::from(\"!\")] (no TemplateStringsArray wrapper), got rust:\n{rust}"
+        rust.contains("vec ! [ts_aot_runtime :: JsString :: from (\"hi \") , ts_aot_runtime :: JsString :: from (\"!\")]")
+            || rust.contains("vec![ts_aot_runtime::JsString::from(\"hi \"), ts_aot_runtime::JsString::from(\"!\")]"),
+        "tag's first arg must be a typed vec![JsString::from(\"hi \"), JsString::from(\"!\")] (no TemplateStringsArray wrapper), got rust:\n{rust}"
     );
     let has_amp_slice_str = rust.contains("& [\"hi\"")
         || rust.contains("&[\"hi\"")

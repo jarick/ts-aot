@@ -361,6 +361,17 @@ impl ExprConverter {
                     });
                     return MirExpr::Local(dest);
                 }
+                if field_name.as_str() == "getPrototypeOf" {
+                    ctx.error(
+                        "E0406",
+                        "Object.getPrototypeOf is not supported in this AOT target; \
+                         prototype chain resolution requires type-tracked receivers and is \
+                         tracked as a separate architectural change. Use Object.keys() for \
+                         enumerable-property iteration, or drop the call.",
+                        Span::new(0, 0),
+                    );
+                    return MirExpr::Unit;
+                }
                 if mir_args.len() != 1 {
                     ctx.error(
                         "E0406",
@@ -376,11 +387,7 @@ impl ExprConverter {
                 let dest = self.fresh_local();
                 self.push_temp_local(dest, ty);
                 out.push(MirStmt::Runtime {
-                    op: match field_name.as_str() {
-                        "keys" => RuntimeOp::ObjectKeys,
-                        "getPrototypeOf" => RuntimeOp::ObjectGetPrototypeOf,
-                        _ => unreachable!("setPrototypeOf handled above"),
-                    },
+                    op: RuntimeOp::ObjectKeys,
                     args: mir_args,
                     dest: Some(dest),
                     ty,

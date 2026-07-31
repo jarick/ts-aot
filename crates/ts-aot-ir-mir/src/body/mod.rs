@@ -391,7 +391,6 @@ pub enum RuntimeOp {
     OpIn,
     OpInstanceof,
     ObjectKeys,
-    ObjectGetPrototypeOf,
     ArrayIsArray,
     ArrayIsArrayFalse,
 }
