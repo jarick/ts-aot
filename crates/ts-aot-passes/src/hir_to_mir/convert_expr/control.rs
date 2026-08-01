@@ -1,5 +1,3 @@
-#![allow(clippy::too_many_arguments)]
-
 use std::collections::HashMap;
 
 use ts_aot_core::{LocalId, StructId, TypeId, TypeTable};

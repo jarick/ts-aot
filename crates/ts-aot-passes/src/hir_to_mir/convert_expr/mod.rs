@@ -8,7 +8,7 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 mod binary;
-mod call;
+pub(crate) mod call;
 mod control;
 mod extras;
 mod literals;
