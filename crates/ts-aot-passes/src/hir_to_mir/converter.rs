@@ -100,6 +100,10 @@ impl ExprConverter {
         self.local_names.insert(id, name);
     }
 
+    pub fn local_name(&self, id: LocalId) -> Option<Atom> {
+        self.local_names.get(&id).cloned()
+    }
+
     pub fn seed_params(&mut self, count: u32) {
         for i in 0..count {
             self.local_map
