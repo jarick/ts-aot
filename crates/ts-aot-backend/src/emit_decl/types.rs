@@ -37,7 +37,7 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
         Type::I8 => quote!(i8),
         Type::I16 => quote!(i16),
         Type::I32 => quote!(i32),
-        Type::I64 => quote!(i64),
+        Type::I64 | Type::Date => quote!(i64),
         Type::U8 => quote!(u8),
         Type::U16 => quote!(u16),
         Type::U32 => quote!(u32),

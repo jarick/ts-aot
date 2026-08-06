@@ -6,6 +6,7 @@ use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
+use crate::hir_to_mir::convert_expr::call::is_string_typed_source;
 use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
 
@@ -47,6 +48,18 @@ impl ExprConverter {
     ) -> MirExpr {
         if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "Array") {
             return self.convert_new_array(
+                callee,
+                args,
+                ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+        }
+        if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "Date") {
+            return self.convert_new_date(
                 callee,
                 args,
                 ty,
@@ -182,6 +195,66 @@ impl ExprConverter {
             base: Box::new(inner),
             ty: opt_ty,
         }
+    }
+
+    fn convert_new_date(
+        &mut self,
+        _callee: &HirExpr,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        if args.is_empty() {
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, ty);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::DateNow,
+                args: Vec::new(),
+                dest: Some(dest),
+                ty,
+            });
+            return MirExpr::Local(dest);
+        }
+        if args.len() == 1 {
+            let op = if is_string_typed_source(&args[0], types) {
+                RuntimeOp::DateParse
+            } else {
+                RuntimeOp::DateNewFromMs
+            };
+            let arg = self.convert_expr(
+                &args[0],
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, ty);
+            out.push(MirStmt::Runtime {
+                op,
+                args: vec![arg],
+                dest: Some(dest),
+                ty,
+            });
+            return MirExpr::Local(dest);
+        }
+        ctx.error(
+            "E0406",
+            format!(
+                "new Date(year, month, ...rest) constructor with {} positional args is not yet \
+                 supported in this AOT target; only `new Date()` and `new Date(value: number | string)` \
+                 are currently lowered. Pass a single epoch-millisecond value (number) or an ISO 8601 \
+                 string to construct a Date from components or a timestamp.",
+                args.len()
+            ),
+            Span::new(0, 0),
+        );
+        MirExpr::Unit
     }
 
     pub(super) fn convert_type_assertion(

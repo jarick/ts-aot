@@ -13,6 +13,7 @@ pub enum RuntimeFeature {
     HostIo,
     Console,
     Math,
+    Date,
 }
 
 impl RuntimeFeature {
@@ -28,6 +29,7 @@ impl RuntimeFeature {
             Self::HostIo => "host_io",
             Self::Console => "console",
             Self::Math => "math",
+            Self::Date => "date",
         }
     }
 }
@@ -73,7 +75,7 @@ impl RuntimeRequirements {
 
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
-        Array, Console, HostIo, Map, Math, Promise, Result as ResultFeat, Scheduler,
+        Array, Console, Date, HostIo, Map, Math, Promise, Result as ResultFeat, Scheduler,
         String as StringFeat,
     };
     match op {
@@ -123,6 +125,20 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime")
         }
+        RuntimeOp::DateNow
+        | RuntimeOp::DateNewFromMs
+        | RuntimeOp::DateParse
+        | RuntimeOp::DateValueOf
+        | RuntimeOp::DateGetTime
+        | RuntimeOp::DateGetFullYear
+        | RuntimeOp::DateGetMonth
+        | RuntimeOp::DateGetDate
+        | RuntimeOp::DateGetHours
+        | RuntimeOp::DateGetMinutes
+        | RuntimeOp::DateGetSeconds
+        | RuntimeOp::DateGetMilliseconds
+        | RuntimeOp::DateToIsoString
+        | RuntimeOp::DateIsInvalid => &[Date],
     }
 }
 

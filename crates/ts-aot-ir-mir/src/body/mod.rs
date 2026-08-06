@@ -393,6 +393,20 @@ pub enum RuntimeOp {
     ObjectKeys,
     ArrayIsArray,
     ArrayIsArrayFalse,
+    DateNow,
+    DateNewFromMs,
+    DateParse,
+    DateValueOf,
+    DateGetTime,
+    DateGetFullYear,
+    DateGetMonth,
+    DateGetDate,
+    DateGetHours,
+    DateGetMinutes,
+    DateGetSeconds,
+    DateGetMilliseconds,
+    DateToIsoString,
+    DateIsInvalid,
 }
 
 #[cfg(test)]
