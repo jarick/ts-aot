@@ -32,7 +32,6 @@ impl<T> Generator<T> {
         self.state = state;
     }
 
-    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> GeneratorResult<T> {
         if self.state == GENERATOR_DONE_STATE {
             return GeneratorResult::Done(None);

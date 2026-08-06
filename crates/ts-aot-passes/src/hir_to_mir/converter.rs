@@ -17,6 +17,7 @@ pub struct ExprConverter {
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
     pub(super) field_id_lookup: HashMap<(StructId, Atom), FieldId>,
+    pub(super) current_call_type_args: Vec<TypeId>,
 }
 
 impl ExprConverter {
@@ -44,6 +45,7 @@ impl ExprConverter {
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
             field_id_lookup: HashMap::new(),
+            current_call_type_args: Vec::new(),
         }
     }
 

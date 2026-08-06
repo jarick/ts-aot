@@ -31,6 +31,10 @@ pub(super) fn is_global_date_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Date")
 }
 
+pub(super) fn is_global_json_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "JSON")
+}
+
 pub(super) fn is_string_typed_source(arg: &HirExpr, types: &TypeTable) -> bool {
     if matches!(arg, HirExpr::String(_, _)) {
         return true;
@@ -46,6 +50,21 @@ fn is_array_static_type(arg: &HirExpr, types: &TypeTable) -> bool {
         return false;
     };
     matches!(types.resolve(ty), Some(Type::Array { .. }))
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum JsonOpKind {
+    Parse,
+    Stringify,
+}
+
+impl JsonOpKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Parse => "parse",
+            Self::Stringify => "stringify",
+        }
+    }
 }
 
 struct ArrayLikeObjectLiteral {
@@ -174,6 +193,7 @@ impl ExprConverter {
             args: full_args,
             dest: Some(dest),
             ty,
+            target_ty: None,
         });
         Some(MirExpr::Local(dest))
     }
@@ -371,6 +391,7 @@ impl ExprConverter {
             args: mir_args,
             dest: Some(dest),
             ty,
+            target_ty: None,
         });
         Some(MirExpr::Local(dest))
     }
@@ -443,13 +464,206 @@ impl ExprConverter {
             args: vec![receiver_mir],
             dest: Some(dest),
             ty,
+            target_ty: None,
+        });
+        Some(MirExpr::Local(dest))
+    }
+
+    fn try_json_static_method_dispatch(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner: json_owner,
+            field_name: json_field,
+            ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        if !is_global_json_reference(json_owner) {
+            return None;
+        }
+        let op_kind = match json_field.as_str() {
+            "parse" => JsonOpKind::Parse,
+            "stringify" => JsonOpKind::Stringify,
+            _ => return None,
+        };
+        let op_name = op_kind.name();
+        if args.len() != 1 {
+            ctx.error(
+                "E0406",
+                format!(
+                    "JSON.{op_name} requires exactly 1 argument; got {}",
+                    args.len()
+                ),
+                Span::new(0, 0),
+            );
+            return Some(MirExpr::Unit);
+        }
+        if op_kind == JsonOpKind::Parse && !is_string_typed_source(&args[0], types) {
+            ctx.error(
+                "E0406",
+                "JSON.parse() argument must be a string (per ECMAScript spec); got non-string \
+                 expression. Coerce the argument to a string (e.g. String(n)) before calling \
+                 JSON.parse()."
+                    .to_string(),
+                Span::new(0, 0),
+            );
+            return Some(MirExpr::Unit);
+        }
+        let target_ty_result: Result<TypeId, &'static str> = match op_kind {
+            JsonOpKind::Parse => self
+                .current_call_type_args
+                .first()
+                .copied()
+                .ok_or("missing type argument"),
+            JsonOpKind::Stringify => {
+                hir_expr_type_id(&args[0]).ok_or("value with unresolvable type")
+            }
+        };
+        let target_ty = match target_ty_result {
+            Ok(t) => t,
+            Err(reason) => {
+                let hint = match op_kind {
+                    JsonOpKind::Parse => {
+                        "JSON.parse requires an explicit type argument \
+                         `JSON.parse<T>(text)`; type-inference from the call result type or \
+                         surrounding context is not supported in this AOT target. The type \
+                         argument <T> must be a primitive type (i64, f64, bool, \
+                         string/JsString) or a Vec<T>/Option<T> aggregate. User struct types \
+                         are deferred (require #[derive(Deserialize)] on the user type)."
+                    }
+                    JsonOpKind::Stringify => {
+                        "JSON.stringify requires the value argument to \
+                         carry a statically-known type; untyped expressions (numeric \
+                         literals, computed values, or expressions whose type is not \
+                         resolved at the HIR level) cannot be used. The value type must be a \
+                         primitive type (i64, f64, bool, string/JsString) or a Vec<T>/Option<T> \
+                         aggregate. User struct types are deferred (require \
+                         #[derive(Serialize)] on the user type)."
+                    }
+                };
+                ctx.error(
+                    "E0406",
+                    format!("JSON.{op_name} {reason}: {hint}"),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
+        };
+        if !is_json_supported_target_type(types, target_ty) {
+            let ty_desc = json_target_type_name(types, target_ty);
+            let hint = match op_kind {
+                JsonOpKind::Parse => {
+                    "JSON.parse is generic in this AOT target; the type \
+                     argument <T> is required to monomorphize the runtime call. Use the form \
+                     `JSON.parse<T>(text)` where T is a primitive type (i64, f64, bool, \
+                     string/JsString) or a Vec<T>/Option<T> aggregate. User struct types are \
+                     deferred (require #[derive(Deserialize)] on the user type)."
+                }
+                JsonOpKind::Stringify => {
+                    "JSON.stringify target type must be a primitive \
+                     type (i64, f64, bool, string/JsString) or a Vec<T>/Option<T> aggregate. \
+                     User struct types are deferred (require #[derive(Serialize)] on the user \
+                     type)."
+                }
+            };
+            ctx.error(
+                "E0406",
+                format!("JSON.{op_name} target type `{ty_desc}` is not supported: {hint}"),
+                Span::new(0, 0),
+            );
+            return Some(MirExpr::Unit);
+        }
+        let op = match (op_kind, types.resolve(target_ty)) {
+            (JsonOpKind::Parse, Some(Type::String)) => RuntimeOp::JsonParseString,
+            (JsonOpKind::Parse, _) => RuntimeOp::JsonParse,
+            (JsonOpKind::Stringify, Some(Type::String)) => RuntimeOp::JsonStringifyString,
+            (JsonOpKind::Stringify, _) => RuntimeOp::JsonStringify,
+        };
+        let mir_args: Vec<MirExpr> = args
+            .iter()
+            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .collect();
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, ty);
+        out.push(MirStmt::Runtime {
+            op,
+            args: mir_args,
+            dest: Some(dest),
+            ty,
+            target_ty: Some(target_ty),
         });
         Some(MirExpr::Local(dest))
     }
 }
 
+fn is_json_supported_target_type(types: &TypeTable, ty: TypeId) -> bool {
+    match types.resolve(ty) {
+        Some(Type::Bool | Type::I64 | Type::F64 | Type::String) => true,
+        Some(Type::Optional { inner }) => is_json_supported_target_type(types, *inner),
+        Some(Type::Array { element }) => is_json_supported_target_type(types, *element),
+        _ => false,
+    }
+}
+
+fn json_target_type_name(types: &TypeTable, ty: TypeId) -> String {
+    match types.resolve(ty) {
+        Some(Type::Bool) => "bool".to_string(),
+        Some(Type::I64) => "i64".to_string(),
+        Some(Type::F64) => "f64".to_string(),
+        Some(Type::String) => "string".to_string(),
+        Some(Type::Optional { inner }) => {
+            format!("Option<{}>", json_target_type_name(types, *inner))
+        }
+        Some(Type::Array { element }) => format!("Vec<{}>", json_target_type_name(types, *element)),
+        Some(Type::Struct { id }) => format!("struct#{id:?}"),
+        Some(Type::Named { symbol }) => symbol.as_str().to_string(),
+        _ => format!("<unresolved #{ty:?}>"),
+    }
+}
+
 impl ExprConverter {
     pub(super) fn convert_call(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        type_args: &[TypeId],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let prev_type_args = std::mem::take(&mut self.current_call_type_args);
+        self.current_call_type_args = type_args.to_vec();
+        let result = self.convert_call_inner(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        self.current_call_type_args = prev_type_args;
+        result
+    }
+
+    fn convert_call_inner(
         &mut self,
         callee: &HirCallee,
         args: &[HirExpr],
@@ -512,6 +726,7 @@ impl ExprConverter {
                 }],
                 dest: Some(dest),
                 ty,
+                target_ty: None,
             });
             for (idx, value_hir) in &indexed {
                 if i128::from(*idx) >= length {
@@ -537,6 +752,7 @@ impl ExprConverter {
                     ],
                     dest: None,
                     ty: TypeId::from_raw(0),
+                    target_ty: None,
                 });
             }
             if args.len() == 1 {
@@ -562,6 +778,7 @@ impl ExprConverter {
                 ],
                 dest: Some(final_dest),
                 ty,
+                target_ty: None,
             });
             return MirExpr::Local(final_dest);
         }
@@ -602,6 +819,18 @@ impl ExprConverter {
             return mir;
         }
         if let Some(mir) = self.try_date_instance_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
+        if let Some(mir) = self.try_json_static_method_dispatch(
             callee,
             args,
             ty,
@@ -698,6 +927,7 @@ impl ExprConverter {
                     args: mir_args,
                     dest: Some(dest),
                     ty,
+                    target_ty: None,
                 });
                 return MirExpr::Local(dest);
             }
@@ -732,6 +962,7 @@ impl ExprConverter {
                     args: mir_args,
                     dest: Some(dest),
                     ty,
+                    target_ty: None,
                 });
                 return MirExpr::Local(dest);
             }
@@ -763,6 +994,7 @@ impl ExprConverter {
                         args: mir_args,
                         dest: Some(dest),
                         ty,
+                        target_ty: None,
                     });
                     return MirExpr::Local(dest);
                 }
@@ -795,6 +1027,7 @@ impl ExprConverter {
                     args: mir_args,
                     dest: Some(dest),
                     ty,
+                    target_ty: None,
                 });
                 return MirExpr::Local(dest);
             }
@@ -813,6 +1046,7 @@ impl ExprConverter {
                     args: Vec::new(),
                     dest: Some(alloc_id),
                     ty,
+                    target_ty: None,
                 });
                 for item_mir in mir_args {
                     out.push(MirStmt::Runtime {
@@ -820,6 +1054,7 @@ impl ExprConverter {
                         args: vec![MirExpr::Local(alloc_id), item_mir],
                         dest: None,
                         ty: TypeId::from_raw(0),
+                        target_ty: None,
                     });
                 }
                 return MirExpr::Local(alloc_id);
@@ -885,6 +1120,7 @@ impl ExprConverter {
                         args: mir_args,
                         dest: Some(dest),
                         ty,
+                        target_ty: None,
                     });
                     return MirExpr::Local(dest);
                 }
@@ -909,6 +1145,7 @@ impl ExprConverter {
                         args: mir_args,
                         dest: Some(dest),
                         ty,
+                        target_ty: None,
                     });
                     return MirExpr::Local(dest);
                 }

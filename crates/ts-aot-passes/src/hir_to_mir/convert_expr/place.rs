@@ -71,8 +71,6 @@ where
     let mut materialize = materialize;
     materialize_place_base(e, ctx, &mut materialize)
 }
-
-#[allow(clippy::only_used_in_recursion)]
 pub(super) fn materialize_place_base<F>(
     e: MirExpr,
     ctx: &mut PassContext,

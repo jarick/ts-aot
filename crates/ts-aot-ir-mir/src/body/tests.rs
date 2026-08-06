@@ -190,6 +190,7 @@ fn stmt_runtime_carries_op_args_ty() {
         args: vec![MirExpr::Unit, MirExpr::Unit],
         dest: None,
         ty: TypeId::from_raw(0),
+        target_ty: None,
     };
     match s {
         MirStmt::Runtime { op, args, ty, .. } => {

@@ -5,6 +5,7 @@ mod bigint;
 mod date;
 mod generator;
 mod host;
+mod json;
 mod map;
 mod math;
 mod module;
@@ -34,6 +35,10 @@ pub use generator::{
     GENERATOR_DONE_STATE, Generator, GeneratorDispatch, GeneratorResult,
 };
 pub use host::{__ts_aot_host_console_log, __ts_aot_throw};
+pub use json::{
+    __ts_aot_json_parse, __ts_aot_json_parse_string, __ts_aot_json_stringify,
+    __ts_aot_json_stringify_string,
+};
 pub use map::{__ts_aot_map_create, __ts_aot_map_get, __ts_aot_map_set, __ts_aot_object_keys};
 pub use math::{
     __ts_aot_math_abs, __ts_aot_math_acos, __ts_aot_math_asin, __ts_aot_math_atan,

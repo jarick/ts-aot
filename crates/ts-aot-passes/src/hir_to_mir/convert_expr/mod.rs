@@ -91,10 +91,15 @@ impl ExprConverter {
                 ty: *ty,
             },
             HirExpr::Call {
-                callee, args, ty, ..
+                callee,
+                args,
+                type_args,
+                ty,
+                ..
             } => self.convert_call(
                 callee,
                 args,
+                type_args,
                 *ty,
                 out,
                 shared_struct_ids,

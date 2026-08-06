@@ -1,5 +1,7 @@
 use std::hash::{Hash, Hasher};
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::host::__ts_aot_throw;
 
 #[derive(Debug, Clone)]
@@ -104,6 +106,96 @@ impl JsString {
     pub fn is_empty(&self) -> bool {
         self.len_code_units() == 0
     }
+}
+
+impl Serialize for JsString {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            JsString::Valid(s) => serializer.serialize_str(s),
+            JsString::Raw(units) => {
+                let s = String::from_utf16_lossy(units);
+                serializer.serialize_str(&s)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for JsString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        let lossy = bytes_to_utf16_lossy(s.as_bytes());
+        let lossless: Vec<u16> = s.encode_utf16().collect();
+        if lossy == lossless {
+            Ok(JsString::Valid(s))
+        } else {
+            Ok(JsString::Raw(lossy))
+        }
+    }
+}
+
+pub(crate) fn bytes_to_utf16_lossy(bytes: &[u8]) -> Vec<u16> {
+    let mut units = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        if b0 < 0x80 {
+            units.push(u16::from(b0));
+            i += 1;
+        } else if (0xC2..=0xDF).contains(&b0) && i + 1 < bytes.len() {
+            let b1 = bytes[i + 1];
+            if (b1 & 0xC0) == 0x80 {
+                let cp = (u32::from(b0 & 0x1F) << 6) | u32::from(b1 & 0x3F);
+                let unit = u16::try_from(cp).unwrap_or(0xFFFD);
+                units.push(unit);
+                i += 2;
+            } else {
+                units.push(0xFFFD);
+                i += 1;
+            }
+        } else if (0xE0..=0xEF).contains(&b0) && i + 2 < bytes.len() {
+            let b1 = bytes[i + 1];
+            let b2 = bytes[i + 2];
+            if (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 {
+                let cp = (u32::from(b0 & 0x0F) << 12)
+                    | (u32::from(b1 & 0x3F) << 6)
+                    | u32::from(b2 & 0x3F);
+                let unit = u16::try_from(cp).unwrap_or(0xFFFD);
+                units.push(unit);
+                i += 3;
+            } else {
+                units.push(0xFFFD);
+                i += 1;
+            }
+        } else if (0xF0..=0xF7).contains(&b0) && i + 3 < bytes.len() {
+            let b1 = bytes[i + 1];
+            let b2 = bytes[i + 2];
+            let b3 = bytes[i + 3];
+            if (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80 {
+                let cp = (u32::from(b0 & 0x07) << 18)
+                    | (u32::from(b1 & 0x3F) << 12)
+                    | (u32::from(b2 & 0x3F) << 6)
+                    | u32::from(b3 & 0x3F);
+                if (0x0001_0000..=0x0010_FFFF).contains(&cp) {
+                    let adjusted = cp - 0x10000;
+                    let high = 0xD800 + u16::try_from(adjusted >> 10).unwrap_or(0);
+                    let low = 0xDC00 + u16::try_from(adjusted & 0x3FF).unwrap_or(0);
+                    units.push(high);
+                    units.push(low);
+                    i += 4;
+                } else {
+                    units.push(0xFFFD);
+                    i += 1;
+                }
+            } else {
+                units.push(0xFFFD);
+                i += 1;
+            }
+        } else {
+            units.push(0xFFFD);
+            i += 1;
+        }
+    }
+    units
 }
 
 #[must_use]
@@ -214,7 +306,51 @@ pub fn __ts_aot_string_len(s: &JsString) -> i64 {
     s.len_code_units()
 }
 
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 fn i64_to_char_code_u16(c: i64) -> u16 {
-    (c as u32 & 0xFFFF) as u16
+    u16::try_from(c & 0xFFFF_i64).expect("0..=0xFFFF fits in u16")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytes_to_utf16_lossy;
+
+    #[test]
+    fn bytes_to_utf16_lossy_valid_4byte_min_codepoint() {
+        let units = bytes_to_utf16_lossy(&[0xF0, 0x90, 0x80, 0x80]);
+        assert_eq!(
+            units,
+            vec![0xD800, 0xDC00],
+            "U+10000 must encode as surrogate pair high=0xD800 low=0xDC00"
+        );
+    }
+
+    #[test]
+    fn bytes_to_utf16_lossy_valid_4byte_max_codepoint() {
+        let units = bytes_to_utf16_lossy(&[0xF4, 0x8F, 0xBF, 0xBF]);
+        assert_eq!(
+            units,
+            vec![0xDBFF, 0xDFFF],
+            "U+10FFFF must encode as surrogate pair high=0xDBFF low=0xDFFF"
+        );
+    }
+
+    #[test]
+    fn bytes_to_utf16_lossy_rejects_4byte_overlong() {
+        let units = bytes_to_utf16_lossy(&[0xF0, 0x80, 0x80, 0x80]);
+        assert_eq!(
+            units,
+            vec![0xFFFD; 4],
+            "overlong 4-byte (cp < 0x10000) must yield 0xFFFD per byte (existing maximal-bad-subpart policy), not underflow at cp - 0x10000"
+        );
+    }
+
+    #[test]
+    fn bytes_to_utf16_lossy_rejects_4byte_out_of_range() {
+        let units = bytes_to_utf16_lossy(&[0xF5, 0x80, 0x80, 0x80]);
+        assert_eq!(
+            units,
+            vec![0xFFFD; 4],
+            "cp > 0x10FFFF (0xF5+ prefix) must yield 0xFFFD per byte, not invalid surrogate units from cp - 0x10000"
+        );
+    }
 }

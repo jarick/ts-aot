@@ -13,6 +13,8 @@ unused_must_use = "deny"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+should_implement_trait = "allow"
+needless_pass_by_value = "allow"
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -30,3 +32,5 @@ indexmap = { workspace = true }
 regex = "1"
 fastrand = { workspace = true }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
+serde = { workspace = true }
+serde_json = { workspace = true }

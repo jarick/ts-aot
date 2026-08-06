@@ -6,8 +6,6 @@ use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, ObjectLiteralField};
 use super::LowerClosuresStats;
 use super::walk_stmt::walk_body;
 use crate::PassContext;
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_expr(
     expr: &mut HirExpr,
     next_id: &mut u32,
@@ -408,8 +406,6 @@ pub(super) fn walk_expr(
         }
     }
 }
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_callee(
     callee: &mut HirCallee,
     span: Span,

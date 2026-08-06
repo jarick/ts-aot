@@ -160,7 +160,13 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
         }
         MirStmt::Break => d.line("break"),
         MirStmt::Continue => d.line("continue"),
-        MirStmt::Runtime { op, args, dest, ty } => {
+        MirStmt::Runtime {
+            op,
+            args,
+            dest,
+            ty,
+            target_ty,
+        } => {
             d.write(&format!("runtime {}(", fmt_op(*op)));
             for (i, arg) in args.iter().enumerate() {
                 if i > 0 {
@@ -168,7 +174,14 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
                 }
                 dump_expr_inline(arg, d);
             }
-            d.write(&format!(") -> {}", ty.raw()));
+            let is_generic_runtime_op =
+                matches!(op, RuntimeOp::JsonParse | RuntimeOp::JsonStringify);
+            if is_generic_runtime_op {
+                let target = target_ty.unwrap_or(*ty);
+                d.write(&format!(") -> T#{}", target.raw()));
+            } else {
+                d.write(&format!(") -> {}", ty.raw()));
+            }
             if let Some(d2) = dest {
                 d.write(&format!(" dest=local({})", d2.raw()));
             }
@@ -516,6 +529,10 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::DateGetMilliseconds => "date_get_milliseconds",
         RuntimeOp::DateToIsoString => "date_to_iso_string",
         RuntimeOp::DateIsInvalid => "date_is_invalid",
+        RuntimeOp::JsonParse => "json_parse",
+        RuntimeOp::JsonParseString => "json_parse_string",
+        RuntimeOp::JsonStringify => "json_stringify",
+        RuntimeOp::JsonStringifyString => "json_stringify_string",
     }
 }
 

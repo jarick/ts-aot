@@ -48,7 +48,6 @@ pub fn __ts_aot_promise_resolve<T: Clone + 'static>(promise: &Promise<T>, value:
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 pub fn __ts_aot_promise_reject<T: 'static>(promise: &Promise<T>, reason: String) {
     let to_fire: Vec<PromiseCallback<T>> = {
         let mut inner = promise.inner.borrow_mut();

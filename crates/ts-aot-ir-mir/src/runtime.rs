@@ -14,6 +14,7 @@ pub enum RuntimeFeature {
     Console,
     Math,
     Date,
+    Json,
 }
 
 impl RuntimeFeature {
@@ -30,6 +31,7 @@ impl RuntimeFeature {
             Self::Console => "console",
             Self::Math => "math",
             Self::Date => "date",
+            Self::Json => "json",
         }
     }
 }
@@ -75,7 +77,7 @@ impl RuntimeRequirements {
 
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
-        Array, Console, Date, HostIo, Map, Math, Promise, Result as ResultFeat, Scheduler,
+        Array, Console, Date, HostIo, Json, Map, Math, Promise, Result as ResultFeat, Scheduler,
         String as StringFeat,
     };
     match op {
@@ -139,6 +141,10 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::DateGetMilliseconds
         | RuntimeOp::DateToIsoString
         | RuntimeOp::DateIsInvalid => &[Date],
+        RuntimeOp::JsonParse
+        | RuntimeOp::JsonParseString
+        | RuntimeOp::JsonStringify
+        | RuntimeOp::JsonStringifyString => &[Json],
     }
 }
 

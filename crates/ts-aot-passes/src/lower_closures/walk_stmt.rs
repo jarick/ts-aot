@@ -7,8 +7,6 @@ use super::LowerClosuresStats;
 use super::walk::walk_decl;
 use super::walk_expr::walk_expr;
 use crate::PassContext;
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_body(
     body: &mut [HirStmt],
     next_id: &mut u32,
@@ -32,8 +30,6 @@ pub(super) fn walk_body(
         );
     }
 }
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn walk_stmt(
     stmt: &mut HirStmt,
     next_id: &mut u32,

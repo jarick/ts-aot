@@ -113,6 +113,7 @@ impl ExprConverter {
                         args: vec![current, part.clone()],
                         dest: Some(dest),
                         ty,
+                        target_ty: None,
                     });
                     current = MirExpr::Local(dest);
                 }

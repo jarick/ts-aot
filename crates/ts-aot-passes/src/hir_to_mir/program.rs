@@ -14,8 +14,6 @@ use ts_aot_ir_mir::{
 
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
-
-#[allow(clippy::too_many_arguments)]
 pub fn convert_function(
     f: &HirFunction,
     id: FunctionId,
@@ -185,8 +183,6 @@ fn debug_check_name_to_function(
     _name_to_function: &Arc<HashMap<Atom, FunctionId>>,
 ) {
 }
-
-#[allow(clippy::too_many_arguments)]
 fn convert_decl(
     decl: &HirDecl,
     next_function_id: &mut u32,
@@ -245,8 +241,6 @@ fn convert_decl(
         HirDecl::Namespace { .. } => None,
     }
 }
-
-#[allow(clippy::too_many_arguments)]
 fn convert_struct(
     c: &HirClass,
     next_function_id: &mut u32,

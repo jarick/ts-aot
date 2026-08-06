@@ -113,6 +113,7 @@ impl ExprConverter {
             args,
             dest: Some(dest),
             ty,
+            target_ty: None,
         });
         MirExpr::Local(dest)
     }
