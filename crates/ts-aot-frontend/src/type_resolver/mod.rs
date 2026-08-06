@@ -68,6 +68,7 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "void" | "undefined" => Some(Type::Void),
         "null" => Some(Type::Null),
         "never" => Some(Type::Never),
+        "Date" => Some(Type::Date),
         _ => None,
     }
 }

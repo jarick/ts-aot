@@ -52,6 +52,7 @@ impl SkeletonBuilder<'_, '_> {
             Expression::UnaryExpression(unary) => self.walk_unary(unary, scope),
             Expression::UpdateExpression(update) => self.walk_update(update, scope),
             Expression::CallExpression(call) => self.walk_call(call, scope),
+            Expression::NewExpression(new_expr) => self.walk_new_expression(new_expr, scope),
             other @ match_member_expression!(Expression) => {
                 self.walk_member(other.to_member_expression(), scope)
             }
@@ -475,6 +476,32 @@ impl SkeletonBuilder<'_, '_> {
             type_args,
             ty,
             span: core_span_from_oxc(call.span),
+        }
+    }
+
+    fn walk_new_expression(
+        &mut self,
+        new_expr: &oxc_ast::ast::NewExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let callee_expr = self.walk_expr(&new_expr.callee, scope);
+        let mut args = Vec::with_capacity(new_expr.arguments.len());
+        for arg in &new_expr.arguments {
+            match arg {
+                arg @ match_expression!(Argument) => {
+                    args.push(self.walk_expr(arg.to_expression(), scope));
+                }
+                _ => {
+                    self.report_unwalked("spread argument is not supported in `new`", arg.span());
+                }
+            }
+        }
+        let ty = self.error_ty();
+        HirExpr::New {
+            callee: Box::new(callee_expr),
+            args,
+            ty,
+            span: core_span_from_oxc(new_expr.span),
         }
     }
 

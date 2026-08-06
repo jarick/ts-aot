@@ -44,6 +44,7 @@ pub enum Type {
         ok: TypeId,
         err: Option<TypeId>,
     },
+    Date,
     Result {
         ok: TypeId,
         err: TypeId,

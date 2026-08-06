@@ -141,6 +141,7 @@ fn is_u64_arg_packable(ty: TypeId, ctx: &EmitCtx<'_>) -> bool {
             | Type::U64
             | Type::F32
             | Type::F64
+            | Type::Date
     )
 }
 
@@ -161,6 +162,7 @@ fn is_u64_ret_packable(ty: TypeId, ctx: &EmitCtx<'_>) -> bool {
             | Type::U64
             | Type::F32
             | Type::F64
+            | Type::Date
             | Type::Void
     )
 }
@@ -206,6 +208,7 @@ fn unpack_arg_stmt(
         | Type::I16
         | Type::I32
         | Type::I64
+        | Type::Date
         | Type::U8
         | Type::U16
         | Type::U32
@@ -233,6 +236,7 @@ fn pack_return_stmt(ty: TypeId, ctx: &EmitCtx<'_>) -> Result<TokenStream, Backen
         | Type::I16
         | Type::I32
         | Type::I64
+        | Type::Date
         | Type::U8
         | Type::U16
         | Type::U32

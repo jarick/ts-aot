@@ -17,8 +17,16 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+[features]
+# Force the host local timezone used by Date getters / offset-free DateTime
+# parsing to be UTC, for deterministic SSR builds. Default (without this feature)
+# uses TimeZone::system() to match ECMAScript spec semantics. Equivalent to
+# deploying with TZ=UTC env var, but baked into the binary.
+tz-utc-only = []
+
 [dependencies]
 ts-aot-core = { path = "../ts-aot-core" }
 indexmap = { workspace = true }
 regex = "1"
 fastrand = { workspace = true }
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }

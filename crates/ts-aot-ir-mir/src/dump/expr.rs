@@ -502,6 +502,20 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ObjectKeys => "object_keys",
         RuntimeOp::ArrayIsArray => "array_is_array",
         RuntimeOp::ArrayIsArrayFalse => "array_is_array_false",
+        RuntimeOp::DateNow => "date_now",
+        RuntimeOp::DateNewFromMs => "date_new_from_ms",
+        RuntimeOp::DateParse => "date_parse",
+        RuntimeOp::DateValueOf => "date_value_of",
+        RuntimeOp::DateGetTime => "date_get_time",
+        RuntimeOp::DateGetFullYear => "date_get_full_year",
+        RuntimeOp::DateGetMonth => "date_get_month",
+        RuntimeOp::DateGetDate => "date_get_date",
+        RuntimeOp::DateGetHours => "date_get_hours",
+        RuntimeOp::DateGetMinutes => "date_get_minutes",
+        RuntimeOp::DateGetSeconds => "date_get_seconds",
+        RuntimeOp::DateGetMilliseconds => "date_get_milliseconds",
+        RuntimeOp::DateToIsoString => "date_to_iso_string",
+        RuntimeOp::DateIsInvalid => "date_is_invalid",
     }
 }
 

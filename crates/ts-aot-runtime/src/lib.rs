@@ -2,6 +2,7 @@ pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
 mod array;
 mod bigint;
+mod date;
 mod generator;
 mod host;
 mod map;
@@ -20,6 +21,13 @@ pub use array::{
     __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
 };
 pub use bigint::{__ts_aot_bigint_new, BigIntHandle};
+pub use date::{
+    __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,
+    __ts_aot_date_get_milliseconds, __ts_aot_date_get_minutes, __ts_aot_date_get_month,
+    __ts_aot_date_get_seconds, __ts_aot_date_get_time, __ts_aot_date_is_invalid,
+    __ts_aot_date_new_from_ms, __ts_aot_date_now, __ts_aot_date_parse, __ts_aot_date_to_iso_string,
+    __ts_aot_date_value_of, MS_PER_DAY, parse_iso8601_to_ms,
+};
 pub use generator::{
     __ts_aot_generator_done, __ts_aot_generator_done_with, __ts_aot_generator_get_state,
     __ts_aot_generator_set_state, __ts_aot_generator_store, __ts_aot_generator_yielded,
