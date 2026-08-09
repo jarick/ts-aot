@@ -269,20 +269,6 @@ pub fn math_method_call_with_2_args(field_name: &str, arg1: HirExpr, arg2: HirEx
     global_method_call("Math", field_name, vec![arg1, arg2])
 }
 
-pub fn box_constructor_call(ns: &str, arg: HirExpr, ty: TypeId) -> HirExpr {
-    HirExpr::Call {
-        callee: HirCallee::Indirect(Box::new(HirExpr::Global {
-            name: Atom::new_inline(ns),
-            ty,
-            span: Span::default(),
-        })),
-        args: vec![arg],
-        ty,
-        type_args: vec![],
-        span: Span::default(),
-    }
-}
-
 pub fn receiver_has_own_property_call(
     types: &mut TypeTable,
     receiver_ty: TypeId,

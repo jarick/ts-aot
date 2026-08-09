@@ -306,6 +306,7 @@ mod tests {
             args: vec![MirExpr::Unit, MirExpr::Unit],
             dest: None,
             ty: TypeId::from_raw(0),
+            target_ty: None,
         };
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
         assert!(text.contains("string_concat"));

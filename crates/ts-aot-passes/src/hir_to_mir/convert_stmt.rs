@@ -88,8 +88,6 @@ impl ExprConverter {
         final_locals.extend(self.take_temp_locals());
         (out, final_locals)
     }
-
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_stmt_into(
         &mut self,
         s: &HirStmt,

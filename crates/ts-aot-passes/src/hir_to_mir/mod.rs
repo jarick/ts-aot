@@ -1,6 +1,3 @@
-#![allow(clippy::match_same_arms)]
-#![allow(dead_code)]
-
 mod convert_expr;
 mod convert_stmt;
 mod converter;

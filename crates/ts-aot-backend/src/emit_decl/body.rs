@@ -59,10 +59,11 @@ fn emit_runtime_stmt(
     args: &[MirExpr],
     dest: Option<LocalId>,
     ty: TypeId,
+    target_ty: Option<TypeId>,
     ctx: &EmitCtx<'_>,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let call = emit_runtime_call(op, args, ctx, body_ctx)?;
+    let call = emit_runtime_call(op, args, ty, target_ty, ctx, body_ctx)?;
     if let Some(dest) = dest {
         let dest = body_ctx.local_ident(dest);
         let ty = emit_type_id_with_ctx(ty, ctx);
@@ -187,9 +188,13 @@ fn emit_stmt(
                 Ok(quote!(continue;))
             }
         }
-        MirStmt::Runtime { op, args, dest, ty } => {
-            emit_runtime_stmt(*op, args, *dest, *ty, ctx, body_ctx)
-        }
+        MirStmt::Runtime {
+            op,
+            args,
+            dest,
+            ty,
+            target_ty,
+        } => emit_runtime_stmt(*op, args, *dest, *ty, *target_ty, ctx, body_ctx),
         MirStmt::DoWhile { body, cond } => emit_do_while(body, cond, ctx, body_ctx),
         MirStmt::Switch {
             disc,
@@ -364,7 +369,6 @@ fn emit_optional_chain_assign(
     }))
 }
 
-#[allow(clippy::too_many_lines)]
 fn emit_expr(
     expr: &MirExpr,
     ctx: &EmitCtx<'_>,
@@ -590,6 +594,8 @@ fn emit_unary_expr(
 fn emit_runtime_call(
     op: RuntimeOp,
     args: &[MirExpr],
+    ty: TypeId,
+    target_ty: Option<TypeId>,
     ctx: &EmitCtx<'_>,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
@@ -655,6 +661,18 @@ fn emit_runtime_call(
             let name = runtime_op_ident(op);
             let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
             Ok(quote!(#name(#arg)))
+        }
+        RuntimeOp::JsonParse | RuntimeOp::JsonStringify => {
+            let name = runtime_op_ident(op);
+            let turbofish_ty = target_ty.unwrap_or(ty);
+            let ty_tokens = emit_type_id_with_ctx(turbofish_ty, ctx);
+            if op == RuntimeOp::JsonParse {
+                let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+                Ok(quote!(#name::<#ty_tokens>(#arg)))
+            } else {
+                let arg = emit_expr(&args[0], ctx, body_ctx)?;
+                Ok(quote!(#name::<#ty_tokens>(&#arg)))
+            }
         }
         _ => {
             let name = runtime_op_ident(op);
@@ -746,7 +764,6 @@ fn emit_switch(
     Ok(quote!(match #disc_expr { #(#arms),* }))
 }
 
-#[allow(clippy::too_many_lines)]
 fn emit_try(
     body: &MirBlock,
     catch_param: Option<LocalId>,
@@ -938,5 +955,9 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::DateGetMilliseconds => format_ident!("__ts_aot_date_get_milliseconds"),
         RuntimeOp::DateToIsoString => format_ident!("__ts_aot_date_to_iso_string"),
         RuntimeOp::DateIsInvalid => format_ident!("__ts_aot_date_is_invalid"),
+        RuntimeOp::JsonParse => format_ident!("__ts_aot_json_parse"),
+        RuntimeOp::JsonParseString => format_ident!("__ts_aot_json_parse_string"),
+        RuntimeOp::JsonStringify => format_ident!("__ts_aot_json_stringify"),
+        RuntimeOp::JsonStringifyString => format_ident!("__ts_aot_json_stringify_string"),
     }
 }

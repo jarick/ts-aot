@@ -135,6 +135,7 @@ impl ExprConverter {
                 args: Vec::new(),
                 dest: Some(alloc_id),
                 ty,
+                target_ty: None,
             });
             return MirExpr::Local(alloc_id);
         }
@@ -152,6 +153,7 @@ impl ExprConverter {
                 args: vec![len_mir],
                 dest: Some(alloc_id),
                 ty,
+                target_ty: None,
             });
             return MirExpr::Local(alloc_id);
         }
@@ -160,6 +162,7 @@ impl ExprConverter {
             args: Vec::new(),
             dest: Some(alloc_id),
             ty,
+            target_ty: None,
         });
         for a in args {
             let item_mir =
@@ -169,6 +172,7 @@ impl ExprConverter {
                 args: vec![MirExpr::Local(alloc_id), item_mir],
                 dest: None,
                 ty: TypeId::from_raw(0),
+                target_ty: None,
             });
         }
         MirExpr::Local(alloc_id)
@@ -216,6 +220,7 @@ impl ExprConverter {
                 args: Vec::new(),
                 dest: Some(dest),
                 ty,
+                target_ty: None,
             });
             return MirExpr::Local(dest);
         }
@@ -240,6 +245,7 @@ impl ExprConverter {
                 args: vec![arg],
                 dest: Some(dest),
                 ty,
+                target_ty: None,
             });
             return MirExpr::Local(dest);
         }

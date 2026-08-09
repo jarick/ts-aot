@@ -9,8 +9,6 @@ use crate::PassContext;
 pub(super) fn fresh_closure_name(next_id: u32) -> Atom {
     Atom::from(format!("__ts_aot_closure_{next_id}"))
 }
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn next_unused_closure_name(next_id: &mut u32, taken: &HashSet<Atom>) -> Atom {
     let mut name = fresh_closure_name(*next_id);
     while taken.contains(&name) {
@@ -39,8 +37,6 @@ pub(super) fn build_closure_fn_decl(
         async_info: None,
     })
 }
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn lift_non_capturing_closure(
     id: LocalId,
     params: &[HirParam],
@@ -102,8 +98,6 @@ pub(super) fn closure_callee_ty(new_decls: &[HirDecl], name: &Atom) -> TypeId {
     }
     TypeId::from_raw(0)
 }
-
-#[allow(clippy::too_many_arguments)]
 pub(super) fn rewrite_closure_callee(
     callee: &mut HirCallee,
     span: Span,

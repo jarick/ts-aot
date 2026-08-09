@@ -96,7 +96,17 @@ pub enum MirStmt {
         op: RuntimeOp,
         args: Vec<MirExpr>,
         dest: Option<LocalId>,
+        /// Result type of the runtime call — always the type of the destination
+        /// local (when `dest` is `Some`). For generic runtime ops that need a
+        /// separate serde turbofish argument, store it in `target_ty` instead.
         ty: TypeId,
+        /// Override for the serde turbofish argument used by generic runtime
+        /// calls. `None` for all non-generic ops and for generic ops where the
+        /// serde argument type equals the result type. `Some` only when the
+        /// serde argument type differs from the result type (e.g. `JSON.stringify`,
+        /// where the result is always `JsString` but the serde target is the
+        /// value's static type, e.g. `i64`).
+        target_ty: Option<TypeId>,
     },
     Switch {
         disc: Box<MirExpr>,
@@ -407,6 +417,10 @@ pub enum RuntimeOp {
     DateGetMilliseconds,
     DateToIsoString,
     DateIsInvalid,
+    JsonParse,
+    JsonParseString,
+    JsonStringify,
+    JsonStringifyString,
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ impl ExprConverter {
                     args: vec![lhs_mir, rhs_mir],
                     dest: Some(dest),
                     ty,
+                    target_ty: None,
                 });
                 MirExpr::Local(dest)
             }
@@ -74,6 +75,7 @@ impl ExprConverter {
                     ],
                     dest: Some(dest),
                     ty,
+                    target_ty: None,
                 });
                 MirExpr::Local(dest)
             }

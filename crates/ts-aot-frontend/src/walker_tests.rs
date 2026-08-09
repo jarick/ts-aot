@@ -2472,7 +2472,6 @@ fn count_calls_in_stmts(stmts: &[HirStmt], out: &mut u32) {
     }
 }
 
-#[allow(clippy::match_same_arms)]
 fn count_calls_in_stmt(s: &HirStmt, out: &mut u32) {
     match s {
         HirStmt::Block(inner) => count_calls_in_stmts(inner, out),
@@ -4314,10 +4313,6 @@ fn conditional_type_in_alias_emits_e0407_and_resolves_to_never() {
 
 #[test]
 fn conditional_type_with_branch_resolving_to_type_error_emits_e0400_per_branch() {
-    // Regression: resolve_simple_type returns Some(Type::Error) for unsupported
-    // type forms (wildcard fallback, e.g. `keyof T`). Conditional resolver must
-    // treat Some(Type::Error) the same as None and emit E0400 per branch — not
-    // silently swallow the error.
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
         "test.ts",

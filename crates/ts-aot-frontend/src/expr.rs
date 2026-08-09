@@ -18,7 +18,6 @@ use crate::skeleton::SkeletonBuilder;
 use crate::util::core_span_from_oxc;
 
 impl SkeletonBuilder<'_, '_> {
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
         match e {
             Expression::BooleanLiteral(b) => HirExpr::Bool(b.value, core_span_from_oxc(b.span)),
