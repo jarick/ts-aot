@@ -657,7 +657,7 @@ fn emit_runtime_call(
             let source_expr = emit_js_string_arg(&args[0], ctx, body_ctx)?;
             Ok(quote!(#name(#source_expr)))
         }
-        RuntimeOp::HostConsoleLog => {
+        RuntimeOp::HostConsoleLog | RuntimeOp::SymbolFor => {
             let name = runtime_op_ident(op);
             let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
             Ok(quote!(#name(#arg)))
@@ -672,6 +672,18 @@ fn emit_runtime_call(
             } else {
                 let arg = emit_expr(&args[0], ctx, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(&#arg)))
+            }
+        }
+        RuntimeOp::SymbolNew => {
+            let name = runtime_op_ident(op);
+            if args.is_empty() || matches!(&args[0], MirExpr::Unit) {
+                Ok(quote!(#name()))
+            } else {
+                let desc_expr: TokenStream = match &args[0] {
+                    MirExpr::Null { .. } => quote!(ts_aot_runtime::JsString::from("null")),
+                    _ => emit_js_string_arg(&args[0], ctx, body_ctx)?,
+                };
+                Ok(quote!(__ts_aot_symbol_new_desc(&#desc_expr)))
             }
         }
         _ => {
@@ -959,5 +971,8 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::JsonParseString => format_ident!("__ts_aot_json_parse_string"),
         RuntimeOp::JsonStringify => format_ident!("__ts_aot_json_stringify"),
         RuntimeOp::JsonStringifyString => format_ident!("__ts_aot_json_stringify_string"),
+        RuntimeOp::SymbolNew => format_ident!("__ts_aot_symbol_new"),
+        RuntimeOp::SymbolFor => format_ident!("__ts_aot_symbol_for"),
+        RuntimeOp::SymbolKeyFor => format_ident!("__ts_aot_symbol_key_for"),
     }
 }

@@ -69,6 +69,7 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "null" => Some(Type::Null),
         "never" => Some(Type::Never),
         "Date" => Some(Type::Date),
+        "Symbol" => Some(Type::Symbol),
         _ => None,
     }
 }
@@ -88,6 +89,7 @@ pub(crate) fn resolve_simple_type(
         TSType::TSBooleanKeyword(_) => Some(types.intern(&Type::Bool)),
         TSType::TSVoidKeyword(_) | TSType::TSUndefinedKeyword(_) => Some(types.intern(&Type::Void)),
         TSType::TSNullKeyword(_) => Some(types.intern(&Type::Null)),
+        TSType::TSSymbolKeyword(_) => Some(types.intern(&Type::Symbol)),
         TSType::TSTypeReference(r) => Some(reference::resolve_type_reference(
             r,
             types,
@@ -176,6 +178,22 @@ mod tests {
         assert_eq!(type_from_ident("Promise"), None);
         assert_eq!(type_from_ident("MyClass"), None);
         assert_eq!(type_from_ident(""), None);
+    }
+
+    #[test]
+    fn type_from_ident_uppercase_symbol_resolves_to_symbol() {
+        assert_eq!(type_from_ident("Symbol"), Some(Type::Symbol));
+    }
+
+    #[test]
+    fn type_from_ident_lowercase_symbol_returns_none() {
+        assert_eq!(
+            type_from_ident("symbol"),
+            None,
+            "lowercase `symbol` is the TS primitive keyword (TSSymbolKeyword) and must NOT \
+             flow through type_from_ident — it resolves to Type::Symbol via the dedicated \
+             TSSymbolKeyword arm in resolve_simple_type"
+        );
     }
 
     #[test]
