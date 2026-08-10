@@ -13,6 +13,7 @@ mod promise;
 mod regex;
 mod result;
 mod string;
+mod symbol;
 mod type_of;
 
 pub use array::{
@@ -58,6 +59,9 @@ pub use string::{
     __ts_aot_string_char_at, __ts_aot_string_concat, __ts_aot_string_equals,
     __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
     __ts_aot_string_len, __ts_aot_string_substring_utf16, JsString,
+};
+pub use symbol::{
+    __ts_aot_symbol_for, __ts_aot_symbol_key_for, __ts_aot_symbol_new, __ts_aot_symbol_new_desc,
 };
 pub use type_of::{
     __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_typeof, __ts_aot_typeof_null,

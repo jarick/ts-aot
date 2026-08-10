@@ -533,6 +533,9 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::JsonParseString => "json_parse_string",
         RuntimeOp::JsonStringify => "json_stringify",
         RuntimeOp::JsonStringifyString => "json_stringify_string",
+        RuntimeOp::SymbolNew => "symbol_new",
+        RuntimeOp::SymbolFor => "symbol_for",
+        RuntimeOp::SymbolKeyFor => "symbol_key_for",
     }
 }
 

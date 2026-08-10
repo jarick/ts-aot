@@ -421,6 +421,9 @@ pub enum RuntimeOp {
     JsonParseString,
     JsonStringify,
     JsonStringifyString,
+    SymbolNew,
+    SymbolFor,
+    SymbolKeyFor,
 }
 
 #[cfg(test)]
