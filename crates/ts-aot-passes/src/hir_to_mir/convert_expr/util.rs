@@ -1,4 +1,4 @@
-use ts_aot_core::TypeId;
+use ts_aot_core::{Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::MirExpr;
 
@@ -43,6 +43,30 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
             TypeId::from_raw(0)
         }
     }
+}
+
+pub(super) fn is_numeric_type_for_array_len(arg: &HirExpr, types: &TypeTable) -> bool {
+    if matches!(arg, HirExpr::Int(_, _) | HirExpr::Float(_, _)) {
+        return true;
+    }
+    let Some(ty) = hir_expr_type_id(arg) else {
+        return false;
+    };
+    matches!(
+        types.resolve(ty),
+        Some(
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::F32
+                | Type::F64
+        )
+    )
 }
 
 pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {

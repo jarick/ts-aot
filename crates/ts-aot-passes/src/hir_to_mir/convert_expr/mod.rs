@@ -7,12 +7,20 @@ use ts_aot_ir_mir::{MirExpr, MirStmt};
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
+mod array_buffer_dispatch;
 mod binary;
-pub(crate) mod call;
+mod call;
 mod control;
+mod date_dispatch;
 mod extras;
+mod fallback_dispatch;
+mod function_dispatch;
+mod globals;
+mod json_dispatch;
 mod literals;
 mod place;
+mod string_dispatch;
+mod symbol_dispatch;
 mod template;
 mod util;
 

@@ -6,33 +6,11 @@ use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
-use crate::hir_to_mir::convert_expr::call::is_string_typed_source;
-use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
+use crate::hir_to_mir::convert_expr::globals::is_string_typed_source;
+use crate::hir_to_mir::convert_expr::util::{
+    has_potential_side_effects, is_numeric_type_for_array_len,
+};
 use crate::hir_to_mir::converter::ExprConverter;
-
-fn is_numeric_type_for_array_len(arg: &HirExpr, types: &TypeTable) -> bool {
-    if matches!(arg, HirExpr::Int(_, _) | HirExpr::Float(_, _)) {
-        return true;
-    }
-    let Some(ty) = hir_expr_type_id(arg) else {
-        return false;
-    };
-    matches!(
-        types.resolve(ty),
-        Some(
-            Type::I8
-                | Type::I16
-                | Type::I32
-                | Type::I64
-                | Type::U8
-                | Type::U16
-                | Type::U32
-                | Type::U64
-                | Type::F32
-                | Type::F64
-        )
-    )
-}
 
 impl ExprConverter {
     pub(super) fn convert_new(
@@ -60,6 +38,18 @@ impl ExprConverter {
         }
         if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "Date") {
             return self.convert_new_date(
+                callee,
+                args,
+                ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+        }
+        if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "ArrayBuffer") {
+            return self.convert_new_array_buffer(
                 callee,
                 args,
                 ty,
@@ -261,6 +251,62 @@ impl ExprConverter {
             Span::new(0, 0),
         );
         MirExpr::Unit
+    }
+
+    fn convert_new_array_buffer(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let _ = callee;
+        if args.len() != 1 {
+            ctx.error(
+                "E0406",
+                format!(
+                    "new ArrayBuffer(byteLength) requires exactly 1 argument; got {}",
+                    args.len()
+                ),
+                Span::new(0, 0),
+            );
+            return MirExpr::Unit;
+        }
+        if !is_numeric_type_for_array_len(&args[0], types) {
+            ctx.error(
+                "E0406",
+                "new ArrayBuffer(byteLength) argument must be a non-negative integer (per \
+                 ECMAScript spec); got non-numeric expression. Coerce the length to an integer \
+                 (e.g. Math.floor(n)) before calling new ArrayBuffer(n)."
+                    .to_string(),
+                Span::new(0, 0),
+            );
+            return MirExpr::Unit;
+        }
+        let byte_length_mir = self.convert_expr(
+            &args[0],
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        let array_buffer_ty = types.intern(&Type::ArrayBuffer);
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, array_buffer_ty);
+        out.push(MirStmt::Runtime {
+            op: RuntimeOp::ArrayBufferNew,
+            args: vec![byte_length_mir],
+            dest: Some(dest),
+            ty: array_buffer_ty,
+            target_ty: None,
+        });
+        let _ = ty;
+        MirExpr::Local(dest)
     }
 
     pub(super) fn convert_type_assertion(

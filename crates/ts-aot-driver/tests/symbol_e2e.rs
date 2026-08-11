@@ -1,16 +1,9 @@
 use ts_aot_core::Diagnostic;
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 
-fn normalize_rust(s: &str) -> String {
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
-        .replace(" :: ", "::")
-        .replace(" <", "<")
-        .replace("> ", ">")
-        .replace("< ", "<")
-        .replace(" >", ">")
-        .replace(" ,", ",")
-}
+mod common;
+
+use common::normalize_rust;
 
 #[test]
 fn e2e_symbol_call_emits_symbol_new_runtime_call_in_rust_source() {

@@ -70,6 +70,7 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "never" => Some(Type::Never),
         "Date" => Some(Type::Date),
         "Symbol" => Some(Type::Symbol),
+        "ArrayBuffer" => Some(Type::ArrayBuffer),
         _ => None,
     }
 }

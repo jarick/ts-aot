@@ -1,6 +1,7 @@
 pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
 mod array;
+mod array_buffer;
 mod bigint;
 mod date;
 mod generator;
@@ -22,6 +23,7 @@ pub use array::{
     __ts_aot_array_get, __ts_aot_array_is_array, __ts_aot_array_is_array_false, __ts_aot_array_len,
     __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
 };
+pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
 pub use bigint::{__ts_aot_bigint_new, BigIntHandle};
 pub use date::{
     __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,

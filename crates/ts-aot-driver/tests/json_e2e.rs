@@ -1,15 +1,8 @@
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 
-fn normalize_rust(s: &str) -> String {
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
-        .replace(" :: ", "::")
-        .replace(" <", "<")
-        .replace("> ", ">")
-        .replace("< ", "<")
-        .replace(" >", ">")
-        .replace(" ,", ",")
-}
+mod common;
+
+use common::normalize_rust;
 
 #[test]
 fn e2e_json_parse_i64_emits_generic_type_arg_in_rust_source() {

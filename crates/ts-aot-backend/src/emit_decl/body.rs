@@ -974,5 +974,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::SymbolNew => format_ident!("__ts_aot_symbol_new"),
         RuntimeOp::SymbolFor => format_ident!("__ts_aot_symbol_for"),
         RuntimeOp::SymbolKeyFor => format_ident!("__ts_aot_symbol_key_for"),
+        RuntimeOp::ArrayBufferNew => format_ident!("__ts_aot_array_buffer_new"),
+        RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
     }
 }
