@@ -64,6 +64,15 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
         }
         Type::Promise { .. } => quote!(ts_aot_runtime::Promise),
         Type::ArrayBuffer => quote!(ts_aot_runtime::ArrayBufferHandle),
+        Type::Int8Array
+        | Type::Uint8Array
+        | Type::Uint8ClampedArray
+        | Type::Int16Array
+        | Type::Uint16Array
+        | Type::Int32Array
+        | Type::Uint32Array
+        | Type::Float32Array
+        | Type::Float64Array => quote!(ts_aot_runtime::TypedArrayHandle),
         Type::Named { symbol } => {
             let raw = symbol.as_str();
             let sanitized = sanitize_ident(raw);

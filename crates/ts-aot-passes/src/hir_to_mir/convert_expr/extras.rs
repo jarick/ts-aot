@@ -60,6 +60,18 @@ impl ExprConverter {
                 ctx,
             );
         }
+        if let Some(mir) = self.try_typed_array_new_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         let callee_mir = self.convert_expr(
             callee,
             out,

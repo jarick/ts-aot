@@ -71,6 +71,15 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "Date" => Some(Type::Date),
         "Symbol" => Some(Type::Symbol),
         "ArrayBuffer" => Some(Type::ArrayBuffer),
+        "Int8Array" => Some(Type::Int8Array),
+        "Uint8Array" => Some(Type::Uint8Array),
+        "Uint8ClampedArray" => Some(Type::Uint8ClampedArray),
+        "Int16Array" => Some(Type::Int16Array),
+        "Uint16Array" => Some(Type::Uint16Array),
+        "Int32Array" => Some(Type::Int32Array),
+        "Uint32Array" => Some(Type::Uint32Array),
+        "Float32Array" => Some(Type::Float32Array),
+        "Float64Array" => Some(Type::Float64Array),
         _ => None,
     }
 }

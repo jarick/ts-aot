@@ -16,6 +16,7 @@ mod result;
 mod string;
 mod symbol;
 mod type_of;
+mod typed_array;
 
 pub use array::{
     __ts_aot_array_create, __ts_aot_array_create_with_len, __ts_aot_array_from,
@@ -69,3 +70,4 @@ pub use type_of::{
     __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_typeof, __ts_aot_typeof_null,
     __ts_aot_typeof_unit, TsClassId,
 };
+pub use typed_array::{__ts_aot_typed_array_new, TypedArrayHandle, TypedArrayKind};
