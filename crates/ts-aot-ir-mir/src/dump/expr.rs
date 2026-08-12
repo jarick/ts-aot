@@ -538,6 +538,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::SymbolKeyFor => "symbol_key_for",
         RuntimeOp::ArrayBufferNew => "array_buffer_new",
         RuntimeOp::ArrayBufferSlice => "array_buffer_slice",
+        RuntimeOp::TypedArrayNew => "typed_array_new",
     }
 }
 

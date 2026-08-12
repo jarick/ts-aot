@@ -31,6 +31,24 @@ pub(super) fn is_global_symbol_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Symbol")
 }
 
+pub(super) fn is_global_typed_array_reference(owner: &HirExpr) -> bool {
+    let HirExpr::Global { name, .. } = owner else {
+        return false;
+    };
+    matches!(
+        name.as_str(),
+        "Int8Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "Int16Array"
+            | "Uint16Array"
+            | "Int32Array"
+            | "Uint32Array"
+            | "Float32Array"
+            | "Float64Array"
+    )
+}
+
 pub(super) fn is_string_typed_source(arg: &HirExpr, types: &TypeTable) -> bool {
     if matches!(arg, HirExpr::String(_, _)) {
         return true;

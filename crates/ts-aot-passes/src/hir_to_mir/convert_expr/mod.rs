@@ -22,6 +22,7 @@ mod place;
 mod string_dispatch;
 mod symbol_dispatch;
 mod template;
+mod typed_array_dispatch;
 mod util;
 
 impl ExprConverter {

@@ -600,6 +600,14 @@ fn emit_runtime_call(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     match op {
+        RuntimeOp::TypedArrayNew => {
+            let length = emit_expr(&args[0], ctx, body_ctx)?;
+            let kind_id = emit_expr(&args[1], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_typed_array_new(
+                (#length) as i64,
+                (#kind_id) as i64
+            )))
+        }
         RuntimeOp::OpInstanceof => {
             let value = emit_expr(&args[0], ctx, body_ctx)?;
             let target_type_id: u32 = match args.get(2) {
@@ -976,5 +984,6 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::SymbolKeyFor => format_ident!("__ts_aot_symbol_key_for"),
         RuntimeOp::ArrayBufferNew => format_ident!("__ts_aot_array_buffer_new"),
         RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
+        RuntimeOp::TypedArrayNew => format_ident!("__ts_aot_typed_array_new"),
     }
 }
