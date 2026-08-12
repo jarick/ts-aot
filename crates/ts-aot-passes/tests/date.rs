@@ -403,3 +403,38 @@ fn new_date_with_too_many_args_emits_e0406() {
         "diagnostic should be E0406 (multi-arg Date ctor not yet supported), got: {diags:?}"
     );
 }
+
+#[test]
+fn date_method_on_literal_int_receiver_with_no_typeid_does_not_dispatch() {
+    let (mir, diags) = convert(
+        r#"
+        function f(): i64 {
+            return (123).getTime();
+        }
+        "#,
+    );
+    assert!(
+        !mir.contains("date_get_time("),
+        "(123).getTime() must NOT dispatch to __ts_aot_date_get_time \
+         (literal receiver has no TypeId, not Type::Date), got:\n{mir}"
+    );
+    assert!(
+        !mir.contains("date_get_full_year(")
+            && !mir.contains("date_value_of(")
+            && !mir.contains("date_to_iso_string(")
+            && !mir.contains("date_get_month(")
+            && !mir.contains("date_get_date(")
+            && !mir.contains("date_get_hours(")
+            && !mir.contains("date_get_minutes(")
+            && !mir.contains("date_get_seconds(")
+            && !mir.contains("date_get_milliseconds("),
+        "no Date prototype method should be dispatched on a literal receiver, got:\n{mir}"
+    );
+    let has_non_dispatch_diag = diags
+        .iter()
+        .any(|d| d.contains("E0406") || d.contains("P0012") || d.contains("P0005"));
+    assert!(
+        has_non_dispatch_diag,
+        "literal receiver with no TypeId must surface a non-Date diagnostic, got: {diags:?}"
+    );
+}

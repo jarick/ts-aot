@@ -16,6 +16,7 @@ pub enum RuntimeFeature {
     Date,
     Json,
     Symbol,
+    ArrayBuffer,
 }
 
 impl RuntimeFeature {
@@ -34,6 +35,7 @@ impl RuntimeFeature {
             Self::Date => "date",
             Self::Json => "json",
             Self::Symbol => "symbol",
+            Self::ArrayBuffer => "array_buffer",
         }
     }
 }
@@ -79,8 +81,8 @@ impl RuntimeRequirements {
 
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
-        Array, Console, Date, HostIo, Json, Map, Math, Promise, Result as ResultFeat, Scheduler,
-        String as StringFeat, Symbol,
+        Array, ArrayBuffer, Console, Date, HostIo, Json, Map, Math, Promise, Result as ResultFeat,
+        Scheduler, String as StringFeat, Symbol,
     };
     match op {
         RuntimeOp::StringConcat
@@ -148,6 +150,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::JsonStringify
         | RuntimeOp::JsonStringifyString => &[Json],
         RuntimeOp::SymbolNew | RuntimeOp::SymbolFor | RuntimeOp::SymbolKeyFor => &[Symbol],
+        RuntimeOp::ArrayBufferNew | RuntimeOp::ArrayBufferSlice => &[ArrayBuffer],
     }
 }
 

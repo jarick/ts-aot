@@ -424,6 +424,8 @@ pub enum RuntimeOp {
     SymbolNew,
     SymbolFor,
     SymbolKeyFor,
+    ArrayBufferNew,
+    ArrayBufferSlice,
 }
 
 #[cfg(test)]

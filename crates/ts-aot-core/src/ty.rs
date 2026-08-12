@@ -46,6 +46,7 @@ pub enum Type {
     },
     Date,
     Symbol,
+    ArrayBuffer,
     Result {
         ok: TypeId,
         err: TypeId,
