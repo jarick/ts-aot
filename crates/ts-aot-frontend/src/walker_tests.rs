@@ -3361,7 +3361,7 @@ fn body_walker_array_expression_elision_becomes_undefined() {
 }
 
 #[test]
-fn body_walker_array_expression_spread_walks_inner_but_warns() {
+fn body_walker_array_expression_spread_lowers_to_runtime_concat_call() {
     let output = FrontendPass::new().run(
         "test.ts",
         "function f(a: i64[]): i64[] { return [...a, 1]; }",
@@ -3371,14 +3371,6 @@ fn body_walker_array_expression_spread_walks_inner_but_warns() {
         "spread array element must not error, got: {:?}",
         output.diagnostics
     );
-    assert!(
-        output
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("spread")),
-        "spread should report unwalked warning, got: {:?}",
-        output.diagnostics
-    );
     let f = match &output.program.declarations[0] {
         ts_aot_ir_hir::HirDecl::Function(f) => f.clone(),
         other => panic!("expected Function, got {other:?}"),
@@ -3386,16 +3378,22 @@ fn body_walker_array_expression_spread_walks_inner_but_warns() {
     let HirStmt::Return { value: Some(expr) } = &f.body[0] else {
         panic!("expected Return, got {:?}", f.body[0]);
     };
-    let HirExpr::ArrayLiteral { elements, .. } = expr else {
-        panic!("expected ArrayLiteral, got {expr:?}");
+    let HirExpr::Call {
+        callee: ts_aot_ir_hir::HirCallee::Runtime { name, .. },
+        args,
+        ..
+    } = expr
+    else {
+        panic!("expected Call to Runtime concat, got {expr:?}");
     };
-    assert_eq!(elements.len(), 2, "[...a, 1] has 2 elements");
-    assert!(
-        matches!(&elements[0], HirExpr::Local { .. }),
-        "spread inner is walked as local ref to `a` (PR 7.7 will do concat), got: {:?}",
-        elements[0]
+    assert_eq!(name.as_str(), "__ts_aot_array_concat");
+    assert_eq!(
+        args.len(),
+        2,
+        "[...a, 1] → 2 parts (spread a + 1-elem literal)"
     );
-    assert!(matches!(&elements[1], HirExpr::Int(1, _)));
+    assert!(matches!(&args[0], HirExpr::Local { .. }));
+    assert!(matches!(&args[1], HirExpr::ArrayLiteral { .. }));
 }
 
 #[test]

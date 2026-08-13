@@ -540,6 +540,8 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ArrayBufferSlice => "array_buffer_slice",
         RuntimeOp::TypedArrayNew => "typed_array_new",
         RuntimeOp::ArrayGetOrDefault => "array_get_or_default",
+        RuntimeOp::ArrayConcat => "array_concat",
+        RuntimeOp::ArrayHole => "array_hole",
     }
 }
 

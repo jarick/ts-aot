@@ -351,6 +351,7 @@ impl MirExpr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub enum RuntimeOp {
     StringConcat,
     StringEquals,
@@ -428,6 +429,8 @@ pub enum RuntimeOp {
     ArrayBufferSlice,
     TypedArrayNew,
     ArrayGetOrDefault,
+    ArrayConcat,
+    ArrayHole,
 }
 
 #[cfg(test)]

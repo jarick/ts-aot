@@ -617,6 +617,20 @@ fn emit_runtime_call(
                 #idx
             )))
         }
+        RuntimeOp::ArrayCreate => {
+            emit_array_op_with_element_type("__ts_aot_array_create", args, ty, ctx, body_ctx)
+        }
+        RuntimeOp::ArrayConcat => {
+            emit_array_op_with_element_type("__ts_aot_array_concat", args, ty, ctx, body_ctx)
+        }
+        RuntimeOp::ArrayHole => {
+            let element_ty_id = match ctx.types.resolve(ty) {
+                Some(Type::Array { element }) => *element,
+                _ => ty,
+            };
+            let element_ty = emit_type_id_with_ctx(element_ty_id, ctx);
+            Ok(quote!(__ts_aot_array_hole::<#element_ty>()))
+        }
         RuntimeOp::OpInstanceof => {
             let value = emit_expr(&args[0], ctx, body_ctx)?;
             let target_type_id: u32 = match args.get(2) {
@@ -717,6 +731,26 @@ fn string_op_string_arg_indices(op: RuntimeOp) -> &'static [usize] {
         RuntimeOp::StringConcat | RuntimeOp::StringEquals | RuntimeOp::StringIndexOf => &[0, 1],
         _ => &[],
     }
+}
+
+fn emit_array_op_with_element_type(
+    op_name: &'static str,
+    args: &[MirExpr],
+    ty: TypeId,
+    ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let element_ty_id = match ctx.types.resolve(ty) {
+        Some(Type::Array { element }) => *element,
+        _ => ty,
+    };
+    let element_ty = emit_type_id_with_ctx(element_ty_id, ctx);
+    let parts: Vec<TokenStream> = args
+        .iter()
+        .map(|a| emit_expr(a, ctx, body_ctx))
+        .collect::<Result<_, _>>()?;
+    let name = format_ident!("{op_name}");
+    Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))
 }
 
 fn emit_js_string_arg(
@@ -995,5 +1029,7 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
         RuntimeOp::TypedArrayNew => format_ident!("__ts_aot_typed_array_new"),
         RuntimeOp::ArrayGetOrDefault => format_ident!("__ts_aot_array_get_or_default"),
+        RuntimeOp::ArrayConcat => format_ident!("__ts_aot_array_concat"),
+        RuntimeOp::ArrayHole => format_ident!("__ts_aot_array_hole"),
     }
 }
