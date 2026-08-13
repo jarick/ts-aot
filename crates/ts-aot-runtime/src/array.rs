@@ -14,14 +14,34 @@ fn validate_dense_len(len: i64, fn_name: &str) {
 }
 
 #[must_use]
-pub fn __ts_aot_array_create<T>() -> Vec<T> {
-    Vec::new()
+pub fn __ts_aot_array_create<T>(elements: Vec<T>) -> Vec<T> {
+    elements
 }
 
 #[must_use]
 pub fn __ts_aot_array_create_with_len<T: Default + Clone>(len: i64) -> Vec<T> {
     validate_dense_len(len, "__ts_aot_array_create_with_len");
     vec![T::default(); usize::try_from(len).expect("checked above")]
+}
+
+#[must_use]
+pub fn __ts_aot_array_concat<T>(parts: Vec<Vec<T>>) -> Vec<T> {
+    let total: usize = parts.iter().map(Vec::len).sum();
+    let mut out: Vec<T> = Vec::new();
+    if out.try_reserve_exact(total).is_err() {
+        __ts_aot_throw(format!(
+            "RangeError: __ts_aot_array_concat allocation failed (out of memory) for {total} elements"
+        ));
+    }
+    for part in parts {
+        out.extend(part);
+    }
+    out
+}
+
+#[must_use]
+pub fn __ts_aot_array_hole<T: Default>() -> Vec<T> {
+    vec![T::default()]
 }
 
 pub fn __ts_aot_array_push<T>(arr: &mut Vec<T>, item: T) {

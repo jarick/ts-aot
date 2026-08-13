@@ -7,7 +7,7 @@ use oxc_ast::ast::{
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
-use ts_aot_core::{Atom, Diagnostic, FieldId, Span};
+use ts_aot_core::{Atom, Diagnostic, FieldId, Span, Type, TypeId};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr};
 
 use crate::ops::{
@@ -218,18 +218,111 @@ impl SkeletonBuilder<'_, '_> {
         scope: &mut BodyScope,
     ) -> HirExpr {
         use oxc_ast::ast::ArrayExpressionElement;
+        enum RawPart {
+            Literal(HirExpr),
+            Spread(HirExpr),
+            Elision,
+        }
+        let has_spread = arr
+            .elements
+            .iter()
+            .any(|el| matches!(el, ArrayExpressionElement::SpreadElement(_)));
+        if !has_spread {
+            return self.walk_array_literal_simple(arr, scope);
+        }
+        let span = core_span_from_oxc(arr.span);
+        let mut raw: Vec<RawPart> = Vec::new();
+        let mut element_ty_id: Option<TypeId> = None;
+        for el in &arr.elements {
+            match el {
+                ArrayExpressionElement::Elision(_) => raw.push(RawPart::Elision),
+                ArrayExpressionElement::SpreadElement(spread) => {
+                    let arg = self.walk_expr(&spread.argument, scope);
+                    let spread_elem_ty = match self.types.resolve(arg.ty()) {
+                        Some(Type::Array { element }) => Some(*element),
+                        _ => None,
+                    };
+                    if let Some(new_ty) = spread_elem_ty {
+                        match element_ty_id {
+                            Some(existing) if existing != new_ty => {
+                                self.report_unwalked(
+                                    "array spread operands have incompatible element types",
+                                    spread.span,
+                                );
+                                return HirExpr::Unit(span);
+                            }
+                            _ => element_ty_id = Some(new_ty),
+                        }
+                    }
+                    raw.push(RawPart::Spread(arg));
+                }
+                other => {
+                    let elem = self.walk_expr(other.to_expression(), scope);
+                    raw.push(RawPart::Literal(elem));
+                }
+            }
+        }
+        let Some(element_ty_id) = element_ty_id else {
+            self.report_unwalked(
+                "array spread requires at least one spread of a typed array \
+                 to determine the element type",
+                arr.span,
+            );
+            return HirExpr::Unit(span);
+        };
+        let arr_ty = self.types.intern(&Type::Array {
+            element: element_ty_id,
+        });
+        let mut parts: Vec<HirExpr> = Vec::new();
+        for r in raw {
+            match r {
+                RawPart::Literal(elem) => parts.push(HirExpr::ArrayLiteral {
+                    elements: vec![elem],
+                    ty: arr_ty,
+                    span,
+                }),
+                RawPart::Spread(arg) => parts.push(arg),
+                RawPart::Elision => parts.push(HirExpr::Call {
+                    callee: HirCallee::Runtime {
+                        name: Atom::from("__ts_aot_array_hole"),
+                        ty: arr_ty,
+                    },
+                    args: Vec::new(),
+                    type_args: Vec::new(),
+                    ty: arr_ty,
+                    span,
+                }),
+            }
+        }
+        let result_ty = self.types.intern(&Type::Array {
+            element: element_ty_id,
+        });
+        HirExpr::Call {
+            callee: HirCallee::Runtime {
+                name: Atom::from("__ts_aot_array_concat"),
+                ty: result_ty,
+            },
+            args: parts,
+            type_args: Vec::new(),
+            ty: result_ty,
+            span,
+        }
+    }
+
+    fn walk_array_literal_simple(
+        &mut self,
+        arr: &oxc_ast::ast::ArrayExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        use oxc_ast::ast::ArrayExpressionElement;
         let mut elements = Vec::with_capacity(arr.elements.len());
         for el in &arr.elements {
             match el {
                 ArrayExpressionElement::Elision(elision) => {
                     elements.push(HirExpr::Undefined(core_span_from_oxc(elision.span)));
                 }
-                ArrayExpressionElement::SpreadElement(spread) => {
-                    self.report_unwalked(
-                        "array spread element is not supported by the body walker (planned for PR 7.7)",
-                        spread.span,
-                    );
-                    elements.push(self.walk_expr(&spread.argument, scope));
+                ArrayExpressionElement::SpreadElement(_) => {
+                    return HirExpr::Unit(core_span_from_oxc(arr.span));
                 }
                 el @ match_expression!(ArrayExpressionElement) => {
                     elements.push(self.walk_expr(el.to_expression(), scope));

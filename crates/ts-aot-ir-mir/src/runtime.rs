@@ -155,6 +155,8 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::ArrayBufferNew | RuntimeOp::ArrayBufferSlice => &[ArrayBuffer],
         RuntimeOp::TypedArrayNew => &[TypedArray],
         RuntimeOp::ArrayGetOrDefault => &[Array],
+        RuntimeOp::ArrayConcat => &[Array],
+        RuntimeOp::ArrayHole => &[Array],
     }
 }
 
