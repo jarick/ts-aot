@@ -539,6 +539,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ArrayBufferNew => "array_buffer_new",
         RuntimeOp::ArrayBufferSlice => "array_buffer_slice",
         RuntimeOp::TypedArrayNew => "typed_array_new",
+        RuntimeOp::ArrayGetOrDefault => "array_get_or_default",
     }
 }
 

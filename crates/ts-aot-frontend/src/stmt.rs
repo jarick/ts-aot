@@ -1,16 +1,16 @@
 use oxc_ast::ast::{
-    Declaration, ForInStatement, ForOfStatement, ForStatement, ForStatementInit, ForStatementLeft,
-    Statement, SwitchStatement, VariableDeclaration, match_assignment_target, match_declaration,
-    match_expression,
+    BindingPattern, Declaration, ForInStatement, ForOfStatement, ForStatement, ForStatementInit,
+    ForStatementLeft, Statement, SwitchStatement, VariableDeclaration, match_assignment_target,
+    match_declaration, match_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, LocalId, Span};
-use ts_aot_ir_hir::{HirExpr, HirStmt, HirSwitchCase};
+use ts_aot_ir_hir::{HirCallee, HirExpr, HirStmt, HirSwitchCase};
 
 use crate::ops::{label_atom, left_span};
 use crate::scope::BodyScope;
 use crate::skeleton::SkeletonBuilder;
-use crate::util::binding_pattern_name;
+use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 impl SkeletonBuilder<'_, '_> {
     pub(crate) fn walk_stmts(
@@ -194,6 +194,24 @@ impl SkeletonBuilder<'_, '_> {
     ) {
         for d in &v.declarations {
             let init = d.init.as_ref().map(|e| self.walk_expr(e, scope));
+            if let BindingPattern::ArrayPattern(array_pat) = &d.id {
+                let Some(init_expr) = init else {
+                    self.report_unwalked(
+                        "array destructuring without initializer is not yet supported",
+                        d.span,
+                    );
+                    continue;
+                };
+                if array_pat.rest.is_some() {
+                    self.report_unwalked(
+                        "array destructuring with `...rest` is not yet supported",
+                        d.span,
+                    );
+                    continue;
+                }
+                self.expand_array_destructuring(array_pat, init_expr, out, scope);
+                continue;
+            }
             let Some(name) = binding_pattern_name(&d.id) else {
                 self.report_unwalked(
                     "destructuring binding is not supported by the body walker",
@@ -208,6 +226,75 @@ impl SkeletonBuilder<'_, '_> {
                 name: Atom::from(name.as_str()),
                 ty,
                 init,
+            });
+        }
+    }
+
+    fn expand_array_destructuring(
+        &mut self,
+        array_pat: &oxc_ast::ast::ArrayPattern<'_>,
+        init: HirExpr,
+        out: &mut Vec<HirStmt>,
+        scope: &mut BodyScope,
+    ) {
+        let init_ty_id = init.ty();
+        let Some(ts_aot_core::Type::Array { element }) = self.types.resolve(init_ty_id) else {
+            self.report_unwalked(
+                "array destructuring requires an array type on the right-hand side",
+                array_pat.span,
+            );
+            return;
+        };
+        let element_ty_id = *element;
+        let span = core_span_from_oxc(array_pat.span);
+        let temp_id = scope.declare("_destructured", init_ty_id);
+        out.push(HirStmt::Let {
+            id: temp_id,
+            name: Atom::from(format!("_destructured_{}", temp_id.raw())),
+            ty: init_ty_id,
+            init: Some(init),
+        });
+        let temp_ref = HirExpr::Local {
+            id: temp_id,
+            ty: init_ty_id,
+            span,
+        };
+        let runtime_name = Atom::from("__ts_aot_array_get_or_default");
+        for (idx, element) in array_pat.elements.iter().enumerate() {
+            let Some(element) = element else {
+                continue;
+            };
+            let BindingPattern::BindingIdentifier(id) = element else {
+                self.report_unwalked(
+                    "array destructuring element must be a simple binding name \
+                     (no nested patterns, no defaults, no rename)",
+                    element.span(),
+                );
+                continue;
+            };
+            let name_str = id.name.to_compact_str();
+            let new_id = scope.declare(name_str.as_str(), element_ty_id);
+            let init_call = HirExpr::Call {
+                callee: HirCallee::Runtime {
+                    name: runtime_name.clone(),
+                    ty: element_ty_id,
+                },
+                args: vec![
+                    temp_ref.clone(),
+                    HirExpr::Int(
+                        i64::try_from(idx).expect("array index fits in i64 (usize overflow)"),
+                        span,
+                    ),
+                ],
+                type_args: Vec::new(),
+                ty: element_ty_id,
+                span,
+            };
+            out.push(HirStmt::Let {
+                id: new_id,
+                name: Atom::from(name_str.as_str()),
+                ty: element_ty_id,
+                init: Some(init_call),
             });
         }
     }

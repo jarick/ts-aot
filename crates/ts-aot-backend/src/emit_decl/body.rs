@@ -608,6 +608,15 @@ fn emit_runtime_call(
                 (#kind_id) as i64
             )))
         }
+        RuntimeOp::ArrayGetOrDefault => {
+            let arr = emit_expr(&args[0], ctx, body_ctx)?;
+            let idx = emit_expr(&args[1], ctx, body_ctx)?;
+            let element_ty = emit_type_id_with_ctx(ty, ctx);
+            Ok(quote!(__ts_aot_array_get_or_default::<#element_ty>(
+                &#arr,
+                #idx
+            )))
+        }
         RuntimeOp::OpInstanceof => {
             let value = emit_expr(&args[0], ctx, body_ctx)?;
             let target_type_id: u32 = match args.get(2) {
@@ -985,5 +994,6 @@ fn runtime_op_ident(op: RuntimeOp) -> Ident {
         RuntimeOp::ArrayBufferNew => format_ident!("__ts_aot_array_buffer_new"),
         RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
         RuntimeOp::TypedArrayNew => format_ident!("__ts_aot_typed_array_new"),
+        RuntimeOp::ArrayGetOrDefault => format_ident!("__ts_aot_array_get_or_default"),
     }
 }
