@@ -154,6 +154,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::SymbolNew | RuntimeOp::SymbolFor | RuntimeOp::SymbolKeyFor => &[Symbol],
         RuntimeOp::ArrayBufferNew | RuntimeOp::ArrayBufferSlice => &[ArrayBuffer],
         RuntimeOp::TypedArrayNew => &[TypedArray],
+        RuntimeOp::ArrayGetOrDefault => &[Array],
     }
 }
 

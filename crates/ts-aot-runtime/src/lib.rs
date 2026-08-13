@@ -21,8 +21,9 @@ mod typed_array;
 pub use array::{
     __ts_aot_array_create, __ts_aot_array_create_with_len, __ts_aot_array_from,
     __ts_aot_array_from_length_mapped, __ts_aot_array_from_mapped, __ts_aot_array_from_string,
-    __ts_aot_array_get, __ts_aot_array_is_array, __ts_aot_array_is_array_false, __ts_aot_array_len,
-    __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
+    __ts_aot_array_get, __ts_aot_array_get_or_default, __ts_aot_array_is_array,
+    __ts_aot_array_is_array_false, __ts_aot_array_len, __ts_aot_array_push, __ts_aot_array_set,
+    IsArray, TsArrayMarker,
 };
 pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
 pub use bigint::{__ts_aot_bigint_new, BigIntHandle};

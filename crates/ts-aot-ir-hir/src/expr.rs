@@ -3,6 +3,42 @@ use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, TypeId};
 use crate::decl::HirParam;
 use crate::stmt::HirStmt;
 
+impl HirExpr {
+    #[must_use]
+    pub fn ty(&self) -> TypeId {
+        match self {
+            Self::Unit(_) | Self::Null(_) | Self::Undefined(_) => TypeId::from_raw(0),
+            Self::Bool(_, _) | Self::Int(_, _) | Self::Float(_, _) | Self::String(_, _) => {
+                TypeId::from_raw(0)
+            }
+            Self::Local { ty, .. }
+            | Self::Global { ty, .. }
+            | Self::Field { ty, .. }
+            | Self::Index { ty, .. }
+            | Self::Call { ty, .. }
+            | Self::Binary { ty, .. }
+            | Self::Unary { ty, .. }
+            | Self::StructLiteral { ty, .. }
+            | Self::ObjectLiteral { ty, .. }
+            | Self::Ternary { ty, .. }
+            | Self::ArrayLiteral { ty, .. }
+            | Self::Closure { ty, .. }
+            | Self::Await { ty, .. }
+            | Self::Yield { ty, .. }
+            | Self::Template { ty, .. }
+            | Self::New { ty, .. }
+            | Self::OptionalChain { ty, .. }
+            | Self::TypeAssertion { target: ty, .. }
+            | Self::Assignment { ty, .. }
+            | Self::CompoundUpdate { ty, .. }
+            | Self::Sequence { ty, .. }
+            | Self::RegExp { ty, .. }
+            | Self::BigInt { ty, .. }
+            | Self::Import { ty, .. } => *ty,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HirBinaryOp {
     Add,

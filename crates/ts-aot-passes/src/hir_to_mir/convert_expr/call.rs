@@ -50,6 +50,18 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if let HirCallee::Runtime { name, .. } = callee {
+            return self.convert_runtime_call(
+                name.as_str(),
+                args,
+                ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+        }
         if let Some(info) = array_from_object_literal(callee, args) {
             let length = info.length;
             let indexed = info.indexed;
@@ -294,5 +306,41 @@ impl ExprConverter {
             args: mir_args,
             ty,
         }
+    }
+
+    fn convert_runtime_call(
+        &mut self,
+        name: &str,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let Some(builtin) = super::runtime_dispatch::lookup_builtin(name) else {
+            ctx.error(
+                "P0005",
+                format!("runtime helper `{name}` is not yet supported in HIR→MIR"),
+                Span::new(0, 0),
+            );
+            return MirExpr::Unit;
+        };
+        let op = builtin.op();
+        let mir_args: Vec<MirExpr> = args
+            .iter()
+            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .collect();
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, ty);
+        out.push(MirStmt::Runtime {
+            op,
+            args: mir_args,
+            dest: Some(dest),
+            ty,
+            target_ty: None,
+        });
+        MirExpr::Local(dest)
     }
 }

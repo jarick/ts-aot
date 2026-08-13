@@ -427,6 +427,7 @@ pub enum RuntimeOp {
     ArrayBufferNew,
     ArrayBufferSlice,
     TypedArrayNew,
+    ArrayGetOrDefault,
 }
 
 #[cfg(test)]

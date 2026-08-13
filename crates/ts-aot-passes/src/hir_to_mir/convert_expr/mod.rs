@@ -19,6 +19,7 @@ mod globals;
 mod json_dispatch;
 mod literals;
 mod place;
+mod runtime_dispatch;
 mod string_dispatch;
 mod symbol_dispatch;
 mod template;

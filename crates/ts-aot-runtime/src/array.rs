@@ -75,6 +75,14 @@ pub fn __ts_aot_array_get<T: Clone>(arr: &[T], idx: i64) -> Option<T> {
 }
 
 #[must_use]
+pub fn __ts_aot_array_get_or_default<T: Clone + Default>(arr: &[T], idx: i64) -> T {
+    let Ok(i) = usize::try_from(idx) else {
+        return T::default();
+    };
+    arr.get(i).cloned().unwrap_or_default()
+}
+
+#[must_use]
 pub fn __ts_aot_array_set<T>(arr: &mut [T], idx: i64, value: T) -> bool {
     let Ok(i) = usize::try_from(idx) else {
         return false;
