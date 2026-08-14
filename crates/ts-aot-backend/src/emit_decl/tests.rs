@@ -8,7 +8,7 @@ use ts_aot_core::{
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, FunctionEffects, FunctionKind, MirBlock, MirBody, MirDecl, MirExpr,
     MirFieldDecl, MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase,
-    MirProgram, MirStmt, MirStructDecl, SwitchCase,
+    MirProgram, MirStmt, MirStructDecl, RuntimeOp, SwitchCase,
 };
 
 fn empty_func(name: &str) -> MirFunctionDecl {
@@ -23,6 +23,22 @@ fn empty_func(name: &str) -> MirFunctionDecl {
         kind: FunctionKind::Plain,
         effects: FunctionEffects::default(),
     }
+}
+
+fn signature_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
+    s.split(&format!("fn {fn_name} ("))
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("")
+}
+
+fn for_header_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
+    let after_fn = s.split(&format!("fn {fn_name} (")).nth(1).unwrap_or("");
+    after_fn
+        .split(" for ")
+        .nth(1)
+        .and_then(|rest| rest.split('{').next())
+        .unwrap_or("")
 }
 
 #[test]
@@ -49,7 +65,7 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("fn __ts_aot_dispatch_add (args : & [u64]) -> u64"),
+        s.contains("pub fn __ts_aot_dispatch_add (_args : & [u64]) -> u64"),
         "dispatch wrapper must be emitted for i64-typed plain function, got: {s}"
     );
     assert!(
@@ -351,11 +367,7 @@ fn union_type_emits_unit_placeholder_at_call_site() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn identity")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "identity");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("v:()") && sig_norm.contains("->()"),
@@ -442,11 +454,7 @@ fn intersection_type_emits_unit_placeholder_at_call_site() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn combine")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "combine");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("v:()") && sig_norm.contains("->()"),
@@ -533,11 +541,7 @@ fn tuple_type_emits_unit_placeholder_at_call_site() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn combine")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "combine");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("v:()") && sig_norm.contains("->()"),
@@ -603,11 +607,7 @@ fn array_typed_return_emits_vec_placeholder() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn make_array")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "make_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("->Vec<i64>"),
@@ -633,11 +633,7 @@ fn array_typed_param_emits_vec_placeholder() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn take_array")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "take_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("v:Vec<i64>"),
@@ -793,6 +789,440 @@ fn method_kind_omits_synthetic_this_param() {
         "method signature must hide synthetic receiver param, got: {s}"
     );
     assert!(s.contains("value : i32"), "expected value param, got: {s}");
+}
+
+#[test]
+fn method_writing_self_field_emits_mut_self() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let owner = StructId::from_raw(7);
+    let self_id = LocalId::from_raw(0);
+    let field_id = FieldId::from_raw(0);
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: owner,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: field_id,
+            name: Atom::from("x"),
+            ty: i32_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+
+    let mut f = empty_func("set_x");
+    f.ret = TypeId::from_raw(0);
+    f.kind = FunctionKind::Method {
+        owner,
+        self_param: self_id,
+    };
+    f.params = vec![MirParam {
+        id: self_id,
+        name: Atom::from("self"),
+        ty: types.intern(&Type::Struct { id: owner }),
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Field {
+                    base: Box::new(MirPlaceBase::Local(self_id)),
+                    field: field_id,
+                    ty: i32_ty,
+                },
+                value: MirExpr::Int {
+                    value: 1,
+                    ty: i32_ty,
+                },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "set_x");
+    assert!(
+        sig.contains("mut self ,"),
+        "method that writes to a self field must emit `mut self,` in the signature, got signature fragment: `{sig}`"
+    );
+    assert!(
+        !sig.contains("self , mut self"),
+        "signature must not emit `self, mut self`, got: `{sig}`"
+    );
+}
+
+#[test]
+fn method_consuming_self_via_generator_next_emits_mut_self() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_result_ty = types.intern(&Type::GeneratorResult { inner: i64_ty });
+    let self_id = LocalId::from_raw(0);
+    let temp = LocalId::from_raw(1);
+
+    let mut f = empty_func("drive");
+    f.ret = TypeId::from_raw(0);
+    f.kind = FunctionKind::Method {
+        owner: StructId::from_raw(0),
+        self_param: self_id,
+    };
+    f.params = vec![MirParam {
+        id: self_id,
+        name: Atom::from("self"),
+        ty: i64_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::GeneratorNext,
+                args: vec![MirExpr::Local(self_id)],
+                dest: Some(temp),
+                ty: gen_result_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "drive");
+    assert!(
+        sig.contains("mut self ,"),
+        "method that drives self.next() must emit `mut self,` in the signature, got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn method_reading_self_only_emits_immutable_self() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let self_id = LocalId::from_raw(0);
+    let result = LocalId::from_raw(1);
+    let mut f = empty_func("get_x");
+    f.ret = TypeId::from_raw(0);
+    f.kind = FunctionKind::Method {
+        owner: StructId::from_raw(0),
+        self_param: self_id,
+    };
+    f.params = vec![MirParam {
+        id: self_id,
+        name: Atom::from("self"),
+        ty: i32_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: result,
+            name: Atom::from("result"),
+            ty: i32_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Local { id: result },
+                value: MirExpr::Local(self_id),
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "get_x");
+    assert!(
+        sig.contains("self ,") && !sig.contains("mut self"),
+        "method that only reads self must emit `self,` (no `mut`), got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn reassigned_param_emits_mut_in_signature() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let param = LocalId::from_raw(1);
+    let mut f = empty_func("reset");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("p"),
+        ty: i32_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Local { id: param },
+                value: MirExpr::Int {
+                    value: 0,
+                    ty: i32_ty,
+                },
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "reset");
+    assert!(
+        sig.contains("mut p : i32"),
+        "reassigned param must emit `mut p : i32` in the function signature, got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn generator_next_consumes_param_emits_mut_in_signature() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_result_ty = types.intern(&Type::GeneratorResult { inner: i64_ty });
+    let g_param = LocalId::from_raw(1);
+    let temp = LocalId::from_raw(2);
+
+    let mut f = empty_func("drive");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.params = vec![MirParam {
+        id: g_param,
+        name: Atom::from("g"),
+        ty: gen_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::GeneratorNext,
+                args: vec![MirExpr::Local(g_param)],
+                dest: Some(temp),
+                ty: gen_result_ty,
+                target_ty: None,
+            }],
+        },
+    };
+
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "drive");
+    assert!(
+        sig.contains("mut g : ts_aot_runtime :: Generator < i64 >"),
+        "generator param consumed by RuntimeOp::GeneratorNext must emit `mut g : ts_aot_runtime :: Generator < i64 >` in the function signature, got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn indirect_generator_next_consumes_param_emits_mut() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_result_ty = types.intern(&Type::GeneratorResult { inner: i64_ty });
+    let struct_id = StructId::from_raw(0);
+    let box_ty = types.intern(&Type::Struct { id: struct_id });
+    let g_field = FieldId::from_raw(0);
+    let obj_param = LocalId::from_raw(1);
+    let temp = LocalId::from_raw(2);
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: struct_id,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: g_field,
+            name: Atom::from("g"),
+            ty: gen_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+
+    let mut f = empty_func("drive_indirect");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.params = vec![MirParam {
+        id: obj_param,
+        name: Atom::from("obj"),
+        ty: box_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::GeneratorNext,
+                args: vec![MirExpr::Field {
+                    base: Box::new(MirExpr::Local(obj_param)),
+                    field: g_field,
+                    ty: gen_ty,
+                }],
+                dest: Some(temp),
+                ty: gen_result_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "drive_indirect");
+    assert!(
+        sig.contains("mut obj"),
+        "param consumed by indirect RuntimeOp::GeneratorNext (obj.g.next()) must emit `mut obj` in the function signature, got signature fragment: `{sig}`"
+    );
+    assert!(
+        s.contains("obj . g"),
+        "field access on a struct param must resolve to the declared field name `g` via EmitCtx, \
+         not the placeholder `__field0` that standalone EmitCtx would emit. Pushing the struct \
+         decl into the same `prog` and calling `emit_decls` is what wires the field name into the \
+         ctx. Got: `{s}`"
+    );
+}
+
+#[test]
+fn param_used_in_nested_place_assign_emits_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let struct_id = StructId::from_raw(0);
+    let obj_ty = types.intern(&Type::Struct { id: struct_id });
+    let param = LocalId::from_raw(1);
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: struct_id,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: i32_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+
+    let mut f = empty_func("poke");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("obj"),
+        ty: obj_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Field {
+                    base: Box::new(MirPlaceBase::Local(param)),
+                    field: FieldId::from_raw(0),
+                    ty: i32_ty,
+                },
+                value: MirExpr::Int {
+                    value: 0,
+                    ty: i32_ty,
+                },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "poke");
+    assert!(
+        sig.contains("mut obj"),
+        "param used in a nested place assign (obj.x = 0) must emit `mut obj` in the function signature, got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn param_used_in_optional_chain_place_assign_emits_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let struct_id = StructId::from_raw(0);
+    let obj_ty = types.intern(&Type::Struct { id: struct_id });
+    let opt_ty = types.intern(&Type::Optional { inner: obj_ty });
+    let param = LocalId::from_raw(1);
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: struct_id,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: i32_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+
+    let mut f = empty_func("poke_opt");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("obj"),
+        ty: obj_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Field {
+                    base: Box::new(MirPlaceBase::Chain {
+                        base: Box::new(MirExpr::OptionalChain {
+                            base: Box::new(MirExpr::Local(param)),
+                            ty: opt_ty,
+                        }),
+                        ty: opt_ty,
+                    }),
+                    field: FieldId::from_raw(0),
+                    ty: i32_ty,
+                },
+                value: MirExpr::Int {
+                    value: 0,
+                    ty: i32_ty,
+                },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "poke_opt");
+    assert!(
+        sig.contains("mut obj"),
+        "param used in a nested place assign through an optional chain (MirPlaceBase::Chain whose base is MirExpr::OptionalChain) must emit `mut obj` in the function signature, got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn non_reassigned_param_omits_mut_in_signature() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let param = LocalId::from_raw(1);
+    let mut f = empty_func("read");
+    f.ret = i32_ty;
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("p"),
+        ty: i32_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(param)))],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "read");
+    assert!(
+        sig.contains("p : i32"),
+        "non-reassigned param must emit `p : i32` in the function signature, got signature fragment: `{sig}`"
+    );
+    assert!(
+        !sig.contains("mut p"),
+        "non-reassigned param must NOT emit `mut`, got signature fragment: `{sig}`"
+    );
 }
 
 #[test]
@@ -1101,6 +1531,31 @@ fn emit_type_result_resolves_ok_and_err_via_table() {
     assert_eq!(
         tokens.to_string(),
         "Result < i32 , ts_aot_runtime :: JsString >"
+    );
+}
+
+#[test]
+fn emit_type_generator_emits_namespaced_generic() {
+    let mut types = TypeTable::new();
+    let i64_id = types.intern(&Type::I64);
+    let gen_id = types.intern(&Type::Generator { inner: i64_id });
+    let tokens = emit_type_id(gen_id, &types);
+    assert_eq!(
+        tokens.to_string(),
+        "ts_aot_runtime :: Generator < i64 >",
+        "Generator must emit as namespaced generic with its yield type"
+    );
+}
+
+#[test]
+fn emit_type_generator_result_emits_namespaced_generic() {
+    let mut types = TypeTable::new();
+    let i64_id = types.intern(&Type::I64);
+    let res_id = types.intern(&Type::GeneratorResult { inner: i64_id });
+    let tokens = emit_type_id(res_id, &types);
+    assert_eq!(
+        tokens.to_string(),
+        "ts_aot_runtime :: GeneratorResult < i64 >"
     );
 }
 
@@ -1814,8 +2269,9 @@ fn float_finite_still_uses_unsuffixed_literal() {
 }
 
 #[test]
-fn yield_with_value_emits_inner_expression() {
+fn yield_with_value_emits_co_yield_await() {
     let mut func = empty_func("yield_test");
+    func.kind = FunctionKind::Generator;
     let i64_ty = TypeId::from_raw(7);
     let local = LocalId::from_raw(0);
     func.body = MirBody {
@@ -1826,10 +2282,16 @@ fn yield_with_value_emits_inner_expression() {
             mutable: true,
         }],
         block: MirBlock {
-            stmts: vec![MirStmt::Return(Some(MirExpr::Yield {
-                expr: Some(Box::new(MirExpr::Local(local))),
-                ty: i64_ty,
-            }))],
+            stmts: vec![
+                MirStmt::Expr(MirExpr::Yield {
+                    expr: Some(Box::new(MirExpr::Local(local))),
+                    ty: i64_ty,
+                }),
+                MirStmt::Return(Some(MirExpr::Int {
+                    value: 1,
+                    ty: i64_ty,
+                })),
+            ],
         },
     };
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
@@ -1838,21 +2300,22 @@ fn yield_with_value_emits_inner_expression() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains('x'),
-        "Yield(Some) must emit inner expression (placeholder for async fn / generator), got: {s}"
+        s.contains("__gen_co_") && s.contains(" . yield_ (x) . await"),
+        "Yield(Some) must emit `co.yield_(x).await` inside the producer, got: {s}"
     );
 }
 
 #[test]
-fn yield_without_value_emits_unit() {
+fn yield_without_value_emits_unit_yield() {
     let mut func = empty_func("yield_unit_test");
+    func.kind = FunctionKind::Generator;
     func.body = MirBody {
         locals: Vec::new(),
         block: MirBlock {
-            stmts: vec![MirStmt::Return(Some(MirExpr::Yield {
+            stmts: vec![MirStmt::Expr(MirExpr::Yield {
                 expr: None,
                 ty: TypeId::from_raw(0),
-            }))],
+            })],
         },
     };
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
@@ -1861,8 +2324,229 @@ fn yield_without_value_emits_unit() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains("()") || s.contains("( )"),
-        "Yield(None) must emit unit `()` (placeholder), got: {s}"
+        s.contains("__gen_co_") && s.contains(" . yield_ (()) . await"),
+        "Yield(None) must emit `co.yield_(()).await`, got: {s}"
+    );
+}
+
+#[test]
+fn yield_in_non_generator_body_returns_internal_error() {
+    let mut func = empty_func("yield_plain_test");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Expr(MirExpr::Yield {
+                expr: None,
+                ty: TypeId::from_raw(0),
+            })],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let err = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect_err("non-generator Yield must be rejected with an error");
+    let BackendError::Internal(msg) = err else {
+        panic!("expected BackendError::Internal, got other error variant");
+    };
+    assert!(
+        msg.contains("MirExpr::Yield"),
+        "Internal error must mention the MirExpr::Yield context, got: {msg:?}"
+    );
+    assert!(
+        msg.contains("non-generator body"),
+        "Internal error must explain the non-generator body invariant, got: {msg:?}"
+    );
+}
+
+#[test]
+fn yield_inside_try_finally_is_allowed() {
+    let i64_ty = TypeId::from_raw(7);
+    let mut func = empty_func("yield_in_finally");
+    func.kind = FunctionKind::Generator;
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Yield {
+                        expr: Some(Box::new(MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        })),
+                        ty: i64_ty,
+                    })],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("yield in finally must remain valid (finally is outside the catch_unwind closure)");
+}
+
+#[test]
+fn cast_to_bool_target_is_rejected_with_internal_error() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let bool_ty = types.intern(&Type::Bool);
+    let mut func = empty_func("cast_to_bool");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Expr(MirExpr::Cast {
+                expr: Box::new(MirExpr::Int {
+                    value: 1,
+                    ty: bool_ty,
+                }),
+                ty: bool_ty,
+            })],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let err = emit_decls(&prog, &types)
+        .expect_err("Cast to Type::Bool must be rejected — Rust's `as bool` is not valid syntax");
+    let BackendError::Internal(msg) = err else {
+        panic!("expected BackendError::Internal, got other error variant");
+    };
+    assert!(
+        msg.contains("MirExpr::Cast"),
+        "Internal error must mention the MirExpr::Cast context, got: {msg:?}"
+    );
+    assert!(
+        msg.contains("not a numeric primitive"),
+        "Internal error must explain the numeric-primitive restriction, got: {msg:?}"
+    );
+    assert!(
+        msg.contains(&bool_ty.raw().to_string()),
+        "Internal error must include the offending TypeId raw id, got: {msg:?}"
+    );
+}
+
+#[test]
+fn cast_to_numeric_target_emits_as_cast() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let f64_ty = types.intern(&Type::F64);
+    let mut func = empty_func("cast_to_numeric");
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Expr(MirExpr::Cast {
+                expr: Box::new(MirExpr::Int {
+                    value: 1,
+                    ty: i64_ty,
+                }),
+                ty: f64_ty,
+            })],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let tokens = emit_decls(&prog, &types).expect("numeric Cast must succeed");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("as f64"),
+        "Cast to numeric primitive (f64) must emit `as f64`, got: {s}"
+    );
+}
+
+#[test]
+fn generator_return_inside_try_preserves_completion_shape() {
+    let mut func = empty_func("gen_try");
+    func.kind = FunctionKind::Generator;
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Expr(MirExpr::Yield {
+                    expr: Some(Box::new(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    })),
+                    ty: i64_ty,
+                }),
+                MirStmt::Try {
+                    body: MirBlock {
+                        stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                            value: 2,
+                            ty: i64_ty,
+                        }))],
+                    },
+                    catch_param: None,
+                    catch: None,
+                    finally: None,
+                },
+                MirStmt::Try {
+                    body: MirBlock {
+                        stmts: vec![MirStmt::Return(None)],
+                    },
+                    catch_param: None,
+                    catch: None,
+                    finally: None,
+                },
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__return_slot_0 = Some (Some (2))"),
+        "valued return inside a generator try block must set runtime slot to `Some(Some(2))`, got: {s}"
+    );
+    assert!(
+        s.contains("__return_slot_1 = Some (None)"),
+        "bare return inside a generator try block must set runtime slot to `Some(None)`, got: {s}"
+    );
+    assert!(
+        s.contains("if let Some (__v) = __return_slot_1"),
+        "generator try replay must read runtime slot via `if let Some(__v) = slot {{ return __v; }}`, \
+         got: {s}"
+    );
+}
+
+#[test]
+fn generator_fn_body_emits_producer_async_block() {
+    let mut func = empty_func("gen");
+    func.kind = FunctionKind::Generator;
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Expr(MirExpr::Yield {
+                    expr: Some(Box::new(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    })),
+                    ty: i64_ty,
+                }),
+                MirStmt::Return(Some(MirExpr::Int {
+                    value: 2,
+                    ty: i64_ty,
+                })),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__ts_aot_generator_new (| __gen_co_") && s.contains(" | async move {"),
+        "generator body must be wrapped in __ts_aot_generator_new(|co| async move {{..}}), got: {s}"
+    );
+    assert!(
+        s.contains("return Some (2) ;"),
+        "generator return must map to `return Some(v)` (completion value), got: {s}"
     );
 }
 
@@ -2177,8 +2861,8 @@ fn try_catch_param_is_bound_for_catch_body_references() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains("if let Err (__e)"),
-        "Try/Catch with catch_param must bind `__e` from catch_unwind result, got: {s}"
+        s.contains("downcast ::<") || s.contains("downcast :: <"),
+        "Try/Catch with catch_param must downcast __e to the parameter type, got: {s}"
     );
     assert!(
         s.contains("downcast"),
@@ -2230,14 +2914,13 @@ fn try_catch_without_param_does_not_bind_param() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains("if let Err (_e)") || s.contains("if let Err (__e)"),
-        "Try/Catch without catch_param must still inspect `__e` (either wildcard or bound). \
-         Got: {s}"
+        s.contains("let __catch_result = std :: panic :: catch_unwind"),
+        "Try/Catch without catch_param must wrap catch body in catch_unwind so the catch arm's \
+         own panic does not propagate as an unhandled throw. Got: {s}"
     );
     assert!(
-        !s.contains("let _e ="),
-        "Try/Catch without catch_param must NOT introduce a named binding for the payload — \
-         nothing in the catch body uses it. Got: {s}"
+        !s.contains("__e . downcast ::<"),
+        "Try/Catch without catch_param must NOT downcast __e (no parameter type). Got: {s}"
     );
 }
 
@@ -2463,16 +3146,21 @@ fn try_return_in_body_runs_finally_then_replays_return() {
         .to_string();
     let break_pos = s.find("break __try_");
     let finally_pos = s.find("7 ;");
-    let return_pos = s.find("return 42");
+    let slot_set_pos = s.find("__return_slot_0 = Some (42)");
+    let replay_pos = s.find("if let Some (__v) = __return_slot_0");
     assert!(
-        break_pos.is_some() && finally_pos.is_some() && return_pos.is_some(),
-        "try-with-return-and-finally must emit: `break #label` (replacing `return 42` in \
-         try body), then finally body (`7 ;`), then `return 42` (replay). Got: {s}"
+        break_pos.is_some()
+            && finally_pos.is_some()
+            && slot_set_pos.is_some()
+            && replay_pos.is_some(),
+        "try-with-return-and-finally must emit: try body sets runtime slot `__return_slot_0 = Some(42);` \
+         and signals `break #label;`, then finally body (`7 ;`), then `if let Some(__v) = __return_slot_0 \
+         {{ return __v; }}` (replay). Got: {s}"
     );
     assert!(
-        break_pos < finally_pos && finally_pos < return_pos,
-        "Order must be: break (try body return → save+break) -> finally body -> return (replay). \
-         If `return 42` appears before finally, finally is skipped (wrong). Got: {s}"
+        break_pos < finally_pos && finally_pos < replay_pos,
+        "Order must be: try body return (slot set + break) -> finally body -> replay. \
+         If replay appears before finally, finally is skipped (wrong). Got: {s}"
     );
 }
 
@@ -2526,16 +3214,228 @@ fn try_catch_return_in_catch_runs_finally_then_replays_return() {
          Bare `return 99` inside the catch would exit the function and skip finally. Got: {s}"
     );
     assert!(
-        s.contains("return 99"),
-        "After finally, the saved catch return value must be replayed via `return 99;`. Got: {s}"
+        s.contains("__return_slot_0 = Some (99)"),
+        "catch body's return must set runtime slot `__return_slot_0 = Some(99);` so finally can \
+         observe and replay it. Got: {s}"
     );
     let break_pos = s.find("break __try_").expect("break in emit");
     let finally_pos = s.find("5 ;").expect("finally in emit");
-    let replay_pos = s.rfind("return 99").expect("replay in emit");
+    let replay_pos = s
+        .find("if let Some (__v) = __return_slot_0")
+        .expect("replay in emit");
     assert!(
         break_pos < finally_pos && finally_pos < replay_pos,
-        "Order must be: catch return → break (save+break) -> finally body -> return 99 (replay). \
+        "Order must be: catch return → break -> finally body -> replay (if let Some). \
          Got: {s}"
+    );
+}
+
+#[test]
+fn try_with_conditional_return_emits_closure_safe_signal() {
+    let mut func = empty_func("try_cond_return");
+    let i64_ty = TypeId::from_raw(7);
+    let cond = LocalId::from_raw(0);
+    func.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: cond,
+            name: Atom::from("c"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::If {
+                        cond: MirExpr::Local(cond),
+                        then_block: MirBlock {
+                            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                                value: 1,
+                                ty: i64_ty,
+                            }))],
+                        },
+                        else_block: Some(MirBlock {
+                            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                                value: 2,
+                                ty: i64_ty,
+                            }))],
+                        }),
+                    }],
+                },
+                catch_param: None,
+                catch: None,
+                finally: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__ReturnSignal"),
+        "try with conditional return must declare __ReturnSignal enum as closure-safe \
+         control signal, got: {s}"
+    );
+    assert!(
+        s.contains("__return_slot_0 = Some (1)"),
+        "if-branch return must set runtime slot to Some(1) so the executed branch's value \
+         is preserved at runtime (not overwritten by codegen-time last-write-wins). Got: {s}"
+    );
+    assert!(
+        s.contains("__return_slot_0 = Some (2)"),
+        "else-branch return must set runtime slot to Some(2) so the executed branch's value \
+         is preserved at runtime. Got: {s}"
+    );
+    assert!(
+        s.contains("if let Some (__v) = __return_slot_0"),
+        "after the try block, replay must use the runtime slot via `if let Some(__v) = slot \
+         {{ return __v; }}` so whichever branch executed drives the actual return. Got: {s}"
+    );
+    assert!(
+        s.contains("Ok (__ReturnSignal :: Break)"),
+        "each return must also signal `return Ok(__ReturnSignal::Break);` so the outer loop \
+         can perform the break (no cross-closure `break #label;`). Got: {s}"
+    );
+    assert!(
+        s.contains("match __try_result"),
+        "outer try loop must pattern-match on __try_result to perform the break. Got: {s}"
+    );
+}
+
+#[test]
+fn nested_try_finally_return_propagates_through_outer_replay() {
+    let mut func = empty_func("nested_try_finally");
+    let i64_ty = TypeId::from_raw(7);
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Try {
+                        body: MirBlock {
+                            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                                value: 42,
+                                ty: i64_ty,
+                            }))],
+                        },
+                        catch_param: None,
+                        catch: None,
+                        finally: Some(MirBlock {
+                            stmts: vec![MirStmt::Expr(MirExpr::Int {
+                                value: 1,
+                                ty: i64_ty,
+                            })],
+                        }),
+                    }],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Int {
+                        value: 2,
+                        ty: i64_ty,
+                    })],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__return_slot_1 = Some (42)"),
+        "inner try's return 42 must set the inner runtime slot (__return_slot_1 since \
+         counter is allocated on enter), got: {s}"
+    );
+    let inner_pos = s
+        .find("__return_slot_1 = Some (42)")
+        .expect("inner slot position");
+    let inner_finally_pos = s.find("1 ;").expect("inner finally position");
+    let inner_replay_pos = s
+        .find("__return_slot_0 = Some (__v)")
+        .or_else(|| s.find("if let Some (__v) = __return_slot_1"))
+        .expect("inner replay position");
+    assert!(
+        inner_pos < inner_finally_pos && inner_finally_pos < inner_replay_pos,
+        "Inner try order: set inner slot -> run inner finally (`1 ;`) -> inner replay. Got: {s}"
+    );
+    assert!(
+        s.contains("__return_slot_0 = Some (__v)"),
+        "Inner replay must propagate to the outer slot (__return_slot_0) for nested try, \
+         not `return __v;` (which would skip the outer finally). Got: {s}"
+    );
+    let outer_finally_pos = s.rfind("2 ;").expect("outer finally position");
+    let outer_replay_pos = s
+        .rfind("if let Some (__v) = __return_slot_0")
+        .expect("outer replay position");
+    let outer_return_pos = s.rfind("return __v ;").expect("outer return position");
+    assert!(
+        outer_replay_pos < outer_return_pos,
+        "Outermost try's replay must `return __v;` (no parent slot to propagate to). Got: {s}"
+    );
+    let inner_replay_to_outer_finally = inner_replay_pos < outer_finally_pos;
+    let outer_finally_to_outer_replay = outer_finally_pos < outer_replay_pos;
+    assert!(
+        inner_replay_to_outer_finally && outer_finally_to_outer_replay,
+        "Outer try order: inner replay propagates -> outer finally (`2 ;`) -> outer replay. \
+         Got: {s}"
+    );
+}
+
+#[test]
+fn nested_try_in_generator_propagates_through_outer_replay() {
+    let mut func = empty_func("nested_try_gen");
+    let i64_ty = TypeId::from_raw(7);
+    func.kind = FunctionKind::Generator;
+    func.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Try {
+                        body: MirBlock {
+                            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                                value: 7,
+                                ty: i64_ty,
+                            }))],
+                        },
+                        catch_param: None,
+                        catch: None,
+                        finally: None,
+                    }],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Int {
+                        value: 9,
+                        ty: i64_ty,
+                    })],
+                }),
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(func));
+    let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
+        .expect("emit must succeed")
+        .to_string();
+    assert!(
+        s.contains("__return_slot_1 = Some (Some (7))"),
+        "Inner generator try return 7 must set inner slot to Some(Some(7)). Got: {s}"
+    );
+    assert!(
+        s.contains("__return_slot_0 = Some (__v)"),
+        "Inner generator replay must propagate Some(Some(7)) to outer slot via \
+         `__return_slot_0 = Some(__v);` (not `return __v;` which would exit the generator). Got: {s}"
+    );
+    assert!(
+        s.contains("if let Some (__v) = __return_slot_0 { return __v ; }")
+            || s.contains("if let Some (__v) = __return_slot_0 { return __v;}"),
+        "Outermost generator try's replay must `return __v;`. Got: {s}"
     );
 }
 
@@ -2756,11 +3656,7 @@ fn function_typed_param_emits_unit_placeholder() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn take_fn")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "take_fn");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("cb:()"),
@@ -2786,11 +3682,7 @@ fn function_typed_return_emits_unit_placeholder() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
 
-    let sig = s
-        .split("fn make_fn")
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("");
+    let sig = signature_fragment(&s, "make_fn");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
         sig_norm.contains("->()"),
@@ -2831,5 +3723,529 @@ fn dynamic_import_emits_turbofish_for_unused_namespace() {
         s.contains("__ts_aot_dynamic_import :: < i64 >"),
         "Standalone (unused) dynamic import must carry the resolved namespace type as a turbofish, \
          otherwise the generic parameter is unconstrained and the call fails to type-check. Got: {s}"
+    );
+}
+
+#[test]
+fn underscore_param_uses_consistent_ident_in_signature_and_body() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let param = LocalId::from_raw(0);
+    let mut f = empty_func("forward");
+    f.ret = i32_ty;
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("_"),
+        ty: i32_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(param)))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    let sig = signature_fragment(&s, "forward");
+    assert!(
+        sig.contains("__tmp0 : i32"),
+        "frontend-emitted `_` param must be renamed to a consistent `__tmp0` in the signature, not \
+         left as a bare `_` (Rust would treat `_` as a wildcard binding and refuse to address it). \
+         Got signature fragment: `{sig}`"
+    );
+    assert!(
+        !sig.contains(" _ : i32") && !sig.contains("(_ : i32"),
+        "signature must NOT emit a literal `_ : i32` (anonymous wildcard) for the param, got: `{sig}`"
+    );
+    assert!(
+        s.contains("return __tmp0"),
+        "body must use the SAME `__tmp0` ident the signature declared, otherwise the function \
+         fails to compile (signature names one binding, body references another). Got: `{s}`"
+    );
+    assert!(
+        !s.contains("return _ ;") && !s.contains("return (_"),
+        "body must NOT use a bare `_` (Rust would not accept `_` as an expression). Got: `{s}`"
+    );
+}
+
+#[test]
+fn dispatch_wrapper_renames_underscore_param_to_usable_ident() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let param = LocalId::from_raw(0);
+    let mut f = empty_func("dispatchable");
+    f.ret = i32_ty;
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("_"),
+        ty: i32_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                value: 0,
+                ty: i32_ty,
+            }))],
+        },
+    };
+    f.kind = FunctionKind::Plain;
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("pub fn __ts_aot_dispatch_dispatchable"),
+        "dispatchable plain function with packable ret+args must produce a `__ts_aot_dispatch_*` \
+         wrapper, got: {s}"
+    );
+    let wrapper_pos = s
+        .find("pub fn __ts_aot_dispatch_dispatchable")
+        .expect("wrapper position");
+    let wrapper_body = s
+        .get(wrapper_pos..)
+        .and_then(|rest| {
+            let open = rest.find('{')?;
+            let close = rest.rfind('}')?;
+            rest.get(open..=close)
+        })
+        .unwrap_or("");
+    assert!(
+        wrapper_body.contains("let __tmp0 : i32 = __slot_0 as i32 ;"),
+        "dispatch wrapper must unpack `_args[0]` into a renamed `__tmp0 : i32` local (not a bare \
+         `_` which Rust would treat as an anonymous wildcard binding and refuse to address), got: \
+         `{wrapper_body}`"
+    );
+    assert!(
+        wrapper_body.contains("dispatchable (__tmp0)"),
+        "dispatch wrapper must call the inner function with the renamed `__tmp0` arg, got: \
+         `{wrapper_body}`"
+    );
+    assert!(
+        !wrapper_body.contains("dispatchable (_)"),
+        "dispatch wrapper must NOT pass a bare `_` as the inner call argument (Rust would reject \
+         the call site), got: `{wrapper_body}`"
+    );
+}
+
+#[test]
+fn array_push_runtime_marks_array_param_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let array_param = LocalId::from_raw(0);
+    let mut f = empty_func("grow");
+    f.ret = i32_ty;
+    f.params = vec![MirParam {
+        id: array_param,
+        name: Atom::from("arr"),
+        ty: arr_ty,
+    }];
+    let value = LocalId::from_raw(1);
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: value,
+            name: Atom::from("v"),
+            ty: i32_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayPush,
+                    args: vec![MirExpr::Local(array_param), MirExpr::Local(value)],
+                    dest: None,
+                    ty: arr_ty,
+                    target_ty: None,
+                },
+                MirStmt::Return(Some(MirExpr::Local(value))),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "grow");
+    assert!(
+        sig.contains("mut arr"),
+        "param passed as `args[0]` to RuntimeOp::ArrayPush must emit `mut arr` in the function \
+         signature (array push needs &mut Vec). Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn array_set_runtime_marks_array_param_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let array_param = LocalId::from_raw(0);
+    let mut f = empty_func("poke");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: array_param,
+        name: Atom::from("arr"),
+        ty: arr_ty,
+    }];
+    let value = LocalId::from_raw(1);
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: value,
+            name: Atom::from("v"),
+            ty: i32_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ArraySet,
+                args: vec![
+                    MirExpr::Local(array_param),
+                    MirExpr::Int {
+                        value: 0,
+                        ty: i32_ty,
+                    },
+                    MirExpr::Local(value),
+                ],
+                dest: None,
+                ty: arr_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "poke");
+    assert!(
+        sig.contains("mut arr"),
+        "param passed as `args[0]` to RuntimeOp::ArraySet must emit `mut arr` in the function \
+         signature (array indexed-set needs &mut [T]). Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn array_set_runtime_call_emits_mut_borrow() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let array_param = LocalId::from_raw(0);
+    let mut f = empty_func("poke");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: array_param,
+        name: Atom::from("arr"),
+        ty: arr_ty,
+    }];
+    let value = LocalId::from_raw(1);
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: value,
+            name: Atom::from("v"),
+            ty: i32_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ArraySet,
+                args: vec![
+                    MirExpr::Local(array_param),
+                    MirExpr::Int {
+                        value: 0,
+                        ty: i32_ty,
+                    },
+                    MirExpr::Local(value),
+                ],
+                dest: None,
+                ty: arr_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("__ts_aot_array_set (& mut arr"),
+        "RuntimeOp::ArraySet call site must emit `&mut arr` to match __ts_aot_array_set's \
+         &mut [T] parameter (dedicated arm in emit_runtime_call). Got emitted code: `{s}`"
+    );
+}
+
+#[test]
+fn map_set_runtime_marks_map_param_mut() {
+    let mut types = TypeTable::new();
+    let str_ty = types.intern(&Type::String);
+    let map_ty_placeholder = types.intern(&Type::Error);
+    let map_param = LocalId::from_raw(0);
+    let mut f = empty_func("set_kv");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: map_param,
+        name: Atom::from("m"),
+        ty: map_ty_placeholder,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::MapSet,
+                args: vec![
+                    MirExpr::Local(map_param),
+                    MirExpr::String {
+                        id: Atom::from("k"),
+                        ty: str_ty,
+                    },
+                    MirExpr::String {
+                        id: Atom::from("v"),
+                        ty: str_ty,
+                    },
+                ],
+                dest: None,
+                ty: map_ty_placeholder,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "set_kv");
+    assert!(
+        sig.contains("mut m"),
+        "param passed as `args[0]` to RuntimeOp::MapSet must emit `mut m` in the function \
+         signature (map set needs &mut map). Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn for_of_item_consumed_by_array_push_marks_item_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let source_param = LocalId::from_raw(0);
+    let item = LocalId::from_raw(1);
+    let mut f = empty_func("push_each");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: source_param,
+        name: Atom::from("sources"),
+        ty: arr_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: item,
+            name: Atom::from("arr"),
+            ty: arr_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::ForOf {
+                item,
+                iterable: MirExpr::Local(source_param),
+                iter_ty: arr_ty,
+                body: MirBlock {
+                    stmts: vec![MirStmt::Runtime {
+                        op: RuntimeOp::ArrayPush,
+                        args: vec![
+                            MirExpr::Local(item),
+                            MirExpr::Int {
+                                value: 1,
+                                ty: i32_ty,
+                            },
+                        ],
+                        dest: None,
+                        ty: arr_ty,
+                        target_ty: None,
+                    }],
+                },
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let for_header = for_header_fragment(&s, "push_each");
+    assert!(
+        for_header.contains("mut arr"),
+        "for-of item consumed by RuntimeOp::ArrayPush (as args[0]) must emit `mut arr` in the \
+         for-of header (locals_mut must OR local.mutable with collect_written_locals so the for-of \
+         binding gets a `mut` qualifier; array push needs &mut Vec). Got for-of header: \
+         `{for_header}`"
+    );
+}
+
+#[test]
+fn for_of_item_consumed_by_array_set_marks_item_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let source_param = LocalId::from_raw(0);
+    let item = LocalId::from_raw(1);
+    let mut f = empty_func("poke_each");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: source_param,
+        name: Atom::from("sources"),
+        ty: arr_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: item,
+            name: Atom::from("arr"),
+            ty: arr_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::ForOf {
+                item,
+                iterable: MirExpr::Local(source_param),
+                iter_ty: arr_ty,
+                body: MirBlock {
+                    stmts: vec![MirStmt::Runtime {
+                        op: RuntimeOp::ArraySet,
+                        args: vec![
+                            MirExpr::Local(item),
+                            MirExpr::Int {
+                                value: 0,
+                                ty: i32_ty,
+                            },
+                            MirExpr::Int {
+                                value: 7,
+                                ty: i32_ty,
+                            },
+                        ],
+                        dest: None,
+                        ty: arr_ty,
+                        target_ty: None,
+                    }],
+                },
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let for_header = for_header_fragment(&s, "poke_each");
+    assert!(
+        for_header.contains("mut arr"),
+        "for-of item consumed by RuntimeOp::ArraySet (as args[0]) must emit `mut arr` in the \
+         for-of header (locals_mut must OR local.mutable with collect_written_locals so the for-of \
+         binding gets a `mut` qualifier; array indexed-set needs &mut [T]). Got for-of header: \
+         `{for_header}`"
+    );
+}
+
+#[test]
+fn for_of_item_consumed_by_map_set_marks_item_mut() {
+    let mut types = TypeTable::new();
+    let str_ty = types.intern(&Type::String);
+    let map_ty_placeholder = types.intern(&Type::Error);
+    let source_param = LocalId::from_raw(0);
+    let item = LocalId::from_raw(1);
+    let mut f = empty_func("seed_each");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: source_param,
+        name: Atom::from("sources"),
+        ty: map_ty_placeholder,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: item,
+            name: Atom::from("m"),
+            ty: map_ty_placeholder,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::ForOf {
+                item,
+                iterable: MirExpr::Local(source_param),
+                iter_ty: map_ty_placeholder,
+                body: MirBlock {
+                    stmts: vec![MirStmt::Runtime {
+                        op: RuntimeOp::MapSet,
+                        args: vec![
+                            MirExpr::Local(item),
+                            MirExpr::String {
+                                id: Atom::from("k"),
+                                ty: str_ty,
+                            },
+                            MirExpr::String {
+                                id: Atom::from("v"),
+                                ty: str_ty,
+                            },
+                        ],
+                        dest: None,
+                        ty: map_ty_placeholder,
+                        target_ty: None,
+                    }],
+                },
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let for_header = for_header_fragment(&s, "seed_each");
+    assert!(
+        for_header.contains("mut m"),
+        "for-of item consumed by RuntimeOp::MapSet (as args[0]) must emit `mut m` in the \
+         for-of header (locals_mut must OR local.mutable with collect_written_locals so the for-of \
+         binding gets a `mut` qualifier; map set needs &mut map). Got for-of header: \
+         `{for_header}`"
+    );
+}
+
+#[test]
+fn for_of_generator_iterable_marks_iterable_param_mut() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_param = LocalId::from_raw(0);
+    let item = LocalId::from_raw(1);
+    let mut f = empty_func("drain");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: gen_param,
+        name: Atom::from("g"),
+        ty: gen_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: item,
+            name: Atom::from("x"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::ForOf {
+                item,
+                iterable: MirExpr::Local(gen_param),
+                iter_ty: gen_ty,
+                body: MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Local(item))],
+                },
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let sig = signature_fragment(&s, "drain");
+    assert!(
+        sig.contains("mut g"),
+        "param that is the iterable of a `for-of` over a Generator must emit `mut g` in the \
+         function signature (ForOf lowers to a mutable-borrow `for` loop). Got signature \
+         fragment: `{sig}`"
     );
 }

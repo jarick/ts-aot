@@ -79,6 +79,14 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             let ident = Ident::new(&sanitized, Span::call_site());
             quote!(#ident)
         }
+        Type::Generator { inner } => {
+            let inner = emit_type_id_with_ctx(*inner, ctx);
+            quote!(ts_aot_runtime::Generator<#inner>)
+        }
+        Type::GeneratorResult { inner } => {
+            let inner = emit_type_id_with_ctx(*inner, ctx);
+            quote!(ts_aot_runtime::GeneratorResult<#inner>)
+        }
         Type::GenericParam { id } => {
             let ident = format_ident!("__generic{}", id.raw());
             quote!(#ident)

@@ -1,73 +1,100 @@
-pub const GENERATOR_DONE_STATE: u32 = u32::MAX;
+use std::future::Future;
+use std::pin::Pin;
+
+use genawaiter::GeneratorState;
+use genawaiter::sync::{Co, Gen as GenStateMachine};
+
+type BoxedProducer<T> = Pin<Box<dyn Future<Output = Option<T>> + 'static>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratorResult<T> {
-    Yielded(Option<T>),
+    Yielded(T),
     Done(Option<T>),
 }
 
-pub type GeneratorDispatch<T> = fn(&mut Generator<T>) -> GeneratorResult<T>;
-
 pub struct Generator<T> {
-    pub state: u32,
-    pub stored: Option<T>,
-    pub dispatch: GeneratorDispatch<T>,
+    inner: GenStateMachine<T, (), BoxedProducer<T>>,
+    finished: bool,
 }
 
 impl<T> Generator<T> {
     #[must_use]
-    pub fn new(dispatch: GeneratorDispatch<T>) -> Self {
-        Self {
-            state: 0,
-            stored: None,
-            dispatch,
-        }
-    }
-
-    pub fn store(&mut self, value: T) {
-        self.stored = Some(value);
-    }
-
-    pub fn set_state(&mut self, state: u32) {
-        self.state = state;
-    }
-
     pub fn next(&mut self) -> GeneratorResult<T> {
-        if self.state == GENERATOR_DONE_STATE {
+        if self.finished {
             return GeneratorResult::Done(None);
         }
-        let result = (self.dispatch)(self);
-        if matches!(result, GeneratorResult::Done(_)) {
-            self.state = GENERATOR_DONE_STATE;
+        self.finished = true;
+        match self.inner.resume() {
+            GeneratorState::Yielded(value) => {
+                self.finished = false;
+                GeneratorResult::Yielded(value)
+            }
+            GeneratorState::Complete(value) => GeneratorResult::Done(value),
         }
-        result
+    }
+
+    fn next_iter(&mut self) -> Option<T> {
+        match self.next() {
+            GeneratorResult::Yielded(value) => Some(value),
+            GeneratorResult::Done(_) => None,
+        }
     }
 }
 
 #[must_use]
-pub fn __ts_aot_generator_get_state<T>(g: &Generator<T>) -> u32 {
-    g.state
+pub fn __ts_aot_generator_new<T, F>(producer: impl FnOnce(Co<T, ()>) -> F) -> Generator<T>
+where
+    F: Future<Output = Option<T>> + 'static,
+{
+    Generator {
+        inner: GenStateMachine::new(move |co| {
+            let fut: BoxedProducer<T> = Box::pin(producer(co));
+            fut
+        }),
+        finished: false,
+    }
 }
 
-pub fn __ts_aot_generator_set_state<T>(g: &mut Generator<T>, state: u32) {
-    g.state = state;
+pub struct GeneratorIntoIter<T> {
+    inner: Generator<T>,
 }
 
-pub fn __ts_aot_generator_store<T>(g: &mut Generator<T>, value: T) {
-    g.stored = Some(value);
+impl<T> Iterator for GeneratorIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_iter()
+    }
 }
 
-#[must_use]
-pub fn __ts_aot_generator_yielded<T>(g: &mut Generator<T>) -> GeneratorResult<T> {
-    GeneratorResult::Yielded(g.stored.take())
+impl<T> IntoIterator for Generator<T> {
+    type Item = T;
+    type IntoIter = GeneratorIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        GeneratorIntoIter { inner: self }
+    }
 }
 
-#[must_use]
-pub fn __ts_aot_generator_done<T>() -> GeneratorResult<T> {
-    GeneratorResult::Done(None)
+pub struct GeneratorRefIntoIter<'a, T> {
+    inner: &'a mut Generator<T>,
 }
 
-#[must_use]
-pub fn __ts_aot_generator_done_with<T>(value: T) -> GeneratorResult<T> {
-    GeneratorResult::Done(Some(value))
+impl<T> Iterator for GeneratorRefIntoIter<'_, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Generator<T> {
+    type Item = T;
+    type IntoIter = GeneratorRefIntoIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        GeneratorRefIntoIter { inner: self }
+    }
+}
+
+impl<T> Generator<T> {
+    pub fn iter_mut(&mut self) -> GeneratorRefIntoIter<'_, T> {
+        GeneratorRefIntoIter { inner: self }
+    }
 }

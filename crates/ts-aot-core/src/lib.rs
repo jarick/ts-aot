@@ -1,6 +1,7 @@
 mod canonical_index;
 mod diagnostics;
 mod ids;
+mod rust_ident;
 mod ty;
 mod type_table;
 mod visibility;
@@ -12,6 +13,7 @@ pub use ids::{
     STRUCT_ID_DYNAMIC, StructId, TypeId, UnionId, VariantId,
 };
 pub use oxc_span::Span;
+pub use rust_ident::sanitize_rust_ident;
 pub use ty::{MemoryKind, Type};
 pub use type_table::TypeTable;
 pub use visibility::Visibility;

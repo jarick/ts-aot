@@ -18,6 +18,7 @@ pub enum RuntimeFeature {
     Symbol,
     ArrayBuffer,
     TypedArray,
+    Generator,
 }
 
 impl RuntimeFeature {
@@ -38,6 +39,7 @@ impl RuntimeFeature {
             Self::Symbol => "symbol",
             Self::ArrayBuffer => "array_buffer",
             Self::TypedArray => "typed_array",
+            Self::Generator => "generator",
         }
     }
 }
@@ -83,8 +85,8 @@ impl RuntimeRequirements {
 
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
-        Array, ArrayBuffer, Console, Date, HostIo, Json, Map, Math, Promise, Result as ResultFeat,
-        Scheduler, String as StringFeat, Symbol, TypedArray,
+        Array, ArrayBuffer, Console, Date, Generator, HostIo, Json, Map, Math, Promise,
+        Result as ResultFeat, Scheduler, String as StringFeat, Symbol, TypedArray,
     };
     match op {
         RuntimeOp::StringConcat
@@ -157,6 +159,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::ArrayGetOrDefault => &[Array],
         RuntimeOp::ArrayConcat => &[Array],
         RuntimeOp::ArrayHole => &[Array],
+        RuntimeOp::GeneratorNext => &[Generator],
     }
 }
 
@@ -226,6 +229,17 @@ mod tests {
         assert!(r.needs(RuntimeFeature::Math));
         assert!(!r.needs(RuntimeFeature::String));
         assert!(!r.needs(RuntimeFeature::Console));
+    }
+
+    #[test]
+    fn require_generator_next_sets_generator_only() {
+        let mut r = RuntimeRequirements::default();
+        r.require(RuntimeOp::GeneratorNext);
+        assert!(r.needs_runtime());
+        assert!(r.needs(RuntimeFeature::Generator));
+        assert!(!r.needs(RuntimeFeature::String));
+        assert!(!r.needs(RuntimeFeature::Array));
+        assert!(!r.needs(RuntimeFeature::Math));
     }
 
     #[test]

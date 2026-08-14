@@ -184,6 +184,17 @@ impl SkeletonBuilder<'_, '_> {
             ));
             return HirExpr::Unit(core_span_from_oxc(y.span));
         }
+        if y.delegate {
+            self.diagnostics.push(Diagnostic::error(
+                "E0501",
+                "`yield*` (delegating yield) is not supported yet — yield values directly instead",
+                core_span_from_oxc(y.span),
+            ));
+            if let Some(a) = y.argument.as_ref() {
+                self.walk_expr(a, scope);
+            }
+            return HirExpr::Unit(core_span_from_oxc(y.span));
+        }
         let inner = y.argument.as_ref().map(|a| self.walk_expr(a, scope));
         let ty = self.error_ty();
         HirExpr::Yield {

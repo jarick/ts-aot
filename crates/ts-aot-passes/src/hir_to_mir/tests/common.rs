@@ -10,16 +10,19 @@ pub use ts_aot_ir_hir::{
     HirSwitchCase, HirUnaryOp, ObjectLiteralField,
 };
 pub use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, FunctionKind, MirBlock, MirExpr, MirPlace, MirPlaceBase, MirStmt,
-    RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, FunctionKind, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirPlaceBase,
+    MirStmt, RuntimeOp, UnaryOp,
 };
 
+#[cfg(test)]
+pub(crate) use super::super::is_local_reassigned;
 pub(crate) use super::super::ops::{convert_binop, convert_unaryop};
 pub(crate) use super::super::{
     ExprConverter, HirBlock, PLACEHOLDER_FUNCTION, convert_function, convert_program,
 };
 pub(crate) use crate::PassContext;
 pub(crate) use crate::lower_classes;
+pub(crate) use crate::lower_generators::GENERATOR_DIAG_DEFERRED_METHOD;
 
 pub fn ctx() -> PassContext {
     PassContext::new()
@@ -71,6 +74,7 @@ pub fn run_convert(
         &empty_field_id_lookup(),
         &mut empty_types(),
         cx,
+        &[],
     )
 }
 

@@ -25,5 +25,10 @@ impl Deref for HirBlock {
 pub use converter::ExprConverter;
 pub use program::{convert_function, convert_program};
 
+pub(crate) use program::qualified_name;
+
+#[cfg(test)]
+pub(crate) use convert_stmt::is_local_reassigned;
+
 pub(crate) const PLACEHOLDER_FUNCTION: ts_aot_core::FunctionId =
     ts_aot_core::FunctionId::from_raw(u32::MAX);

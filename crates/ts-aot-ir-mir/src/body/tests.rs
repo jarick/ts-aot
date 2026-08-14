@@ -1,4 +1,5 @@
 use super::*;
+use ts_aot_core::TypeId;
 
 #[test]
 fn block_starts_empty() {
@@ -168,15 +169,29 @@ fn stmt_if_carries_cond_and_blocks() {
 }
 
 #[test]
-fn stmt_for_of_carries_item_iterable_body() {
+fn stmt_for_of_carries_item_iterable_body_iter_ty() {
     let s = MirStmt::ForOf {
         item: LocalId::from_raw(0),
         iterable: MirExpr::Unit,
+        iter_ty: TypeId::from_raw(42),
         body: MirBlock::new(),
     };
     match s {
-        MirStmt::ForOf { item, body, .. } => {
+        MirStmt::ForOf {
+            item,
+            iterable,
+            iter_ty,
+            body,
+        } => {
             assert_eq!(item, LocalId::from_raw(0));
+            assert!(matches!(iterable, MirExpr::Unit));
+            assert_eq!(
+                iter_ty,
+                TypeId::from_raw(42),
+                "MirStmt::ForOf must carry the iterable's static type in `iter_ty` \
+                 so the backend can choose between `into_iter()` and `&mut` iteration; \
+                 it must not be silently replaced with a sentinel"
+            );
             assert!(body.is_empty());
         }
         _ => panic!("expected ForOf"),
