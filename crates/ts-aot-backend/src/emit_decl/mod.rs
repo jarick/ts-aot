@@ -15,6 +15,7 @@ use ts_aot_ir_mir::{
 };
 
 use self::body::emit_body;
+use self::ctx::BodyCtx;
 use self::ctx::EmitCtx;
 use self::ident::ident_from;
 use self::literals::emit_const_expr;
@@ -62,7 +63,8 @@ fn emit_function_with_ctx(
     ctx: &EmitCtx<'_>,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&f.name);
-    let params = emit_params(f, ctx);
+    let body_ctx = BodyCtx::new(f, ctx.types);
+    let params = emit_params(f, ctx, &body_ctx);
     let ret = emit_type_id_with_ctx(f.ret, ctx);
     let vis = if f.export_name.is_some() {
         quote!(pub)
@@ -74,8 +76,8 @@ fn emit_function_with_ctx(
     } else {
         quote!()
     };
-    let self_token = self_param_token(f.kind);
-    let body = emit_body(f, ctx)?;
+    let self_token = self_param_token(&f.kind, &body_ctx);
+    let body = emit_body(f, ctx, &body_ctx)?;
 
     let fn_tokens = quote! {
         #vis #asyncness fn #name(#self_token #(#params),*) -> #ret #body
@@ -322,25 +324,34 @@ fn emit_global_with_ctx(
     ))
 }
 
-fn emit_params(f: &MirFunctionDecl, ctx: &EmitCtx<'_>) -> Vec<TokenStream> {
-    let self_param = match f.kind {
-        FunctionKind::Method { self_param, .. } => Some(self_param),
-        _ => None,
-    };
+fn emit_params(f: &MirFunctionDecl, ctx: &EmitCtx<'_>, body_ctx: &BodyCtx) -> Vec<TokenStream> {
     f.params
         .iter()
-        .filter(|p| Some(p.id) != self_param)
+        .filter(|p| Some(p.id) != body_ctx.self_param())
         .map(|p| {
-            let name = ident_from(&p.name);
+            let name = body_ctx.local_ident(p.id);
             let ty = emit_type_id_with_ctx(p.ty, ctx);
-            quote!(#name: #ty)
+            let mutability = if body_ctx.local_mut(p.id) {
+                quote!(mut)
+            } else {
+                quote!()
+            };
+            quote!(#mutability #name: #ty)
         })
         .collect()
 }
 
-fn self_param_token(kind: FunctionKind) -> TokenStream {
-    match kind {
-        FunctionKind::Method { .. } | FunctionKind::Constructor { .. } => quote!(self,),
+fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
+    match *kind {
+        FunctionKind::Method { self_param, .. }
+        | FunctionKind::GeneratorMethod { self_param, .. } => {
+            if body_ctx.local_mut(self_param) {
+                quote!(mut self,)
+            } else {
+                quote!(self,)
+            }
+        }
+        FunctionKind::Constructor { .. } => quote!(self,),
         _ => TokenStream::new(),
     }
 }

@@ -72,6 +72,12 @@ pub enum Type {
     Named {
         symbol: Atom,
     },
+    Generator {
+        inner: TypeId,
+    },
+    GeneratorResult {
+        inner: TypeId,
+    },
     GenericParam {
         id: GenericParamId,
     },
@@ -400,6 +406,43 @@ mod tests {
         assert_eq!(
             id_empty, id_again,
             "interning two empty Tuples must yield the same TypeId (dedup)"
+        );
+    }
+
+    #[test]
+    fn generator_equality_depends_on_inner_type() {
+        let a = Type::Generator {
+            inner: TypeId::from_raw(7),
+        };
+        let b = Type::Generator {
+            inner: TypeId::from_raw(7),
+        };
+        let c = Type::Generator {
+            inner: TypeId::from_raw(8),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn generator_result_equality_depends_on_inner_type() {
+        let a = Type::GeneratorResult {
+            inner: TypeId::from_raw(1),
+        };
+        let b = Type::GeneratorResult {
+            inner: TypeId::from_raw(1),
+        };
+        let c = Type::GeneratorResult {
+            inner: TypeId::from_raw(2),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(
+            a,
+            Type::Generator {
+                inner: TypeId::from_raw(1)
+            },
+            "Generator and GeneratorResult must remain distinct"
         );
     }
 

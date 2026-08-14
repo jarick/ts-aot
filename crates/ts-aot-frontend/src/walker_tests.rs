@@ -3968,6 +3968,30 @@ fn body_walker_bare_yield_in_generator_produces_hir_yield_with_none() {
 }
 
 #[test]
+fn body_walker_delegating_yield_rejects_with_e0501() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function* gen(): i64 { yield* other(); return 0; }",
+    );
+    let e0501 = output
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_str() == "E0501")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        e0501.len(),
+        1,
+        "yield* must be rejected with exactly one E0501, got {:?}",
+        output.diagnostics
+    );
+    assert!(
+        e0501[0].message.contains("yield*"),
+        "E0501 must mention yield*, got: {}",
+        e0501[0].message
+    );
+}
+
+#[test]
 fn function_type_in_param_resolves_to_type_fn() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(

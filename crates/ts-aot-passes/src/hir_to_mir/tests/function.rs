@@ -102,10 +102,109 @@ fn convert_function_nested_let_in_forof_appears_in_body_locals() {
         .collect();
     assert_eq!(mir.body.locals.len(), 2, "for-of binding + nested let");
     assert!(
-        names.contains(&"for_of_binding".to_owned()),
-        "for-of binding synth name"
+        names.iter().any(|n| n.starts_with("__for_of_")),
+        "for-of binding must use a unique __for_of_<counter> synth name (allocated by \
+         unique_synth_local_name from the converter's fresh_local counter, so the suffix tracks \
+         the next_local counter rather than a fixed local id) to avoid collisions with user code, \
+         got names: {names:?}"
     );
     assert!(names.contains(&"77".to_owned()), "nested let name");
+}
+
+#[test]
+fn convert_function_forof_synth_name_avoids_user_local_collision() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![
+            HirStmt::Let {
+                id: LocalId::from_raw(0),
+                name: Atom::new_inline("__for_of_1"),
+                ty: unit_ty(),
+                init: Some(int_lit(0)),
+            },
+            HirStmt::ForOf {
+                binding: LocalId::from_raw(20),
+                iter: int_lit(0),
+                body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
+            },
+        ],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = run_convert(&f, FunctionId::from_raw(0), None, HashMap::new(), &mut cx);
+    let names: Vec<String> = mir
+        .body
+        .locals
+        .iter()
+        .map(|l| l.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.contains(&"__for_of_1".to_owned()),
+        "user local named __for_of_1 must keep its name, got names: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("__for_of_") && n != "__for_of_1"),
+        "for-of binding must get a collision-free name starting with __for_of_ but distinct from the user local, got names: {names:?}"
+    );
+    let unique: std::collections::HashSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), names.len(), "local names must stay unique");
+}
+
+#[test]
+fn convert_function_forin_synth_name_avoids_user_local_collision() {
+    let f = HirFunction {
+        name: Atom::new_inline("1"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![
+            HirStmt::Let {
+                id: LocalId::from_raw(0),
+                name: Atom::new_inline("__for_in_1"),
+                ty: unit_ty(),
+                init: Some(int_lit(0)),
+            },
+            HirStmt::ForIn {
+                binding: LocalId::from_raw(20),
+                iter: int_lit(0),
+                body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
+            },
+        ],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    };
+    let mut cx = ctx();
+    let mir = run_convert(&f, FunctionId::from_raw(0), None, HashMap::new(), &mut cx);
+    let names: Vec<String> = mir
+        .body
+        .locals
+        .iter()
+        .map(|l| l.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.contains(&"__for_in_1".to_owned()),
+        "user local named __for_in_1 must keep its name, got names: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("__for_in_") && n != "__for_in_1"),
+        "for-in binding must get a collision-free name starting with __for_in_ but distinct from the user local, got names: {names:?}"
+    );
+    let unique: std::collections::HashSet<&String> = names.iter().collect();
+    assert_eq!(unique.len(), names.len(), "local names must stay unique");
 }
 
 #[test]

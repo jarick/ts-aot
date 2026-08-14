@@ -135,11 +135,12 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
         MirStmt::ForOf {
             item,
             iterable,
+            iter_ty,
             body,
         } => {
-            d.write(&format!("for {} of ", item.raw()));
+            d.write(&format!("for {} of (", item.raw()));
             dump_expr_inline(iterable, d);
-            d.write(" {\n");
+            d.write(&format!("):T#{} {{\n", iter_ty.raw()));
             d.push();
             for s in &body.stmts {
                 dump_stmt(s, d);
@@ -413,6 +414,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(expr, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::Cast { expr, ty } => {
+            d.write("cast(");
+            dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
         MirExpr::TemplateStringsArray { cooked, ty } => {
             d.write("tplstrings(cooked=[");
             for (i, p) in cooked.iter().enumerate() {
@@ -542,6 +548,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ArrayGetOrDefault => "array_get_or_default",
         RuntimeOp::ArrayConcat => "array_concat",
         RuntimeOp::ArrayHole => "array_hole",
+        RuntimeOp::GeneratorNext => "generator_next",
     }
 }
 

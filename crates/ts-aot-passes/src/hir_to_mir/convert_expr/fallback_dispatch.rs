@@ -7,10 +7,12 @@ use ts_aot_ir_mir::{MirExpr, MirPlace, MirStmt, RuntimeOp};
 use crate::PassContext;
 use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
+use crate::lower_generators::GENERATOR_DIAG_DEFERRED_METHOD;
 
 use super::globals::{
-    is_array_static_type, is_global_array_reference, is_global_math_reference,
-    is_global_object_reference, is_global_string_reference, is_string_typed_source,
+    generator_inner_type, is_array_static_type, is_global_array_reference,
+    is_global_math_reference, is_global_object_reference, is_global_string_reference,
+    is_string_typed_source, type_label,
 };
 
 impl ExprConverter {
@@ -362,5 +364,91 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         None
+    }
+
+    pub(in crate::hir_to_mir::convert_expr) fn try_generator_instance_method_dispatch(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner,
+            field_name,
+            span: field_span,
+            ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        let field_span = *field_span;
+        let owner_ty = owner.ty();
+        let inner_ty = generator_inner_type(owner_ty, types)?;
+        match field_name.as_str() {
+            "next" => {
+                if !args.is_empty() {
+                    ctx.error(
+                        "E0406",
+                        format!(
+                            "Generator.prototype.next() takes no arguments; got {}",
+                            args.len()
+                        ),
+                        field_span,
+                    );
+                    return Some(MirExpr::Unit);
+                }
+                let owner_mir = self.convert_expr(
+                    owner,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                let dest = self.fresh_local();
+                let result_ty = types.intern(&Type::GeneratorResult { inner: inner_ty });
+                self.push_temp_local(dest, result_ty);
+                out.push(MirStmt::Runtime {
+                    op: RuntimeOp::GeneratorNext,
+                    args: vec![owner_mir],
+                    dest: Some(dest),
+                    ty: result_ty,
+                    target_ty: None,
+                });
+                Some(MirExpr::Local(dest))
+            }
+            "return" | "throw" => {
+                ctx.error(
+                    GENERATOR_DIAG_DEFERRED_METHOD,
+                    format!(
+                        "Generator.prototype.{} is not supported in PR 7.8 MVP \
+                         (deferred — use .next() and explicit done handling instead)",
+                        field_name
+                    ),
+                    field_span,
+                );
+                Some(MirExpr::Unit)
+            }
+            _ => {
+                ctx.error(
+                    "E0406",
+                    format!(
+                        "method `{}` is not recognized on `Generator<{}>`; \
+                         recognized methods are: `next`, `return`, `throw`",
+                        field_name,
+                        type_label(types, inner_ty),
+                    ),
+                    field_span,
+                );
+                Some(MirExpr::Unit)
+            }
+        }
     }
 }

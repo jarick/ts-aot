@@ -1359,6 +1359,7 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     let outer_stmts = &mir.body.block.stmts;
     let outer_has_call_directly = outer_stmts.iter().any(|s| {
@@ -1485,6 +1486,7 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     let stmts = &mir.body.block.stmts;
     let first_call_pos = stmts.iter().position(|s| {
@@ -2378,6 +2380,293 @@ fn convert_expr_assignment_value_temp_carries_rhs_ty_not_type_zero() {
 }
 
 #[test]
+fn convert_expr_assignment_casts_rhs_to_primitive_target_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let f64_ty = types.intern(&Type::F64);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: f64_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::Local {
+        id: LocalId::from_raw(1),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: f64_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    assert_eq!(
+        out.len(),
+        2,
+        "expected exactly 2 stmts (Let + Assign), got: {:?}",
+        out
+    );
+
+    let MirStmt::Let {
+        local: value_temp,
+        ty: let_ty,
+        init,
+        ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let, got {:?}", out[0]);
+    };
+    assert_eq!(
+        *let_ty, f64_ty,
+        "value_temp must be declared with the primitive target type when a cast applies"
+    );
+    assert!(
+        matches!(
+            init,
+            Some(MirExpr::Cast {
+                expr,
+                ty
+            }) if *ty == f64_ty && matches!(expr.as_ref(), MirExpr::Local(_))
+        ),
+        "Let init must be a Cast to the target type, got {init:?}"
+    );
+
+    let MirStmt::Assign {
+        value: assign_value,
+        ..
+    } = &out[1]
+    else {
+        panic!("expected out[1] = Assign, got {:?}", out[1]);
+    };
+    assert_eq!(
+        assign_value,
+        &MirExpr::Local(*value_temp),
+        "Assign must read from the cast temp"
+    );
+}
+
+#[test]
+fn convert_expr_assignment_with_string_rhs_to_f64_target_emits_diagnostic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let str_ty = types.intern(&Type::String);
+    let f64_ty = types.intern(&Type::F64);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: f64_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::Local {
+        id: LocalId::from_raw(1),
+        ty: str_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: str_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        cx.has_errors(),
+        "F64 target with String RHS must produce a diagnostic, got: {:?}",
+        cx.diagnostics()
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0408")
+        .expect("expected E0408 diagnostic for string-to-numeric assignment");
+    assert!(
+        diag.message.contains("string"),
+        "E0408 diagnostic must mention the string type, got: {:?}",
+        diag.message
+    );
+    assert!(
+        out.is_empty(),
+        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        out
+    );
+}
+
+#[test]
+fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let i64_ty = types.intern(&Type::I64);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::Unit(Span::default());
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: void_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        cx.has_errors(),
+        "I64 target with void/Unit RHS must produce a diagnostic, got: {:?}",
+        cx.diagnostics()
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0409")
+        .expect("expected E0409 diagnostic for void-to-typed assignment");
+    assert!(
+        diag.message.contains("void") || diag.message.contains("Unit"),
+        "E0409 diagnostic must mention void/Unit, got: {:?}",
+        diag.message
+    );
+    assert!(
+        out.is_empty(),
+        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        out
+    );
+}
+
+#[test]
+fn convert_expr_assignment_with_i64_rhs_to_bool_target_emits_diagnostic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let bool_ty = types.intern(&Type::Bool);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: bool_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::Local {
+        id: LocalId::from_raw(1),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        cx.has_errors(),
+        "Bool target with i64 RHS must produce a diagnostic, got: {:?}",
+        cx.diagnostics()
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0410")
+        .expect("expected E0410 diagnostic for bool<->numeric assignment");
+    assert!(
+        diag.message.contains("boolean"),
+        "E0410 diagnostic must mention boolean, got: {:?}",
+        diag.message
+    );
+    assert!(
+        out.is_empty(),
+        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        out
+    );
+}
+
+#[test]
+fn convert_expr_assignment_with_string_literal_rhs_to_numeric_target_falls_back_emits_diagnostic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let i64_ty = types.intern(&Type::I64);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::String(Atom::new_inline("hello"), Span::default());
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: error_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        cx.has_errors(),
+        "i64 target with String literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
+        cx.diagnostics()
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0410")
+        .expect("expected E0410 diagnostic for string-literal-to-numeric assignment");
+    assert!(
+        diag.message.contains("string"),
+        "E0410 diagnostic must mention string, got: {:?}",
+        diag.message
+    );
+    assert!(
+        out.is_empty(),
+        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        out
+    );
+}
+
+#[test]
 fn convert_expr_assignment_rhs_call_materialized_once_for_statement_and_return() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
@@ -2574,5 +2863,60 @@ fn convert_expr_compound_update_index_target_materializes_arr_call_with_arr_ty()
     assert_eq!(
         arr_materialize_let_ty, arr_ty,
         "MirStmt::Let for materialized arr() must declare the Call's ty ({arr_ty:?}), not TypeId(0)"
+    );
+}
+
+#[test]
+fn convert_expr_assignment_casts_i64_local_to_f32() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let f32_ty = types.intern(&Type::F32);
+    let target = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: f32_ty,
+        span: Span::default(),
+    };
+    let rhs = HirExpr::Local {
+        id: LocalId::from_raw(1),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Assignment {
+        target: Box::new(target),
+        value: Box::new(rhs),
+        ty: f32_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let MirStmt::Let {
+        ty: let_ty,
+        init: Some(init),
+        ..
+    } = &out[0]
+    else {
+        panic!("expected out[0] = Let with init, got {:?}", out[0]);
+    };
+    assert_eq!(
+        *let_ty, f32_ty,
+        "value_temp for i64 -> f32 assignment must be declared with f32 type"
+    );
+    assert!(
+        matches!(
+            init,
+            MirExpr::Cast { expr, ty } if *ty == f32_ty && matches!(expr.as_ref(), MirExpr::Local(_))
+        ),
+        "i64 -> f32 assignment must emit MirExpr::Cast to f32, got {init:?}"
     );
 }

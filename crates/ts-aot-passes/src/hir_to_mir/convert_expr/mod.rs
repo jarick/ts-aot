@@ -15,7 +15,7 @@ mod date_dispatch;
 mod extras;
 mod fallback_dispatch;
 mod function_dispatch;
-mod globals;
+pub(crate) mod globals;
 mod json_dispatch;
 mod literals;
 mod place;

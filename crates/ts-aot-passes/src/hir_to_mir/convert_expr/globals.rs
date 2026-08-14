@@ -49,6 +49,13 @@ pub(super) fn is_global_typed_array_reference(owner: &HirExpr) -> bool {
     )
 }
 
+pub(crate) fn generator_inner_type(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
+    match types.resolve(ty) {
+        Some(Type::Generator { inner }) => Some(*inner),
+        _ => None,
+    }
+}
+
 pub(super) fn is_string_typed_source(arg: &HirExpr, types: &TypeTable) -> bool {
     if matches!(arg, HirExpr::String(_, _)) {
         return true;

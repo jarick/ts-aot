@@ -292,11 +292,16 @@ mod tests {
         let stmt = MirStmt::ForOf {
             item: LocalId::from_raw(0),
             iterable: MirExpr::Unit,
+            iter_ty: ts_aot_core::TypeId::from_raw(0),
             body: MirBlock::with(MirStmt::Continue),
         };
         let text = wrap_prog(wrap_body(vec![stmt])).dump_text();
         assert!(text.contains("for"));
         assert!(text.contains("continue"));
+        assert!(
+            text.contains("for 0 of (()):T#0"),
+            "for-of dump must wrap the iterable in parens so the type annotation is unambiguous, got: {text}"
+        );
     }
 
     #[test]

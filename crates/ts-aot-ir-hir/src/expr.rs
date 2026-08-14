@@ -37,6 +37,43 @@ impl HirExpr {
             | Self::Import { ty, .. } => *ty,
         }
     }
+
+    #[must_use]
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Unit(s)
+            | Self::Bool(_, s)
+            | Self::Int(_, s)
+            | Self::Float(_, s)
+            | Self::String(_, s)
+            | Self::Null(s)
+            | Self::Undefined(s)
+            | Self::Local { span: s, .. }
+            | Self::Global { span: s, .. }
+            | Self::Field { span: s, .. }
+            | Self::Index { span: s, .. }
+            | Self::Call { span: s, .. }
+            | Self::Binary { span: s, .. }
+            | Self::Unary { span: s, .. }
+            | Self::StructLiteral { span: s, .. }
+            | Self::ObjectLiteral { span: s, .. }
+            | Self::Ternary { span: s, .. }
+            | Self::ArrayLiteral { span: s, .. }
+            | Self::Closure { span: s, .. }
+            | Self::Await { span: s, .. }
+            | Self::Yield { span: s, .. }
+            | Self::Template { span: s, .. }
+            | Self::New { span: s, .. }
+            | Self::OptionalChain { span: s, .. }
+            | Self::TypeAssertion { span: s, .. }
+            | Self::Assignment { span: s, .. }
+            | Self::CompoundUpdate { span: s, .. }
+            | Self::Sequence { span: s, .. }
+            | Self::RegExp { span: s, .. }
+            | Self::BigInt { span: s, .. }
+            | Self::Import { span: s, .. } => *s,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -238,6 +275,28 @@ pub enum HirExpr {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ObjectLiteralField {
+    Property { name: Atom, value: HirExpr },
+    Spread(HirExpr),
+}
+
+impl ObjectLiteralField {
+    #[must_use]
+    pub fn value(&self) -> &HirExpr {
+        match self {
+            Self::Property { value, .. } | Self::Spread(value) => value,
+        }
+    }
+
+    #[must_use]
+    pub fn value_mut(&mut self) -> &mut HirExpr {
+        match self {
+            Self::Property { value, .. } | Self::Spread(value) => value,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,10 +355,111 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ObjectLiteralField {
-    Property { name: Atom, value: HirExpr },
-    Spread(HirExpr),
+    #[test]
+    fn span_returns_payload_span_for_simple_variants() {
+        assert_eq!(HirExpr::Unit(Span::new(1, 2)).span(), Span::new(1, 2));
+        assert_eq!(HirExpr::Bool(true, Span::new(3, 4)).span(), Span::new(3, 4));
+        assert_eq!(HirExpr::Int(42, Span::new(5, 6)).span(), Span::new(5, 6));
+        assert_eq!(
+            HirExpr::String(Atom::new_inline("x"), Span::new(7, 8)).span(),
+            Span::new(7, 8)
+        );
+        assert_eq!(HirExpr::Null(Span::new(9, 10)).span(), Span::new(9, 10));
+        assert_eq!(
+            HirExpr::Undefined(Span::new(11, 12)).span(),
+            Span::new(11, 12)
+        );
+    }
+
+    #[test]
+    fn span_returns_struct_field_span_for_structured_variants() {
+        let int_ty = TypeId::from_raw(0);
+        let local = HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: int_ty,
+            span: Span::new(20, 21),
+        };
+        assert_eq!(local.span(), Span::new(20, 21));
+
+        let call = HirExpr::Call {
+            callee: HirCallee::Function(FunctionId::from_raw(0)),
+            args: Vec::new(),
+            type_args: Vec::new(),
+            ty: int_ty,
+            span: Span::new(30, 31),
+        };
+        assert_eq!(call.span(), Span::new(30, 31));
+
+        let binary = HirExpr::Binary {
+            op: HirBinaryOp::Add,
+            lhs: Box::new(HirExpr::Int(1, Span::new(40, 41))),
+            rhs: Box::new(HirExpr::Int(2, Span::new(42, 43))),
+            ty: int_ty,
+            span: Span::new(40, 43),
+        };
+        assert_eq!(binary.span(), Span::new(40, 43));
+
+        let template = HirExpr::Template {
+            tag: None,
+            expressions: Vec::new(),
+            cooked_parts: Vec::new(),
+            raw_parts: Vec::new(),
+            ty: int_ty,
+            span: Span::new(50, 55),
+        };
+        assert_eq!(template.span(), Span::new(50, 55));
+    }
+
+    #[test]
+    fn span_returns_struct_field_span_for_newer_variants() {
+        let int_ty = TypeId::from_raw(0);
+        let new_expr = HirExpr::New {
+            callee: Box::new(HirExpr::Global {
+                name: Atom::new_inline("X"),
+                ty: int_ty,
+                span: Span::new(60, 61),
+            }),
+            args: Vec::new(),
+            ty: int_ty,
+            span: Span::new(60, 70),
+        };
+        assert_eq!(new_expr.span(), Span::new(60, 70));
+
+        let opt_chain = HirExpr::OptionalChain {
+            base: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: int_ty,
+                span: Span::new(80, 81),
+            }),
+            ty: int_ty,
+            span: Span::new(80, 90),
+        };
+        assert_eq!(opt_chain.span(), Span::new(80, 90));
+
+        let regexp = HirExpr::RegExp {
+            pattern: Atom::new_inline("foo"),
+            flags: Atom::new_inline("g"),
+            ty: int_ty,
+            span: Span::new(100, 110),
+        };
+        assert_eq!(regexp.span(), Span::new(100, 110));
+
+        let bigint = HirExpr::BigInt {
+            value: Atom::new_inline("42"),
+            ty: int_ty,
+            span: Span::new(120, 130),
+        };
+        assert_eq!(bigint.span(), Span::new(120, 130));
+
+        let import = HirExpr::Import {
+            source: Box::new(HirExpr::String(
+                Atom::new_inline("mod"),
+                Span::new(140, 145),
+            )),
+            ty: int_ty,
+            span: Span::new(140, 150),
+        };
+        assert_eq!(import.span(), Span::new(140, 150));
+    }
 }

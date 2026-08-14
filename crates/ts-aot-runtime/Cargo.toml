@@ -34,3 +34,4 @@ fastrand = { workspace = true }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+genawaiter = { version = "0.99", default-features = false }

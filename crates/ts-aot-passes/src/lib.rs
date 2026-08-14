@@ -17,7 +17,9 @@ pub use lower_async::{LowerAsyncStats, lower_async};
 pub use lower_classes::{LowerClassesStats, lower_classes};
 pub use lower_closures::{LowerClosuresResult, LowerClosuresStats, lower_closures};
 pub use lower_enums::lower_enums;
-pub use lower_generators::{LowerGeneratorsStats, lower_generators};
+pub use lower_generators::{
+    GENERATOR_DIAG_DEFERRED_METHOD, LowerGeneratorsStats, lower_generators,
+};
 pub use lower_result::lower_result;
 pub use monomorphize::{MonomorphizeStats, monomorphize};
 pub use source_map::{LineCol, SourceMap};
