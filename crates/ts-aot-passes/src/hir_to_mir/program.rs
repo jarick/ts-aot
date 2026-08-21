@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ts_aot_core::{
@@ -14,6 +14,20 @@ use ts_aot_ir_mir::{
 
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
+
+const NAMESPACE_PATH_COLLISION_DIAG: &str = "E0503";
+
+fn report_collision(ctx: &mut PassContext, key: &Atom) {
+    ctx.error(
+        NAMESPACE_PATH_COLLISION_DIAG,
+        format!(
+            "namespace path collision: qualified name `{}` already used by another declaration; \
+             rename one of the namespaces to avoid the collision",
+            key.as_str()
+        ),
+        Span::default(),
+    );
+}
 pub fn convert_function(
     f: &HirFunction,
     id: FunctionId,
@@ -25,12 +39,14 @@ pub fn convert_function(
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
     types: &mut TypeTable,
     ctx: &mut PassContext,
+    namespace_path: &[String],
 ) -> MirFunctionDecl {
     let param_count = f.params.len();
     let mut converter =
         ExprConverter::with_function_remap_and_offset(function_remap, param_count as u32);
     converter.name_to_function = Arc::clone(name_to_function);
     converter.set_field_id_lookup(field_id_lookup.clone());
+    converter.set_namespace_path(namespace_path);
     converter.seed_params(param_count as u32);
     let (block, locals) = converter.convert_block_with_shared_struct_ids(
         &f.body,
@@ -52,12 +68,43 @@ pub fn convert_function(
         ret: f.ret,
         throws,
         body: MirBody { locals, block },
-        kind: FunctionKind::Plain,
+        kind: if f.is_generator {
+            FunctionKind::Generator
+        } else {
+            FunctionKind::Plain
+        },
         effects: FunctionEffects {
             can_throw,
             is_async: f.is_async,
         },
     }
+}
+
+pub(crate) fn qualified_name(namespace_path: &[String], leaf: &str) -> Atom {
+    if namespace_path.is_empty() {
+        Atom::from(leaf.to_owned())
+    } else {
+        let mut s = String::with_capacity(
+            namespace_path.iter().map(|p| p.len() + 2).sum::<usize>() + leaf.len(),
+        );
+        for (i, part) in namespace_path.iter().enumerate() {
+            if i > 0 {
+                s.push_str("::");
+            }
+            s.push_str(part);
+        }
+        s.push_str("::");
+        s.push_str(leaf);
+        Atom::from(s)
+    }
+}
+
+fn extend_qualified(base: &Atom, leaf: &str) -> Atom {
+    let mut s = String::with_capacity(base.as_str().len() + 2 + leaf.len());
+    s.push_str(base.as_str());
+    s.push_str("::");
+    s.push_str(leaf);
+    Atom::from(s)
 }
 
 fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
@@ -70,6 +117,46 @@ fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
             ty: p.ty,
         })
         .collect()
+}
+
+struct PreAssignState<'a> {
+    pre_id: u32,
+    name_to_function: HashMap<Atom, FunctionId>,
+    struct_id_map: HashMap<TypeId, StructId>,
+    next_struct_id: u32,
+    seen_names: HashSet<Atom>,
+    ctx: &'a mut PassContext,
+}
+
+impl<'a> PreAssignState<'a> {
+    fn alloc_function_id(&mut self) -> FunctionId {
+        let id = FunctionId::from_raw(self.pre_id);
+        self.pre_id += 1;
+        id
+    }
+}
+
+struct ConvertState<'a> {
+    next_function_id: u32,
+    name_to_function: Arc<HashMap<Atom, FunctionId>>,
+    struct_id_map: HashMap<TypeId, StructId>,
+    next_struct_id: u32,
+    field_id_lookup: HashMap<(StructId, Atom), FieldId>,
+    types: &'a mut TypeTable,
+    ctx: &'a mut PassContext,
+    converted_names: HashSet<Atom>,
+}
+
+impl<'a> ConvertState<'a> {
+    fn alloc_function_id(&mut self) -> FunctionId {
+        let id = FunctionId::from_raw(self.next_function_id);
+        self.next_function_id += 1;
+        id
+    }
+
+    fn skip_function_id(&mut self) {
+        self.next_function_id += 1;
+    }
 }
 
 pub fn convert_program(
@@ -91,65 +178,146 @@ pub fn convert_program(
             alias: import.alias.clone(),
         });
     }
-    let mut next_function_id: u32 = 0;
-    let mut struct_id_map: HashMap<TypeId, StructId> = HashMap::new();
-    let mut next_struct_id: u32 = 0;
-    let mut name_to_function: HashMap<Atom, FunctionId> = HashMap::new();
-    let mut pre_id: u32 = 0;
-    for decl in &hir.declarations {
+    let mut pre_state = PreAssignState {
+        pre_id: 0,
+        name_to_function: HashMap::new(),
+        struct_id_map: HashMap::new(),
+        next_struct_id: 0,
+        seen_names: HashSet::new(),
+        ctx,
+    };
+    pre_assign_ids_recursive(&hir.declarations, &mut pre_state, &[]);
+    let mut field_id_lookup: HashMap<(StructId, Atom), FieldId> = HashMap::new();
+    collect_field_id_lookup_recursive(
+        &hir.declarations,
+        &pre_state.struct_id_map,
+        &mut field_id_lookup,
+    );
+    let PreAssignState {
+        pre_id: _,
+        name_to_function,
+        struct_id_map,
+        next_struct_id,
+        seen_names: _,
+        ctx,
+    } = pre_state;
+    let mut convert_state = ConvertState {
+        next_function_id: 0,
+        name_to_function: Arc::new(name_to_function),
+        struct_id_map,
+        next_struct_id,
+        field_id_lookup,
+        types,
+        ctx,
+        converted_names: HashSet::new(),
+    };
+    convert_decls_recursive(&hir.declarations, &mut mir, &mut convert_state, &[]);
+    debug_check_name_to_function(&mir, &convert_state.name_to_function);
+    mir
+}
+
+fn pre_assign_ids_recursive(
+    decls: &[HirDecl],
+    state: &mut PreAssignState,
+    namespace_path: &[String],
+) {
+    for decl in decls {
         match decl {
             HirDecl::Function(f) => {
-                let id = FunctionId::from_raw(pre_id);
-                name_to_function.insert(f.name.clone(), id);
-                pre_id += 1;
-            }
-            HirDecl::Class(c) => {
-                let sid = StructId::from_raw(next_struct_id);
-                next_struct_id += 1;
-                struct_id_map.insert(c.ty, sid);
-                for method in &c.methods {
-                    if method.params.is_empty() {
-                        continue;
-                    }
-                    let id = FunctionId::from_raw(pre_id);
-                    name_to_function.entry(method.name.clone()).or_insert(id);
-                    pre_id += 1;
+                let id = state.alloc_function_id();
+                let key = qualified_name(namespace_path, f.name.as_str());
+                if state.seen_names.contains(&key) {
+                    report_collision(state.ctx, &key);
+                } else {
+                    state.seen_names.insert(key.clone());
+                    state.name_to_function.insert(key, id);
                 }
             }
-            HirDecl::TypeAlias { .. }
-            | HirDecl::Interface { .. }
-            | HirDecl::Enum { .. }
-            | HirDecl::Global { .. }
-            | HirDecl::Namespace { .. } => {}
-        }
-    }
-    let mut field_id_lookup: HashMap<(StructId, Atom), FieldId> = HashMap::new();
-    for decl in &hir.declarations {
-        if let HirDecl::Class(c) = decl
-            && let Some(&sid) = struct_id_map.get(&c.ty)
-        {
-            for (i, f) in c.fields.iter().enumerate() {
-                field_id_lookup.insert((sid, f.name.clone()), FieldId::from_raw(i as u32));
+            HirDecl::Class(c) => {
+                let sid = StructId::from_raw(state.next_struct_id);
+                state.next_struct_id += 1;
+                let class_key = qualified_name(namespace_path, c.name.as_str());
+                if state.seen_names.contains(&class_key) {
+                    report_collision(state.ctx, &class_key);
+                } else {
+                    state.seen_names.insert(class_key.clone());
+                    state.struct_id_map.insert(c.ty, sid);
+                    for method in &c.methods {
+                        if method.params.is_empty() {
+                            continue;
+                        }
+                        let id = state.alloc_function_id();
+                        let method_key = extend_qualified(&class_key, method.name.as_str());
+                        if state.seen_names.contains(&method_key) {
+                            report_collision(state.ctx, &method_key);
+                        } else {
+                            state.seen_names.insert(method_key.clone());
+                            state.name_to_function.insert(method_key, id);
+                        }
+                    }
+                }
+            }
+            HirDecl::Namespace { name, members } => {
+                let mut child_path: Vec<String> = namespace_path.to_vec();
+                child_path.push(name.as_str().to_owned());
+                pre_assign_ids_recursive(members, state, &child_path);
+            }
+            HirDecl::TypeAlias { .. } | HirDecl::Interface { .. } | HirDecl::Enum { .. } => {}
+            HirDecl::Global { name, .. } => {
+                let key = qualified_name(namespace_path, name.as_str());
+                if state.seen_names.contains(&key) {
+                    report_collision(state.ctx, &key);
+                } else {
+                    state.seen_names.insert(key);
+                }
             }
         }
     }
-    let name_to_function = Arc::new(name_to_function);
-    for decl in &hir.declarations {
-        if let Some(mir_decl) = convert_decl(
-            decl,
-            &mut next_function_id,
-            &name_to_function,
-            &mut struct_id_map,
-            &mut next_struct_id,
-            &field_id_lookup,
-            types,
-            ctx,
-        ) {
+}
+
+fn collect_field_id_lookup_recursive(
+    decls: &[HirDecl],
+    struct_id_map: &HashMap<TypeId, StructId>,
+    field_id_lookup: &mut HashMap<(StructId, Atom), FieldId>,
+) {
+    for decl in decls {
+        match decl {
+            HirDecl::Class(c) => {
+                if let Some(&sid) = struct_id_map.get(&c.ty) {
+                    for (i, f) in c.fields.iter().enumerate() {
+                        field_id_lookup.insert((sid, f.name.clone()), FieldId::from_raw(i as u32));
+                    }
+                }
+            }
+            HirDecl::Namespace { members, .. } => {
+                collect_field_id_lookup_recursive(members, struct_id_map, field_id_lookup);
+            }
+            HirDecl::Function(_)
+            | HirDecl::TypeAlias { .. }
+            | HirDecl::Interface { .. }
+            | HirDecl::Enum { .. }
+            | HirDecl::Global { .. } => {}
+        }
+    }
+}
+
+fn convert_decls_recursive(
+    decls: &[HirDecl],
+    mir: &mut MirProgram,
+    state: &mut ConvertState,
+    namespace_path: &[String],
+) {
+    for decl in decls {
+        if let HirDecl::Namespace { name, members } = decl {
+            let mut child_path: Vec<String> = namespace_path.to_vec();
+            child_path.push(name.as_str().to_owned());
+            convert_decls_recursive(members, mir, state, &child_path);
+            continue;
+        }
+        if let Some(mir_decl) = convert_decl(decl, state, namespace_path) {
             mir.push_decl(mir_decl);
         }
     }
-    debug_check_name_to_function(&mir, &name_to_function);
-    mir
 }
 
 #[cfg(debug_assertions)]
@@ -185,52 +353,58 @@ fn debug_check_name_to_function(
 }
 fn convert_decl(
     decl: &HirDecl,
-    next_function_id: &mut u32,
-    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
-    struct_id_map: &mut HashMap<TypeId, StructId>,
-    next_struct_id: &mut u32,
-    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
+    state: &mut ConvertState,
+    namespace_path: &[String],
 ) -> Option<MirDecl> {
     match decl {
         HirDecl::Function(f) => {
-            let id = FunctionId::from_raw(*next_function_id);
-            *next_function_id += 1;
+            let mir_name = qualified_name(namespace_path, f.name.as_str());
+            if state.converted_names.contains(&mir_name) {
+                state.skip_function_id();
+                return None;
+            }
+            state.converted_names.insert(mir_name.clone());
+            let id = state.alloc_function_id();
             let export_name = if f.is_exported {
-                Some(f.name.as_str().to_owned())
+                Some(mir_name.as_str().to_owned())
             } else {
                 None
             };
-            Some(MirDecl::Function(convert_function(
+            let mut mir_fn = convert_function(
                 f,
                 id,
                 export_name,
                 HashMap::new(),
-                name_to_function,
-                struct_id_map,
-                next_struct_id,
-                field_id_lookup,
-                types,
-                ctx,
-            )))
+                &state.name_to_function,
+                &mut state.struct_id_map,
+                &mut state.next_struct_id,
+                &state.field_id_lookup,
+                state.types,
+                state.ctx,
+                namespace_path,
+            );
+            mir_fn.name = mir_name;
+            Some(MirDecl::Function(mir_fn))
         }
-        HirDecl::Class(c) => Some(MirDecl::Struct(convert_struct(
-            c,
-            next_function_id,
-            name_to_function,
-            struct_id_map,
-            next_struct_id,
-            field_id_lookup,
-            types,
-            ctx,
-        ))),
+        HirDecl::Class(c) => {
+            let class_name = qualified_name(namespace_path, c.name.as_str());
+            if state.converted_names.contains(&class_name) {
+                return None;
+            }
+            state.converted_names.insert(class_name);
+            Some(MirDecl::Struct(convert_struct(c, state, namespace_path)))
+        }
         HirDecl::TypeAlias { .. } | HirDecl::Interface { .. } => None,
         HirDecl::Enum { .. } => None,
         HirDecl::Global { name, ty, init } => {
-            let mir_init = init.as_ref().and_then(|e| lower_global_init(e, ctx));
+            let mir_name = qualified_name(namespace_path, name.as_str());
+            if state.converted_names.contains(&mir_name) {
+                return None;
+            }
+            state.converted_names.insert(mir_name.clone());
+            let mir_init = init.as_ref().and_then(|e| lower_global_init(e, state.ctx));
             Some(MirDecl::Global(MirGlobalDecl {
-                name: name.clone(),
+                name: mir_name,
                 ty: *ty,
                 mutable: false,
                 visibility: Visibility::Public,
@@ -243,15 +417,10 @@ fn convert_decl(
 }
 fn convert_struct(
     c: &HirClass,
-    next_function_id: &mut u32,
-    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
-    struct_id_map: &mut HashMap<TypeId, StructId>,
-    next_struct_id: &mut u32,
-    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
+    state: &mut ConvertState,
+    namespace_path: &[String],
 ) -> MirStructDecl {
-    let sid = struct_id_map[&c.ty];
+    let sid = state.struct_id_map[&c.ty];
     let fields: Vec<MirFieldDecl> = c
         .fields
         .iter()
@@ -264,15 +433,21 @@ fn convert_struct(
             visibility: Visibility::Public,
         })
         .collect();
+    let class_qualified = qualified_name(namespace_path, c.name.as_str());
     let mut methods = Vec::new();
     for method in &c.methods {
         if method.params.is_empty() {
             continue;
         }
-        let id = FunctionId::from_raw(*next_function_id);
-        *next_function_id += 1;
+        let method_qualified = extend_qualified(&class_qualified, method.name.as_str());
+        if state.converted_names.contains(&method_qualified) {
+            state.skip_function_id();
+            continue;
+        }
+        state.converted_names.insert(method_qualified.clone());
+        let id = state.alloc_function_id();
         let export_name = if method.is_exported {
-            Some(method.name.as_str().to_owned())
+            Some(method_qualified.as_str().to_owned())
         } else {
             None
         };
@@ -284,23 +459,32 @@ fn convert_struct(
             id,
             export_name,
             method_remap,
-            name_to_function,
-            struct_id_map,
-            next_struct_id,
-            field_id_lookup,
-            types,
-            ctx,
+            &state.name_to_function,
+            &mut state.struct_id_map,
+            &mut state.next_struct_id,
+            &state.field_id_lookup,
+            state.types,
+            state.ctx,
+            namespace_path,
         );
         let mut m = m;
-        m.kind = FunctionKind::Method {
-            owner: sid,
-            self_param,
+        m.name = method_qualified;
+        m.kind = if method.is_generator {
+            FunctionKind::GeneratorMethod {
+                owner: sid,
+                self_param,
+            }
+        } else {
+            FunctionKind::Method {
+                owner: sid,
+                self_param,
+            }
         };
         methods.push(m);
     }
     MirStructDecl {
         id: sid,
-        name: c.name.clone(),
+        name: class_qualified,
         fields,
         methods,
     }

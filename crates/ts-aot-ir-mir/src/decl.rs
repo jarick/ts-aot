@@ -31,6 +31,11 @@ pub enum FunctionKind {
         owner: StructId,
     },
     RuntimeShim,
+    Generator,
+    GeneratorMethod {
+        owner: StructId,
+        self_param: LocalId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -136,10 +141,39 @@ mod tests {
         };
         let closure = FunctionKind::Closure;
         let shim = FunctionKind::RuntimeShim;
+        let generator = FunctionKind::Generator;
+        let generator_method = FunctionKind::GeneratorMethod {
+            owner: StructId::from_raw(0),
+            self_param: LocalId::from_raw(1),
+        };
         assert_ne!(plain, method);
         assert_ne!(method, ctor);
         assert_ne!(closure, plain);
         assert_ne!(shim, plain);
+        assert_ne!(generator, plain);
+        assert_ne!(generator_method, plain);
+        assert_ne!(generator_method, method);
+        assert_ne!(generator_method, generator);
+    }
+
+    #[test]
+    fn generator_method_kind_preserves_owner_and_self_param() {
+        let owner = StructId::from_raw(42);
+        let self_param = LocalId::from_raw(7);
+        let k = FunctionKind::GeneratorMethod { owner, self_param };
+        match k {
+            FunctionKind::GeneratorMethod {
+                owner: o,
+                self_param: s,
+            } => {
+                assert_eq!(o, owner, "GeneratorMethod must preserve owner StructId");
+                assert_eq!(
+                    s, self_param,
+                    "GeneratorMethod must preserve self_param LocalId"
+                );
+            }
+            _ => panic!("expected FunctionKind::GeneratorMethod"),
+        }
     }
 
     #[test]

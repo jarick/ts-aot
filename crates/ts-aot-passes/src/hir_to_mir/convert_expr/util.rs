@@ -35,6 +35,7 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::OptionalChain { ty, .. }
         | MirExpr::IndirectCall { ty, .. }
         | MirExpr::TypeOf { ty, .. }
+        | MirExpr::Cast { ty, .. }
         | MirExpr::TemplateStringsArray { ty, .. }
         | MirExpr::RegExp { ty, .. }
         | MirExpr::BigInt { ty, .. }

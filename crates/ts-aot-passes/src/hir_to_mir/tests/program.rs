@@ -686,3 +686,547 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
         cx.diagnostics()
     );
 }
+
+#[test]
+fn convert_program_emits_function_inside_namespace() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("outer"),
+        members: vec![HirDecl::Function(HirFunction {
+            name: Atom::new_inline("nested_fn"),
+            params: Vec::new(),
+            ret: unit_ty(),
+            throws: None,
+            body: vec![HirStmt::Return { value: None }],
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            type_params: Vec::new(),
+            async_info: None,
+        })],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let names: Vec<_> = mir
+        .functions()
+        .map(|f| f.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "outer::nested_fn"),
+        "function inside namespace must be emitted with qualified name in MIR, got functions: {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n == "nested_fn"),
+        "bare name must not be emitted for namespace-contained function, got: {:?}",
+        names
+    );
+    assert_eq!(
+        names.len(),
+        1,
+        "only the namespace-contained function should be emitted, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn convert_program_qualifies_nested_namespaces() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns1"),
+        members: vec![HirDecl::Namespace {
+            name: Atom::new_inline("ns2"),
+            members: vec![HirDecl::Function(HirFunction {
+                name: Atom::new_inline("deep_fn"),
+                params: Vec::new(),
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            })],
+        }],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let names: Vec<_> = mir
+        .functions()
+        .map(|f| f.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "ns1::ns2::deep_fn"),
+        "nested-namespace function must be emitted with full qualified name, got: {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n == "ns2::deep_fn"),
+        "ns2::deep_fn must NOT be emitted — qualified_name must produce the full path from root, not just the parent namespace, got: {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n == "deep_fn"),
+        "deep_fn must NOT be emitted bare — namespace functions must always be qualified, got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn convert_namespace_scoped_global_call_resolves_to_qualified_name() {
+    let i64_ty = TypeId::from_raw(0);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("outer"),
+        members: vec![
+            HirDecl::Function(HirFunction {
+                name: Atom::new_inline("g"),
+                params: Vec::new(),
+                ret: i64_ty,
+                throws: None,
+                body: vec![HirStmt::Expr {
+                    expr: HirExpr::Int(42, Span::default()),
+                }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            }),
+            HirDecl::Function(HirFunction {
+                name: Atom::new_inline("main"),
+                params: Vec::new(),
+                ret: i64_ty,
+                throws: None,
+                body: vec![HirStmt::Return {
+                    value: Some(HirExpr::Call {
+                        callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                            name: Atom::new_inline("g"),
+                            ty: i64_ty,
+
+                            span: Span::default(),
+                        })),
+                        args: Vec::new(),
+                        ty: i64_ty,
+                        type_args: vec![],
+
+                        span: Span::default(),
+                    }),
+                }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            }),
+        ],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let p0005: Vec<_> = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "P0005")
+        .collect();
+    assert!(
+        p0005.is_empty(),
+        "indirect call to namespace-scoped `outer.g()` from inside the namespace must NOT \
+         emit P0005 (placeholder-resolution warning); got {} diagnostics: {:?}",
+        p0005.len(),
+        p0005
+    );
+    let functions: Vec<_> = mir.functions().collect();
+    let outer_g = functions
+        .iter()
+        .find(|f| f.name == Atom::new_inline("outer::g"))
+        .expect("MIR must contain function `outer::g` with the namespace-qualified name");
+    let outer_g_id = outer_g.id;
+    let outer_main = functions
+        .iter()
+        .find(|f| f.name == Atom::new_inline("outer::main"))
+        .expect("MIR must contain function `outer::main` with the namespace-qualified name");
+    let main_stmt = outer_main
+        .body
+        .block
+        .stmts
+        .first()
+        .expect("main has at least one stmt");
+    let MirStmt::Return(Some(MirExpr::Call { callee, .. })) = main_stmt else {
+        panic!("expected MirStmt::Return(Some(MirExpr::Call {{..}})), got {main_stmt:?}");
+    };
+    assert_eq!(
+        *callee, outer_g_id,
+        "namespace-scoped indirect call `outer.g()` from `outer.main` must resolve to \
+         FunctionId of `outer::g` (qualified), not a bare `g` lookup. \
+         bare-name `g` is not in the name_to_function map (only `outer::g` is), so a \
+         bare lookup would have produced PLACEHOLDER_FUNCTION; the qualified lookup must win."
+    );
+    let bare_g: Vec<_> = functions
+        .iter()
+        .filter(|f| f.name == Atom::new_inline("g"))
+        .collect();
+    assert!(
+        bare_g.is_empty(),
+        "no bare `g` function should be emitted; the only MIR function for `g` is `outer::g`. \
+         found: {bare_g:?}"
+    );
+}
+
+#[test]
+fn convert_program_emits_collision_diagnostic_for_namespace_path_collision() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("a"),
+        members: vec![HirDecl::Namespace {
+            name: Atom::new_inline("b"),
+            members: vec![HirDecl::Function(HirFunction {
+                name: Atom::new_inline("c"),
+                params: Vec::new(),
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            })],
+        }],
+    });
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("a::b"),
+        members: vec![HirDecl::Function(HirFunction {
+            name: Atom::new_inline("c"),
+            params: Vec::new(),
+            ret: unit_ty(),
+            throws: None,
+            body: vec![HirStmt::Return { value: None }],
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            type_params: Vec::new(),
+            async_info: None,
+        })],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let e0503: Vec<_> = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == ts_aot_core::Severity::Error && d.code.as_str() == "E0503")
+        .collect();
+    assert_eq!(
+        e0503.len(),
+        1,
+        "expected exactly one E0503 collision diagnostic, got diagnostics: {:?}",
+        cx.diagnostics()
+    );
+    let d = e0503[0];
+    assert!(
+        d.message.contains("a::b::c"),
+        "E0503 must include the colliding qualified name `a::b::c`, got: {:?}",
+        d.message
+    );
+    assert!(
+        d.message.contains("namespace path collision"),
+        "E0503 must identify the failure mode, got: {:?}",
+        d.message
+    );
+    assert!(
+        d.message.contains("rename"),
+        "E0503 must suggest renaming a namespace, got: {:?}",
+        d.message
+    );
+    let functions: Vec<_> = mir.functions().collect();
+    let names: Vec<String> = functions
+        .iter()
+        .map(|f| f.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "a::b::c"),
+        "the non-colliding first declaration must be emitted with qualified name `a::b::c`, got: {:?}",
+        names
+    );
+    assert_eq!(
+        functions.len(),
+        1,
+        "exactly one function must be emitted (the colliding one is skipped), got: {:?}",
+        names
+    );
+}
+
+#[test]
+fn convert_program_emits_collision_diagnostic_for_two_functions_in_namespace() {
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns"),
+        members: vec![
+            HirDecl::Function(HirFunction {
+                name: Atom::new_inline("f"),
+                params: Vec::new(),
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            }),
+            HirDecl::Function(HirFunction {
+                name: Atom::new_inline("f"),
+                params: Vec::new(),
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            }),
+        ],
+    });
+    let mut cx = ctx();
+    let _mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let e0503: Vec<_> = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == ts_aot_core::Severity::Error && d.code.as_str() == "E0503")
+        .collect();
+    assert_eq!(
+        e0503.len(),
+        1,
+        "expected exactly one E0503 collision diagnostic for two same-name functions in the same namespace, got diagnostics: {:?}",
+        cx.diagnostics()
+    );
+    let d = e0503[0];
+    assert!(
+        d.message.contains("ns::f"),
+        "E0503 must include the colliding qualified name `ns::f`, got: {:?}",
+        d.message
+    );
+    assert!(
+        d.message.contains("namespace path collision"),
+        "E0503 must identify the failure mode, got: {:?}",
+        d.message
+    );
+    assert!(
+        d.message.contains("rename"),
+        "E0503 must suggest renaming one of the colliding declarations, got: {:?}",
+        d.message
+    );
+}
+
+#[test]
+fn convert_program_resolves_ancestor_namespace_function_from_descendant() {
+    let i64_ty = TypeId::from_raw(0);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns1"),
+        members: vec![
+            HirDecl::Function(HirFunction {
+                name: Atom::new_inline("foo"),
+                params: Vec::new(),
+                ret: i64_ty,
+                throws: None,
+                body: vec![HirStmt::Expr {
+                    expr: HirExpr::Int(42, Span::default()),
+                }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            }),
+            HirDecl::Namespace {
+                name: Atom::new_inline("ns2"),
+                members: vec![HirDecl::Function(HirFunction {
+                    name: Atom::new_inline("caller"),
+                    params: Vec::new(),
+                    ret: i64_ty,
+                    throws: None,
+                    body: vec![HirStmt::Return {
+                        value: Some(HirExpr::Call {
+                            callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                                name: Atom::new_inline("foo"),
+                                ty: i64_ty,
+                                span: Span::default(),
+                            })),
+                            args: Vec::new(),
+                            ty: i64_ty,
+                            type_args: vec![],
+                            span: Span::default(),
+                        }),
+                    }],
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    type_params: Vec::new(),
+                    async_info: None,
+                })],
+            },
+        ],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let p0005: Vec<_> = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "P0005")
+        .collect();
+    assert!(
+        p0005.is_empty(),
+        "indirect call to ancestor-namespace `foo()` from `ns1::ns2::caller` must NOT emit \
+         P0005 (placeholder-resolution warning); the outward namespace probe must locate \
+         `ns1::foo`. Got {} diagnostics: {:?}",
+        p0005.len(),
+        p0005
+    );
+    let functions: Vec<_> = mir.functions().collect();
+    let foo = functions
+        .iter()
+        .find(|f| f.name == Atom::new_inline("ns1::foo"))
+        .expect("MIR must contain function `ns1::foo` with the namespace-qualified name");
+    let foo_id = foo.id;
+    let caller = functions
+        .iter()
+        .find(|f| f.name == Atom::new_inline("ns1::ns2::caller"))
+        .expect("MIR must contain function `ns1::ns2::caller` with the namespace-qualified name");
+    let stmt = caller
+        .body
+        .block
+        .stmts
+        .first()
+        .expect("caller has at least one stmt");
+    let MirStmt::Return(Some(MirExpr::Call { callee, .. })) = stmt else {
+        panic!("expected MirStmt::Return(Some(MirExpr::Call {{..}})), got {stmt:?}");
+    };
+    assert_eq!(
+        *callee, foo_id,
+        "bare-name `foo()` called from `ns1::ns2::caller` (namespace_path=[ns1,ns2]) must \
+         resolve to FunctionId of `ns1::foo` via the outward ancestor probe at depth=1. \
+         Without the fix, only the full-qualified `ns1::ns2::foo` (not in name_to_function) \
+         and the bare `foo` (not in name_to_function, only `ns1::foo` is) are probed, so the \
+         call would fall through to PLACEHOLDER_FUNCTION. Got callee={callee:?}, expected={foo_id:?}"
+    );
+}
+
+#[test]
+fn convert_program_methods_of_different_classes_do_not_collide() {
+    use ts_aot_ir_hir::{HirClass, HirParam};
+    let class_a_ty = TypeId::from_raw(200);
+    let class_b_ty = TypeId::from_raw(201);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns"),
+        members: vec![
+            HirDecl::Class(HirClass {
+                name: Atom::new_inline("A"),
+                ty: class_a_ty,
+                fields: Vec::new(),
+                methods: vec![HirFunction {
+                    name: Atom::new_inline("foo"),
+                    params: vec![HirParam {
+                        name: Atom::new_inline("self"),
+                        ty: class_a_ty,
+                    }],
+                    ret: unit_ty(),
+                    throws: None,
+                    body: vec![HirStmt::Return { value: None }],
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    type_params: Vec::new(),
+                    async_info: None,
+                }],
+                extends: None,
+                type_params: Vec::new(),
+            }),
+            HirDecl::Class(HirClass {
+                name: Atom::new_inline("B"),
+                ty: class_b_ty,
+                fields: Vec::new(),
+                methods: vec![HirFunction {
+                    name: Atom::new_inline("foo"),
+                    params: vec![HirParam {
+                        name: Atom::new_inline("self"),
+                        ty: class_b_ty,
+                    }],
+                    ret: unit_ty(),
+                    throws: None,
+                    body: vec![HirStmt::Return { value: None }],
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    type_params: Vec::new(),
+                    async_info: None,
+                }],
+                extends: None,
+                type_params: Vec::new(),
+            }),
+        ],
+    });
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let e0503: Vec<_> = cx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code.as_str() == "E0503")
+        .collect();
+    assert!(
+        e0503.is_empty(),
+        "two classes A and B in the same namespace `ns`, each with method `foo`, must NOT \
+         produce an E0503 collision; the method key must include the owning class name. \
+         Got {} diagnostics: {:?}",
+        e0503.len(),
+        e0503
+    );
+    let structs: Vec<_> = mir.structs().collect();
+    assert_eq!(
+        structs.len(),
+        2,
+        "expected two structs A and B, got: {:?}",
+        structs
+            .iter()
+            .map(|s| s.name.as_str().to_owned())
+            .collect::<Vec<_>>()
+    );
+    let struct_a = structs
+        .iter()
+        .find(|s| s.name == Atom::new_inline("ns::A"))
+        .expect("MIR must contain struct `ns::A`");
+    let struct_b = structs
+        .iter()
+        .find(|s| s.name == Atom::new_inline("ns::B"))
+        .expect("MIR must contain struct `ns::B`");
+    assert_eq!(
+        struct_a.methods.len(),
+        1,
+        "class A must emit its `foo` method to MIR"
+    );
+    assert_eq!(
+        struct_b.methods.len(),
+        1,
+        "class B must emit its `foo` method to MIR (pre-fix bug: B's foo was skipped because \
+         method_key `ns::foo` collided with A's foo)"
+    );
+    let a_foo_id = struct_a.methods[0].id;
+    let b_foo_id = struct_b.methods[0].id;
+    assert_ne!(
+        a_foo_id, b_foo_id,
+        "A::foo and B::foo must have distinct FunctionIds; got A::foo={a_foo_id:?}, \
+         B::foo={b_foo_id:?}. Pre-fix, both mapped to `ns::foo` and the second was dropped."
+    );
+    let a_foo_name = struct_a.methods[0].name.as_str();
+    let b_foo_name = struct_b.methods[0].name.as_str();
+    assert_eq!(
+        a_foo_name, "ns::A::foo",
+        "A's foo method must be named `ns::A::foo` (owning class included), got `{a_foo_name}`"
+    );
+    assert_eq!(
+        b_foo_name, "ns::B::foo",
+        "B's foo method must be named `ns::B::foo` (owning class included), got `{b_foo_name}`"
+    );
+}

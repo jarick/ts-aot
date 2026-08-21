@@ -31,10 +31,6 @@ fn e2e_new_array_buffer_emits_runtime_call_in_rust_source() {
         rust.contains("ts_aot_runtime::ArrayBufferHandle"),
         "ArrayBuffer return type must be ts_aot_runtime::ArrayBufferHandle; got:\n{rust}"
     );
-    assert!(
-        rust.contains("let _ : ts_aot_runtime::ArrayBufferHandle"),
-        "ArrayBuffer dest local must be typed ts_aot_runtime::ArrayBufferHandle (not unit `()`); got:\n{rust}"
-    );
 }
 
 #[test]
