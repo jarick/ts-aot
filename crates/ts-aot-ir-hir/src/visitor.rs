@@ -73,7 +73,9 @@ pub fn walk_stmt<V: Visitor + ?Sized>(v: &mut V, stmt: &HirStmt) {
             v.visit_stmt(body);
             v.visit_expr(cond);
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             v.visit_expr(iter);
             v.visit_stmt(body);
         }
@@ -238,7 +240,9 @@ pub fn walk_stmt_mut<V: VisitorMut + ?Sized>(v: &mut V, stmt: &mut HirStmt) {
             v.visit_stmt_mut(body);
             v.visit_expr_mut(cond);
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             v.visit_expr_mut(iter);
             v.visit_stmt_mut(body);
         }
@@ -420,7 +424,9 @@ mod tests {
             HirStmt::If { cond, .. } => cond.span(),
             HirStmt::While { cond, .. } => cond.span(),
             HirStmt::DoWhile { body, .. } => stmt_first_span(body),
-            HirStmt::ForOf { iter, .. } | HirStmt::ForIn { iter, .. } => iter.span(),
+            HirStmt::ForOf { iter, .. }
+            | HirStmt::ForAwaitOf { iter, .. }
+            | HirStmt::ForIn { iter, .. } => iter.span(),
             HirStmt::Switch { disc, .. } => disc.span(),
             HirStmt::Return { value: Some(e), .. } => e.span(),
             HirStmt::Throw { expr } => expr.span(),
@@ -776,7 +782,9 @@ mod tests {
                 count_ints_in_expr_mut(cond, count);
                 count_ints_mut(body, count);
             }
-            HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+            HirStmt::ForOf { iter, body, .. }
+            | HirStmt::ForAwaitOf { iter, body, .. }
+            | HirStmt::ForIn { iter, body, .. } => {
                 count_ints_in_expr_mut(iter, count);
                 count_ints_mut(body, count);
             }

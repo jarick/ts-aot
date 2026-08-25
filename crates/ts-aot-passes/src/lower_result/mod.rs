@@ -73,6 +73,7 @@ fn rewrite_stmt(stmt: &mut MirStmt, result_ty: TypeId, err_ty: TypeId) {
         MirStmt::While { body, .. }
         | MirStmt::DoWhile { body, .. }
         | MirStmt::ForOf { body, .. }
+        | MirStmt::ForAwaitOf { body, .. }
         | MirStmt::ForIn { body, .. } => rewrite_block(body, result_ty, err_ty),
         MirStmt::Switch { cases, default, .. } => {
             for case in cases {

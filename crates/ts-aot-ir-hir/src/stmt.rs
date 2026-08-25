@@ -49,6 +49,11 @@ pub enum HirStmt {
         iter: HirExpr,
         body: Box<HirStmt>,
     },
+    ForAwaitOf {
+        binding: LocalId,
+        iter: HirExpr,
+        body: Box<HirStmt>,
+    },
     ForIn {
         binding: LocalId,
         iter: HirExpr,
@@ -130,6 +135,7 @@ impl HirStmt {
             Self::DoWhile { body, .. } => body.completion(),
             Self::While { .. }
             | Self::ForOf { .. }
+            | Self::ForAwaitOf { .. }
             | Self::ForIn { .. }
             | Self::Let { .. }
             | Self::Expr { .. }

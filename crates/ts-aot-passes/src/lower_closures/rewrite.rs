@@ -40,7 +40,9 @@ pub(super) fn rewrite_in_stmt(
             rewrite_in_expr(cond, closure_names, ctx);
             rewrite_in_stmt(body, closure_names, ctx);
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             rewrite_in_expr(iter, closure_names, ctx);
             rewrite_in_stmt(body, closure_names, ctx);
         }

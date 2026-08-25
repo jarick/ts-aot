@@ -89,6 +89,19 @@ pub(crate) fn dump_stmt(stmt: &HirStmt, d: &mut Dumper) {
             d.pop();
             d.line("}");
         }
+        HirStmt::ForAwaitOf {
+            binding,
+            iter,
+            body,
+        } => {
+            d.write(&format!("for_await_of (id={}) in ", binding.raw()));
+            dump_expr_inline(iter, d);
+            d.write(" {\n");
+            d.push();
+            dump_stmt(body, d);
+            d.pop();
+            d.line("}");
+        }
         HirStmt::ForIn {
             binding,
             iter,
@@ -659,6 +672,17 @@ mod tests {
         };
         let text = dump(vec![s]);
         assert!(text.contains("for_of (id=1) in"));
+    }
+
+    #[test]
+    fn dump_for_await_of_stmt() {
+        let s = HirStmt::ForAwaitOf {
+            binding: LocalId::from_raw(3),
+            iter: HirExpr::Unit(Span::default()),
+            body: Box::new(HirStmt::expr(HirExpr::Unit(Span::default()))),
+        };
+        let text = dump(vec![s]);
+        assert!(text.contains("for_await_of (id=3) in"));
     }
 
     #[test]

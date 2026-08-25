@@ -61,7 +61,9 @@ fn rewrite_stmt(stmt: &mut HirStmt, map: &HashMap<(Atom, Atom), Atom>) {
             rewrite_expr(cond, map);
             rewrite_stmt(body, map);
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             rewrite_expr(iter, map);
             rewrite_stmt(body, map);
         }

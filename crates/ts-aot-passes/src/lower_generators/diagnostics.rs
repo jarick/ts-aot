@@ -154,7 +154,9 @@ pub(super) fn first_body_span(body: &[HirStmt]) -> Option<Span> {
             HirStmt::If { cond, .. } => Some(cond.span()),
             HirStmt::While { cond, .. } => Some(cond.span()),
             HirStmt::DoWhile { body, cond } => stmt_span(body).or_else(|| Some(cond.span())),
-            HirStmt::ForOf { iter, .. } | HirStmt::ForIn { iter, .. } => Some(iter.span()),
+            HirStmt::ForOf { iter, .. }
+            | HirStmt::ForAwaitOf { iter, .. }
+            | HirStmt::ForIn { iter, .. } => Some(iter.span()),
             HirStmt::Switch { disc, .. } => Some(disc.span()),
             HirStmt::Return {
                 value: Some(value), ..

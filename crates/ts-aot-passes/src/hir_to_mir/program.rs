@@ -674,9 +674,9 @@ fn body_can_throw(body: &[HirStmt]) -> bool {
             HirStmt::While { cond, body } | HirStmt::DoWhile { body, cond } => {
                 expr_can_throw(cond) || stmt_can_throw(body)
             }
-            HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
-                expr_can_throw(iter) || stmt_can_throw(body)
-            }
+            HirStmt::ForOf { iter, body, .. }
+            | HirStmt::ForAwaitOf { iter, body, .. }
+            | HirStmt::ForIn { iter, body, .. } => expr_can_throw(iter) || stmt_can_throw(body),
             HirStmt::Switch { disc, cases } => {
                 expr_can_throw(disc) || cases.iter().any(switch_case_can_throw)
             }
@@ -717,7 +717,9 @@ fn body_throws_type(body: &[HirStmt]) -> Option<TypeId> {
                 then, otherwise, ..
             } => check(then).or_else(|| otherwise.as_deref().and_then(check)),
             HirStmt::While { body, .. } | HirStmt::DoWhile { body, .. } => check(body),
-            HirStmt::ForOf { body, .. } | HirStmt::ForIn { body, .. } => check(body),
+            HirStmt::ForOf { body, .. }
+            | HirStmt::ForAwaitOf { body, .. }
+            | HirStmt::ForIn { body, .. } => check(body),
             HirStmt::Block(stmts) => stmts.iter().find_map(check),
             HirStmt::Try { body, .. } => check(body),
             HirStmt::Switch { cases, .. } => {

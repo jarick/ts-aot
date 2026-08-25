@@ -61,7 +61,7 @@ fn collect_call_callees_in_block(b: &MirBlock, out: &mut Vec<FunctionId>) {
                 collect_in_expr(cond, out);
                 collect_call_callees_in_block(body, out);
             }
-            MirStmt::ForOf { iterable, body, .. } => {
+            MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
                 collect_in_expr(iterable, out);
                 collect_call_callees_in_block(body, out);
             }

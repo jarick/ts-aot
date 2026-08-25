@@ -53,6 +53,15 @@ pub fn substitute_stmt(
             iter: substitute_expr(iter, mapping, types, result),
             body: Box::new(substitute_stmt(body, mapping, types, result)),
         },
+        HirStmt::ForAwaitOf {
+            binding,
+            iter,
+            body,
+        } => HirStmt::ForAwaitOf {
+            binding: *binding,
+            iter: substitute_expr(iter, mapping, types, result),
+            body: Box::new(substitute_stmt(body, mapping, types, result)),
+        },
         HirStmt::ForIn {
             binding,
             iter,

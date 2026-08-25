@@ -148,6 +148,22 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
             d.pop();
             d.line("}");
         }
+        MirStmt::ForAwaitOf {
+            item,
+            iterable,
+            iter_ty,
+            body,
+        } => {
+            d.write(&format!("for_await {} of (", item.raw()));
+            dump_expr_inline(iterable, d);
+            d.write(&format!("):T#{} {{\n", iter_ty.raw()));
+            d.push();
+            for s in &body.stmts {
+                dump_stmt(s, d);
+            }
+            d.pop();
+            d.line("}");
+        }
         MirStmt::ForIn { key, object, body } => {
             d.write(&format!("for {} in ", key.raw()));
             dump_expr_inline(object, d);

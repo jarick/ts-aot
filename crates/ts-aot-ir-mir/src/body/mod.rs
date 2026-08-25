@@ -86,6 +86,12 @@ pub enum MirStmt {
         iter_ty: TypeId,
         body: MirBlock,
     },
+    ForAwaitOf {
+        item: LocalId,
+        iterable: MirExpr,
+        iter_ty: TypeId,
+        body: MirBlock,
+    },
     ForIn {
         key: LocalId,
         object: MirExpr,
