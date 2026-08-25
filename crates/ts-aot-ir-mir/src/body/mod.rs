@@ -83,6 +83,7 @@ pub enum MirStmt {
     ForOf {
         item: LocalId,
         iterable: MirExpr,
+        iter_ty: TypeId,
         body: MirBlock,
     },
     ForIn {
@@ -301,6 +302,10 @@ pub enum MirExpr {
         expr: Box<MirExpr>,
         ty: TypeId,
     },
+    Cast {
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
     TemplateStringsArray {
         cooked: Vec<Atom>,
         ty: TypeId,
@@ -342,6 +347,7 @@ impl MirExpr {
             | MirExpr::Yield { ty, .. }
             | MirExpr::OptionalChain { ty, .. }
             | MirExpr::TypeOf { ty, .. }
+            | MirExpr::Cast { ty, .. }
             | MirExpr::TemplateStringsArray { ty, .. }
             | MirExpr::RegExp { ty, .. }
             | MirExpr::BigInt { ty, .. }
@@ -431,6 +437,7 @@ pub enum RuntimeOp {
     ArrayGetOrDefault,
     ArrayConcat,
     ArrayHole,
+    GeneratorNext,
 }
 
 #[cfg(test)]

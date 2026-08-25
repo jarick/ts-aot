@@ -123,6 +123,7 @@ fn throw_in_for_of_body_is_rewritten() {
     f.body.block = MirBlock::with(MirStmt::ForOf {
         item: LocalId::from_raw(0),
         iterable: MirExpr::Local(LocalId::from_raw(1)),
+        iter_ty: TypeId::from_raw(0),
         body: MirBlock::with(throw_stmt()),
     });
     let mut program = MirProgram::new(ts_aot_core::ModuleId::from_raw(0));

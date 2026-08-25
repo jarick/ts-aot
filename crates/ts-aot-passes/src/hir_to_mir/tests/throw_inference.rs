@@ -49,6 +49,7 @@ fn body_can_throw_propagates_through_struct_literal_fields() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -81,6 +82,7 @@ fn body_can_throw_stays_false_for_plain_struct_literal() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         !mir.effects.can_throw,
@@ -131,6 +133,7 @@ fn body_can_throw_propagates_through_assignment_target() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -188,6 +191,7 @@ fn body_can_throw_propagates_through_assignment_target_index() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -233,6 +237,7 @@ fn body_can_throw_propagates_through_if_condition_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -283,6 +288,7 @@ fn body_can_throw_propagates_through_ternary_branches() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -327,6 +333,7 @@ fn body_can_throw_propagates_through_while_condition_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -372,6 +379,7 @@ fn body_can_throw_propagates_through_for_of_iter_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -419,6 +427,7 @@ fn body_can_throw_propagates_through_switch_discriminant_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -467,6 +476,7 @@ fn body_can_throw_propagates_through_catch_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -512,6 +522,7 @@ fn body_can_throw_propagates_through_finally_call() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -552,6 +563,7 @@ fn body_can_throw_await_alone_is_throwing() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -598,6 +610,7 @@ fn body_can_throw_new_alone_is_throwing() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -638,6 +651,7 @@ fn body_can_throw_yield_alone_is_throwing() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -680,6 +694,7 @@ fn infer_throws_is_none_for_call_only_function() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(
         mir.effects.can_throw,
@@ -730,6 +745,7 @@ fn infer_throws_is_none_for_if_with_throwing_cond_only() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert!(mir.effects.can_throw);
     assert!(
@@ -772,6 +788,7 @@ fn infer_throws_uses_real_source_when_throwing_typed_expr() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert_eq!(
         mir.throws,
@@ -837,6 +854,7 @@ fn infer_throws_respects_declared_over_inferred() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert_eq!(
         mir.throws,
@@ -860,6 +878,7 @@ fn infer_throws_uses_sentinel_for_primitive_thrown_expr() {
         &empty_field_id_lookup(),
         &mut empty_types(),
         &mut cx,
+        &[],
     );
     assert_eq!(
         mir.throws,

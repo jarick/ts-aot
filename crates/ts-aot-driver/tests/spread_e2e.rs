@@ -52,10 +52,20 @@ fn e2e_array_spread_with_multiple_sources_preserves_operand_sequence() {
     let inner = &after[..inner_end];
     let inner = inner.trim_start().trim_start_matches('[').trim_start();
     let operands: Vec<&str> = inner.split(", ").collect();
+    let named_temps: Vec<&str> = operands
+        .iter()
+        .map(|op| {
+            if op.starts_with("__tmp") {
+                "__tmp"
+            } else {
+                *op
+            }
+        })
+        .collect();
     assert_eq!(
-        operands,
-        vec!["_", "a", "_", "b", "_"],
-        "[0, ...a, 1, ...b, 2] must lower to [_ (literal 0), a (spread), _ (literal 1), b (spread), _ (literal 2)] in source order, got:\n{rust}"
+        named_temps,
+        vec!["__tmp", "a", "__tmp", "b", "__tmp"],
+        "[0, ...a, 1, ...b, 2] must lower to [temp (literal 0), a (spread), temp (literal 1), b (spread), temp (literal 2)] in source order, got:\n{rust}"
     );
 }
 

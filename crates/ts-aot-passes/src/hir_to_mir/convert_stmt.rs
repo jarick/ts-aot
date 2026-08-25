@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId, Span, StructId, TypeId, TypeTable};
-use ts_aot_ir_hir::HirStmt;
+use ts_aot_core::{Atom, LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_ir_hir::{HirCallee, HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase,
 };
@@ -21,9 +21,11 @@ impl ExprConverter {
         let mut interim: Vec<MirStmt> = Vec::new();
         let mut shared_struct_ids: HashMap<TypeId, StructId> = HashMap::new();
         let mut shared_next_struct: u32 = 0;
-        for s in block {
+        let mutable_locals = collect_mutable_locals(block, types);
+        for s in block.iter() {
             self.convert_stmt_into(
                 s,
+                &mutable_locals,
                 &mut interim,
                 &mut final_locals,
                 &mut shared_struct_ids,
@@ -45,12 +47,33 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> (MirBlock, Vec<MirLocalDecl>) {
+        let mutable_locals = collect_mutable_locals(block, types);
+        self.convert_block_with_shared_struct_ids_inner(
+            block,
+            &mutable_locals,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        )
+    }
+
+    fn convert_block_with_shared_struct_ids_inner(
+        &mut self,
+        block: &[HirStmt],
+        mutable_locals: &HashSet<LocalId>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> (MirBlock, Vec<MirLocalDecl>) {
         let mut out = MirBlock::new();
         let mut final_locals: Vec<MirLocalDecl> = Vec::new();
         let mut interim: Vec<MirStmt> = Vec::new();
-        for s in block {
+        for s in block.iter() {
             self.convert_stmt_into(
                 s,
+                mutable_locals,
                 &mut interim,
                 &mut final_locals,
                 shared_struct_ids,
@@ -67,6 +90,7 @@ impl ExprConverter {
     pub fn convert_single_stmt_with_shared_struct_ids(
         &mut self,
         s: &HirStmt,
+        mutable_locals: &HashSet<LocalId>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
         types: &mut TypeTable,
@@ -77,6 +101,7 @@ impl ExprConverter {
         let mut interim: Vec<MirStmt> = Vec::new();
         self.convert_stmt_into(
             s,
+            mutable_locals,
             &mut interim,
             &mut final_locals,
             shared_struct_ids,
@@ -91,6 +116,7 @@ impl ExprConverter {
     pub(super) fn convert_stmt_into(
         &mut self,
         s: &HirStmt,
+        mutable_locals: &HashSet<LocalId>,
         out: &mut Vec<MirStmt>,
         final_locals: &mut Vec<MirLocalDecl>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
@@ -100,9 +126,10 @@ impl ExprConverter {
     ) {
         match s {
             HirStmt::Block(stmts) => {
-                for inner in stmts {
+                for inner in stmts.iter() {
                     self.convert_stmt_into(
                         inner,
+                        mutable_locals,
                         out,
                         final_locals,
                         shared_struct_ids,
@@ -116,11 +143,12 @@ impl ExprConverter {
                 let new_id = self.map_local_id(*id);
                 let name = name.clone();
                 self.register_local_name(new_id, name.clone());
+                let mutable = mutable_locals.contains(id);
                 final_locals.push(MirLocalDecl {
                     id: new_id,
                     name,
                     ty: *ty,
-                    mutable: false,
+                    mutable,
                 });
                 let init_mir = init.as_ref().map(|e| {
                     self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
@@ -129,7 +157,7 @@ impl ExprConverter {
                     local: new_id,
                     ty: *ty,
                     init: init_mir,
-                    mutable: false,
+                    mutable,
                 });
             }
             HirStmt::Expr { expr } => {
@@ -146,6 +174,7 @@ impl ExprConverter {
                     self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let (then_mir, then_locals) = self.convert_stmt_block(
                     then,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -155,6 +184,7 @@ impl ExprConverter {
                 let else_mir = otherwise.as_ref().map(|b| {
                     let (m, l) = self.convert_stmt_block(
                         b,
+                        mutable_locals,
                         shared_struct_ids,
                         shared_next_struct,
                         types,
@@ -179,9 +209,9 @@ impl ExprConverter {
                     types,
                     ctx,
                 );
-                out.extend(cond_stmts.iter().cloned());
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -189,11 +219,12 @@ impl ExprConverter {
                 );
                 final_locals.extend(body_locals);
 
+                let bool_ty = types.intern(&Type::Bool);
                 let is_break = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: is_break,
                     name: Atom::from(""),
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     mutable: true,
                 });
 
@@ -214,7 +245,7 @@ impl ExprConverter {
 
                 out.push(MirStmt::Let {
                     local: is_break,
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     init: Some(MirExpr::Bool(false)),
                     mutable: true,
                 });
@@ -226,6 +257,7 @@ impl ExprConverter {
             HirStmt::DoWhile { body, cond } => {
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -242,18 +274,19 @@ impl ExprConverter {
                     ctx,
                 );
 
+                let bool_ty = types.intern(&Type::Bool);
                 let first_id = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: first_id,
                     name: Atom::from(""),
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     mutable: true,
                 });
                 let is_break = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: is_break,
                     name: Atom::from(""),
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     mutable: true,
                 });
 
@@ -268,7 +301,7 @@ impl ExprConverter {
                     op: BinaryOp::Or,
                     left: Box::new(MirExpr::Local(first_id)),
                     right: Box::new(cond_mir),
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                 };
 
                 let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 2);
@@ -285,13 +318,13 @@ impl ExprConverter {
 
                 out.push(MirStmt::Let {
                     local: first_id,
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     init: Some(MirExpr::Bool(true)),
                     mutable: true,
                 });
                 out.push(MirStmt::Let {
                     local: is_break,
-                    ty: TypeId::from_raw(0),
+                    ty: bool_ty,
                     init: Some(MirExpr::Bool(false)),
                     mutable: true,
                 });
@@ -308,14 +341,61 @@ impl ExprConverter {
                 let iter_mir =
                     self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let new_binding = self.map_local_id(*binding);
+                let binding_name = self.unique_synth_local_name(new_binding, "__for_of");
+                let iter_span = iter.span();
+                let item_ty = match types.resolve(iter.ty()) {
+                    Some(Type::Array { element }) | Some(Type::Generator { inner: element }) => {
+                        *element
+                    }
+                    Some(unsupported) => {
+                        let message = match unsupported {
+                            Type::String => "for-of over String is not yet supported in \
+                                this AOT target; AOT for-of requires Array<T> or \
+                                Generator<T> — convert the string to an array of code \
+                                points (e.g. Array.from(s)) first"
+                                .to_string(),
+                            Type::ArrayBuffer
+                            | Type::Int8Array
+                            | Type::Uint8Array
+                            | Type::Uint8ClampedArray
+                            | Type::Int16Array
+                            | Type::Uint16Array
+                            | Type::Int32Array
+                            | Type::Uint32Array
+                            | Type::Float32Array
+                            | Type::Float64Array => format!(
+                                "for-of over TypedArray (`{unsupported:?}`) is not yet \
+                                 supported in this AOT target; AOT for-of requires \
+                                 Array<T> or Generator<T> — convert the TypedArray to \
+                                 an Array first (e.g. Array.from(...))"
+                            ),
+                            other => format!(
+                                "for-of iterables must be Array<T> or Generator<T> in this \
+                                 AOT target; got unsupported iterable type `{other:?}`"
+                            ),
+                        };
+                        ctx.error("E0406", message, iter_span);
+                        types.intern(&Type::Error)
+                    }
+                    None => {
+                        ctx.error(
+                            "E0406",
+                            "for-of iterable type could not be resolved in this AOT target; \
+                             AOT for-of requires a concrete Array<T> or Generator<T>",
+                            iter_span,
+                        );
+                        types.intern(&Type::Error)
+                    }
+                };
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
-                    name: Atom::from("for_of_binding"),
-                    ty: TypeId::from_raw(0),
+                    name: binding_name,
+                    ty: item_ty,
                     mutable: false,
                 });
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -325,6 +405,7 @@ impl ExprConverter {
                 out.push(MirStmt::ForOf {
                     item: new_binding,
                     iterable: iter_mir,
+                    iter_ty: iter.ty(),
                     body: body_mir,
                 });
             }
@@ -336,14 +417,17 @@ impl ExprConverter {
                 let iter_mir =
                     self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let new_binding = self.map_local_id(*binding);
+                let binding_name = self.unique_synth_local_name(new_binding, "__for_in");
+                let string_ty = types.intern(&Type::String);
                 final_locals.push(MirLocalDecl {
                     id: new_binding,
-                    name: Atom::from(""),
-                    ty: TypeId::from_raw(0),
+                    name: binding_name,
+                    ty: string_ty,
                     mutable: false,
                 });
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -362,13 +446,15 @@ impl ExprConverter {
                 let mut mir_cases: Vec<SwitchCase> = Vec::new();
                 let mut default_block: Option<MirBlock> = None;
                 for case in cases {
-                    let (mut case_body, body_locals) = self.convert_block_with_shared_struct_ids(
-                        &case.body,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
+                    let (mut case_body, body_locals) = self
+                        .convert_block_with_shared_struct_ids_inner(
+                            &case.body,
+                            mutable_locals,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
                     final_locals.extend(body_locals);
                     if !ends_with_terminator(&case_body) {
                         ctx.warning(
@@ -425,11 +511,12 @@ impl ExprConverter {
             HirStmt::Break { .. } => out.push(MirStmt::Break),
             HirStmt::Continue { .. } => out.push(MirStmt::Continue),
             HirStmt::Throw { expr } => {
+                let error_ty = expr.ty();
                 let err_mir =
                     self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
                 out.push(MirStmt::Throw {
                     error: err_mir,
-                    error_ty: TypeId::from_raw(0),
+                    error_ty,
                 });
             }
             HirStmt::Try {
@@ -439,6 +526,7 @@ impl ExprConverter {
             } => {
                 let (mir_body, body_locals) = self.convert_single_stmt_with_shared_struct_ids(
                     body,
+                    mutable_locals,
                     shared_struct_ids,
                     shared_next_struct,
                     types,
@@ -449,6 +537,7 @@ impl ExprConverter {
                     let (catch_body, catch_locals) = self
                         .convert_single_stmt_with_shared_struct_ids(
                             &c.body,
+                            mutable_locals,
                             shared_struct_ids,
                             shared_next_struct,
                             types,
@@ -473,6 +562,7 @@ impl ExprConverter {
                 let mir_finally = if let Some(fin) = finally {
                     let (fbody, flocals) = self.convert_single_stmt_with_shared_struct_ids(
                         fin,
+                        mutable_locals,
                         shared_struct_ids,
                         shared_next_struct,
                         types,
@@ -497,6 +587,7 @@ impl ExprConverter {
     pub(super) fn convert_stmt_block(
         &mut self,
         s: &HirStmt,
+        mutable_locals: &HashSet<LocalId>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
         types: &mut TypeTable,
@@ -506,6 +597,7 @@ impl ExprConverter {
         let mut final_locals: Vec<MirLocalDecl> = Vec::new();
         self.convert_stmt_into(
             s,
+            mutable_locals,
             &mut out.stmts,
             &mut final_locals,
             shared_struct_ids,
@@ -514,6 +606,106 @@ impl ExprConverter {
             ctx,
         );
         (out, final_locals)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn is_local_reassigned(target: LocalId, body: &[HirStmt], types: &TypeTable) -> bool {
+    collect_mutable_locals(body, types).contains(&target)
+}
+
+pub(crate) fn collect_mutable_locals(body: &[HirStmt], types: &TypeTable) -> HashSet<LocalId> {
+    let mut out: HashSet<LocalId> = HashSet::new();
+    {
+        let mut visitor = CollectMutableVisitor {
+            types,
+            out: &mut out,
+        };
+        visitor.visit_block(body);
+    }
+    out
+}
+
+fn collect_mutable_root(e: &HirExpr) -> Option<LocalId> {
+    match e {
+        HirExpr::Local { id, .. } => Some(*id),
+        HirExpr::Field { owner, .. } | HirExpr::OptionalChain { base: owner, .. } => {
+            collect_mutable_root(owner)
+        }
+        HirExpr::Index { owner, .. } => collect_mutable_root(owner),
+        HirExpr::TypeAssertion { expr, .. } => collect_mutable_root(expr),
+        _ => None,
+    }
+}
+
+fn is_deferred_generator_method(name: &Atom) -> bool {
+    matches!(name.as_str(), "next" | "return" | "throw")
+}
+
+fn iter_is_generator(types: &TypeTable, iter: &HirExpr) -> bool {
+    matches!(types.resolve(iter.ty()), Some(Type::Generator { .. }))
+}
+
+struct CollectMutableVisitor<'a> {
+    types: &'a TypeTable,
+    out: &'a mut HashSet<LocalId>,
+}
+
+impl<'a> Visitor for CollectMutableVisitor<'a> {
+    fn visit_stmt(&mut self, stmt: &HirStmt) {
+        match stmt {
+            HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+                if iter_is_generator(self.types, iter)
+                    && let Some(root) = collect_mutable_root(iter)
+                {
+                    self.out.insert(root);
+                }
+                self.visit_expr(iter);
+                self.visit_stmt(body);
+            }
+            _ => walk_stmt(self, stmt),
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &HirExpr) {
+        match expr {
+            HirExpr::Assignment { target, value, .. } => {
+                if let Some(root) = collect_mutable_root(target) {
+                    self.out.insert(root);
+                }
+                self.visit_expr(target);
+                self.visit_expr(value);
+            }
+            HirExpr::CompoundUpdate { target, rhs, .. } => {
+                if let Some(root) = collect_mutable_root(target) {
+                    self.out.insert(root);
+                }
+                self.visit_expr(target);
+                self.visit_expr(rhs);
+            }
+            HirExpr::Call { callee, args, .. } => {
+                if let HirCallee::Indirect(inner) = callee {
+                    if let HirExpr::Field {
+                        owner, field_name, ..
+                    } = inner.as_ref()
+                        && is_deferred_generator_method(field_name)
+                        && let Some(root) = collect_mutable_root(owner)
+                    {
+                        let owner_resolved = self.types.resolve(owner.ty());
+                        if matches!(owner_resolved, Some(Type::Generator { .. }))
+                            || owner_resolved.is_none()
+                        {
+                            self.out.insert(root);
+                        }
+                    }
+                    self.visit_expr(inner);
+                }
+                for a in args {
+                    self.visit_expr(a);
+                }
+            }
+            _ => walk_expr(self, expr),
+        }
     }
 }
 
@@ -562,6 +754,7 @@ fn rewrite_break_continue_for_loop(
             MirStmt::ForOf {
                 item,
                 iterable,
+                iter_ty,
                 body,
             } => {
                 let new_body =
@@ -569,6 +762,7 @@ fn rewrite_break_continue_for_loop(
                 out.push(MirStmt::ForOf {
                     item,
                     iterable,
+                    iter_ty,
                     body: MirBlock { stmts: new_body },
                 });
             }

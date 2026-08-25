@@ -1,0 +1,98 @@
+use proc_macro2::Ident;
+use quote::format_ident;
+use ts_aot_ir_mir::RuntimeOp;
+
+use crate::error::BackendError;
+
+pub(super) fn runtime_op_ident(op: RuntimeOp) -> Result<Ident, BackendError> {
+    Ok(match op {
+        RuntimeOp::StringConcat => format_ident!("__ts_aot_string_concat"),
+        RuntimeOp::StringEquals => format_ident!("__ts_aot_string_equals"),
+        RuntimeOp::StringLen => format_ident!("__ts_aot_string_len"),
+        RuntimeOp::StringIndexOf => format_ident!("__ts_aot_string_index_of"),
+        RuntimeOp::StringCharAt => format_ident!("__ts_aot_string_char_at"),
+        RuntimeOp::StringFromCharCode => format_ident!("__ts_aot_string_from_char_code"),
+        RuntimeOp::StringFromCodePoint => format_ident!("__ts_aot_string_from_code_point"),
+        RuntimeOp::ArrayCreate => format_ident!("__ts_aot_array_create"),
+        RuntimeOp::ArrayCreateWithLen => format_ident!("__ts_aot_array_create_with_len"),
+        RuntimeOp::ArrayGet => format_ident!("__ts_aot_array_get"),
+        RuntimeOp::ArraySet => format_ident!("__ts_aot_array_set"),
+        RuntimeOp::ArrayLen => format_ident!("__ts_aot_array_len"),
+        RuntimeOp::ArrayPush => format_ident!("__ts_aot_array_push"),
+        RuntimeOp::ArrayFrom => format_ident!("__ts_aot_array_from"),
+        RuntimeOp::ArrayFromString => format_ident!("__ts_aot_array_from_string"),
+        RuntimeOp::ArrayFromMapped => format_ident!("__ts_aot_array_from_mapped"),
+        RuntimeOp::ArrayFromLengthMapped => format_ident!("__ts_aot_array_from_length_mapped"),
+        RuntimeOp::MapGet => format_ident!("__ts_aot_map_get"),
+        RuntimeOp::MapSet => format_ident!("__ts_aot_map_set"),
+        RuntimeOp::ResultOk => format_ident!("__ts_aot_result_ok"),
+        RuntimeOp::ResultErr => format_ident!("__ts_aot_result_err"),
+        RuntimeOp::ResultUnwrapOk => format_ident!("__ts_aot_result_unwrap_ok"),
+        RuntimeOp::PromiseCreate => format_ident!("__ts_aot_promise_create"),
+        RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
+        RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
+        RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
+        RuntimeOp::MathAbs => format_ident!("__ts_aot_math_abs"),
+        RuntimeOp::MathFloor => format_ident!("__ts_aot_math_floor"),
+        RuntimeOp::MathCeil => format_ident!("__ts_aot_math_ceil"),
+        RuntimeOp::MathRound => format_ident!("__ts_aot_math_round"),
+        RuntimeOp::MathTrunc => format_ident!("__ts_aot_math_trunc"),
+        RuntimeOp::MathSign => format_ident!("__ts_aot_math_sign"),
+        RuntimeOp::MathPow => format_ident!("__ts_aot_math_pow"),
+        RuntimeOp::MathLog => format_ident!("__ts_aot_math_log"),
+        RuntimeOp::MathExp => format_ident!("__ts_aot_math_exp"),
+        RuntimeOp::MathSin => format_ident!("__ts_aot_math_sin"),
+        RuntimeOp::MathCos => format_ident!("__ts_aot_math_cos"),
+        RuntimeOp::MathTan => format_ident!("__ts_aot_math_tan"),
+        RuntimeOp::MathAsin => format_ident!("__ts_aot_math_asin"),
+        RuntimeOp::MathAcos => format_ident!("__ts_aot_math_acos"),
+        RuntimeOp::MathAtan => format_ident!("__ts_aot_math_atan"),
+        RuntimeOp::MathAtan2 => format_ident!("__ts_aot_math_atan2"),
+        RuntimeOp::MathMax => format_ident!("__ts_aot_math_max"),
+        RuntimeOp::MathMin => format_ident!("__ts_aot_math_min"),
+        RuntimeOp::MathRandom => format_ident!("__ts_aot_math_random"),
+        RuntimeOp::TypeOf => {
+            return Err(BackendError::Internal(
+                "RuntimeOp::TypeOf must be emitted by emit_typeof, not by runtime_op_ident"
+                    .to_string(),
+            ));
+        }
+        RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
+        RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
+        RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
+        RuntimeOp::ArrayIsArray => format_ident!("__ts_aot_array_is_array"),
+        RuntimeOp::ArrayIsArrayFalse => format_ident!("__ts_aot_array_is_array_false"),
+        RuntimeOp::DateNow => format_ident!("__ts_aot_date_now"),
+        RuntimeOp::DateNewFromMs => format_ident!("__ts_aot_date_new_from_ms"),
+        RuntimeOp::DateParse => format_ident!("__ts_aot_date_parse"),
+        RuntimeOp::DateValueOf => format_ident!("__ts_aot_date_value_of"),
+        RuntimeOp::DateGetTime => format_ident!("__ts_aot_date_get_time"),
+        RuntimeOp::DateGetFullYear => format_ident!("__ts_aot_date_get_full_year"),
+        RuntimeOp::DateGetMonth => format_ident!("__ts_aot_date_get_month"),
+        RuntimeOp::DateGetDate => format_ident!("__ts_aot_date_get_date"),
+        RuntimeOp::DateGetHours => format_ident!("__ts_aot_date_get_hours"),
+        RuntimeOp::DateGetMinutes => format_ident!("__ts_aot_date_get_minutes"),
+        RuntimeOp::DateGetSeconds => format_ident!("__ts_aot_date_get_seconds"),
+        RuntimeOp::DateGetMilliseconds => format_ident!("__ts_aot_date_get_milliseconds"),
+        RuntimeOp::DateToIsoString => format_ident!("__ts_aot_date_to_iso_string"),
+        RuntimeOp::DateIsInvalid => format_ident!("__ts_aot_date_is_invalid"),
+        RuntimeOp::JsonParse => format_ident!("__ts_aot_json_parse"),
+        RuntimeOp::JsonParseString => format_ident!("__ts_aot_json_parse_string"),
+        RuntimeOp::JsonStringify => format_ident!("__ts_aot_json_stringify"),
+        RuntimeOp::JsonStringifyString => format_ident!("__ts_aot_json_stringify_string"),
+        RuntimeOp::SymbolNew => format_ident!("__ts_aot_symbol_new"),
+        RuntimeOp::SymbolFor => format_ident!("__ts_aot_symbol_for"),
+        RuntimeOp::SymbolKeyFor => format_ident!("__ts_aot_symbol_key_for"),
+        RuntimeOp::ArrayBufferNew => format_ident!("__ts_aot_array_buffer_new"),
+        RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
+        RuntimeOp::TypedArrayNew => format_ident!("__ts_aot_typed_array_new"),
+        RuntimeOp::ArrayGetOrDefault => format_ident!("__ts_aot_array_get_or_default"),
+        RuntimeOp::ArrayConcat => format_ident!("__ts_aot_array_concat"),
+        RuntimeOp::ArrayHole => format_ident!("__ts_aot_array_hole"),
+        RuntimeOp::GeneratorNext => {
+            return Err(BackendError::Internal(
+                "RuntimeOp::GeneratorNext must be emitted by emit_runtime_call, not by runtime_op_ident".to_string(),
+            ));
+        }
+    })
+}

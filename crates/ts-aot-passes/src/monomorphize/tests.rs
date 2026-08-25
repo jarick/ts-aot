@@ -610,7 +610,7 @@ fn monomorphize_then_convert_program_keeps_function_ids_aligned() {
 }
 
 #[test]
-fn monomorphize_namespace_skips_does_not_break_convert_program() {
+fn monomorphize_namespace_emits_function_inside_namespace() {
     let (mut program, mut types, mut ctx) = setup();
     let inner = generic_fn(
         "ns_identity",
@@ -643,13 +643,23 @@ fn monomorphize_namespace_skips_does_not_break_convert_program() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        functions.len(),
-        1,
-        "only caller survives (namespace skipped, no mono copy appended)"
+    let names: Vec<&str> = functions.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(
+        names.contains(&"outer::ns_identity"),
+        "namespace-contained function must be emitted in MIR with qualified name, got: {:?}",
+        names
     );
-    assert_eq!(functions[0].0, FunctionId::from_raw(0));
-    assert_eq!(functions[0].1.as_str(), "caller");
+    assert!(
+        names.contains(&"caller"),
+        "top-level caller must still be emitted in MIR, got: {:?}",
+        names
+    );
+    assert_eq!(
+        names.len(),
+        2,
+        "monomorphize must preserve namespace-qualified functions in the emitted MIR (caller + outer::ns_identity), got: {:?}",
+        names
+    );
 }
 
 #[test]

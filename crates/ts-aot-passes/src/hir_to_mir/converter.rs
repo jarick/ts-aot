@@ -6,13 +6,14 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 
 use crate::PassContext;
-use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
+use crate::hir_to_mir::{PLACEHOLDER_FUNCTION, qualified_name};
 
 pub struct ExprConverter {
     pub(super) local_map: HashMap<LocalId, LocalId>,
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) name_to_function: Arc<HashMap<Atom, FunctionId>>,
+    pub(super) namespace_path: Vec<String>,
     pub(super) next_local: u32,
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
@@ -41,6 +42,7 @@ impl ExprConverter {
             local_names: HashMap::new(),
             function_remap: remap,
             name_to_function: Arc::new(HashMap::new()),
+            namespace_path: Vec::new(),
             next_local,
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
@@ -51,6 +53,10 @@ impl ExprConverter {
 
     pub fn set_field_id_lookup(&mut self, lookup: HashMap<(StructId, Atom), FieldId>) {
         self.field_id_lookup = lookup;
+    }
+
+    pub fn set_namespace_path(&mut self, path: &[String]) {
+        self.namespace_path = path.to_vec();
     }
 
     pub(super) fn take_temp_locals(&mut self) -> Vec<MirLocalDecl> {
@@ -106,6 +112,22 @@ impl ExprConverter {
         self.local_names.get(&id).cloned()
     }
 
+    pub(super) fn local_name_taken(&self, name: &str) -> bool {
+        self.local_names
+            .values()
+            .any(|existing| existing.as_str() == name)
+    }
+
+    pub(super) fn unique_synth_local_name(&mut self, id: LocalId, base: &str) -> Atom {
+        let mut name = format!("{}_{}", base, id.raw());
+        while self.local_name_taken(&name) {
+            name.push('_');
+        }
+        let name = Atom::from(name);
+        self.register_local_name(id, name.clone());
+        name
+    }
+
     pub fn seed_params(&mut self, count: u32) {
         for i in 0..count {
             self.local_map
@@ -124,10 +146,13 @@ impl ExprConverter {
         match callee {
             HirCallee::Function(fid) => self.function_remap.get(fid).copied().unwrap_or(*fid),
             HirCallee::Indirect(inner) => {
-                if let HirExpr::Global { name, .. } = inner.as_ref()
-                    && let Some(&fid) = self.name_to_function.get(name)
-                {
-                    return fid;
+                if let HirExpr::Global { name, .. } = inner.as_ref() {
+                    for depth in (0..=self.namespace_path.len()).rev() {
+                        let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+                        if let Some(&fid) = self.name_to_function.get(&probe) {
+                            return fid;
+                        }
+                    }
                 }
                 ctx.warning(
                     "P0005",

@@ -6,6 +6,7 @@ mod converter;
 mod expr;
 mod function;
 mod function_call_method;
+mod generator_method;
 mod math_builtins;
 mod object_builtins;
 mod program;

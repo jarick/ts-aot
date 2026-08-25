@@ -1,4 +1,4 @@
-use proc_macro2::{Ident, Literal, TokenStream};
+use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 use ts_aot_core::{LocalId, Type, TypeId};
 
@@ -10,19 +10,32 @@ use ts_aot_ir_mir::{
 use super::ctx::{BodyCtx, EmitCtx};
 use super::ident::ident_from;
 use super::literals::emit_whole_number_literal;
+use super::runtime_op::runtime_op_ident;
 use super::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
 
 pub(super) fn emit_body(
     f: &MirFunctionDecl,
     ctx: &EmitCtx<'_>,
+    body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     if f.body.block.is_empty() {
         return Ok(quote!({ unimplemented!() }));
     }
-    let body_ctx = BodyCtx::new(f);
-    let stmts = emit_block_stmts(&f.body.block, ctx, &body_ctx)?;
-    Ok(quote!({ #(#stmts)* }))
+    let stmts = emit_block_stmts(&f.body.block, ctx, body_ctx)?;
+    if body_ctx.is_generator() {
+        let co = body_ctx.gen_co().ok_or_else(|| {
+            BackendError::Internal(
+                "is_generator() returned true but gen_co identifier is unset (BodyCtx invariant violation)"
+                    .to_string(),
+            )
+        })?;
+        Ok(quote!({
+            ts_aot_runtime::__ts_aot_generator_new(|#co| async move { #(#stmts)* })
+        }))
+    } else {
+        Ok(quote!({ #(#stmts)* }))
+    }
 }
 
 fn emit_block_stmts(
@@ -79,14 +92,31 @@ fn emit_return_stmt(
     ctx: &EmitCtx<'_>,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    if let Some(label) = body_ctx.try_label() {
+    if body_ctx.try_label().is_some() {
+        let slot_ident = body_ctx
+            .return_slot()
+            .expect("emit_return_stmt inside try requires return_slot to be set by emit_try");
+        let value_ts = if body_ctx.is_generator() {
+            if let Some(expr) = slot {
+                let expr = emit_expr(expr, ctx, body_ctx)?;
+                quote!(Some(#expr))
+            } else {
+                quote!(None)
+            }
+        } else if let Some(expr) = slot {
+            let expr = emit_expr(expr, ctx, body_ctx)?;
+            quote!(#expr)
+        } else {
+            quote!(())
+        };
+        Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
+    } else if body_ctx.is_generator() {
         if let Some(expr) = slot {
             let expr = emit_expr(expr, ctx, body_ctx)?;
-            body_ctx.set_pending_return(Some(quote!(#expr)));
+            Ok(quote!(return Some(#expr);))
         } else {
-            body_ctx.set_pending_return(Some(quote!(())));
+            Ok(quote!(return None;))
         }
-        Ok(quote!(break #label;))
     } else if let Some(expr) = slot {
         let expr = emit_expr(expr, ctx, body_ctx)?;
         Ok(quote!(return #expr;))
@@ -142,6 +172,9 @@ fn emit_stmt(
             Ok(quote!(#target = #value;))
         }
         MirStmt::Expr(expr) => {
+            if matches!(expr, MirExpr::Local(_)) {
+                return Ok(quote!());
+            }
             let expr = emit_expr(expr, ctx, body_ctx)?;
             Ok(quote!(#expr;))
         }
@@ -167,12 +200,26 @@ fn emit_stmt(
         MirStmt::ForOf {
             item,
             iterable,
+            iter_ty,
             body,
         } => {
-            let item = body_ctx.local_ident(*item);
+            let item_ident = body_ctx.local_ident(*item);
+            let item = if body_ctx.local_mut(*item) {
+                quote!(mut #item_ident)
+            } else {
+                quote!(#item_ident)
+            };
             let iterable = emit_expr(iterable, ctx, body_ctx)?;
             let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
-            Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
+            let needs_mut_ref = matches!(
+                ctx.types.resolve(*iter_ty),
+                Some(ts_aot_core::Type::Generator { .. })
+            );
+            if needs_mut_ref {
+                Ok(quote!(for #item in &mut (#iterable) { #(#body_stmts)* }))
+            } else {
+                Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
+            }
         }
         MirStmt::ForIn { key, object, body } => {
             let key = body_ctx.local_ident(*key);
@@ -473,6 +520,19 @@ fn emit_expr(
         }
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
+        MirExpr::Cast { expr, ty } => {
+            let inner = emit_expr(expr, ctx, body_ctx)?;
+            if !is_numeric_primitive_target(ctx.types.resolve(*ty)) {
+                return Err(BackendError::Internal(format!(
+                    "MirExpr::Cast target TypeId({}) is not a numeric primitive; \
+                     Rust's `as` cast cannot lower it. \
+                     Only I8/I16/I32/I64/U8/U16/U32/U64/F32/F64 are supported as cast targets.",
+                    ty.raw()
+                )));
+            }
+            let cast_ty = emit_type_id_with_ctx(*ty, ctx);
+            Ok(quote!((#inner as #cast_ty)))
+        }
         MirExpr::TemplateStringsArray { cooked, .. } => {
             let cooked_lits: Vec<TokenStream> = cooked
                 .iter()
@@ -501,10 +561,22 @@ fn emit_expr(
                 )),
             )
         }
-        MirExpr::Yield { expr, .. } => match expr {
-            Some(inner) => emit_expr(inner, ctx, body_ctx),
-            None => Ok(quote!(())),
-        },
+        MirExpr::Yield { expr, .. } => {
+            let co = body_ctx.gen_co().ok_or_else(|| {
+                BackendError::Internal(
+                    "MirExpr::Yield reached for non-generator body \
+                     (HIR->MIR contract violation: lower_generators must \
+                     transform every yield into a generator body)"
+                        .to_string(),
+                )
+            })?;
+            let value = if let Some(inner) = expr {
+                emit_expr(inner, ctx, body_ctx)?
+            } else {
+                quote!(())
+            };
+            Ok(quote!(#co.yield_(#value).await))
+        }
     }
 }
 
@@ -591,6 +663,24 @@ fn emit_unary_expr(
     })
 }
 
+fn is_numeric_primitive_target(ty: Option<&Type>) -> bool {
+    matches!(
+        ty,
+        Some(
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::F32
+                | Type::F64
+        )
+    )
+}
+
 fn emit_runtime_call(
     op: RuntimeOp,
     args: &[MirExpr],
@@ -631,6 +721,10 @@ fn emit_runtime_call(
             let element_ty = emit_type_id_with_ctx(element_ty_id, ctx);
             Ok(quote!(__ts_aot_array_hole::<#element_ty>()))
         }
+        RuntimeOp::GeneratorNext => {
+            let owner = emit_expr(&args[0], ctx, body_ctx)?;
+            Ok(quote!((#owner).next()))
+        }
         RuntimeOp::OpInstanceof => {
             let value = emit_expr(&args[0], ctx, body_ctx)?;
             let target_type_id: u32 = match args.get(2) {
@@ -645,8 +739,14 @@ fn emit_runtime_call(
             let item = emit_expr(&args[1], ctx, body_ctx)?;
             Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
         }
+        RuntimeOp::ArraySet => {
+            let arr = emit_expr(&args[0], ctx, body_ctx)?;
+            let idx = emit_expr(&args[1], ctx, body_ctx)?;
+            let value = emit_expr(&args[2], ctx, body_ctx)?;
+            Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
+        }
         RuntimeOp::MathMax | RuntimeOp::MathMin => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#name(&[#(#args),*])))
         }
@@ -656,7 +756,7 @@ fn emit_runtime_call(
         | RuntimeOp::StringIndexOf
         | RuntimeOp::StringCharAt => {
             let string_arg_indices = string_op_string_arg_indices(op);
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let emitted: Vec<TokenStream> = args
                 .iter()
                 .enumerate()
@@ -671,30 +771,30 @@ fn emit_runtime_call(
             Ok(quote!(#name(#(#emitted),*)))
         }
         RuntimeOp::MapSet => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
             let key_expr = emit_js_string_owned(&args[1], ctx, body_ctx)?;
             let value_expr = emit_js_string_owned(&args[2], ctx, body_ctx)?;
             Ok(quote!(#name(&mut #map_expr, #key_expr, #value_expr)))
         }
         RuntimeOp::MapGet => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
             let key_expr = emit_js_string_arg(&args[1], ctx, body_ctx)?;
             Ok(quote!(#name(&#map_expr, #key_expr)))
         }
         RuntimeOp::ArrayFromString => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let source_expr = emit_js_string_arg(&args[0], ctx, body_ctx)?;
             Ok(quote!(#name(#source_expr)))
         }
         RuntimeOp::HostConsoleLog | RuntimeOp::SymbolFor => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
             Ok(quote!(#name(#arg)))
         }
         RuntimeOp::JsonParse | RuntimeOp::JsonStringify => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let turbofish_ty = target_ty.unwrap_or(ty);
             let ty_tokens = emit_type_id_with_ctx(turbofish_ty, ctx);
             if op == RuntimeOp::JsonParse {
@@ -706,7 +806,7 @@ fn emit_runtime_call(
             }
         }
         RuntimeOp::SymbolNew => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             if args.is_empty() || matches!(&args[0], MirExpr::Unit) {
                 Ok(quote!(#name()))
             } else {
@@ -718,7 +818,7 @@ fn emit_runtime_call(
             }
         }
         _ => {
-            let name = runtime_op_ident(op);
+            let name = runtime_op_ident(op)?;
             let args = emit_exprs(args, ctx, body_ctx)?;
             Ok(quote!(#name(#(#args),*)))
         }
@@ -835,12 +935,15 @@ fn emit_try(
     ctx: &EmitCtx<'_>,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let label = format_ident!("__try_{}", body.stmts.len());
+    let try_id = body_ctx.alloc_try_id();
+    let label = format_ident!("__try_{}", try_id);
+    let slot_ident = format_ident!("__return_slot_{}", try_id);
     let prev_in_try = body_ctx.in_try();
     let prev_try_label = body_ctx.try_label();
-    let prev_pending_return = body_ctx.take_pending_return();
+    let prev_return_slot = body_ctx.return_slot();
     body_ctx.set_in_try(true);
     body_ctx.set_try_label(Some(label.clone()));
+    body_ctx.set_return_slot(Some(slot_ident.clone()));
     let body_stmts = emit_block_stmts(body, ctx, body_ctx);
     body_ctx.set_try_label(prev_try_label);
     let body_stmts = body_stmts?;
@@ -863,19 +966,34 @@ fn emit_try(
         None
     };
     body_ctx.set_in_try(prev_in_try);
-    let pending_return_after_try = body_ctx.take_pending_return();
-    body_ctx.set_pending_return(prev_pending_return);
+    body_ctx.set_return_slot(prev_return_slot);
 
     let catch_unwind = format_ident!("catch_unwind");
     let assert_unwind_safe = format_ident!("AssertUnwindSafe");
     let resume_unwind = format_ident!("resume_unwind");
 
-    let replay_return = if let Some(return_expr) = &pending_return_after_try {
+    let inner_ret_ty = emit_type_id_with_ctx(body_ctx.return_type_id(), ctx);
+    let slot_ty = if body_ctx.is_generator() {
+        quote!(Option<Option<#inner_ret_ty>>)
+    } else {
+        quote!(Option<#inner_ret_ty>)
+    };
+    let slot_decl = quote!(let mut #slot_ident: #slot_ty = None;);
+    let is_nested = body_ctx.return_slot().is_some();
+    let outer_slot_ident = body_ctx.return_slot();
+    let replay_return = if is_nested {
+        let outer_slot = outer_slot_ident.expect("nested try must have an outer return slot");
         quote! {
-            return #return_expr;
+            if let Some(__v) = #slot_ident {
+                #outer_slot = Some(__v);
+            }
         }
     } else {
-        quote! {}
+        quote! {
+            if let Some(__v) = #slot_ident {
+                return __v;
+            }
+        }
     };
 
     let body_arm = if catch.is_some() {
@@ -886,46 +1004,38 @@ fn emit_try(
                 .local_ty(param)
                 .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, ctx));
             quote! {
-                if let Err(__e) = __try_result {
-                    let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
-                        Ok(v) => *v,
-                        Err(__e) => std::panic::#resume_unwind(__e),
-                    };
-                    let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
-                        #(#catch_stmts)*
-                    }));
-                    if let Err(__e2) = __catch_result {
-                        __pending_throw = Some(__e2);
-                    }
+                let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
+                    Ok(v) => *v,
+                    Err(__e) => std::panic::#resume_unwind(__e),
+                };
+                let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                    #(#catch_stmts)*
+                }));
+                if let Err(__e2) = __catch_result {
+                    __pending_throw = Some(__e2);
                 }
             }
         } else {
             quote! {
-                if let Err(__e) = __try_result {
-                    let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
-                        #(#catch_stmts)*
-                    }));
-                    if let Err(__e2) = __catch_result {
-                        __pending_throw = Some(__e2);
-                    }
+                let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                    #(#catch_stmts)*
+                }));
+                if let Err(__e2) = __catch_result {
+                    __pending_throw = Some(__e2);
                 }
             }
         }
     } else if finally_stmts.is_some() {
         quote! {
-            if let Err(__e) = __try_result {
-                let __e = if let Ok(__sentinel) = __e.downcast::<TsAotThrowSentinel>() {
-                    __sentinel
-                } else {
-                    std::panic::#resume_unwind(__e)
-                };
-                __pending_throw = Some(__e);
-            }
+            let __e = if let Ok(__sentinel) = __e.downcast::<TsAotThrowSentinel>() {
+                __sentinel
+            } else {
+                std::panic::#resume_unwind(__e)
+            };
+            __pending_throw = Some(__e);
         }
     } else {
-        quote! {
-            let _ = __try_result;
-        }
+        quote! {}
     };
 
     let finally_block = if let Some(finally_stmts) = finally_stmts {
@@ -935,13 +1045,19 @@ fn emit_try(
     };
 
     Ok(quote! {{
+        enum __ReturnSignal { Continue, Break }
+        #slot_decl
         let mut __pending_throw: Option<Box<dyn std::any::Any + Send>> = None;
         #label: loop {
-            let __try_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
-                #(#body_stmts)*
-            }));
-            #body_arm
-            break #label;
+            let __try_result: Result<__ReturnSignal, Box<dyn std::any::Any + Send>> =
+                std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                    #(#body_stmts)*
+                    Ok::<_, Box<dyn std::any::Any + Send>>(__ReturnSignal::Continue)
+                }));
+            match __try_result {
+                Ok(__ReturnSignal::Break | __ReturnSignal::Continue) => break #label,
+                Err(__e) => { #body_arm }
+            }
         }
         #finally_block
         if let Some(__e) = __pending_throw {
@@ -949,87 +1065,4 @@ fn emit_try(
         }
         #replay_return
     }})
-}
-
-fn runtime_op_ident(op: RuntimeOp) -> Ident {
-    match op {
-        RuntimeOp::StringConcat => format_ident!("__ts_aot_string_concat"),
-        RuntimeOp::StringEquals => format_ident!("__ts_aot_string_equals"),
-        RuntimeOp::StringLen => format_ident!("__ts_aot_string_len"),
-        RuntimeOp::StringIndexOf => format_ident!("__ts_aot_string_index_of"),
-        RuntimeOp::StringCharAt => format_ident!("__ts_aot_string_char_at"),
-        RuntimeOp::StringFromCharCode => format_ident!("__ts_aot_string_from_char_code"),
-        RuntimeOp::StringFromCodePoint => format_ident!("__ts_aot_string_from_code_point"),
-        RuntimeOp::ArrayCreate => format_ident!("__ts_aot_array_create"),
-        RuntimeOp::ArrayCreateWithLen => format_ident!("__ts_aot_array_create_with_len"),
-        RuntimeOp::ArrayGet => format_ident!("__ts_aot_array_get"),
-        RuntimeOp::ArraySet => format_ident!("__ts_aot_array_set"),
-        RuntimeOp::ArrayLen => format_ident!("__ts_aot_array_len"),
-        RuntimeOp::ArrayPush => format_ident!("__ts_aot_array_push"),
-        RuntimeOp::ArrayFrom => format_ident!("__ts_aot_array_from"),
-        RuntimeOp::ArrayFromString => format_ident!("__ts_aot_array_from_string"),
-        RuntimeOp::ArrayFromMapped => format_ident!("__ts_aot_array_from_mapped"),
-        RuntimeOp::ArrayFromLengthMapped => format_ident!("__ts_aot_array_from_length_mapped"),
-        RuntimeOp::MapGet => format_ident!("__ts_aot_map_get"),
-        RuntimeOp::MapSet => format_ident!("__ts_aot_map_set"),
-        RuntimeOp::ResultOk => format_ident!("__ts_aot_result_ok"),
-        RuntimeOp::ResultErr => format_ident!("__ts_aot_result_err"),
-        RuntimeOp::ResultUnwrapOk => format_ident!("__ts_aot_result_unwrap_ok"),
-        RuntimeOp::PromiseCreate => format_ident!("__ts_aot_promise_create"),
-        RuntimeOp::PromiseResolve => format_ident!("__ts_aot_promise_resolve"),
-        RuntimeOp::HostConsoleLog => format_ident!("__ts_aot_host_console_log"),
-        RuntimeOp::MathSqrt => format_ident!("__ts_aot_math_sqrt"),
-        RuntimeOp::MathAbs => format_ident!("__ts_aot_math_abs"),
-        RuntimeOp::MathFloor => format_ident!("__ts_aot_math_floor"),
-        RuntimeOp::MathCeil => format_ident!("__ts_aot_math_ceil"),
-        RuntimeOp::MathRound => format_ident!("__ts_aot_math_round"),
-        RuntimeOp::MathTrunc => format_ident!("__ts_aot_math_trunc"),
-        RuntimeOp::MathSign => format_ident!("__ts_aot_math_sign"),
-        RuntimeOp::MathPow => format_ident!("__ts_aot_math_pow"),
-        RuntimeOp::MathLog => format_ident!("__ts_aot_math_log"),
-        RuntimeOp::MathExp => format_ident!("__ts_aot_math_exp"),
-        RuntimeOp::MathSin => format_ident!("__ts_aot_math_sin"),
-        RuntimeOp::MathCos => format_ident!("__ts_aot_math_cos"),
-        RuntimeOp::MathTan => format_ident!("__ts_aot_math_tan"),
-        RuntimeOp::MathAsin => format_ident!("__ts_aot_math_asin"),
-        RuntimeOp::MathAcos => format_ident!("__ts_aot_math_acos"),
-        RuntimeOp::MathAtan => format_ident!("__ts_aot_math_atan"),
-        RuntimeOp::MathAtan2 => format_ident!("__ts_aot_math_atan2"),
-        RuntimeOp::MathMax => format_ident!("__ts_aot_math_max"),
-        RuntimeOp::MathMin => format_ident!("__ts_aot_math_min"),
-        RuntimeOp::MathRandom => format_ident!("__ts_aot_math_random"),
-        RuntimeOp::TypeOf => unreachable!("TypeOf is handled by emit_typeof, not runtime_op_ident"),
-        RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
-        RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
-        RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
-        RuntimeOp::ArrayIsArray => format_ident!("__ts_aot_array_is_array"),
-        RuntimeOp::ArrayIsArrayFalse => format_ident!("__ts_aot_array_is_array_false"),
-        RuntimeOp::DateNow => format_ident!("__ts_aot_date_now"),
-        RuntimeOp::DateNewFromMs => format_ident!("__ts_aot_date_new_from_ms"),
-        RuntimeOp::DateParse => format_ident!("__ts_aot_date_parse"),
-        RuntimeOp::DateValueOf => format_ident!("__ts_aot_date_value_of"),
-        RuntimeOp::DateGetTime => format_ident!("__ts_aot_date_get_time"),
-        RuntimeOp::DateGetFullYear => format_ident!("__ts_aot_date_get_full_year"),
-        RuntimeOp::DateGetMonth => format_ident!("__ts_aot_date_get_month"),
-        RuntimeOp::DateGetDate => format_ident!("__ts_aot_date_get_date"),
-        RuntimeOp::DateGetHours => format_ident!("__ts_aot_date_get_hours"),
-        RuntimeOp::DateGetMinutes => format_ident!("__ts_aot_date_get_minutes"),
-        RuntimeOp::DateGetSeconds => format_ident!("__ts_aot_date_get_seconds"),
-        RuntimeOp::DateGetMilliseconds => format_ident!("__ts_aot_date_get_milliseconds"),
-        RuntimeOp::DateToIsoString => format_ident!("__ts_aot_date_to_iso_string"),
-        RuntimeOp::DateIsInvalid => format_ident!("__ts_aot_date_is_invalid"),
-        RuntimeOp::JsonParse => format_ident!("__ts_aot_json_parse"),
-        RuntimeOp::JsonParseString => format_ident!("__ts_aot_json_parse_string"),
-        RuntimeOp::JsonStringify => format_ident!("__ts_aot_json_stringify"),
-        RuntimeOp::JsonStringifyString => format_ident!("__ts_aot_json_stringify_string"),
-        RuntimeOp::SymbolNew => format_ident!("__ts_aot_symbol_new"),
-        RuntimeOp::SymbolFor => format_ident!("__ts_aot_symbol_for"),
-        RuntimeOp::SymbolKeyFor => format_ident!("__ts_aot_symbol_key_for"),
-        RuntimeOp::ArrayBufferNew => format_ident!("__ts_aot_array_buffer_new"),
-        RuntimeOp::ArrayBufferSlice => format_ident!("__ts_aot_array_buffer_slice"),
-        RuntimeOp::TypedArrayNew => format_ident!("__ts_aot_typed_array_new"),
-        RuntimeOp::ArrayGetOrDefault => format_ident!("__ts_aot_array_get_or_default"),
-        RuntimeOp::ArrayConcat => format_ident!("__ts_aot_array_concat"),
-        RuntimeOp::ArrayHole => format_ident!("__ts_aot_array_hole"),
-    }
 }

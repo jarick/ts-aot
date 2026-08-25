@@ -182,6 +182,17 @@ impl ExprConverter {
         ) {
             return mir;
         }
+        if let Some(mir) = self.try_generator_instance_method_dispatch(
+            callee,
+            args,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         if let Some(mir) = self.try_function_method_dispatch(
             callee,
             args,
