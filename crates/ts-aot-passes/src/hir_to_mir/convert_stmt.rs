@@ -409,6 +409,65 @@ impl ExprConverter {
                     body: body_mir,
                 });
             }
+            HirStmt::ForAwaitOf {
+                binding,
+                iter,
+                body,
+            } => {
+                let iter_mir =
+                    self.convert_expr(iter, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let new_binding = self.map_local_id(*binding);
+                let binding_name = self.unique_synth_local_name(new_binding, "__for_await_of");
+                let iter_span = iter.span();
+                let item_ty = match types.resolve(iter.ty()) {
+                    Some(Type::Generator { inner: element }) => *element,
+                    Some(unsupported) => {
+                        let message = match unsupported {
+                            Type::String => "for-await-of over String is not yet supported in \
+                                this AOT target; AOT for-await-of requires Generator<T> — \
+                                convert the string to an array of code points (e.g. \
+                                Array.from(s)) first"
+                                .to_string(),
+                            other => format!(
+                                "for-await-of iterables must be Generator<T> in this \
+                                 AOT target; got unsupported iterable type `{other:?}`"
+                            ),
+                        };
+                        ctx.error("E0406", message, iter_span);
+                        types.intern(&Type::Error)
+                    }
+                    None => {
+                        ctx.error(
+                            "E0406",
+                            "for-await-of iterable type could not be resolved in this AOT \
+                             target; AOT for-await-of requires a concrete Generator<T>",
+                            iter_span,
+                        );
+                        types.intern(&Type::Error)
+                    }
+                };
+                final_locals.push(MirLocalDecl {
+                    id: new_binding,
+                    name: binding_name,
+                    ty: item_ty,
+                    mutable: true,
+                });
+                let (body_mir, body_locals) = self.convert_stmt_block(
+                    body,
+                    mutable_locals,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                final_locals.extend(body_locals);
+                out.push(MirStmt::ForAwaitOf {
+                    item: new_binding,
+                    iterable: iter_mir,
+                    iter_ty: iter.ty(),
+                    body: body_mir,
+                });
+            }
             HirStmt::ForIn {
                 binding,
                 iter,
@@ -654,7 +713,9 @@ struct CollectMutableVisitor<'a> {
 impl<'a> Visitor for CollectMutableVisitor<'a> {
     fn visit_stmt(&mut self, stmt: &HirStmt) {
         match stmt {
-            HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+            HirStmt::ForOf { iter, body, .. }
+            | HirStmt::ForAwaitOf { iter, body, .. }
+            | HirStmt::ForIn { iter, body, .. } => {
                 if iter_is_generator(self.types, iter)
                     && let Some(root) = collect_mutable_root(iter)
                 {

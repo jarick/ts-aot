@@ -35,7 +35,8 @@ pub use date::{
     __ts_aot_date_value_of, MS_PER_DAY, parse_iso8601_to_ms,
 };
 pub use generator::{
-    __ts_aot_generator_new, Generator, GeneratorIntoIter, GeneratorRefIntoIter, GeneratorResult,
+    __ts_aot_async_generator_new, __ts_aot_generator_new, AsyncGenYield, AsyncGenerator, Generator,
+    GeneratorIntoIter, GeneratorRefIntoIter, GeneratorResult,
 };
 pub use host::{__ts_aot_host_console_log, __ts_aot_throw};
 pub use json::{

@@ -65,6 +65,7 @@ pub fn count_runtime_ops(mir: &MirProgram, op: RuntimeOp) -> usize {
                 MirStmt::While { body, .. }
                 | MirStmt::DoWhile { body, .. }
                 | MirStmt::ForOf { body, .. }
+                | MirStmt::ForAwaitOf { body, .. }
                 | MirStmt::ForIn { body, .. } => walk_block(body, op, count),
                 MirStmt::Switch { cases, default, .. } => {
                     for case in cases {

@@ -119,7 +119,7 @@ pub(super) fn rewrite_stmt(
                 stats,
             );
         }
-        HirStmt::ForOf { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. } | HirStmt::ForAwaitOf { iter, body, .. } => {
             rewrite_expr(
                 iter,
                 promise_sym,

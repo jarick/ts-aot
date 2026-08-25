@@ -208,7 +208,9 @@ fn visit_stmt_callees(stmt: &mut HirStmt, on_callee: OnCallee<'_>) {
             visit_expr_callees(cond, on_callee);
             visit_stmt_callees(body, on_callee);
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             visit_expr_callees(iter, on_callee);
             visit_stmt_callees(body, on_callee);
         }

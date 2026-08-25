@@ -4,6 +4,8 @@ use std::pin::Pin;
 use genawaiter::GeneratorState;
 use genawaiter::sync::{Co, Gen as GenStateMachine};
 
+use crate::promise::{__ts_aot_promise_create, __ts_aot_promise_resolve, Promise};
+
 type BoxedProducer<T> = Pin<Box<dyn Future<Output = Option<T>> + 'static>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,5 +98,73 @@ impl<'a, T> IntoIterator for &'a mut Generator<T> {
 impl<T> Generator<T> {
     pub fn iter_mut(&mut self) -> GeneratorRefIntoIter<'_, T> {
         GeneratorRefIntoIter { inner: self }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncGenYield<T> {
+    pub value: Option<T>,
+    pub done: bool,
+}
+
+impl<T> AsyncGenYield<T> {
+    pub fn yielded(value: T) -> Self {
+        Self {
+            value: Some(value),
+            done: false,
+        }
+    }
+
+    pub fn finished(value: Option<T>) -> Self {
+        Self { value, done: true }
+    }
+}
+
+pub struct AsyncGenerator<T> {
+    inner: Generator<AsyncGenYield<T>>,
+}
+
+impl<T> AsyncGenerator<T> {
+    #[must_use]
+    pub fn next(&mut self) -> Promise<AsyncGenYield<T>>
+    where
+        T: Clone + 'static,
+    {
+        let promise = __ts_aot_promise_create::<AsyncGenYield<T>>();
+        match self.inner.next() {
+            GeneratorResult::Yielded(yielded) => {
+                __ts_aot_promise_resolve(&promise, yielded);
+            }
+            GeneratorResult::Done(value) => {
+                let completed = match value {
+                    Some(AsyncGenYield {
+                        value: inner_value,
+                        done: true,
+                    }) => AsyncGenYield {
+                        value: inner_value,
+                        done: true,
+                    },
+                    _ => AsyncGenYield {
+                        value: None,
+                        done: true,
+                    },
+                };
+                __ts_aot_promise_resolve(&promise, completed);
+            }
+        }
+        promise
+    }
+}
+
+#[must_use]
+pub fn __ts_aot_async_generator_new<T, F>(
+    producer: impl FnOnce(Co<AsyncGenYield<T>, ()>) -> F,
+) -> AsyncGenerator<T>
+where
+    T: Clone + 'static,
+    F: Future<Output = Option<AsyncGenYield<T>>> + 'static,
+{
+    AsyncGenerator {
+        inner: __ts_aot_generator_new(producer),
     }
 }

@@ -311,6 +311,12 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
             iter_ty,
             body,
             ..
+        }
+        | MirStmt::ForAwaitOf {
+            iterable,
+            iter_ty,
+            body,
+            ..
         } => {
             if matches!(types.resolve(*iter_ty), Some(Type::Generator { .. }))
                 && let Some(id) = expr_root_local_id(iterable)

@@ -221,6 +221,30 @@ fn emit_stmt(
                 Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
             }
         }
+        MirStmt::ForAwaitOf {
+            item,
+            iterable,
+            iter_ty,
+            body,
+        } => {
+            let item_ident = body_ctx.local_ident(*item);
+            let item = if body_ctx.local_mut(*item) {
+                quote!(mut #item_ident)
+            } else {
+                quote!(#item_ident)
+            };
+            let iterable = emit_expr(iterable, ctx, body_ctx)?;
+            let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
+            let needs_mut_ref = matches!(
+                ctx.types.resolve(*iter_ty),
+                Some(ts_aot_core::Type::Generator { .. })
+            );
+            if needs_mut_ref {
+                Ok(quote!(for #item in &mut (#iterable) { #(#body_stmts)* }))
+            } else {
+                Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
+            }
+        }
         MirStmt::ForIn { key, object, body } => {
             let key = body_ctx.local_ident(*key);
             let object = emit_expr(object, ctx, body_ctx)?;

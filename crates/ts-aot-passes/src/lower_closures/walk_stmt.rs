@@ -122,7 +122,9 @@ pub(super) fn walk_stmt(
                 ctx,
             );
         }
-        HirStmt::ForOf { iter, body, .. } | HirStmt::ForIn { iter, body, .. } => {
+        HirStmt::ForOf { iter, body, .. }
+        | HirStmt::ForAwaitOf { iter, body, .. }
+        | HirStmt::ForIn { iter, body, .. } => {
             walk_expr(
                 iter,
                 next_id,
