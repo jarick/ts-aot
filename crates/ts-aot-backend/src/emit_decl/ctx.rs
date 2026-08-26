@@ -149,6 +149,31 @@ impl BodyCtx {
         id
     }
 
+    pub(super) fn for_closure(ret: TypeId) -> Self {
+        Self {
+            locals: HashMap::new(),
+            locals_ty: HashMap::new(),
+            locals_mut: HashMap::new(),
+            reserved_idents: HashSet::new(),
+            self_param: None,
+            is_generator: false,
+            gen_co: None,
+            ret,
+            in_try: Cell::new(false),
+            continue_label: RefCell::new(None),
+            try_label: RefCell::new(None),
+            return_slot: RefCell::new(None),
+            next_try_id: Cell::new(0),
+        }
+    }
+
+    pub(super) fn register_local(&mut self, id: LocalId, name: Ident, ty: TypeId, mutable: bool) {
+        self.locals.insert(id, name.clone());
+        self.locals_ty.insert(id, ty);
+        self.locals_mut.insert(id, mutable);
+        self.reserved_idents.insert(name);
+    }
+
     pub(super) fn is_generator(&self) -> bool {
         self.is_generator
     }
@@ -273,6 +298,18 @@ pub(super) fn collect_written_locals(block: &MirBlock, types: &TypeTable) -> Has
     written
 }
 
+pub(super) fn collect_assigned_locals(
+    stmts: &[MirStmt],
+    types: &TypeTable,
+    candidates: &HashSet<LocalId>,
+) -> HashSet<LocalId> {
+    let mut all_written = HashSet::new();
+    for stmt in stmts {
+        collect_from_stmt(stmt, types, &mut all_written);
+    }
+    all_written.intersection(candidates).copied().collect()
+}
+
 fn collect_from_block(block: &MirBlock, types: &TypeTable, written: &mut HashSet<LocalId>) {
     for stmt in &block.stmts {
         collect_from_stmt(stmt, types, written);
@@ -306,6 +343,11 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
                 collect_from_block(b, types, written);
             }
         }
+        MirStmt::While { body, .. }
+        | MirStmt::DoWhile { body, .. }
+        | MirStmt::ForIn { body, .. } => {
+            collect_from_block(body, types, written);
+        }
         MirStmt::ForOf {
             iterable,
             iter_ty,
@@ -323,11 +365,6 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
             {
                 written.insert(id);
             }
-            collect_from_block(body, types, written);
-        }
-        MirStmt::While { body, .. }
-        | MirStmt::DoWhile { body, .. }
-        | MirStmt::ForIn { body, .. } => {
             collect_from_block(body, types, written);
         }
         MirStmt::Switch { cases, default, .. } => {
@@ -352,12 +389,66 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
                 collect_from_block(b, types, written);
             }
         }
-        MirStmt::Let { .. }
-        | MirStmt::Expr(_)
-        | MirStmt::Return(_)
-        | MirStmt::ReturnResultErr { .. }
-        | MirStmt::Throw { .. }
-        | MirStmt::Break
-        | MirStmt::Continue => {}
+        MirStmt::Expr(expr) | MirStmt::Return(Some(expr)) => {
+            collect_from_expr(expr, types, written);
+        }
+        MirStmt::Throw { error, .. } | MirStmt::ReturnResultErr { error, .. } => {
+            collect_from_expr(error, types, written);
+        }
+        MirStmt::Let { .. } | MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
+    }
+}
+
+fn collect_from_expr(expr: &MirExpr, types: &TypeTable, written: &mut HashSet<LocalId>) {
+    match expr {
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. } => collect_from_expr(base, types, written),
+        MirExpr::Index { base, index, .. } => {
+            collect_from_expr(base, types, written);
+            collect_from_expr(index, types, written);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_from_expr(left, types, written);
+            collect_from_expr(right, types, written);
+        }
+        MirExpr::Unary { expr, .. }
+        | MirExpr::Await { expr, .. }
+        | MirExpr::TypeOf { expr, .. }
+        | MirExpr::Cast { expr, .. }
+        | MirExpr::ResultErr { error: expr, .. }
+        | MirExpr::Import { source: expr, .. } => collect_from_expr(expr, types, written),
+        MirExpr::Yield { expr: Some(e), .. } => collect_from_expr(e, types, written),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                collect_from_expr(a, types, written);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_from_expr(callee, types, written);
+            for a in args {
+                collect_from_expr(a, types, written);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                collect_from_expr(v, types, written);
+            }
+        }
+        MirExpr::Closure { body, .. } => {
+            collect_from_block(body, types, written);
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
     }
 }

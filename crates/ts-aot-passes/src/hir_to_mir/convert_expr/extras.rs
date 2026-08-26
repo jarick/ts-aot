@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{LocalId, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
-use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
+use ts_aot_ir_mir::{MirExpr, MirLocalDecl, MirParam, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
@@ -335,14 +335,90 @@ impl ExprConverter {
         self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx)
     }
 
-    pub(super) fn convert_closure(&mut self, ty: TypeId, ctx: &mut PassContext) -> MirExpr {
-        let _ = ty;
-        ctx.error(
-            "P0005",
-            "closure expressions are not yet supported in HIR→MIR",
-            Span::new(0, 0),
+    pub(super) fn convert_closure(
+        &mut self,
+        hir: &HirExpr,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let HirExpr::Closure {
+            id: _id,
+            params,
+            captures,
+            body,
+            ty: closure_ty,
+            span,
+        } = hir
+        else {
+            ctx.error(
+                "P0005",
+                "convert_closure called with non-closure",
+                Span::new(0, 0),
+            );
+            return MirExpr::Unit;
+        };
+        if !captures.is_empty() {
+            ctx.error(
+                "P0005",
+                "capturing closures are not supported in this PR; \
+                 only no-capture arrow functions are accepted",
+                *span,
+            );
+            return MirExpr::Unit;
+        }
+        let ret_ty = types
+            .resolve(*closure_ty)
+            .and_then(|t| match t {
+                ts_aot_core::Type::Fn { ret, .. } => Some(*ret),
+                _ => None,
+            })
+            .unwrap_or(ty);
+        let mut mir_params: Vec<MirParam> = Vec::with_capacity(params.len());
+        let param_ids: Vec<LocalId> = (0..params.len())
+            .map(|i| LocalId::from_raw(u32::try_from(i).unwrap_or(u32::MAX)))
+            .collect();
+        let snapshot: std::collections::HashMap<LocalId, LocalId> = self.local_map.clone();
+        let temp_locals_snapshot: Vec<MirLocalDecl> = std::mem::take(&mut self.temp_locals);
+        for (hir_param_id, p) in param_ids.iter().zip(params.iter()) {
+            let new_id = self.fresh_local();
+            self.map_local_id_inplace(*hir_param_id, new_id);
+            let name = self.unique_synth_local_name(new_id, "__closure_param");
+            mir_params.push(MirParam {
+                id: new_id,
+                name,
+                ty: p.ty,
+            });
+        }
+        let (mir_body, body_locals) = self.convert_block_with_shared_struct_ids(
+            body,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
         );
-        MirExpr::Unit
+        self.local_map = snapshot;
+        self.temp_locals = temp_locals_snapshot;
+        let closure_expr = MirExpr::Closure {
+            params: mir_params,
+            captures: Vec::new(),
+            locals: body_locals,
+            body: mir_body,
+            ret_ty,
+            fn_ty: *closure_ty,
+        };
+        let dest = self.fresh_local();
+        self.push_temp_local_with_mut(dest, *closure_ty, false);
+        out.push(MirStmt::Let {
+            local: dest,
+            ty: *closure_ty,
+            init: Some(closure_expr),
+            mutable: false,
+        });
+        MirExpr::Local(dest)
     }
 
     pub(super) fn convert_await(

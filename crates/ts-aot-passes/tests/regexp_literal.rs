@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     (mir.dump_text(), diags)
@@ -29,7 +29,7 @@ fn regexp_literal_with_flags_emits_regexp_mir() {
     let line = mir
         .lines()
         .find(|l| l.contains("regexp("))
-        .unwrap_or_else(|| panic!("expected regexp(...) line in MIR, got:\n{mir}"));
+        .unwrap_or_else(|| panic!("expected regexp(...) line in MIR, got:\r\n{mir}"));
     assert!(
         line.contains("\"foo\""),
         "must include pattern literal, got: {line}"
@@ -46,7 +46,7 @@ fn regexp_literal_without_flags_emits_empty_flags() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("regexp(") && mir.contains("\"abc\""),
-        "expected regexp line with pattern, got:\n{mir}"
+        "expected regexp line with pattern, got:\r\n{mir}"
     );
 }
 
@@ -56,7 +56,7 @@ fn regexp_literal_in_return_emits_regexp_mir() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("regexp("),
-        "MIR must include regexp call, got:\n{mir}"
+        "MIR must include regexp call, got:\r\n{mir}"
     );
 }
 
@@ -68,6 +68,6 @@ fn regexp_literal_chained_call_keeps_exactly_one_regexp() {
     assert_eq!(
         regexp_lines.len(),
         1,
-        "exactly one regexp(...) call expected, got:\n{mir}"
+        "exactly one regexp(...) call expected, got:\r\n{mir}"
     );
 }

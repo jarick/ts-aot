@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId};
+use ts_aot_core::{Atom, LocalId, TypeTable};
 use ts_aot_ir_hir::HirStmt;
 
 use super::LowerClosuresStats;
@@ -15,6 +15,7 @@ pub(super) fn walk_body(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     for stmt in body.iter_mut() {
@@ -26,6 +27,7 @@ pub(super) fn walk_body(
             generated,
             taken,
             stats,
+            types,
             ctx,
         );
     }
@@ -38,6 +40,7 @@ pub(super) fn walk_stmt(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     match stmt {
@@ -49,6 +52,7 @@ pub(super) fn walk_stmt(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirStmt::Let { init: Some(e), .. } | HirStmt::Expr { expr: e } => walk_expr(
@@ -59,6 +63,7 @@ pub(super) fn walk_stmt(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirStmt::Let { init: None, .. } => {}
@@ -75,6 +80,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_stmt(
@@ -85,6 +91,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             if let Some(else_stmt) = otherwise {
@@ -96,6 +103,7 @@ pub(super) fn walk_stmt(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -109,6 +117,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_stmt(
@@ -119,6 +128,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -133,6 +143,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_stmt(
@@ -143,6 +154,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -155,6 +167,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             for case in cases {
@@ -167,6 +180,7 @@ pub(super) fn walk_stmt(
                         generated,
                         taken,
                         stats,
+                        types,
                         ctx,
                     );
                 }
@@ -178,6 +192,7 @@ pub(super) fn walk_stmt(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -190,6 +205,7 @@ pub(super) fn walk_stmt(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirStmt::Return { value: None } => {}
@@ -201,6 +217,7 @@ pub(super) fn walk_stmt(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirStmt::Try {
@@ -216,6 +233,7 @@ pub(super) fn walk_stmt(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             if let Some(c) = catch {
@@ -227,6 +245,7 @@ pub(super) fn walk_stmt(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -239,11 +258,12 @@ pub(super) fn walk_stmt(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
         }
-        HirStmt::Decl(d) => walk_decl(d, next_id, new_decls, generated, taken, stats, ctx),
+        HirStmt::Decl(d) => walk_decl(d, next_id, new_decls, generated, taken, stats, types, ctx),
         HirStmt::Break { .. } | HirStmt::Continue { .. } => {}
     }
 }

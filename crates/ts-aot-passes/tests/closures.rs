@@ -60,7 +60,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(outer));
 
-    let result = lower_closures(&mut hir, &mut ctx);
+    let result = lower_closures(&mut hir, &mut types, &mut ctx);
     let stats = &result.stats;
     assert_eq!(stats.emitted_fns, 1);
     assert_eq!(stats.deferred_capturing, 0);
@@ -276,7 +276,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(outer));
 
-    let result = lower_closures(&mut hir, &mut ctx);
+    let result = lower_closures(&mut hir, &mut types, &mut ctx);
     assert_eq!(
         result.stats.emitted_fns, 2,
         "two distinct closures must be lifted"
@@ -450,7 +450,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
     hir.declarations.push(HirDecl::Function(apply_fn));
     hir.declarations.push(HirDecl::Function(outer));
 
-    let result = lower_closures(&mut hir, &mut ctx);
+    let result = lower_closures(&mut hir, &mut types, &mut ctx);
     assert_eq!(
         result.stats.emitted_fns, 1,
         "exactly one closure lifted (inlined as call argument)"
@@ -531,7 +531,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
         }),
     });
 
-    let result = lower_closures(&mut hir, &mut ctx);
+    let result = lower_closures(&mut hir, &mut types, &mut ctx);
     assert_eq!(result.stats.emitted_fns, 1);
     assert!(
         !ctx.has_errors(),

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId};
-use ts_aot_ir_hir::{HirCallee, HirExpr};
+use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, Span, StructId, TypeId};
+use ts_aot_ir_hir::{HirCallee, HirExpr, HirProgram};
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 
 use crate::PassContext;
@@ -13,6 +13,7 @@ pub struct ExprConverter {
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) name_to_function: Arc<HashMap<Atom, FunctionId>>,
+    pub(super) program: Arc<HirProgram>,
     pub(super) namespace_path: Vec<String>,
     pub(super) next_local: u32,
     pub(super) temp_locals: Vec<MirLocalDecl>,
@@ -42,6 +43,7 @@ impl ExprConverter {
             local_names: HashMap::new(),
             function_remap: remap,
             name_to_function: Arc::new(HashMap::new()),
+            program: Arc::new(HirProgram::new(ModuleId::from_raw(0))),
             namespace_path: Vec::new(),
             next_local,
             temp_locals: Vec::new(),
@@ -59,16 +61,24 @@ impl ExprConverter {
         self.namespace_path = path.to_vec();
     }
 
+    pub fn set_program(&mut self, program: Arc<HirProgram>) {
+        self.program = program;
+    }
+
     pub(super) fn take_temp_locals(&mut self) -> Vec<MirLocalDecl> {
         std::mem::take(&mut self.temp_locals)
     }
 
     pub(super) fn push_temp_local(&mut self, id: LocalId, ty: TypeId) {
+        self.push_temp_local_with_mut(id, ty, true);
+    }
+
+    pub(super) fn push_temp_local_with_mut(&mut self, id: LocalId, ty: TypeId, mutable: bool) {
         self.temp_locals.push(MirLocalDecl {
             id,
             name: Atom::from(""),
             ty,
-            mutable: true,
+            mutable,
         });
     }
 
@@ -102,6 +112,10 @@ impl ExprConverter {
             self.local_map.insert(old, new_id);
             new_id
         }
+    }
+
+    pub fn map_local_id_inplace(&mut self, old: LocalId, new: LocalId) {
+        self.local_map.insert(old, new);
     }
 
     pub fn register_local_name(&mut self, id: LocalId, name: Atom) {

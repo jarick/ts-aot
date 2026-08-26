@@ -1,5 +1,5 @@
 use super::*;
-use ts_aot_core::{Atom, LocalId, ModuleId, Span, TypeId};
+use ts_aot_core::{Atom, LocalId, ModuleId, Span, TypeId, TypeTable};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirClass, HirDecl, HirExpr, HirFunction, HirParam, HirProgram, HirStmt,
 };
@@ -56,8 +56,9 @@ fn non_capturing_closure_is_emitted_as_top_level_fn() {
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 1);
@@ -127,8 +128,9 @@ fn call_to_closure_is_rewritten_to_indirect_global() {
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let _result = lower_closures(&mut program, &mut ctx);
+    let _result = lower_closures(&mut program, &mut types, &mut ctx);
 
     let HirDecl::Function(HirFunction { body, .. }) = &program.declarations[0] else {
         panic!("expected Function");
@@ -196,8 +198,9 @@ fn capturing_closure_emits_warning_and_is_unchanged() {
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 0);
@@ -274,8 +277,9 @@ fn two_functions_with_closure_at_local_zero_get_distinct_names() {
     program.declarations.push(HirDecl::Function(fa));
     program.declarations.push(HirDecl::Function(fb));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 2);
@@ -328,8 +332,9 @@ fn closure_inside_namespace_is_walked_and_emitted() {
         members: vec![HirDecl::Function(inner)],
     });
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 1);
@@ -422,8 +427,9 @@ fn nested_non_capturing_closure_is_walked_and_rewritten() {
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 2);
@@ -488,8 +494,9 @@ fn no_closures_is_a_noop() {
     program
         .declarations
         .push(HirDecl::Function(empty_function("f")));
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
     assert_eq!(stats.emitted_fns, 0);
     assert_eq!(stats.deferred_capturing, 0);
@@ -529,8 +536,9 @@ fn generated_name_skips_names_already_taken_by_user_decls() {
         async_info: None,
     }));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 1);
@@ -631,8 +639,9 @@ fn generated_name_skips_names_taken_by_class_methods() {
     program.declarations.push(class_with_method);
     program.declarations.push(HirDecl::Function(outer));
 
+    let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let result = lower_closures(&mut program, &mut ctx);
+    let result = lower_closures(&mut program, &mut types, &mut ctx);
     let stats = &result.stats;
 
     assert_eq!(stats.emitted_fns, 1);

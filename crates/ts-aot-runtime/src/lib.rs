@@ -53,8 +53,13 @@ pub use math::{
 };
 pub use module::{__ts_aot_dynamic_import, __ts_aot_module_register, ModuleNamespace};
 pub use promise::{
-    __ts_aot_await, __ts_aot_promise_create, __ts_aot_promise_reject, __ts_aot_promise_resolve,
-    __ts_aot_promise_then, Promise,
+    __ts_aot_await, __ts_aot_await_value, __ts_aot_enqueue_microtask, __ts_aot_promise_all,
+    __ts_aot_promise_all_settled, __ts_aot_promise_any, __ts_aot_promise_catch,
+    __ts_aot_promise_catch_value, __ts_aot_promise_create, __ts_aot_promise_finally,
+    __ts_aot_promise_finally_value, __ts_aot_promise_race, __ts_aot_promise_reject,
+    __ts_aot_promise_reject_value, __ts_aot_promise_resolve, __ts_aot_promise_resolve_value,
+    __ts_aot_promise_then, __ts_aot_promise_then_value, __ts_aot_runtime_run, AggregateError,
+    AwaitFuture, Promise, PromiseSettledResult,
 };
 pub use regex::{__ts_aot_regex_new, RegExpHandle};
 pub use result::{__ts_aot_result_err, __ts_aot_result_ok, __ts_aot_result_unwrap_ok};

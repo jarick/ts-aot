@@ -108,7 +108,17 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::ArrayFromLengthMapped => &[Array],
         RuntimeOp::MapGet | RuntimeOp::MapSet => &[Map],
         RuntimeOp::ResultOk | RuntimeOp::ResultErr | RuntimeOp::ResultUnwrapOk => &[ResultFeat],
-        RuntimeOp::PromiseCreate | RuntimeOp::PromiseResolve => &[Promise, Scheduler],
+        RuntimeOp::PromiseCreate
+        | RuntimeOp::PromiseResolve
+        | RuntimeOp::PromiseAll
+        | RuntimeOp::PromiseRace
+        | RuntimeOp::PromiseAllSettled
+        | RuntimeOp::PromiseAny
+        | RuntimeOp::PromiseResolveStatic
+        | RuntimeOp::PromiseRejectStatic
+        | RuntimeOp::PromiseThenInstance
+        | RuntimeOp::PromiseCatchInstance
+        | RuntimeOp::PromiseFinallyInstance => &[Promise, Scheduler],
         RuntimeOp::HostConsoleLog => &[HostIo, Console],
         RuntimeOp::MathSqrt
         | RuntimeOp::MathAbs

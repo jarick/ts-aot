@@ -4,7 +4,9 @@ use std::pin::Pin;
 use genawaiter::GeneratorState;
 use genawaiter::sync::{Co, Gen as GenStateMachine};
 
-use crate::promise::{__ts_aot_promise_create, __ts_aot_promise_resolve, Promise};
+use crate::promise::{
+    __ts_aot_promise_create, __ts_aot_promise_resolve, __ts_aot_runtime_run, Promise,
+};
 
 type BoxedProducer<T> = Pin<Box<dyn Future<Output = Option<T>> + 'static>>;
 
@@ -122,6 +124,7 @@ impl<T> AsyncGenYield<T> {
 
 pub struct AsyncGenerator<T> {
     inner: Generator<AsyncGenYield<T>>,
+    finished: bool,
 }
 
 impl<T> AsyncGenerator<T> {
@@ -131,11 +134,23 @@ impl<T> AsyncGenerator<T> {
         T: Clone + 'static,
     {
         let promise = __ts_aot_promise_create::<AsyncGenYield<T>>();
-        match self.inner.next() {
-            GeneratorResult::Yielded(yielded) => {
+        if self.finished {
+            __ts_aot_promise_resolve(
+                &promise,
+                AsyncGenYield {
+                    value: None,
+                    done: true,
+                },
+            );
+            return promise;
+        }
+        let result = __ts_aot_runtime_run(self.inner.inner.async_resume());
+        self.finished = matches!(result, GeneratorState::Complete(_));
+        match result {
+            GeneratorState::Yielded(yielded) => {
                 __ts_aot_promise_resolve(&promise, yielded);
             }
-            GeneratorResult::Done(value) => {
+            GeneratorState::Complete(value) => {
                 let completed = match value {
                     Some(AsyncGenYield {
                         value: inner_value,
@@ -166,5 +181,6 @@ where
 {
     AsyncGenerator {
         inner: __ts_aot_generator_new(producer),
+        finished: false,
     }
 }

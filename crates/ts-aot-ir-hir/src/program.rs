@@ -1,6 +1,26 @@
 use ts_aot_core::{Atom, DiagnosticBag, ModuleId};
 
-use crate::decl::HirDecl;
+use crate::decl::{HirDecl, HirFunction};
+
+#[must_use]
+pub fn qualified_name(namespace_path: &[String], leaf: &str) -> Atom {
+    if namespace_path.is_empty() {
+        Atom::from(leaf.to_owned())
+    } else {
+        let mut s = String::with_capacity(
+            namespace_path.iter().map(|p| p.len() + 2).sum::<usize>() + leaf.len(),
+        );
+        for (i, part) in namespace_path.iter().enumerate() {
+            if i > 0 {
+                s.push_str("::");
+            }
+            s.push_str(part);
+        }
+        s.push_str("::");
+        s.push_str(leaf);
+        Atom::from(s)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirImport {
@@ -36,6 +56,23 @@ impl HirProgram {
         }
     }
 
+    #[must_use]
+    pub fn find_function_by_name(&self, name: &Atom) -> Option<&HirFunction> {
+        for decl in &self.declarations {
+            if let HirDecl::Function(f) = decl
+                && f.name == *name
+            {
+                return Some(f);
+            }
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn find_function_by_qualified_name(&self, qualified: &Atom) -> Option<&HirFunction> {
+        find_function_in_decls(&self.declarations, qualified, &[])
+    }
+
     pub fn push_decl(&mut self, decl: HirDecl) {
         self.declarations.push(decl);
     }
@@ -44,6 +81,35 @@ impl HirProgram {
     pub fn decl_count(&self) -> usize {
         self.declarations.len()
     }
+}
+
+fn find_function_in_decls<'a>(
+    decls: &'a [HirDecl],
+    qualified: &Atom,
+    path: &[String],
+) -> Option<&'a HirFunction> {
+    for decl in decls {
+        match decl {
+            HirDecl::Function(f) => {
+                if path.is_empty() {
+                    if f.name == *qualified {
+                        return Some(f);
+                    }
+                } else if qualified_name(path, f.name.as_str()) == *qualified {
+                    return Some(f);
+                }
+            }
+            HirDecl::Namespace { name, members } => {
+                let mut new_path = path.to_vec();
+                new_path.push(name.as_str().to_owned());
+                if let Some(f) = find_function_in_decls(members, qualified, &new_path) {
+                    return Some(f);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]

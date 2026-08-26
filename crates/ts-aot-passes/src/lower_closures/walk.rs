@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId};
+use ts_aot_core::{Atom, LocalId, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirExpr, HirStmt};
 
 use super::LowerClosuresStats;
@@ -15,6 +15,7 @@ pub(super) fn walk_decl(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     match decl {
@@ -25,6 +26,7 @@ pub(super) fn walk_decl(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirDecl::Class(c) => {
@@ -36,16 +38,17 @@ pub(super) fn walk_decl(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
         }
         HirDecl::Global { init: Some(e), .. } => {
-            process_global_init(e, next_id, new_decls, generated, taken, stats, ctx);
+            process_global_init(e, next_id, new_decls, generated, taken, stats, types, ctx);
         }
         HirDecl::Namespace { members, .. } => {
             for m in members {
-                walk_decl(m, next_id, new_decls, generated, taken, stats, ctx);
+                walk_decl(m, next_id, new_decls, generated, taken, stats, types, ctx);
             }
         }
         HirDecl::Global { init: None, .. }
@@ -62,6 +65,7 @@ fn process_scope(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     let mut closure_names: HashMap<LocalId, Atom> = HashMap::new();
@@ -73,6 +77,7 @@ fn process_scope(
         generated,
         taken,
         stats,
+        types,
         ctx,
     );
     if !closure_names.is_empty() {
@@ -87,6 +92,7 @@ fn process_global_init(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     let mut closure_names: HashMap<LocalId, Atom> = HashMap::new();
@@ -98,6 +104,7 @@ fn process_global_init(
         generated,
         taken,
         stats,
+        types,
         ctx,
     );
     if !closure_names.is_empty() {

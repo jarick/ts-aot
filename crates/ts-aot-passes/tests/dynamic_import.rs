@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     (mir.dump_text(), diags)
@@ -29,7 +29,7 @@ fn dynamic_import_string_source_emits_direct_not_dynfrom() {
     let import_line = mir
         .lines()
         .find(|l| l.starts_with("return import(") || l.contains(" return import("))
-        .unwrap_or_else(|| panic!("expected return import(...) line, got:\n{mir}"));
+        .unwrap_or_else(|| panic!("expected return import(...) line, got:\r\n{mir}"));
     assert!(
         !import_line.contains("dynfrom("),
         "strict AOT must NOT wrap import source in DynamicFrom, got: {import_line}"

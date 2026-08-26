@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use ts_aot_core::Atom;
+use ts_aot_core::{Atom, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirProgram};
 
 use crate::PassContext;
@@ -53,7 +53,11 @@ fn collect_taken_names(decls: &[HirDecl], taken: &mut HashSet<Atom>) {
     }
 }
 
-pub fn lower_closures(program: &mut HirProgram, ctx: &mut PassContext) -> LowerClosuresResult {
+pub fn lower_closures(
+    program: &mut HirProgram,
+    types: &mut TypeTable,
+    ctx: &mut PassContext,
+) -> LowerClosuresResult {
     let mut stats = LowerClosuresStats::default();
     let mut closure_names: Vec<Atom> = Vec::new();
     let mut new_decls: Vec<HirDecl> = Vec::new();
@@ -74,6 +78,7 @@ pub fn lower_closures(program: &mut HirProgram, ctx: &mut PassContext) -> LowerC
             &mut closure_names,
             &mut taken,
             &mut stats,
+            types,
             ctx,
         );
     }

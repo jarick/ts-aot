@@ -23,7 +23,7 @@ pub fn convert(src: &str) -> (MirProgram, TypeTable, Vec<Diagnostic>, String) {
     lower_enums(&mut hir, &mut types, &mut ctx);
     lower_classes(&mut hir, &mut types, &mut ctx);
     monomorphize(&mut hir, &mut types, &mut ctx);
-    lower_closures(&mut hir, &mut ctx);
+    lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = lower_async(&mut hir, &mut types, &mut ctx);
     let _ = lower_generators(&mut hir, &mut types, &mut ctx);
     let hir_dump = hir.dump_text();

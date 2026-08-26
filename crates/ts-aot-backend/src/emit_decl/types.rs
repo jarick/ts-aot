@@ -62,7 +62,10 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             let err_tokens = emit_type_id_with_ctx(*err, ctx);
             quote!(Result<#ok_tokens, #err_tokens>)
         }
-        Type::Promise { .. } => quote!(ts_aot_runtime::Promise),
+        Type::Promise { ok, err: _ } => {
+            let ok_tokens = emit_type_id_with_ctx(*ok, ctx);
+            quote!(ts_aot_runtime::Promise<#ok_tokens>)
+        }
         Type::ArrayBuffer => quote!(ts_aot_runtime::ArrayBufferHandle),
         Type::Int8Array
         | Type::Uint8Array

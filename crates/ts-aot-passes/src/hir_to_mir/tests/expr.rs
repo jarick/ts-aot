@@ -296,6 +296,566 @@ fn convert_expr_call_resolves_callee() {
 }
 
 #[test]
+fn convert_expr_call_to_promise_all_lowers_to_runtime_op_with_element_turbofish() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let array_promise_ty = types.intern(&Type::Array {
+        element: promise_i64_ty,
+    });
+    let array_i64_ty = types.intern(&Type::Array { element: i64_ty });
+    let result_promise_ty = types.intern(&Type::Promise {
+        ok: array_i64_ty,
+        err: None,
+    });
+    let arr_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: array_promise_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: TypeId::from_raw(0),
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("all"),
+            ty: result_promise_ty,
+            span: Span::default(),
+        })),
+        args: vec![arr_local],
+        ty: result_promise_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let runtime = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, target_ty, .. } => Some((*op, *target_ty)),
+            _ => None,
+        })
+        .expect("expected a Runtime stmt from Promise.all dispatch");
+    assert_eq!(runtime.0, RuntimeOp::PromiseAll);
+    assert_eq!(
+        runtime.1,
+        Some(i64_ty),
+        "target_ty must extract Promise<i64>::ok = i64 for turbofish"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_race_lowers_to_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let array_promise_ty = types.intern(&Type::Array {
+        element: promise_i64_ty,
+    });
+    let result_promise_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: TypeId::from_raw(0),
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("race"),
+            ty: result_promise_ty,
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: array_promise_ty,
+            span: Span::default(),
+        }],
+        ty: result_promise_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let op = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, .. } => Some(*op),
+            _ => None,
+        })
+        .expect("expected a Runtime stmt from Promise.race dispatch");
+    assert_eq!(op, RuntimeOp::PromiseRace);
+}
+
+#[test]
+fn convert_expr_call_to_unknown_promise_method_does_not_match_dispatch() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let array_promise_ty = types.intern(&Type::Array {
+        element: promise_ty,
+    });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: TypeId::from_raw(0),
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("nonexistent"),
+            ty: TypeId::from_raw(0),
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: array_promise_ty,
+            span: Span::default(),
+        }],
+        ty: TypeId::from_raw(0),
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let no_runtime = !out.iter().any(|s| matches!(s, MirStmt::Runtime { .. }));
+    assert!(
+        no_runtime,
+        "Promise.nonexistent must not produce MirStmt::Runtime"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_resolve_lowers_to_runtime_op_with_value_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: TypeId::from_raw(0),
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("resolve"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::Int(42, Span::default())],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let runtime = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, target_ty, .. } => Some((*op, *target_ty)),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.resolve dispatch");
+    assert_eq!(runtime.0, RuntimeOp::PromiseResolveStatic);
+    assert_eq!(
+        runtime.1,
+        Some(i64_ty),
+        "Promise.resolve target_ty must be value's type for turbofish"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_reject_lowers_to_runtime_op_with_promise_inner_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: TypeId::from_raw(0),
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("reject"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::String(Atom::new_inline("nope"), Span::default())],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let runtime = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, target_ty, .. } => Some((*op, *target_ty)),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.reject dispatch");
+    assert_eq!(runtime.0, RuntimeOp::PromiseRejectStatic);
+    assert_eq!(
+        runtime.1,
+        Some(i64_ty),
+        "Promise.reject target_ty must be the outer Promise's ok type"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_then_with_global_handler_lowers_to_instance_runtime_op() {
+    let mut c = ExprConverter::new();
+    let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
+        std::collections::HashMap::new();
+    name_to_function.insert(Atom::new_inline("global_handler"), FunctionId::from_raw(0));
+    c.name_to_function = std::sync::Arc::new(name_to_function);
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("global_handler"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("then"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let op = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, .. } => Some(*op),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.then dispatch");
+    assert_eq!(op, RuntimeOp::PromiseThenInstance);
+}
+
+#[test]
+fn convert_expr_call_to_promise_catch_with_global_handler_lowers_to_instance_runtime_op() {
+    let mut c = ExprConverter::new();
+    let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
+        std::collections::HashMap::new();
+    name_to_function.insert(Atom::new_inline("err_handler"), FunctionId::from_raw(0));
+    c.name_to_function = std::sync::Arc::new(name_to_function);
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("err_handler"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("catch"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let op = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, .. } => Some(*op),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.catch dispatch");
+    assert_eq!(op, RuntimeOp::PromiseCatchInstance);
+}
+
+#[test]
+fn convert_expr_call_to_promise_finally_with_global_handler_lowers_to_instance_runtime_op() {
+    let mut c = ExprConverter::new();
+    let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
+        std::collections::HashMap::new();
+    name_to_function.insert(Atom::new_inline("cleanup"), FunctionId::from_raw(0));
+    c.name_to_function = std::sync::Arc::new(name_to_function);
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("cleanup"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("finally"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let op = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, .. } => Some(*op),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.finally dispatch");
+    assert_eq!(op, RuntimeOp::PromiseFinallyInstance);
+}
+
+#[test]
+fn convert_expr_call_to_promise_then_with_closure_handler_lowers_to_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let closure = HirExpr::Closure {
+        id: LocalId::from_raw(1),
+        params: vec![],
+        captures: vec![],
+        body: vec![],
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("then"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![closure],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        !cx.has_errors(),
+        "closure handler must not produce diagnostics, got: {:?}",
+        cx.diagnostics()
+    );
+    let op = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Runtime { op, .. } => Some(*op),
+            _ => None,
+        })
+        .expect("expected Runtime stmt from Promise.then with closure handler");
+    assert_eq!(op, RuntimeOp::PromiseThenInstance);
+}
+
+#[test]
+fn convert_expr_call_to_promise_then_on_non_promise_owner_falls_through() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let owner_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("user_then"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(owner_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("then"),
+            ty: i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        !out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::PromiseThenInstance,
+                ..
+            }
+        )),
+        "non-Promise owner must NOT match PromiseThenInstance dispatch (would miscompile \
+         user-defined `then` method); got: {out:?}"
+    );
+    let promise_diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.message.contains("Promise.prototype.then"));
+    assert!(
+        promise_diag.is_none(),
+        "non-Promise owner must not produce Promise-specific diagnostics; got: {promise_diag:?}"
+    );
+}
+
+#[test]
 fn convert_expr_struct_literal_converts_fields() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
@@ -517,7 +1077,7 @@ fn convert_expr_await_emits_mir_await_expr() {
 }
 
 #[test]
-fn convert_expr_closure_returns_unit_and_diagnostics() {
+fn convert_expr_closure_with_empty_body_lowers_to_local_binding() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -530,24 +1090,64 @@ fn convert_expr_closure_returns_unit_and_diagnostics() {
 
         span: Span::default(),
     };
-    assert_eq!(
-        c.convert_expr(
-            &expr,
-            out,
-            &mut empty_struct_ids(),
-            &mut empty_next_struct(),
-            &mut empty_types(),
-            &mut cx
-        ),
-        MirExpr::Unit
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
     );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "closure should bind to a local, got {mir:?}"
+    );
+    assert!(
+        !cx.has_errors(),
+        "empty-body closure must not produce diagnostics"
+    );
+    assert!(
+        !out.is_empty(),
+        "closure should emit at least one MirStmt (the Let binding)"
+    );
+}
+
+#[test]
+fn convert_expr_closure_with_captures_emits_p0005_diagnostic() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let captured_local = HirExpr::Local {
+        id: LocalId::from_raw(42),
+        ty: unit_ty(),
+
+        span: Span::default(),
+    };
+    let expr = HirExpr::Closure {
+        id: LocalId::from_raw(0),
+        params: Vec::new(),
+        captures: vec![captured_local],
+        body: Vec::new(),
+        ty: unit_ty(),
+
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert_eq!(mir, MirExpr::Unit, "capturing closure must lower to Unit");
     assert!(cx.has_errors());
     let diag = cx
         .diagnostics()
         .iter()
         .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 diagnostic for Closure");
-    assert!(diag.message.contains("closure"));
+        .expect("expected P0005 diagnostic for capturing closure");
+    assert!(diag.message.contains("captur"));
 }
 
 #[test]
@@ -1354,6 +1954,7 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         None,
         HashMap::new(),
         &std::sync::Arc::new(HashMap::new()),
+        &std::sync::Arc::new(empty_hir()),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
@@ -1481,6 +2082,7 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         None,
         HashMap::new(),
         &std::sync::Arc::new(HashMap::new()),
+        &std::sync::Arc::new(empty_hir()),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
@@ -3689,5 +4291,89 @@ fn convert_expr_assignment_casts_i64_local_to_f32() {
             MirExpr::Cast { expr, ty } if *ty == f32_ty && matches!(expr.as_ref(), MirExpr::Local(_))
         ),
         "i64 -> f32 assignment must emit MirExpr::Cast to f32, got {init:?}"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set_program() {
+    let mut c = ExprConverter::new();
+    let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
+        std::collections::HashMap::new();
+    name_to_function.insert(Atom::new_inline("bad_handler"), FunctionId::from_raw(0));
+    c.name_to_function = std::sync::Arc::new(name_to_function);
+    let mut types = TypeTable::new();
+    let bool_ty = types.intern(&Type::Bool);
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("bad_handler"),
+        params: vec![HirParam {
+            name: Atom::from("x"),
+            ty: bool_ty,
+        }],
+        ret: i64_ty,
+        throws: None,
+        body: Vec::new(),
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    c.set_program(std::sync::Arc::new(prog));
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("bad_handler"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("then"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        mir,
+        MirExpr::Unit,
+        "mismatched handler signature must short-circuit to Unit (not fall through to generic call)"
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0504")
+        .expect("expected E0504 diagnostic from validate_promise_handler_param_and_return");
+    assert!(
+        diag.message.contains("bad_handler"),
+        "E0504 message must reference the offending handler name; got: {diag:?}"
+    );
+    assert!(
+        diag.message.contains("parameter type is not"),
+        "E0504 must report parameter-type mismatch (not arity); got: {diag:?}"
     );
 }

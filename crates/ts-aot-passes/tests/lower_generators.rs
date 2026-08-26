@@ -153,6 +153,9 @@ fn collect_in_expr(e: &MirExpr, out: &mut Vec<FunctionId>) {
         MirExpr::TypeOf { expr, .. } => collect_in_expr(expr, out),
         MirExpr::Cast { expr, .. } => collect_in_expr(expr, out),
         MirExpr::Import { source, .. } => collect_in_expr(source, out),
+        MirExpr::Closure { body, .. } => {
+            collect_call_callees_in_block(body, out);
+        }
     }
 }
 

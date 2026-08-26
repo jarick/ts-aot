@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId, Span, TypeId};
+use ts_aot_core::{Atom, LocalId, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirStmt};
 
 use super::LowerClosuresStats;
@@ -49,6 +49,7 @@ pub(super) fn lift_non_capturing_closure(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     walk_body: WalkBodyFn,
     ctx: &mut PassContext,
 ) -> HirExpr {
@@ -60,6 +61,7 @@ pub(super) fn lift_non_capturing_closure(
         generated,
         taken,
         stats,
+        types,
         ctx,
     );
     super::rewrite::rewrite_in_body(body, closure_names, ctx);
@@ -68,13 +70,20 @@ pub(super) fn lift_non_capturing_closure(
     *next_id += 1;
     taken.insert(name.clone());
 
-    let fn_decl = build_closure_fn_decl(&name, params, body, ty);
+    let fn_decl = build_closure_fn_decl(&name, params, body, ret_ty_from_fn_type(ty, types));
     new_decls.push(fn_decl);
     closure_names.insert(id, name.clone());
     generated.push(name.clone());
     stats.emitted_fns += 1;
 
     HirExpr::Global { name, ty, span }
+}
+
+fn ret_ty_from_fn_type(ty: TypeId, types: &TypeTable) -> TypeId {
+    if let Some(Type::Fn { ret, .. }) = types.resolve(ty) {
+        return *ret;
+    }
+    ty
 }
 
 pub(super) type WalkBodyFn = fn(
@@ -85,6 +94,7 @@ pub(super) type WalkBodyFn = fn(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 );
 

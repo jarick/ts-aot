@@ -274,6 +274,7 @@ fn emit_struct_with_ctx(
         dispatch_entries.extend(m_entries);
     }
     let tokens = quote! {
+        #[derive(Clone, Debug)]
         pub struct #name {
             #(#fields,)*
         }

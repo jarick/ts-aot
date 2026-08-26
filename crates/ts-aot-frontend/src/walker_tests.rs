@@ -2547,6 +2547,86 @@ fn body_walker_nested_blocks_get_distinct_local_ids() {
     assert_eq!(ids, vec![0, 1, 2], "each binding gets a unique LocalId");
 }
 
+#[test]
+fn body_walker_nested_block_arrow_captures_later_local_emits_p0005_not_global() {
+    use crate::frontend::FrontendPass;
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function f(): number { { const cb = (): number => x; let x = 1; return cb(); } return 0; }",
+    );
+    let diag = output
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "P0005")
+        .expect("expected P0005 diagnostic when arrow in nested block captures a later local");
+    assert!(diag.message.contains("captur"));
+}
+
+#[test]
+fn body_walker_inner_let_shadows_outer_and_outer_visible_after_block() {
+    let f = sole_function("function f(): number { let x = 1; { let x = 2; } return x; }");
+    let mut let_ids: Vec<u32> = Vec::new();
+    collect_let_ids(&f.body, &mut let_ids);
+    assert_eq!(
+        let_ids,
+        vec![0, 1],
+        "inner let x must get a distinct LocalId (shadow) and the outer x must keep its \
+         original LocalId even after the block exits; regression: BodyScope::declare walked \
+         ancestor scopes and reused the outer LocalId for the inner `let x = 2`, so the outer \
+         read after the block had no separate binding to resolve to"
+    );
+    let return_local = f
+        .body
+        .iter()
+        .find_map(|s| match s {
+            HirStmt::Return {
+                value: Some(HirExpr::Local { id, .. }),
+            } => Some(id.raw()),
+            _ => None,
+        })
+        .expect("return must reference outer x as a Local");
+    assert_eq!(
+        return_local, 0,
+        "return x after the block must resolve to the outer x (LocalId 0), not the inner \
+         shadow (LocalId 1); regression: the inner shadow was leaking through ancestor-aware \
+         declare and polluting the outer frame"
+    );
+}
+
+#[test]
+fn body_walker_top_level_predeclare_picks_up_inner_block_lexical_via_walk_lookup() {
+    let f = sole_function("function f(): number { let bar = 1; { bar(); } return 0; }");
+    let call_local_in_inner = f.body.iter().find_map(|s| match s {
+        HirStmt::Block(inner) => inner.iter().find_map(|s| match s {
+            HirStmt::Expr {
+                expr:
+                    HirExpr::Call {
+                        callee: HirCallee::Indirect(e),
+                        ..
+                    },
+                ..
+            } => match e.as_ref() {
+                HirExpr::Local { id, .. } => Some(id.raw()),
+                _ => None,
+            },
+            _ => None,
+        }),
+        _ => None,
+    });
+    let outer_let_id = f.body.iter().find_map(|s| match s {
+        HirStmt::Let { id, .. } => Some(id.raw()),
+        _ => None,
+    });
+    let call_local = call_local_in_inner.expect("inner block must contain a `bar()` call");
+    let outer_id = outer_let_id.expect("outer body must contain a `let bar = 1`");
+    assert_eq!(
+        call_local, outer_id,
+        "bar() inside a nested block must resolve to the outer `let bar` LocalId via the \
+         ancestor-aware lookup (pre-pass predeclares at the outer frame; walk pushes the \
+         nested scope which inherits predeclared via Vec<HashMap> ancestor lookup)"
+    );
+}
+
 fn collect_let_ids(stmts: &[HirStmt], out: &mut Vec<u32>) {
     for s in stmts {
         match s {
@@ -4470,4 +4550,23 @@ fn call_site_type_args_resolve_functions_generic_param_not_error() {
          got {type_arg:?} (type_args[0] = {:?})",
         type_args[0]
     );
+}
+
+#[test]
+fn arrow_function_capturing_outer_local_emits_p0005_diagnostic() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "function outer(): i32 { const x: i32 = 42; const f = (): i32 => x; return f(); }",
+    );
+    assert!(
+        output.diagnostics.has_errors(),
+        "capturing arrow function must produce a diagnostic; got: {:?}",
+        output.diagnostics
+    );
+    let diag = output
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "P0005")
+        .expect("expected P0005 diagnostic for capturing closure");
+    assert!(diag.message.contains("captur"));
 }
