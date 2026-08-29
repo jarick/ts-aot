@@ -6,6 +6,7 @@ mod common;
 fn e2e_array_destructuring_emits_runtime_call_per_element() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -33,6 +34,7 @@ fn e2e_array_destructuring_emits_runtime_call_per_element() {
 fn e2e_array_destructuring_on_non_array_rhs_emits_diagnostic() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",

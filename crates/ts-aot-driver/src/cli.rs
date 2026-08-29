@@ -51,6 +51,12 @@ pub struct CompileArgs {
 
     #[arg(short = 'o', long = "output", value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    #[arg(
+        long = "module",
+        help = "Treat input as an ES module (enables top-level await)"
+    )]
+    pub module: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +73,7 @@ impl From<CompileArgs> for ParsedArgs {
             output: args.output.map(|p| p.display().to_string()),
             opts: CompileOptions {
                 emit: args.emit.into(),
+                module: args.module,
             },
         }
     }

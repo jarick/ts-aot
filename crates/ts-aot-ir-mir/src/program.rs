@@ -21,6 +21,8 @@ pub struct MirProgram {
     pub imports: Vec<MirImport>,
     pub exports: Vec<MirExport>,
     pub declarations: Vec<MirDecl>,
+    pub is_module: bool,
+    pub tla_main_name: Option<Atom>,
 }
 
 impl MirProgram {
@@ -31,6 +33,8 @@ impl MirProgram {
             imports: Vec::new(),
             exports: Vec::new(),
             declarations: Vec::new(),
+            is_module: false,
+            tla_main_name: None,
         }
     }
 

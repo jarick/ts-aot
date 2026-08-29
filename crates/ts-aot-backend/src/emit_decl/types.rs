@@ -1,29 +1,43 @@
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 
-#[cfg(test)]
-use ts_aot_core::TypeTable;
-use ts_aot_core::{Type, TypeId};
+use ts_aot_core::Type;
+use ts_aot_core::TypeId;
 
 use super::ctx::EmitCtx;
+use super::ctx::EmitEnv;
 use super::ident::sanitize_ident;
 
 #[cfg(test)]
+use ts_aot_core::TypeTable;
+#[cfg(test)]
+use ts_aot_ir_mir::MirProgram;
+
+#[cfg(test)]
+use ts_aot_core::ModuleId;
+
+#[cfg(test)]
 pub(super) fn emit_type_id(id: TypeId, types: &TypeTable) -> TokenStream {
-    let ctx = EmitCtx::standalone(types);
-    emit_type_id_with_ctx(id, &ctx)
+    let empty_program = MirProgram::new(ModuleId::from_raw(0));
+    let ctx = EmitCtx::build(&empty_program);
+    let emit_env = EmitEnv {
+        types,
+        program: &empty_program,
+    };
+    emit_type_id_with_ctx(id, &emit_env, &ctx)
 }
 
-pub(super) fn emit_type_id_with_ctx(id: TypeId, ctx: &EmitCtx<'_>) -> TokenStream {
-    if let Some(ty) = ctx.types.resolve(id) {
-        emit_type(ty, ctx)
+pub(super) fn emit_type_id_with_ctx(id: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
+    let EmitEnv { types, .. } = emit_env;
+    if let Some(ty) = types.resolve(id) {
+        emit_type(ty, emit_env, ctx)
     } else {
         let ident = format_ident!("__ty{}", id.raw());
         quote!(#ident)
     }
 }
 
-fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
+fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
     match ty {
         Type::Void
         | Type::Null
@@ -46,11 +60,11 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
         Type::F64 => quote!(f64),
         Type::String => quote!(ts_aot_runtime::JsString),
         Type::Optional { inner } => {
-            let inner_tokens = emit_type_id_with_ctx(*inner, ctx);
+            let inner_tokens = emit_type_id_with_ctx(*inner, emit_env, ctx);
             quote!(Option<#inner_tokens>)
         }
         Type::Array { element } => {
-            let element_tokens = emit_type_id_with_ctx(*element, ctx);
+            let element_tokens = emit_type_id_with_ctx(*element, emit_env, ctx);
             quote!(Vec<#element_tokens>)
         }
         Type::Struct { id } => {
@@ -58,12 +72,12 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             quote!(#ident)
         }
         Type::Result { ok, err } => {
-            let ok_tokens = emit_type_id_with_ctx(*ok, ctx);
-            let err_tokens = emit_type_id_with_ctx(*err, ctx);
+            let ok_tokens = emit_type_id_with_ctx(*ok, emit_env, ctx);
+            let err_tokens = emit_type_id_with_ctx(*err, emit_env, ctx);
             quote!(Result<#ok_tokens, #err_tokens>)
         }
         Type::Promise { ok, err: _ } => {
-            let ok_tokens = emit_type_id_with_ctx(*ok, ctx);
+            let ok_tokens = emit_type_id_with_ctx(*ok, emit_env, ctx);
             quote!(ts_aot_runtime::Promise<#ok_tokens>)
         }
         Type::ArrayBuffer => quote!(ts_aot_runtime::ArrayBufferHandle),
@@ -83,11 +97,11 @@ fn emit_type(ty: &Type, ctx: &EmitCtx<'_>) -> TokenStream {
             quote!(#ident)
         }
         Type::Generator { inner } => {
-            let inner = emit_type_id_with_ctx(*inner, ctx);
+            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
             quote!(ts_aot_runtime::Generator<#inner>)
         }
         Type::GeneratorResult { inner } => {
-            let inner = emit_type_id_with_ctx(*inner, ctx);
+            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
             quote!(ts_aot_runtime::GeneratorResult<#inner>)
         }
         Type::GenericParam { id } => {

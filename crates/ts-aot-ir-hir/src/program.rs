@@ -42,6 +42,8 @@ pub struct HirProgram {
     pub exports: Vec<HirExport>,
     pub declarations: Vec<HirDecl>,
     pub diagnostics: DiagnosticBag,
+    pub is_module: bool,
+    pub tla_main_name: Option<Atom>,
 }
 
 impl HirProgram {
@@ -53,6 +55,8 @@ impl HirProgram {
             exports: Vec::new(),
             declarations: Vec::new(),
             diagnostics: DiagnosticBag::new(),
+            is_module: false,
+            tla_main_name: None,
         }
     }
 

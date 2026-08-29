@@ -194,6 +194,8 @@ pub fn convert_program(
     ctx: &mut PassContext,
 ) -> MirProgram {
     let mut mir = MirProgram::new(hir.module);
+    mir.is_module = hir.is_module;
+    mir.tla_main_name = hir.tla_main_name.clone();
     for export in &hir.exports {
         mir.exports.push(ts_aot_ir_mir::MirExport {
             symbol: export.name.clone(),

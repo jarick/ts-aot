@@ -4,7 +4,7 @@ use ts_aot_passes::{PassContext, convert_program};
 fn convert(source: &str) -> (String, Vec<String>) {
     let mut types = ts_aot_core::TypeTable::new();
     let mut ctx = PassContext::new();
-    let frontend = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let frontend = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     let diags: Vec<String> = frontend
         .diagnostics
         .iter()

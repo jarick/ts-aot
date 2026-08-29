@@ -10,8 +10,17 @@ pub(crate) fn binding_pattern_name(pattern: &BindingPattern<'_>) -> Option<oxc_s
     }
 }
 
-pub(crate) fn source_type_for(name: &str) -> SourceType {
-    SourceType::from_path(name).unwrap_or_else(|_| SourceType::default().with_typescript(true))
+pub(crate) fn source_type_for(name: &str, module: bool) -> SourceType {
+    SourceType::from_path(name).map_or_else(
+        |_| {
+            let mut s = SourceType::default().with_typescript(true);
+            if module {
+                s = s.with_module(true);
+            }
+            s
+        },
+        |s| if module { s.with_module(true) } else { s },
+    )
 }
 
 pub(crate) fn core_span_from_oxc(span: OxcSpan) -> CoreSpan {

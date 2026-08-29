@@ -9,7 +9,7 @@ use ts_aot_passes::{
 pub fn convert(src: &str) -> (MirProgram, TypeTable, Vec<Diagnostic>, String) {
     let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
-    let frontend = FrontendPass::new().run_with_types("test.ts", src, &mut types);
+    let frontend = FrontendPass::new().run_with_types("test.ts", src, &mut types, false);
     let mut diags: Vec<Diagnostic> = frontend.diagnostics.iter().cloned().collect();
     if frontend.diagnostics.has_errors() {
         return (

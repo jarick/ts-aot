@@ -12,15 +12,27 @@ use ts_aot_ir_mir::{
 
 use super::ident::ident_from;
 
-pub(super) struct EmitCtx<'a> {
-    pub(super) types: &'a TypeTable,
+pub(super) struct RuntimeCallSpec<'a> {
+    pub(super) op: RuntimeOp,
+    pub(super) args: &'a [MirExpr],
+    pub(super) dest: Option<LocalId>,
+    pub(super) ty: TypeId,
+    pub(super) target_ty: Option<TypeId>,
+}
+
+pub(super) struct EmitCtx {
     struct_names: HashMap<StructId, Ident>,
     function_names: HashMap<FunctionId, Ident>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
 }
 
-impl<'a> EmitCtx<'a> {
-    pub(super) fn new(program: &MirProgram, types: &'a TypeTable) -> Self {
+pub(super) struct EmitEnv<'a> {
+    pub(super) types: &'a TypeTable,
+    pub(super) program: &'a MirProgram,
+}
+
+impl EmitCtx {
+    pub(super) fn build(program: &MirProgram) -> Self {
         let mut struct_names = HashMap::new();
         let mut function_names = HashMap::new();
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
@@ -42,20 +54,9 @@ impl<'a> EmitCtx<'a> {
             }
         }
         Self {
-            types,
             struct_names,
             function_names,
             struct_fields,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn standalone(types: &'a TypeTable) -> Self {
-        Self {
-            types,
-            struct_names: HashMap::new(),
-            function_names: HashMap::new(),
-            struct_fields: HashMap::new(),
         }
     }
 
@@ -91,6 +92,7 @@ pub(super) struct BodyCtx {
     gen_co: Option<Ident>,
     ret: TypeId,
     in_try: Cell<bool>,
+    in_tla_main: bool,
     continue_label: RefCell<Option<Ident>>,
     try_label: RefCell<Option<Ident>>,
     return_slot: RefCell<Option<Ident>>,
@@ -136,6 +138,7 @@ impl BodyCtx {
             gen_co,
             ret: f.ret,
             in_try: Cell::new(false),
+            in_tla_main: false,
             continue_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
@@ -160,6 +163,7 @@ impl BodyCtx {
             gen_co: None,
             ret,
             in_try: Cell::new(false),
+            in_tla_main: false,
             continue_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
@@ -223,6 +227,14 @@ impl BodyCtx {
 
     pub(super) fn in_try(&self) -> bool {
         self.in_try.get()
+    }
+
+    pub(super) fn set_in_tla_main(&mut self, value: bool) {
+        self.in_tla_main = value;
+    }
+
+    pub(super) fn in_tla_main(&self) -> bool {
+        self.in_tla_main
     }
 
     pub(super) fn set_continue_label(&self, label: Option<Ident>) {

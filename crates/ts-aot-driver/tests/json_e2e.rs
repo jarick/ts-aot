@@ -8,6 +8,7 @@ use common::normalize_rust;
 fn e2e_json_parse_i64_emits_generic_type_arg_in_rust_source() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -33,6 +34,7 @@ fn e2e_json_parse_i64_emits_generic_type_arg_in_rust_source() {
 fn e2e_json_parse_f64_emits_generic_type_arg_in_rust_source() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -58,6 +60,7 @@ fn e2e_json_parse_f64_emits_generic_type_arg_in_rust_source() {
 fn e2e_json_parse_string_emits_non_generic_helper() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -87,6 +90,7 @@ fn e2e_json_parse_string_emits_non_generic_helper() {
 fn e2e_json_parse_vec_i64_emits_generic_type_arg() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -112,6 +116,7 @@ fn e2e_json_parse_vec_i64_emits_generic_type_arg() {
 fn e2e_json_stringify_i64_emits_generic_type_arg() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -137,6 +142,7 @@ fn e2e_json_stringify_i64_emits_generic_type_arg() {
 fn e2e_json_parse_without_type_arg_produces_error() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -159,6 +165,7 @@ fn e2e_json_parse_without_type_arg_produces_error() {
 fn e2e_json_parse_string_lone_surrogate_emits_non_generic_helper() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",

@@ -6,6 +6,7 @@ mod common;
 fn e2e_new_int8_array_emits_runtime_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -27,6 +28,7 @@ fn e2e_new_int8_array_emits_runtime_call() {
 fn e2e_new_uint8_array_emits_runtime_call_with_kind_1() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -52,6 +54,7 @@ fn e2e_new_uint8_array_emits_runtime_call_with_kind_1() {
 fn e2e_new_float64_array_emits_runtime_call_with_kind_8() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -77,6 +80,7 @@ fn e2e_new_float64_array_emits_runtime_call_with_kind_8() {
 fn e2e_new_int8_array_with_number_parameter_coerces_to_i64() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
