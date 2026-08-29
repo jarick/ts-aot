@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>, bool) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     let has_errors = ctx.has_errors();
@@ -38,16 +38,16 @@ fn object_set_prototype_of_with_side_effecting_prototype_arg_evaluates_the_arg()
     assert!(
         mir.contains("makeProto"),
         "Object.setPrototypeOf(target, makeProto()) must still emit a call to makeProto \
-         (the prototype arg is a side-effecting expression and must be evaluated), got:\n{mir}"
+         (the prototype arg is a side-effecting expression and must be evaluated), got:\r\n{mir}"
     );
     assert!(
         mir.contains("expr "),
-        "side-effect preservation must emit a MirStmt::Expr for the prototype arg, got:\n{mir}"
+        "side-effect preservation must emit a MirStmt::Expr for the prototype arg, got:\r\n{mir}"
     );
     let call_count = mir.matches("call fn(").count();
     assert!(
         call_count >= 1,
-        "expected at least 1 MIR Call block (the makeProto arg must be evaluated as a Call); got {call_count} in:\n{mir}"
+        "expected at least 1 MIR Call block (the makeProto arg must be evaluated as a Call); got {call_count} in:\r\n{mir}"
     );
 }
 
@@ -63,6 +63,6 @@ fn object_set_prototype_of_with_empty_args_emits_e0406() {
     );
     assert!(
         !mir.contains("set_prototype"),
-        "no set_prototype runtime lowering should happen on an E0406 path, got:\n{mir}"
+        "no set_prototype runtime lowering should happen on an E0406 path, got:\r\n{mir}"
     );
 }

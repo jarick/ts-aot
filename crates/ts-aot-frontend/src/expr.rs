@@ -1,21 +1,22 @@
 use oxc_ast::ast::{
-    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression, Expression,
-    LogicalExpression, SequenceExpression, SimpleAssignmentTarget, TaggedTemplateExpression,
-    TemplateLiteral, UnaryExpression, UpdateExpression, match_assignment_target,
-    match_assignment_target_pattern, match_expression, match_member_expression,
+    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, BindingPattern,
+    CallExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
+    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression,
+    match_assignment_target, match_assignment_target_pattern, match_expression,
+    match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
-use ts_aot_core::{Atom, Diagnostic, FieldId, Span, Type, TypeId};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr};
+use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirParam, HirStmt};
 
 use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
 use crate::scope::BodyScope;
 use crate::skeleton::SkeletonBuilder;
-use crate::util::core_span_from_oxc;
+use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 impl SkeletonBuilder<'_, '_> {
     pub(crate) fn walk_expr(&mut self, e: &Expression<'_>, scope: &mut BodyScope) -> HirExpr {
@@ -125,6 +126,7 @@ impl SkeletonBuilder<'_, '_> {
                     span: core_span_from_oxc(imp.span),
                 }
             }
+            Expression::ArrowFunctionExpression(arrow) => self.walk_arrow(arrow, scope),
             other => {
                 self.report_unwalked(
                     "expression form is not supported by the body walker",
@@ -167,6 +169,131 @@ impl SkeletonBuilder<'_, '_> {
             raw_parts,
             ty,
             span: core_span_from_oxc(t.span),
+        }
+    }
+
+    fn walk_arrow(
+        &mut self,
+        arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        if arrow.r#async {
+            self.diagnostics.push(Diagnostic::error(
+                "E0502",
+                "async arrow functions are not supported in this PR; \
+                 only synchronous no-capture arrow functions are accepted",
+                core_span_from_oxc(arrow.span),
+            ));
+            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+        }
+        if arrow.type_parameters.is_some() {
+            self.diagnostics.push(Diagnostic::error(
+                "E0502",
+                "generic arrow functions (<T>(x: T) => ...) are not supported in this PR",
+                core_span_from_oxc(arrow.span),
+            ));
+            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+        }
+        if arrow.params.rest.is_some() {
+            self.diagnostics.push(Diagnostic::error(
+                "E0502",
+                "rest parameters (...args) are not supported in arrow functions in this PR; \
+                 use plain identifier parameters with explicit type annotations instead",
+                core_span_from_oxc(arrow.span),
+            ));
+            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+        }
+        let mut params: Vec<HirParam> = Vec::with_capacity(arrow.params.items.len());
+        let mut param_locals: Vec<(Atom, TypeId)> = Vec::with_capacity(arrow.params.items.len());
+        for param in &arrow.params.items {
+            if matches!(param.pattern, BindingPattern::AssignmentPattern(_)) {
+                self.diagnostics.push(Diagnostic::error(
+                    "E0502",
+                    "default-value arrow parameters (e.g. (x = 1) => ...) are not supported \
+                     in this PR; use a plain identifier parameter with an explicit type \
+                     annotation instead",
+                    core_span_from_oxc(param.pattern.span()),
+                ));
+                return HirExpr::Unit(core_span_from_oxc(arrow.span));
+            }
+            let Some(name) = binding_pattern_name(&param.pattern) else {
+                self.diagnostics.push(Diagnostic::error(
+                    "E0502",
+                    "destructuring arrow parameters (e.g. ({x}) => ..., ([x]) => ...) are not \
+                     supported in this PR; use a plain identifier parameter with an explicit \
+                     type annotation instead",
+                    core_span_from_oxc(param.pattern.span()),
+                ));
+                return HirExpr::Unit(core_span_from_oxc(arrow.span));
+            };
+            let name = Atom::from(name);
+            if param.type_annotation.is_none() {
+                self.diagnostics.push(Diagnostic::error(
+                    "E0502",
+                    "arrow function parameters require an explicit type annotation in this PR; \
+                     type inference for closure parameters is not yet implemented",
+                    core_span_from_oxc(arrow.span),
+                ));
+                return HirExpr::Unit(core_span_from_oxc(arrow.span));
+            }
+            let ty = self.resolve_ts_type_from_annotation(param.type_annotation.as_deref());
+            params.push(HirParam {
+                name: name.clone(),
+                ty,
+            });
+            param_locals.push((name, ty));
+        }
+        if arrow.return_type.is_none() {
+            self.diagnostics.push(Diagnostic::error(
+                "E0502",
+                "arrow function return type must be annotated in this PR; \
+                 type inference for closure return types is not yet implemented",
+                core_span_from_oxc(arrow.span),
+            ));
+            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+        }
+        let ret_ty = self.resolve_ts_type_from_annotation(arrow.return_type.as_deref());
+        let mut outer_locals: std::collections::HashSet<String> =
+            scope.names().into_iter().collect();
+        outer_locals.insert("this".to_owned());
+        let body: Vec<HirStmt> = if arrow.expression {
+            let mut inner_scope = BodyScope::new(u32::try_from(params.len()).unwrap_or(u32::MAX));
+            for (idx, (name, ty)) in param_locals.iter().enumerate() {
+                let id = LocalId::from_raw(u32::try_from(idx).unwrap_or(u32::MAX));
+                inner_scope.declare_param(name.as_str(), id, *ty);
+            }
+            let mut stmts = self.walk_stmts(&arrow.body.statements, &mut inner_scope);
+            if let Some(HirStmt::Expr { expr }) = stmts.first().cloned() {
+                stmts[0] = HirStmt::Return { value: Some(expr) };
+            }
+            stmts
+        } else {
+            self.walk_function_body(Some(&arrow.body), &params, false)
+        };
+        if exprs_reference_outer_local(&body, &outer_locals) {
+            self.diagnostics.push(Diagnostic::error(
+                "P0005",
+                "capturing closures are not supported in this PR; \
+                 only no-capture arrow functions are accepted (outer local referenced from arrow body)",
+                core_span_from_oxc(arrow.span),
+            ));
+            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+        }
+        let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
+        let fn_ty = self.types.intern(&Type::Fn {
+            params: param_types,
+            ret: ret_ty,
+            err: None,
+        });
+        let id = LocalId::from_raw(self.next_closure_id);
+        self.next_closure_id += 1;
+        HirExpr::Closure {
+            id,
+            params,
+            captures: Vec::new(),
+            body,
+            ty: fn_ty,
+            span: core_span_from_oxc(arrow.span),
         }
     }
 
@@ -705,4 +832,40 @@ impl SkeletonBuilder<'_, '_> {
             },
         }
     }
+}
+
+fn exprs_reference_outer_local(
+    stmts: &[HirStmt],
+    outer_locals: &std::collections::HashSet<String>,
+) -> bool {
+    use ts_aot_ir_hir::{Visitor, walk_expr};
+    struct CaptureSearch<'a> {
+        outer_locals: &'a std::collections::HashSet<String>,
+        found: bool,
+    }
+    impl Visitor for CaptureSearch<'_> {
+        fn visit_expr(&mut self, expr: &HirExpr) {
+            if self.found {
+                return;
+            }
+            if let HirExpr::Global { name, .. } = expr
+                && self.outer_locals.contains(name.as_str())
+            {
+                self.found = true;
+                return;
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let mut search = CaptureSearch {
+        outer_locals,
+        found: false,
+    };
+    for stmt in stmts {
+        search.visit_stmt(stmt);
+        if search.found {
+            return true;
+        }
+    }
+    false
 }

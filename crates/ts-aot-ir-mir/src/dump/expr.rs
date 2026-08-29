@@ -53,8 +53,10 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
             if let Some(init) = init {
                 d.write(" = ");
                 dump_expr_inline(init, d);
+                d.write("\n");
+            } else {
+                d.write("\n");
             }
-            d.write("\n");
         }
         MirStmt::Assign { target, value } => {
             d.write("assign ");
@@ -456,6 +458,19 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(source, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::Closure {
+            params,
+            captures,
+            ret_ty,
+            ..
+        } => {
+            d.write(&format!(
+                "closure(params={}, captures={}, ret_ty={})",
+                params.len(),
+                captures.len(),
+                ret_ty.raw()
+            ));
+        }
     }
 }
 
@@ -508,6 +523,15 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::ResultUnwrapOk => "result_unwrap_ok",
         RuntimeOp::PromiseCreate => "promise_create",
         RuntimeOp::PromiseResolve => "promise_resolve",
+        RuntimeOp::PromiseAll => "promise_all",
+        RuntimeOp::PromiseRace => "promise_race",
+        RuntimeOp::PromiseAllSettled => "promise_all_settled",
+        RuntimeOp::PromiseAny => "promise_any",
+        RuntimeOp::PromiseResolveStatic => "promise_resolve_static",
+        RuntimeOp::PromiseRejectStatic => "promise_reject_static",
+        RuntimeOp::PromiseThenInstance => "promise_then_instance",
+        RuntimeOp::PromiseCatchInstance => "promise_catch_instance",
+        RuntimeOp::PromiseFinallyInstance => "promise_finally_instance",
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is not a MirStmt::Runtime; it's a MirExpr::TypeOf")
         }

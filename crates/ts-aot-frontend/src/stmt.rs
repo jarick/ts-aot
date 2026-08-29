@@ -39,7 +39,7 @@ impl SkeletonBuilder<'_, '_> {
         match s {
             Statement::BlockStatement(b) => {
                 scope.push();
-                let inner = self.walk_stmts(&b.body, scope);
+                let inner = self.walk_block_with_predeclare(&b.body, scope);
                 scope.pop();
                 out.push(HirStmt::Block(inner));
             }

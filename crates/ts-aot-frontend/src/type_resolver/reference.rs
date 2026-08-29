@@ -67,6 +67,51 @@ trait BuiltInGeneric {
     ) -> Option<TypeId>;
 }
 
+fn resolve_single_arg_generic(
+    name: &str,
+    r: &oxc_ast::ast::TSTypeReference<'_>,
+    types: &mut TypeTable,
+    aliases: Option<&HashMap<String, TypeId>>,
+    type_params: Option<&TypeParamMap>,
+    diagnostics: &mut Option<&mut DiagnosticBag>,
+    build: impl FnOnce(TypeId) -> Type,
+) -> TypeId {
+    let type_args = r.type_arguments.as_ref();
+    if let Some(args) = type_args {
+        if args.params.len() == 1 {
+            let inner_id = resolve_simple_type(
+                Some(&args.params[0]),
+                types,
+                aliases,
+                type_params,
+                (*diagnostics).as_deref_mut(),
+            )
+            .unwrap_or_else(|| types.intern(&Type::Error));
+            return types.intern(&build(inner_id));
+        }
+        if let Some(diag) = (*diagnostics).as_deref_mut() {
+            diag.push(Diagnostic::warning(
+                "E0403",
+                format!(
+                    "{name}<T> requires exactly one type argument, got {}",
+                    args.params.len()
+                ),
+                core_span_from_oxc(r.span),
+            ));
+        }
+        types.intern(&Type::Error)
+    } else {
+        if let Some(diag) = (*diagnostics).as_deref_mut() {
+            diag.push(Diagnostic::warning(
+                "E0403",
+                format!("{name} used without type arguments"),
+                core_span_from_oxc(r.span),
+            ));
+        }
+        types.intern(&Type::Error)
+    }
+}
+
 struct ArrayGeneric;
 
 impl BuiltInGeneric for ArrayGeneric {
@@ -81,43 +126,47 @@ impl BuiltInGeneric for ArrayGeneric {
         type_params: Option<&TypeParamMap>,
         diagnostics: &mut Option<&mut DiagnosticBag>,
     ) -> Option<TypeId> {
-        let type_args = r.type_arguments.as_ref();
-        if let Some(args) = type_args {
-            if args.params.len() == 1 {
-                let element_id = resolve_simple_type(
-                    Some(&args.params[0]),
-                    types,
-                    aliases,
-                    type_params,
-                    (*diagnostics).as_deref_mut(),
-                )
-                .unwrap_or_else(|| types.intern(&Type::Error));
-                return Some(types.intern(&Type::Array {
-                    element: element_id,
-                }));
-            }
-            if let Some(diag) = (*diagnostics).as_deref_mut() {
-                diag.push(Diagnostic::warning(
-                    "E0403",
-                    format!(
-                        "Array<T> requires exactly one type argument, got {}",
-                        args.params.len()
-                    ),
-                    core_span_from_oxc(r.span),
-                ));
-            }
-            Some(types.intern(&Type::Error))
-        } else {
-            if let Some(diag) = (*diagnostics).as_deref_mut() {
-                diag.push(Diagnostic::warning(
-                    "E0403",
-                    "Array used without type arguments",
-                    core_span_from_oxc(r.span),
-                ));
-            }
-            Some(types.intern(&Type::Error))
-        }
+        Some(resolve_single_arg_generic(
+            self.name(),
+            r,
+            types,
+            aliases,
+            type_params,
+            diagnostics,
+            |element_id| Type::Array {
+                element: element_id,
+            },
+        ))
     }
 }
 
-const BUILTIN_GENERICS: &[&dyn BuiltInGeneric] = &[&ArrayGeneric];
+struct PromiseGeneric;
+
+impl BuiltInGeneric for PromiseGeneric {
+    fn name(&self) -> &'static str {
+        "Promise"
+    }
+    fn try_resolve(
+        &self,
+        r: &oxc_ast::ast::TSTypeReference<'_>,
+        types: &mut TypeTable,
+        aliases: Option<&HashMap<String, TypeId>>,
+        type_params: Option<&TypeParamMap>,
+        diagnostics: &mut Option<&mut DiagnosticBag>,
+    ) -> Option<TypeId> {
+        Some(resolve_single_arg_generic(
+            self.name(),
+            r,
+            types,
+            aliases,
+            type_params,
+            diagnostics,
+            |ok_id| Type::Promise {
+                ok: ok_id,
+                err: None,
+            },
+        ))
+    }
+}
+
+const BUILTIN_GENERICS: &[&dyn BuiltInGeneric] = &[&ArrayGeneric, &PromiseGeneric];

@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     diags.extend(ctx.diagnostics().iter().map(|d| format!("{:?}", d)));

@@ -43,6 +43,7 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         MirExpr::Unit | MirExpr::Bool(_) | MirExpr::Local(_) | MirExpr::Global(_) => {
             TypeId::from_raw(0)
         }
+        MirExpr::Closure { fn_ty, .. } => *fn_ty,
     }
 }
 

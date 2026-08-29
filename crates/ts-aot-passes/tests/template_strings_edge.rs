@@ -16,7 +16,7 @@ fn convert(source: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     (mir.dump_text(), diags)
@@ -39,7 +39,7 @@ fn template_strings_array_cooked_with_double_quote() {
 
 #[test]
 fn template_strings_array_cooked_with_backslash_preserved() {
-    let src = r#"function tag(s: string[], ...x: any[]): i64 { return 0; } function f(): i64 { return tag`a\nb ${42}!`; }"#;
+    let src = r#"function tag(s: string[], ...x: any[]): i64 { return 0; } function f(): i64 { return tag`a\r\nb ${42}!`; }"#;
     let (mir, diags) = convert(src);
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(

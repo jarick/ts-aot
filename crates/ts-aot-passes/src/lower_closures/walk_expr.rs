@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId, Span};
+use ts_aot_core::{Atom, LocalId, Span, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, ObjectLiteralField};
 
 use super::LowerClosuresStats;
@@ -14,6 +14,7 @@ pub(super) fn walk_expr(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     if let HirExpr::Closure {
@@ -49,6 +50,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             walk_body,
             ctx,
         );
@@ -56,16 +58,6 @@ pub(super) fn walk_expr(
     }
 
     match expr {
-        HirExpr::Closure { body, .. } => walk_body(
-            body,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            ctx,
-        ),
         HirExpr::Call {
             callee, args, span, ..
         } => {
@@ -78,6 +70,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             for a in args {
@@ -89,6 +82,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -102,6 +96,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -112,6 +107,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -123,6 +119,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirExpr::Field { owner, .. } => walk_expr(
@@ -133,6 +130,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirExpr::Index { owner, index, .. } => {
@@ -144,6 +142,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -154,6 +153,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -167,6 +167,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -181,6 +182,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -199,6 +201,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -217,6 +220,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -227,6 +231,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -237,6 +242,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -250,6 +256,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -262,6 +269,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirExpr::Yield { expr: Some(e), .. } => walk_expr(
@@ -272,6 +280,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirExpr::Template {
@@ -286,6 +295,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -298,6 +308,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -311,6 +322,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             for a in args {
@@ -322,6 +334,7 @@ pub(super) fn walk_expr(
                     generated,
                     taken,
                     stats,
+                    types,
                     ctx,
                 );
             }
@@ -334,6 +347,7 @@ pub(super) fn walk_expr(
             generated,
             taken,
             stats,
+            types,
             ctx,
         ),
         HirExpr::Assignment { target, value, .. } => {
@@ -345,6 +359,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -355,6 +370,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -367,6 +383,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
             walk_expr(
@@ -377,6 +394,7 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
@@ -401,9 +419,11 @@ pub(super) fn walk_expr(
                 generated,
                 taken,
                 stats,
+                types,
                 ctx,
             );
         }
+        HirExpr::Closure { .. } => {}
     }
 }
 pub(super) fn walk_callee(
@@ -415,6 +435,7 @@ pub(super) fn walk_callee(
     generated: &mut Vec<Atom>,
     taken: &mut HashSet<Atom>,
     stats: &mut LowerClosuresStats,
+    types: &mut TypeTable,
     ctx: &mut PassContext,
 ) {
     if matches!(callee, HirCallee::Closure(_)) {
@@ -430,6 +451,7 @@ pub(super) fn walk_callee(
             generated,
             taken,
             stats,
+            types,
             ctx,
         );
     }

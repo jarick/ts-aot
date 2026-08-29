@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{StructId, TypeId, TypeTable};
+use ts_aot_core::{StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 
@@ -81,25 +81,34 @@ impl ExprConverter {
             }
             HirExpr::Index {
                 owner, index, ty, ..
-            } => MirExpr::Index {
-                base: Box::new(self.convert_expr(
-                    owner,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    types,
-                    ctx,
-                )),
-                index: Box::new(self.convert_expr(
-                    index,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    types,
-                    ctx,
-                )),
-                ty: *ty,
-            },
+            } => {
+                let resolved_index_ty = types
+                    .resolve(owner.ty())
+                    .and_then(|t| match t {
+                        Type::Array { element } => Some(*element),
+                        _ => None,
+                    })
+                    .unwrap_or(*ty);
+                MirExpr::Index {
+                    base: Box::new(self.convert_expr(
+                        owner,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    )),
+                    index: Box::new(self.convert_expr(
+                        index,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    )),
+                    ty: resolved_index_ty,
+                }
+            }
             HirExpr::Call {
                 callee,
                 args,
@@ -197,7 +206,17 @@ impl ExprConverter {
                 types,
                 ctx,
             ),
-            HirExpr::Closure { ty, .. } => self.convert_closure(*ty, ctx),
+            HirExpr::Closure {
+                ty: closure_hir_ty, ..
+            } => self.convert_closure(
+                e,
+                *closure_hir_ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ),
             HirExpr::Await { expr, ty, .. } => self.convert_await(
                 expr,
                 *ty,

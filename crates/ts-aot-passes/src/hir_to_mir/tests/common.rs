@@ -69,6 +69,7 @@ pub fn run_convert(
         export_name,
         remap,
         &Arc::new(HashMap::new()),
+        &Arc::new(empty_hir()),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),

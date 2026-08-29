@@ -4249,3 +4249,350 @@ fn for_of_generator_iterable_marks_iterable_param_mut() {
          fragment: `{sig}`"
     );
 }
+
+#[test]
+fn closure_param_for_of_generator_iterable_emits_mut() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let outer_param = LocalId::from_raw(0);
+    let closure_param = LocalId::from_raw(10);
+    let item = LocalId::from_raw(11);
+    let mut f = empty_func("drain_via_closure");
+    f.ret = TypeId::from_raw(0);
+    f.params = vec![MirParam {
+        id: outer_param,
+        name: Atom::from("g"),
+        ty: gen_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: vec![MirParam {
+                    id: closure_param,
+                    name: Atom::from("g"),
+                    ty: gen_ty,
+                }],
+                captures: Vec::new(),
+                locals: vec![MirLocalDecl {
+                    id: item,
+                    name: Atom::from("x"),
+                    ty: i64_ty,
+                    mutable: false,
+                }],
+                body: MirBlock {
+                    stmts: vec![MirStmt::ForOf {
+                        item,
+                        iterable: MirExpr::Local(closure_param),
+                        iter_ty: gen_ty,
+                        body: MirBlock {
+                            stmts: vec![MirStmt::Expr(MirExpr::Local(item))],
+                        },
+                    }],
+                },
+                ret_ty: i64_ty,
+                fn_ty: gen_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let closure_sig = s
+        .split("move |")
+        .nth(1)
+        .and_then(|after_opener| after_opener.split('|').next())
+        .unwrap_or("");
+    assert!(
+        closure_sig.trim_start().starts_with("mut "),
+        "closure param that is the iterable of a `for-of` over a Generator must emit \
+         `mut g` in the move-closure signature (regression: closure body walk did not mark \
+         the closure-local iterable as mutated when the closure was emitted); got \
+         closure signature fragment: `{closure_sig}`"
+    );
+}
+
+#[test]
+fn closure_param_assigned_in_if_body_emits_mut() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let param_id = LocalId::from_raw(0);
+    let mut f = empty_func("make_closure");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: vec![MirParam {
+                    id: param_id,
+                    name: Atom::from("x"),
+                    ty: int_ty,
+                }],
+                captures: Vec::new(),
+                locals: Vec::new(),
+                body: MirBlock {
+                    stmts: vec![
+                        MirStmt::If {
+                            cond: MirExpr::Bool(true),
+                            then_block: MirBlock {
+                                stmts: vec![MirStmt::Assign {
+                                    target: ts_aot_ir_mir::MirPlace::Local { id: param_id },
+                                    value: MirExpr::Int {
+                                        value: 1,
+                                        ty: int_ty,
+                                    },
+                                }],
+                            },
+                            else_block: None,
+                        },
+                        MirStmt::Return(Some(MirExpr::Local(param_id))),
+                    ],
+                },
+                ret_ty: int_ty,
+                fn_ty: int_ty,
+            }))],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("mut x :"),
+        "closure param assigned inside an `if` then-block must emit `mut x : i32`; got: {s}"
+    );
+}
+
+#[test]
+fn closure_param_unused_emits_immut() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let param_id = LocalId::from_raw(0);
+    let mut f = empty_func("make_closure_pure");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: vec![MirParam {
+                    id: param_id,
+                    name: Atom::from("x"),
+                    ty: int_ty,
+                }],
+                captures: Vec::new(),
+                locals: Vec::new(),
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Local(param_id)))],
+                },
+                ret_ty: int_ty,
+                fn_ty: int_ty,
+            }))],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let param_sig = s
+        .split("move |")
+        .nth(1)
+        .and_then(|after_opener| after_opener.split('|').next())
+        .unwrap_or("");
+    assert!(
+        !param_sig.trim_start().starts_with("mut "),
+        "closure param that is not assigned must remain `x : i32` (no `mut`); got: `{param_sig}`"
+    );
+}
+
+#[test]
+fn closure_param_passed_to_array_push_emits_mut() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: int_ty });
+    let param_id = LocalId::from_raw(0);
+    let mut f = empty_func("make_closure_push");
+    f.ret = int_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: vec![MirParam {
+                    id: param_id,
+                    name: Atom::from("arr"),
+                    ty: arr_ty,
+                }],
+                captures: Vec::new(),
+                locals: Vec::new(),
+                body: MirBlock {
+                    stmts: vec![MirStmt::Runtime {
+                        op: ts_aot_ir_mir::RuntimeOp::ArrayPush,
+                        args: vec![
+                            MirExpr::Local(param_id),
+                            MirExpr::Int {
+                                value: 42,
+                                ty: int_ty,
+                            },
+                        ],
+                        dest: None,
+                        ty: TypeId::from_raw(0),
+                        target_ty: None,
+                    }],
+                },
+                ret_ty: int_ty,
+                fn_ty: int_ty,
+            }))],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let param_sig = s
+        .split("move |")
+        .nth(1)
+        .and_then(|after_opener| after_opener.split('|').next())
+        .unwrap_or("");
+    assert!(
+        param_sig.trim_start().starts_with("mut "),
+        "closure param passed as `args[0]` to RuntimeOp::ArrayPush must emit `mut arr : ...` \
+         (runtime requires &mut Vec); got: `{param_sig}`"
+    );
+}
+
+#[test]
+fn closure_param_assigned_via_optional_chain_place_emits_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let struct_id = StructId::from_raw(0);
+    let obj_ty = types.intern(&Type::Struct { id: struct_id });
+    let opt_ty = types.intern(&Type::Optional { inner: obj_ty });
+    let param_id = LocalId::from_raw(0);
+
+    let mut f = empty_func("make_closure_optional_chain");
+    f.ret = i32_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: vec![MirParam {
+                    id: param_id,
+                    name: Atom::from("obj"),
+                    ty: obj_ty,
+                }],
+                captures: Vec::new(),
+                locals: Vec::new(),
+                body: MirBlock {
+                    stmts: vec![MirStmt::Assign {
+                        target: MirPlace::Field {
+                            base: Box::new(MirPlaceBase::Chain {
+                                base: Box::new(MirExpr::OptionalChain {
+                                    base: Box::new(MirExpr::Local(param_id)),
+                                    ty: opt_ty,
+                                }),
+                                ty: opt_ty,
+                            }),
+                            field: FieldId::from_raw(0),
+                            ty: i32_ty,
+                        },
+                        value: MirExpr::Int {
+                            value: 0,
+                            ty: i32_ty,
+                        },
+                    }],
+                },
+                ret_ty: i32_ty,
+                fn_ty: i32_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: struct_id,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("x"),
+            ty: i32_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let param_sig = s
+        .split("move |")
+        .nth(1)
+        .and_then(|after_opener| after_opener.split('|').next())
+        .unwrap_or("");
+    assert!(
+        param_sig.trim_start().starts_with("mut "),
+        "closure param assigned through MirPlaceBase::Chain over OptionalChain over Local \
+         must emit `mut obj : ...` (regression: visit_base for Chain in body.rs lacked the \
+         early-insert that collect_written_locals in ctx.rs has via place_base_root_local_id); \
+         got: `{param_sig}`"
+    );
+}
+
+#[test]
+fn closure_local_array_assigned_via_array_set_emits_mut() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let arr_local = LocalId::from_raw(10);
+    let mut f = empty_func("make_closure_array_set");
+    f.ret = i32_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                params: Vec::new(),
+                captures: Vec::new(),
+                locals: vec![MirLocalDecl {
+                    id: arr_local,
+                    name: Atom::from("arr"),
+                    ty: arr_ty,
+                    mutable: false,
+                }],
+                body: MirBlock {
+                    stmts: vec![
+                        MirStmt::Let {
+                            local: arr_local,
+                            ty: arr_ty,
+                            init: None,
+                            mutable: false,
+                        },
+                        MirStmt::Runtime {
+                            op: ts_aot_ir_mir::RuntimeOp::ArraySet,
+                            args: vec![
+                                MirExpr::Local(arr_local),
+                                MirExpr::Int {
+                                    value: 0,
+                                    ty: i32_ty,
+                                },
+                                MirExpr::Int {
+                                    value: 7,
+                                    ty: i32_ty,
+                                },
+                            ],
+                            dest: None,
+                            ty: TypeId::from_raw(0),
+                            target_ty: None,
+                        },
+                    ],
+                },
+                ret_ty: i32_ty,
+                fn_ty: i32_ty,
+            }))],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("let mut arr"),
+        "closure local array passed as `args[0]` to RuntimeOp::ArraySet must be re-registered \
+         with `mutable=true` (regression: collect_assigned_locals in body.rs was filtering \
+         candidates to closure params only, so mutably-borrowed closure locals stayed \
+         `let arr = ...` and the generated Rust required `&mut Vec<T>` on an immutable \
+         binding); got tokens: `{s}`"
+    );
+}

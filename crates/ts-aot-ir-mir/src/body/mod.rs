@@ -1,3 +1,4 @@
+use crate::decl::MirParam;
 use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, StructId, TypeId};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -300,6 +301,14 @@ pub enum MirExpr {
         expr: Option<Box<MirExpr>>,
         ty: TypeId,
     },
+    Closure {
+        params: Vec<MirParam>,
+        captures: Vec<LocalId>,
+        locals: Vec<MirLocalDecl>,
+        body: MirBlock,
+        ret_ty: TypeId,
+        fn_ty: TypeId,
+    },
     OptionalChain {
         base: Box<MirExpr>,
         ty: TypeId,
@@ -358,6 +367,7 @@ impl MirExpr {
             | MirExpr::RegExp { ty, .. }
             | MirExpr::BigInt { ty, .. }
             | MirExpr::Import { ty, .. } => Some(*ty),
+            MirExpr::Closure { fn_ty, .. } => Some(*fn_ty),
         }
     }
 }
@@ -389,6 +399,15 @@ pub enum RuntimeOp {
     ResultUnwrapOk,
     PromiseCreate,
     PromiseResolve,
+    PromiseAll,
+    PromiseRace,
+    PromiseAllSettled,
+    PromiseAny,
+    PromiseResolveStatic,
+    PromiseRejectStatic,
+    PromiseThenInstance,
+    PromiseCatchInstance,
+    PromiseFinallyInstance,
     HostConsoleLog,
     MathSqrt,
     MathAbs,
@@ -444,6 +463,19 @@ pub enum RuntimeOp {
     ArrayConcat,
     ArrayHole,
     GeneratorNext,
+}
+
+impl RuntimeOp {
+    #[must_use]
+    pub fn mutably_borrowed_arg_index(&self) -> Option<usize> {
+        match self {
+            RuntimeOp::ArrayPush
+            | RuntimeOp::ArraySet
+            | RuntimeOp::MapSet
+            | RuntimeOp::GeneratorNext => Some(0),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

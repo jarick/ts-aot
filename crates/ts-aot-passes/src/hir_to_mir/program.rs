@@ -75,6 +75,7 @@ pub fn convert_function(
     export_name: Option<String>,
     function_remap: HashMap<FunctionId, FunctionId>,
     name_to_function: &Arc<HashMap<Atom, FunctionId>>,
+    hir: &Arc<HirProgram>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
@@ -86,6 +87,7 @@ pub fn convert_function(
     let mut converter =
         ExprConverter::with_function_remap_and_offset(function_remap, param_count as u32);
     converter.name_to_function = Arc::clone(name_to_function);
+    converter.set_program(Arc::clone(hir));
     converter.set_field_id_lookup(field_id_lookup.clone());
     converter.set_namespace_path(namespace_path);
     converter.seed_params(param_count as u32);
@@ -121,24 +123,7 @@ pub fn convert_function(
     }
 }
 
-pub(crate) fn qualified_name(namespace_path: &[String], leaf: &str) -> Atom {
-    if namespace_path.is_empty() {
-        Atom::from(leaf.to_owned())
-    } else {
-        let mut s = String::with_capacity(
-            namespace_path.iter().map(|p| p.len() + 2).sum::<usize>() + leaf.len(),
-        );
-        for (i, part) in namespace_path.iter().enumerate() {
-            if i > 0 {
-                s.push_str("::");
-            }
-            s.push_str(part);
-        }
-        s.push_str("::");
-        s.push_str(leaf);
-        Atom::from(s)
-    }
-}
+pub(crate) use ts_aot_ir_hir::qualified_name;
 
 fn extend_qualified(base: &Atom, leaf: &str) -> Atom {
     let mut s = String::with_capacity(base.as_str().len() + 2 + leaf.len());
@@ -181,6 +166,7 @@ impl<'a> PreAssignState<'a> {
 struct ConvertState<'a> {
     next_function_id: u32,
     name_to_function: Arc<HashMap<Atom, FunctionId>>,
+    hir: Arc<HirProgram>,
     struct_id_map: HashMap<TypeId, StructId>,
     next_struct_id: u32,
     field_id_lookup: HashMap<(StructId, Atom), FieldId>,
@@ -249,6 +235,7 @@ pub fn convert_program(
     let mut convert_state = ConvertState {
         next_function_id: 0,
         name_to_function: Arc::new(name_to_function),
+        hir: Arc::new(HirProgram::clone(hir)),
         struct_id_map,
         next_struct_id,
         field_id_lookup,
@@ -454,6 +441,7 @@ fn convert_decl(
                 export_name,
                 HashMap::new(),
                 &state.name_to_function,
+                &state.hir,
                 &mut state.struct_id_map,
                 &mut state.next_struct_id,
                 &state.field_id_lookup,
@@ -585,6 +573,7 @@ fn convert_struct(
             export_name,
             method_remap,
             &state.name_to_function,
+            &state.hir,
             &mut state.struct_id_map,
             &mut state.next_struct_id,
             &state.field_id_lookup,

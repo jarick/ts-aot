@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     diags.extend(ctx.diagnostics().iter().map(|d| format!("{:?}", d)));
@@ -30,7 +30,7 @@ fn json_parse_i64_emits_runtime_call() {
     assert!(
         mir.contains("json_parse(") && mir.contains(") -> T#0"),
         "JSON.parse<i64>(\"42\") must lower to a json_parse statement with exact i64 type id T#0 \
-         (T#0 = I64, not any T#N sentinel); got:\n{mir}"
+         (T#0 = I64, not any T#N sentinel); got:\r\n{mir}"
     );
 }
 
@@ -52,7 +52,7 @@ fn json_parse_f64_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_parse("),
-        "JSON.parse<f64>(\"3.5\") must lower to __ts_aot_json_parse, got:\n{mir}"
+        "JSON.parse<f64>(\"3.5\") must lower to __ts_aot_json_parse, got:\r\n{mir}"
     );
 }
 
@@ -62,7 +62,7 @@ fn json_parse_string_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_parse_string("),
-        "JSON.parse<string> must lower to __ts_aot_json_parse_string (surrogate-preserving path), got:\n{mir}"
+        "JSON.parse<string> must lower to __ts_aot_json_parse_string (surrogate-preserving path), got:\r\n{mir}"
     );
 }
 
@@ -72,7 +72,7 @@ fn json_parse_bool_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_parse("),
-        "JSON.parse<bool>(\"true\") must lower to __ts_aot_json_parse, got:\n{mir}"
+        "JSON.parse<bool>(\"true\") must lower to __ts_aot_json_parse, got:\r\n{mir}"
     );
 }
 
@@ -83,7 +83,7 @@ fn json_parse_vec_i64_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_parse("),
-        "JSON.parse<Array<i64>> must lower to __ts_aot_json_parse, got:\n{mir}"
+        "JSON.parse<Array<i64>> must lower to __ts_aot_json_parse, got:\r\n{mir}"
     );
 }
 
@@ -93,7 +93,7 @@ fn json_stringify_i64_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_stringify("),
-        "JSON.stringify(i64) must lower to __ts_aot_json_stringify, got:\n{mir}"
+        "JSON.stringify(i64) must lower to __ts_aot_json_stringify, got:\r\n{mir}"
     );
 }
 
@@ -103,7 +103,7 @@ fn json_stringify_f64_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_stringify("),
-        "JSON.stringify(f64) must lower to __ts_aot_json_stringify, got:\n{mir}"
+        "JSON.stringify(f64) must lower to __ts_aot_json_stringify, got:\r\n{mir}"
     );
 }
 
@@ -113,7 +113,7 @@ fn json_stringify_string_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_stringify_string("),
-        "JSON.stringify(string) must lower to __ts_aot_json_stringify_string (surrogate-preserving path), got:\n{mir}"
+        "JSON.stringify(string) must lower to __ts_aot_json_stringify_string (surrogate-preserving path), got:\r\n{mir}"
     );
 }
 
@@ -123,7 +123,7 @@ fn json_stringify_vec_i64_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("json_stringify("),
-        "JSON.stringify(Array<i64>) must lower to __ts_aot_json_stringify, got:\n{mir}"
+        "JSON.stringify(Array<i64>) must lower to __ts_aot_json_stringify, got:\r\n{mir}"
     );
 }
 
@@ -139,7 +139,7 @@ fn json_parse_without_type_arg_emits_e0406() {
     );
     assert!(
         !mir.contains("json_parse("),
-        "JSON.parse without <T> must NOT emit runtime call, got:\n{mir}"
+        "JSON.parse without <T> must NOT emit runtime call, got:\r\n{mir}"
     );
 }
 
@@ -155,7 +155,7 @@ fn json_stringify_with_untyped_int_literal_emits_e0406() {
     );
     assert!(
         !mir.contains("json_stringify("),
-        "JSON.stringify(42) must NOT emit runtime call (rejected before dispatch), got:\n{mir}"
+        "JSON.stringify(42) must NOT emit runtime call (rejected before dispatch), got:\r\n{mir}"
     );
 }
 

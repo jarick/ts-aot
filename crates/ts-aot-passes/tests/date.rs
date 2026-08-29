@@ -16,7 +16,7 @@ fn convert(src: &str) -> (String, Vec<String>) {
     let mut hir = frontend.program;
     ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
     ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
-    ts_aot_passes::lower_closures(&mut hir, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
     let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
     let mir = convert_program(&hir, &mut types, &mut ctx);
     diags.extend(ctx.diagnostics().iter().map(|d| format!("{:?}", d)));
@@ -29,7 +29,7 @@ fn date_now_static_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_now()"),
-        "Date.now() must lower to runtime call __ts_aot_date_now, got:\n{mir}"
+        "Date.now() must lower to runtime call __ts_aot_date_now, got:\r\n{mir}"
     );
 }
 
@@ -40,7 +40,7 @@ fn date_parse_static_emits_runtime_call() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_parse("),
-        "Date.parse() must lower to runtime call __ts_aot_date_parse, got:\n{mir}"
+        "Date.parse() must lower to runtime call __ts_aot_date_parse, got:\r\n{mir}"
     );
 }
 
@@ -50,7 +50,7 @@ fn new_date_no_args_emits_date_now() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_now()"),
-        "new Date() with no args must lower to __ts_aot_date_now, got:\n{mir}"
+        "new Date() with no args must lower to __ts_aot_date_now, got:\r\n{mir}"
     );
 }
 
@@ -60,7 +60,7 @@ fn new_date_with_ms_emits_new_from_ms() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_new_from_ms("),
-        "new Date(0) must lower to __ts_aot_date_new_from_ms, got:\n{mir}"
+        "new Date(0) must lower to __ts_aot_date_new_from_ms, got:\r\n{mir}"
     );
 }
 
@@ -71,7 +71,7 @@ fn new_date_with_string_emits_parse() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_parse("),
-        "new Date(string) must lower to __ts_aot_date_parse, got:\n{mir}"
+        "new Date(string) must lower to __ts_aot_date_parse, got:\r\n{mir}"
     );
 }
 
@@ -87,11 +87,11 @@ fn new_date_with_string_variable_dispatches_to_parse_not_new_from_ms() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_parse("),
-        "new Date(string-typed-local) must dispatch to DateParse (via HIR type), not DateNewFromMs, got:\n{mir}"
+        "new Date(string-typed-local) must dispatch to DateParse (via HIR type), not DateNewFromMs, got:\r\n{mir}"
     );
     assert!(
         !mir.contains("date_new_from_ms("),
-        "new Date(string-typed-local) must NOT dispatch to DateNewFromMs, got:\n{mir}"
+        "new Date(string-typed-local) must NOT dispatch to DateNewFromMs, got:\r\n{mir}"
     );
 }
 
@@ -107,11 +107,11 @@ fn new_date_with_number_variable_dispatches_to_new_from_ms_not_parse() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_new_from_ms("),
-        "new Date(number-typed-local) must dispatch to DateNewFromMs, not DateParse, got:\n{mir}"
+        "new Date(number-typed-local) must dispatch to DateNewFromMs, not DateParse, got:\r\n{mir}"
     );
     assert!(
         !mir.contains("date_parse("),
-        "new Date(number-typed-local) must NOT dispatch to DateParse, got:\n{mir}"
+        "new Date(number-typed-local) must NOT dispatch to DateParse, got:\r\n{mir}"
     );
 }
 
@@ -133,7 +133,7 @@ fn date_get_time_with_extra_args_emits_e0406_and_does_not_forward_args() {
     );
     assert!(
         !mir.contains("date_get_time("),
-        "d.getTime(1, 2) must NOT emit any date_get_time runtime call (rejected before dispatch), got:\n{mir}"
+        "d.getTime(1, 2) must NOT emit any date_get_time runtime call (rejected before dispatch), got:\r\n{mir}"
     );
 }
 
@@ -155,7 +155,7 @@ fn date_to_iso_string_with_extra_arg_emits_e0406() {
     );
     assert!(
         !mir.contains("date_to_iso_string("),
-        "d.toISOString(123) must NOT emit any date_to_iso_string runtime call, got:\n{mir}"
+        "d.toISOString(123) must NOT emit any date_to_iso_string runtime call, got:\r\n{mir}"
     );
 }
 
@@ -170,13 +170,13 @@ fn plain_i64_receiver_does_not_enter_date_dispatch() {
     );
     assert!(
         !mir.contains("date_get_time("),
-        "plain i64.getTime() must NOT dispatch to __ts_aot_date_get_time (receiver is i64, not Date), got:\n{mir}"
+        "plain i64.getTime() must NOT dispatch to __ts_aot_date_get_time (receiver is i64, not Date), got:\r\n{mir}"
     );
     assert!(
         !mir.contains("date_get_full_year(")
             && !mir.contains("date_value_of(")
             && !mir.contains("date_to_iso_string("),
-        "plain i64 should not enter any Date runtime dispatch, got:\n{mir}"
+        "plain i64 should not enter any Date runtime dispatch, got:\r\n{mir}"
     );
     let has_dispatch_failure = diags
         .iter()
@@ -199,7 +199,7 @@ fn date_get_time_instance_method_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_time("),
-        "d.getTime() must lower to __ts_aot_date_get_time, got:\n{mir}"
+        "d.getTime() must lower to __ts_aot_date_get_time, got:\r\n{mir}"
     );
 }
 
@@ -215,7 +215,7 @@ fn date_value_of_instance_method_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_value_of("),
-        "d.valueOf() must lower to __ts_aot_date_value_of, got:\n{mir}"
+        "d.valueOf() must lower to __ts_aot_date_value_of, got:\r\n{mir}"
     );
 }
 
@@ -231,7 +231,7 @@ fn date_get_full_year_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_full_year("),
-        "d.getFullYear() must lower to __ts_aot_date_get_full_year, got:\n{mir}"
+        "d.getFullYear() must lower to __ts_aot_date_get_full_year, got:\r\n{mir}"
     );
 }
 
@@ -247,7 +247,7 @@ fn date_to_iso_string_dispatches_and_returns_string() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_to_iso_string("),
-        "d.toISOString() must lower to __ts_aot_date_to_iso_string, got:\n{mir}"
+        "d.toISOString() must lower to __ts_aot_date_to_iso_string, got:\r\n{mir}"
     );
 }
 
@@ -263,7 +263,7 @@ fn date_get_month_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_month("),
-        "d.getMonth() must lower to __ts_aot_date_get_month, got:\n{mir}"
+        "d.getMonth() must lower to __ts_aot_date_get_month, got:\r\n{mir}"
     );
 }
 
@@ -279,7 +279,7 @@ fn date_get_date_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_date("),
-        "d.getDate() must lower to __ts_aot_date_get_date, got:\n{mir}"
+        "d.getDate() must lower to __ts_aot_date_get_date, got:\r\n{mir}"
     );
 }
 
@@ -295,7 +295,7 @@ fn date_get_hours_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_hours("),
-        "d.getHours() must lower to __ts_aot_date_get_hours, got:\n{mir}"
+        "d.getHours() must lower to __ts_aot_date_get_hours, got:\r\n{mir}"
     );
 }
 
@@ -311,7 +311,7 @@ fn date_get_minutes_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_minutes("),
-        "d.getMinutes() must lower to __ts_aot_date_get_minutes, got:\n{mir}"
+        "d.getMinutes() must lower to __ts_aot_date_get_minutes, got:\r\n{mir}"
     );
 }
 
@@ -327,7 +327,7 @@ fn date_get_seconds_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_seconds("),
-        "d.getSeconds() must lower to __ts_aot_date_get_seconds, got:\n{mir}"
+        "d.getSeconds() must lower to __ts_aot_date_get_seconds, got:\r\n{mir}"
     );
 }
 
@@ -343,7 +343,7 @@ fn date_get_milliseconds_dispatches() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_get_milliseconds("),
-        "d.getMilliseconds() must lower to __ts_aot_date_get_milliseconds, got:\n{mir}"
+        "d.getMilliseconds() must lower to __ts_aot_date_get_milliseconds, got:\r\n{mir}"
     );
 }
 
@@ -352,7 +352,7 @@ fn date_parse_with_non_string_arg_emits_e0406_and_skips_runtime_call() {
     let (mir, diags) = convert("function f(): i64 { return Date.parse(123); }");
     assert!(
         !mir.contains("date_parse("),
-        "Date.parse(123) must NOT lower to __ts_aot_date_parse (rejected before dispatch), got:\n{mir}"
+        "Date.parse(123) must NOT lower to __ts_aot_date_parse (rejected before dispatch), got:\r\n{mir}"
     );
     let has_e0406 = diags
         .iter()
@@ -370,7 +370,7 @@ fn date_parse_with_string_arg_emits_no_warning() {
     assert!(diags.is_empty(), "diags: {diags:?}");
     assert!(
         mir.contains("date_parse("),
-        "Date.parse(string) must lower to __ts_aot_date_parse, got:\n{mir}"
+        "Date.parse(string) must lower to __ts_aot_date_parse, got:\r\n{mir}"
     );
 }
 
@@ -379,7 +379,7 @@ fn date_now_with_extra_args_emits_e0406() {
     let (mir, diags) = convert("function f(): i64 { return Date.now(123); }");
     assert!(
         !diags.is_empty(),
-        "expected E0406 diagnostic, got mir:\n{mir}"
+        "expected E0406 diagnostic, got mir:\r\n{mir}"
     );
     let has_e0406 = diags.iter().any(|d| d.contains("E0406"));
     assert!(
@@ -393,7 +393,7 @@ fn new_date_with_too_many_args_emits_e0406() {
     let (mir, diags) = convert("function f(): Date { return new Date(2020, 0, 1, 0, 0, 0, 0); }");
     assert!(
         !diags.is_empty(),
-        "expected E0406 diagnostic, got mir:\n{mir}"
+        "expected E0406 diagnostic, got mir:\r\n{mir}"
     );
     let has_e0406 = diags
         .iter()
@@ -416,7 +416,7 @@ fn date_method_on_literal_int_receiver_with_no_typeid_does_not_dispatch() {
     assert!(
         !mir.contains("date_get_time("),
         "(123).getTime() must NOT dispatch to __ts_aot_date_get_time \
-         (literal receiver has no TypeId, not Type::Date), got:\n{mir}"
+         (literal receiver has no TypeId, not Type::Date), got:\r\n{mir}"
     );
     assert!(
         !mir.contains("date_get_full_year(")
@@ -428,7 +428,7 @@ fn date_method_on_literal_int_receiver_with_no_typeid_does_not_dispatch() {
             && !mir.contains("date_get_minutes(")
             && !mir.contains("date_get_seconds(")
             && !mir.contains("date_get_milliseconds("),
-        "no Date prototype method should be dispatched on a literal receiver, got:\n{mir}"
+        "no Date prototype method should be dispatched on a literal receiver, got:\r\n{mir}"
     );
     let has_non_dispatch_diag = diags
         .iter()

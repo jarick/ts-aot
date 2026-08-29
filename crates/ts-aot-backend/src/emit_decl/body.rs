@@ -1,6 +1,6 @@
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::{LocalId, Type, TypeId};
+use ts_aot_core::{LocalId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt,
@@ -36,6 +36,14 @@ pub(super) fn emit_body(
     } else {
         Ok(quote!({ #(#stmts)* }))
     }
+}
+
+fn collect_assigned_locals(
+    stmts: &[ts_aot_ir_mir::MirStmt],
+    types: &TypeTable,
+    candidates: &std::collections::HashSet<LocalId>,
+) -> std::collections::HashSet<LocalId> {
+    super::ctx::collect_assigned_locals(stmts, types, candidates)
 }
 
 fn emit_block_stmts(
@@ -155,7 +163,11 @@ fn emit_stmt(
         } => {
             let name = body_ctx.local_ident(*local);
             let ty = emit_type_id_with_ctx(*ty, ctx);
-            let mutability = if *mutable { quote!(mut) } else { quote!() };
+            let mutability = if *mutable || body_ctx.local_mut(*local) {
+                quote!(mut)
+            } else {
+                quote!()
+            };
             if let Some(init) = init {
                 let init = emit_expr(init, ctx, body_ctx)?;
                 Ok(quote!(let #mutability #name: #ty = #init;))
@@ -202,26 +214,8 @@ fn emit_stmt(
             iterable,
             iter_ty,
             body,
-        } => {
-            let item_ident = body_ctx.local_ident(*item);
-            let item = if body_ctx.local_mut(*item) {
-                quote!(mut #item_ident)
-            } else {
-                quote!(#item_ident)
-            };
-            let iterable = emit_expr(iterable, ctx, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
-            let needs_mut_ref = matches!(
-                ctx.types.resolve(*iter_ty),
-                Some(ts_aot_core::Type::Generator { .. })
-            );
-            if needs_mut_ref {
-                Ok(quote!(for #item in &mut (#iterable) { #(#body_stmts)* }))
-            } else {
-                Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
-            }
         }
-        MirStmt::ForAwaitOf {
+        | MirStmt::ForAwaitOf {
             item,
             iterable,
             iter_ty,
@@ -351,6 +345,13 @@ fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
         MirExpr::Local(id) => body_ctx.local_ty(*id),
         other => other.ty(),
     }
+}
+
+fn is_display_supported_reason(reason_ty: Option<&Type>) -> bool {
+    matches!(
+        reason_ty,
+        Some(Type::I32 | Type::I64 | Type::F64 | Type::String | Type::Bool)
+    )
 }
 
 fn optional_chain_map_arm(
@@ -529,15 +530,15 @@ fn emit_expr(
             op, left, right, ..
         } => emit_binary_expr(*op, left, right, ctx, body_ctx),
         MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, body_ctx),
-        MirExpr::Await { expr, .. } => {
+        MirExpr::Await { expr, ty, .. } => {
             let inner = emit_expr(expr, ctx, body_ctx)?;
             let needs_helper = matches!(expr.as_ref(), MirExpr::Import { .. })
-                || expr
-                    .ty()
+                || expr_base_ty(expr, body_ctx)
                     .and_then(|ty_id| ctx.types.resolve(ty_id))
                     .is_some_and(|ty| matches!(ty, Type::Promise { .. }));
             if needs_helper {
-                Ok(quote!(ts_aot_runtime::__ts_aot_await(&#inner)))
+                let ok_ty = emit_type_id_with_ctx(*ty, ctx);
+                Ok(quote!(ts_aot_runtime::__ts_aot_await_value::<#ok_ty>(&#inner)))
             } else {
                 Ok(inner)
             }
@@ -600,6 +601,50 @@ fn emit_expr(
                 quote!(())
             };
             Ok(quote!(#co.yield_(#value).await))
+        }
+        MirExpr::Closure {
+            params,
+            captures,
+            locals,
+            body,
+            ret_ty,
+            ..
+        } => {
+            if !captures.is_empty() {
+                return Err(BackendError::NotImplemented);
+            }
+            let mut child_ctx = BodyCtx::for_closure(*ret_ty);
+            let mut candidates: std::collections::HashSet<LocalId> =
+                params.iter().map(|p| p.id).collect();
+            for l in locals {
+                candidates.insert(l.id);
+            }
+            let assigned: std::collections::HashSet<LocalId> =
+                collect_assigned_locals(&body.stmts, ctx.types, &candidates);
+            for l in locals {
+                let mutable = l.mutable || assigned.contains(&l.id);
+                let name = ident_from(&l.name);
+                child_ctx.register_local(l.id, name, l.ty, mutable);
+            }
+            for p in params {
+                let mutable = assigned.contains(&p.id);
+                child_ctx.register_local(p.id, ident_from(&p.name), p.ty, mutable);
+            }
+            let param_tokens: Vec<TokenStream> = params
+                .iter()
+                .map(|p| {
+                    let name = child_ctx.local_ident(p.id);
+                    let ty = emit_type_id_with_ctx(p.ty, ctx);
+                    if assigned.contains(&p.id) {
+                        quote!(mut #name: #ty)
+                    } else {
+                        quote!(#name: #ty)
+                    }
+                })
+                .collect();
+            let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, ctx);
+            let inner_stmts = emit_block_stmts(body, ctx, &child_ctx)?;
+            Ok(quote!(move |#(#param_tokens),*| -> #ret_ty_tokens { #(#inner_stmts)* }))
         }
     }
 }
@@ -819,8 +864,8 @@ fn emit_runtime_call(
         }
         RuntimeOp::JsonParse | RuntimeOp::JsonStringify => {
             let name = runtime_op_ident(op)?;
-            let turbofish_ty = target_ty.unwrap_or(ty);
-            let ty_tokens = emit_type_id_with_ctx(turbofish_ty, ctx);
+            let target = target_ty.unwrap_or(ty);
+            let ty_tokens = emit_type_id_with_ctx(target, ctx);
             if op == RuntimeOp::JsonParse {
                 let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(#arg)))
@@ -840,6 +885,53 @@ fn emit_runtime_call(
                 };
                 Ok(quote!(__ts_aot_symbol_new_desc(&#desc_expr)))
             }
+        }
+        RuntimeOp::PromiseResolveStatic | RuntimeOp::PromiseRejectStatic => {
+            let name = runtime_op_ident(op)?;
+            let target = target_ty.unwrap_or(ty);
+            let ty_tokens = emit_type_id_with_ctx(target, ctx);
+            if matches!(op, RuntimeOp::PromiseRejectStatic) {
+                let reason = match &args[0] {
+                    MirExpr::String { id, .. } => {
+                        let lit = Literal::string(id.as_str());
+                        quote!(ts_aot_runtime::JsString::from(#lit).to_string_lossy()
+                            .into_owned())
+                    }
+                    _ if matches!(
+                        expr_base_ty(&args[0], body_ctx).and_then(|ty| ctx.types.resolve(ty)),
+                        Some(Type::String)
+                    ) =>
+                    {
+                        let js = emit_js_string_owned(&args[0], ctx, body_ctx)?;
+                        quote!(#js.to_string_lossy().into_owned())
+                    }
+                    _ => {
+                        let reason_ty =
+                            expr_base_ty(&args[0], body_ctx).and_then(|ty| ctx.types.resolve(ty));
+                        if !is_display_supported_reason(reason_ty) {
+                            return Err(BackendError::NotImplemented);
+                        }
+                        let inner = emit_expr(&args[0], ctx, body_ctx)?;
+                        quote!(#inner.to_string())
+                    }
+                };
+                Ok(quote!(#name::<#ty_tokens>(#reason)))
+            } else {
+                let value = emit_expr(&args[0], ctx, body_ctx)?;
+                Ok(quote!(#name::<#ty_tokens>(#value)))
+            }
+        }
+        RuntimeOp::PromiseThenInstance
+        | RuntimeOp::PromiseCatchInstance
+        | RuntimeOp::PromiseFinallyInstance => {
+            let name = runtime_op_ident(op)?;
+            let promise = emit_expr(&args[0], ctx, body_ctx)?;
+            let handler = emit_expr(&args[1], ctx, body_ctx)?;
+            let input_ty_tokens = match target_ty {
+                Some(t) => emit_type_id_with_ctx(t, ctx),
+                None => emit_type_id_with_ctx(ty, ctx),
+            };
+            Ok(quote!(#name::<#input_ty_tokens, _>(&#promise, #handler)))
         }
         _ => {
             let name = runtime_op_ident(op)?;
