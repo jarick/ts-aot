@@ -81,6 +81,10 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
             quote!(ts_aot_runtime::Promise<#ok_tokens>)
         }
         Type::ArrayBuffer => quote!(ts_aot_runtime::ArrayBufferHandle),
+        Type::WeakMap { value, .. } => {
+            let value_tokens = emit_type_id_with_ctx(*value, emit_env, ctx);
+            quote!(ts_aot_runtime::WeakMapHandle<#value_tokens>)
+        }
         Type::Int8Array
         | Type::Uint8Array
         | Type::Uint8ClampedArray

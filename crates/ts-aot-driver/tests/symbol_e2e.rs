@@ -1,5 +1,5 @@
 use ts_aot_core::Diagnostic;
-use ts_aot_driver::{CompileOptions, Driver, EmitStage};
+use ts_aot_driver::{CompileOptions, Driver};
 
 mod common;
 
@@ -8,7 +8,7 @@ use common::normalize_rust;
 #[test]
 fn e2e_symbol_call_emits_symbol_new_runtime_call_in_rust_source() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -34,7 +34,7 @@ fn e2e_symbol_call_emits_symbol_new_runtime_call_in_rust_source() {
 #[test]
 fn e2e_symbol_for_emits_symbol_for_runtime_call_in_rust_source() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -60,7 +60,7 @@ fn e2e_symbol_for_emits_symbol_for_runtime_call_in_rust_source() {
 #[test]
 fn e2e_symbol_call_with_undefined_description_collapses_to_no_arg_constructor() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -98,7 +98,7 @@ fn e2e_symbol_call_with_undefined_description_collapses_to_no_arg_constructor() 
 #[test]
 fn e2e_symbol_call_with_null_description_emits_jsstring_null_literal() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -128,7 +128,7 @@ fn e2e_symbol_call_with_null_description_emits_jsstring_null_literal() {
 #[test]
 fn e2e_symbol_key_for_emits_symbol_key_for_runtime_call_in_rust_source() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -159,7 +159,7 @@ fn e2e_symbol_key_for_emits_symbol_key_for_runtime_call_in_rust_source() {
 #[test]
 fn e2e_symbol_key_for_with_non_symbol_arg_emits_e0406() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(

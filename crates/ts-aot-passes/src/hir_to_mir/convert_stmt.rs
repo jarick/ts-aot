@@ -20,7 +20,7 @@ impl ExprConverter {
         let mut final_locals: Vec<MirLocalDecl> = Vec::new();
         let mut interim: Vec<MirStmt> = Vec::new();
         let mut shared_struct_ids: HashMap<TypeId, StructId> = HashMap::new();
-        let mut shared_next_struct: u32 = 0;
+        let mut shared_next_struct: u32 = 1;
         let mutable_locals = collect_mutable_locals(block, types);
         for s in block.iter() {
             self.convert_stmt_into(

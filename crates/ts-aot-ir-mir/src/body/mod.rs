@@ -459,6 +459,12 @@ pub enum RuntimeOp {
     ArrayBufferNew,
     ArrayBufferSlice,
     TypedArrayNew,
+    WeakMapNew,
+    WeakMapSet,
+    WeakMapGet,
+    WeakMapHas,
+    WeakMapDelete,
+    WeakMapClear,
     ArrayGetOrDefault,
     ArrayConcat,
     ArrayHole,
@@ -472,6 +478,7 @@ impl RuntimeOp {
             RuntimeOp::ArrayPush
             | RuntimeOp::ArraySet
             | RuntimeOp::MapSet
+            | RuntimeOp::WeakMapSet
             | RuntimeOp::GeneratorNext => Some(0),
             _ => None,
         }

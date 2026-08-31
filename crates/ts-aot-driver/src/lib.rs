@@ -29,10 +29,26 @@ impl EmitStage {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOptions {
     pub emit: EmitStage,
     pub module: bool,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            emit: EmitStage::default(),
+            module: true,
+        }
+    }
+}
+
+impl CompileOptions {
+    #[must_use]
+    pub fn with_emit(emit: EmitStage) -> Self {
+        Self { emit, module: true }
+    }
 }
 
 #[derive(Debug, Default)]

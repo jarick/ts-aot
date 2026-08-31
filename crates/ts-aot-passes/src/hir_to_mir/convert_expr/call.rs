@@ -345,6 +345,18 @@ impl ExprConverter {
         ) {
             return mir;
         }
+        if let Some(mir) = self.try_weakmap_instance_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         let callee_id = self.resolve_callee(callee, ctx);
         let mir_args: Vec<MirExpr> = args
             .iter()

@@ -19,6 +19,7 @@ pub enum RuntimeFeature {
     ArrayBuffer,
     TypedArray,
     Generator,
+    WeakMap,
 }
 
 impl RuntimeFeature {
@@ -40,6 +41,7 @@ impl RuntimeFeature {
             Self::ArrayBuffer => "array_buffer",
             Self::TypedArray => "typed_array",
             Self::Generator => "generator",
+            Self::WeakMap => "weak_map",
         }
     }
 }
@@ -86,7 +88,7 @@ impl RuntimeRequirements {
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
         Array, ArrayBuffer, Console, Date, Generator, HostIo, Json, Map, Math, Promise,
-        Result as ResultFeat, Scheduler, String as StringFeat, Symbol, TypedArray,
+        Result as ResultFeat, Scheduler, String as StringFeat, Symbol, TypedArray, WeakMap,
     };
     match op {
         RuntimeOp::StringConcat
@@ -166,6 +168,12 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         RuntimeOp::SymbolNew | RuntimeOp::SymbolFor | RuntimeOp::SymbolKeyFor => &[Symbol],
         RuntimeOp::ArrayBufferNew | RuntimeOp::ArrayBufferSlice => &[ArrayBuffer],
         RuntimeOp::TypedArrayNew => &[TypedArray],
+        RuntimeOp::WeakMapNew
+        | RuntimeOp::WeakMapSet
+        | RuntimeOp::WeakMapGet
+        | RuntimeOp::WeakMapHas
+        | RuntimeOp::WeakMapDelete
+        | RuntimeOp::WeakMapClear => &[WeakMap],
         RuntimeOp::ArrayGetOrDefault => &[Array],
         RuntimeOp::ArrayConcat => &[Array],
         RuntimeOp::ArrayHole => &[Array],

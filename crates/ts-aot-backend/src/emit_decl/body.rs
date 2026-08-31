@@ -1,4 +1,4 @@
-use proc_macro2::{Literal, TokenStream};
+use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
 use ts_aot_core::{LocalId, Type, TypeId, TypeTable};
 
@@ -23,7 +23,14 @@ pub(super) fn emit_body(
     if f.body.block.is_empty() {
         return Ok(quote!({ unimplemented!() }));
     }
-    let stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    if body_ctx.has_weakmap_liveness() {
+        let cache = body_ctx.weakmap_liveness_per_key.borrow();
+        let mut prelude: Vec<TokenStream> =
+            cache.values().map(emit_weakmap_liveness_binding).collect();
+        prelude.append(&mut stmts);
+        stmts = prelude;
+    }
     if body_ctx.is_generator() {
         let co = body_ctx.gen_co().ok_or_else(|| {
             BackendError::Internal(
@@ -193,9 +200,13 @@ fn emit_stmt(
             {
                 return Ok(chain_assign);
             }
-            let target = emit_place(target, ctx, emit_env, body_ctx)?;
-            let value = emit_expr(value, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#target = #value;))
+            let target_tokens = emit_place(target, ctx, emit_env, body_ctx)?;
+            let value_tokens = emit_expr(value, ctx, emit_env, body_ctx)?;
+            let reset = emit_weakmap_liveness_reset(target, body_ctx);
+            Ok(quote! {
+                #target_tokens = #value_tokens;
+                #reset
+            })
         }
         MirStmt::Expr(expr) => {
             if matches!(expr, MirExpr::Local(_)) && !body_ctx.in_tla_main() {
@@ -242,14 +253,20 @@ fn emit_stmt(
             iter_ty,
             body,
         } => {
-            let item_ident = body_ctx.local_ident(*item);
-            let item = if body_ctx.local_mut(*item) {
+            let item_id = *item;
+            let item_ident = body_ctx.local_ident(item_id);
+            let item = if body_ctx.local_mut(item_id) {
                 quote!(mut #item_ident)
             } else {
                 quote!(#item_ident)
             };
             let iterable = emit_expr(iterable, ctx, emit_env, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let liveness_reset =
+                emit_weakmap_liveness_reset(&MirPlace::Local { id: item_id }, body_ctx);
+            if !liveness_reset.is_empty() {
+                body_stmts.insert(0, liveness_reset);
+            }
             let needs_mut_ref = matches!(
                 types.resolve(*iter_ty),
                 Some(ts_aot_core::Type::Generator { .. })
@@ -682,7 +699,16 @@ fn emit_expr(
                 .collect();
             let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, emit_env, ctx);
             let inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
-            Ok(quote!(move |#(#param_tokens),*| -> #ret_ty_tokens { #(#inner_stmts)* }))
+            let stmts = if child_ctx.has_weakmap_liveness() {
+                let cache = child_ctx.weakmap_liveness_per_key.borrow();
+                let mut prelude: Vec<TokenStream> =
+                    cache.values().map(emit_weakmap_liveness_binding).collect();
+                prelude.extend(inner_stmts);
+                prelude
+            } else {
+                inner_stmts
+            };
+            Ok(quote!(move |#(#param_tokens),*| -> #ret_ty_tokens { #(#stmts)* }))
         }
     }
 }
@@ -790,6 +816,81 @@ fn is_numeric_primitive_target(ty: Option<&Type>) -> bool {
                 | Type::F64
         )
     )
+}
+
+fn emit_default_for_weakmap_get(ty: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
+    let EmitEnv { types, .. } = emit_env;
+    match types.resolve(ty) {
+        Some(Type::Bool) => quote!(false),
+        Some(
+            Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64,
+        ) => quote!(0),
+        Some(Type::F32 | Type::F64) => quote!(0.0),
+        Some(Type::String) => {
+            let ty_tokens = emit_type_id_with_ctx(ty, emit_env, ctx);
+            quote!(<#ty_tokens as ::std::default::Default>::default())
+        }
+        Some(Type::Void | Type::Null | Type::Optional { .. }) => {
+            quote!(Default::default())
+        }
+        _ => quote!(Default::default()),
+    }
+}
+
+fn emit_weakmap_key(
+    key_expr: &MirExpr,
+    body_ctx: &BodyCtx,
+) -> Result<(TokenStream, Ident), BackendError> {
+    let key_root = root_local_id_of(key_expr).ok_or(BackendError::NotImplemented)?;
+    let liveness = body_ctx.weakmap_liveness_for_key(key_root);
+    let key_ptr = quote!(std::rc::Rc::as_ptr(&#liveness).cast::<()>());
+    Ok((key_ptr, liveness))
+}
+
+fn emit_weakmap_liveness_binding(liveness_ident: &Ident) -> TokenStream {
+    quote! {
+        let mut #liveness_ident: std::rc::Rc<()> = std::rc::Rc::new(());
+    }
+}
+
+fn emit_weakmap_liveness_reset(target: &MirPlace, body_ctx: &BodyCtx) -> TokenStream {
+    let MirPlace::Local { id } = target else {
+        return quote!();
+    };
+    if !body_ctx.has_weakmap_liveness_for_key(*id) {
+        return quote!();
+    }
+    let liveness = body_ctx.weakmap_liveness_for_key(*id);
+    quote! {
+        #liveness = std::rc::Rc::new(());
+    }
+}
+
+fn weakmap_value_type_id(
+    handle_expr: &MirExpr,
+    body_ctx: &BodyCtx,
+    types: &TypeTable,
+) -> Result<TypeId, BackendError> {
+    let handle_ty = expr_base_ty(handle_expr, body_ctx).ok_or(BackendError::NotImplemented)?;
+    match types.resolve(handle_ty) {
+        Some(Type::WeakMap { value, .. }) => Ok(*value),
+        _ => Err(BackendError::NotImplemented),
+    }
+}
+
+fn root_local_id_of(expr: &MirExpr) -> Option<LocalId> {
+    match expr {
+        MirExpr::Local(id) => Some(*id),
+        MirExpr::Field { base, .. } | MirExpr::Index { base, .. } => root_local_id_of(base),
+        _ => None,
+    }
 }
 
 fn emit_runtime_call(
@@ -986,6 +1087,61 @@ fn emit_runtime_call(
                 None => emit_type_id_with_ctx(ty, emit_env, ctx),
             };
             Ok(quote!(#name::<#input_ty_tokens, _>(&#promise, #handler)))
+        }
+        RuntimeOp::WeakMapGet => {
+            let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
+            let default_tokens = emit_default_for_weakmap_get(ty, emit_env, ctx);
+            let value_ty_tokens = emit_type_id_with_ctx(ty, emit_env, ctx);
+            Ok(
+                quote!(ts_aot_runtime::__ts_aot_weak_map_get::<#value_ty_tokens>(
+                &#handle,
+                &#liveness,
+                #key,
+            ).unwrap_or(#default_tokens)),
+            )
+        }
+        RuntimeOp::WeakMapSet => {
+            let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
+            let value = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
+            let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
+            let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
+            Ok(quote!({
+                let _ = ts_aot_runtime::__ts_aot_weak_map_set::<#value_ty_tokens>(
+                    &#handle,
+                    &#liveness,
+                    #key,
+                    #value,
+                );
+                #handle.clone()
+            }))
+        }
+        RuntimeOp::WeakMapHas => {
+            let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
+            let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
+            let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
+            Ok(
+                quote!(ts_aot_runtime::__ts_aot_weak_map_has::<#value_ty_tokens>(
+                &#handle, &#liveness, #key,
+            ) != 0),
+            )
+        }
+        RuntimeOp::WeakMapDelete => {
+            let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
+            let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
+            let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
+            Ok(
+                quote!(ts_aot_runtime::__ts_aot_weak_map_delete::<#value_ty_tokens>(
+                &#handle, &#liveness, #key,
+            ) != 0),
+            )
+        }
+        RuntimeOp::WeakMapClear => {
+            let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_weak_map_clear(&#handle)))
         }
         _ => {
             let name = runtime_op_ident(op)?;

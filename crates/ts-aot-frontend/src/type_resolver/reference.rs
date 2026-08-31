@@ -169,4 +169,114 @@ impl BuiltInGeneric for PromiseGeneric {
     }
 }
 
-const BUILTIN_GENERICS: &[&dyn BuiltInGeneric] = &[&ArrayGeneric, &PromiseGeneric];
+struct WeakMapGeneric;
+
+impl BuiltInGeneric for WeakMapGeneric {
+    fn name(&self) -> &'static str {
+        "WeakMap"
+    }
+    fn try_resolve(
+        &self,
+        r: &oxc_ast::ast::TSTypeReference<'_>,
+        types: &mut TypeTable,
+        aliases: Option<&HashMap<String, TypeId>>,
+        type_params: Option<&TypeParamMap>,
+        diagnostics: &mut Option<&mut DiagnosticBag>,
+    ) -> Option<TypeId> {
+        let type_args = r.type_arguments.as_ref();
+        match type_args {
+            Some(args) if args.params.len() == 2 => {
+                let key_id = resolve_simple_type(
+                    Some(&args.params[0]),
+                    types,
+                    aliases,
+                    type_params,
+                    (*diagnostics).as_deref_mut(),
+                )
+                .unwrap_or_else(|| types.intern(&Type::Error));
+                let value_id = resolve_simple_type(
+                    Some(&args.params[1]),
+                    types,
+                    aliases,
+                    type_params,
+                    (*diagnostics).as_deref_mut(),
+                )
+                .unwrap_or_else(|| types.intern(&Type::Error));
+                if !is_supported_weakmap_key_type(key_id, types) {
+                    if let Some(diag) = (*diagnostics).as_deref_mut() {
+                        let key_ty = types.resolve(key_id);
+                        let detail = match key_ty {
+                            Some(Type::Error) => "the bare `object` type is not supported as a WeakMap key until a full identity-bearing handle (an object wrapper that preserves address across function boundaries) is available; use a concrete struct type instead.".to_string(),
+                            _ => format!("WeakMap keys must be concrete struct types so the compiler can emit an identity-bearing handle; got key type {key_ty:?}"),
+                        };
+                        diag.push(Diagnostic::warning(
+                            "E0403",
+                            format!("WeakMap<K, V> key must be a struct type. {detail}"),
+                            core_span_from_oxc(r.span),
+                        ));
+                    }
+                    return Some(types.intern(&Type::Error));
+                }
+                if !is_supported_weakmap_value_type(value_id, types) {
+                    if let Some(diag) = (*diagnostics).as_deref_mut() {
+                        diag.push(Diagnostic::warning(
+                            "E0403",
+                            format!(
+                                "WeakMap<K, V> value must resolve to i64; runtime helpers take i64 by value. Got value type {:?}",
+                                types.resolve(value_id)
+                            ),
+                            core_span_from_oxc(r.span),
+                        ));
+                    }
+                    return Some(types.intern(&Type::Error));
+                }
+                Some(types.intern(&Type::WeakMap {
+                    key: key_id,
+                    value: value_id,
+                }))
+            }
+            Some(args) => {
+                if let Some(diag) = (*diagnostics).as_deref_mut() {
+                    diag.push(Diagnostic::warning(
+                        "E0403",
+                        format!(
+                            "WeakMap<K, V> requires exactly two type arguments, got {}",
+                            args.params.len()
+                        ),
+                        core_span_from_oxc(r.span),
+                    ));
+                }
+                Some(types.intern(&Type::Error))
+            }
+            None => {
+                if let Some(diag) = (*diagnostics).as_deref_mut() {
+                    diag.push(Diagnostic::warning(
+                        "E0403",
+                        "WeakMap<K, V> requires type arguments; bare `WeakMap` is not a valid type annotation. Use `WeakMap<K, V>` with concrete key/value types.".to_string(),
+                        core_span_from_oxc(r.span),
+                    ));
+                }
+                Some(types.intern(&Type::Error))
+            }
+        }
+    }
+}
+
+fn is_supported_weakmap_value_type(value: TypeId, types: &TypeTable) -> bool {
+    if value.raw() == 0 {
+        return true;
+    }
+    matches!(types.resolve(value), Some(Type::I64))
+}
+
+fn is_supported_weakmap_key_type(key: TypeId, types: &TypeTable) -> bool {
+    if let Some(Type::Error) = types.resolve(key) {
+        return false;
+    }
+    if key.raw() == 0 {
+        return true;
+    }
+    matches!(types.resolve(key), Some(Type::Struct { .. }))
+}
+
+const BUILTIN_GENERICS: &[&dyn BuiltInGeneric] = &[&ArrayGeneric, &PromiseGeneric, &WeakMapGeneric];

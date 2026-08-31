@@ -328,10 +328,7 @@ mod tests {
         let parsed = ParsedArgs {
             input: "input.ts".to_owned(),
             output: Some("out.rs".to_owned()),
-            opts: CompileOptions {
-                emit: EmitStage::Mir,
-                ..CompileOptions::default()
-            },
+            opts: CompileOptions::with_emit(EmitStage::Mir),
         };
         assert_eq!(parsed.input, "input.ts");
         assert_eq!(parsed.output.as_deref(), Some("out.rs"));

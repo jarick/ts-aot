@@ -17,6 +17,7 @@ mod string;
 mod symbol;
 mod type_of;
 mod typed_array;
+mod weakmap;
 
 pub use array::{
     __ts_aot_array_concat, __ts_aot_array_create, __ts_aot_array_create_with_len,
@@ -76,3 +77,7 @@ pub use type_of::{
     __ts_aot_typeof_unit, TsClassId,
 };
 pub use typed_array::{__ts_aot_typed_array_new, TypedArrayHandle, TypedArrayKind};
+pub use weakmap::{
+    __ts_aot_weak_map_clear, __ts_aot_weak_map_delete, __ts_aot_weak_map_get,
+    __ts_aot_weak_map_has, __ts_aot_weak_map_new, __ts_aot_weak_map_set, WeakMapHandle,
+};

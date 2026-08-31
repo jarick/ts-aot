@@ -13,3 +13,4 @@ mod program;
 mod stmt;
 mod string_builtins;
 mod throw_inference;
+mod weakmap;

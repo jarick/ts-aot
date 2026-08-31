@@ -1,4 +1,4 @@
-use ts_aot_driver::{CompileOptions, Driver, EmitStage};
+use ts_aot_driver::{CompileOptions, Driver};
 
 mod common;
 
@@ -7,7 +7,7 @@ use common::normalize_rust;
 #[test]
 fn e2e_new_array_buffer_emits_runtime_call_in_rust_source() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -37,7 +37,7 @@ fn e2e_new_array_buffer_emits_runtime_call_in_rust_source() {
 #[test]
 fn e2e_array_buffer_slice_method_emits_runtime_call_in_rust_source() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -63,7 +63,7 @@ fn e2e_array_buffer_slice_method_emits_runtime_call_in_rust_source() {
 #[test]
 fn e2e_new_array_buffer_with_wrong_arity_emits_e0406() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(

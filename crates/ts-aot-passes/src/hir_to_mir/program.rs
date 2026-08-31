@@ -213,7 +213,7 @@ pub fn convert_program(
         pre_id: 0,
         name_to_function: HashMap::new(),
         struct_id_map: HashMap::new(),
-        next_struct_id: 0,
+        next_struct_id: 1,
         seen_names: HashSet::new(),
         seen_sanitized_names: HashSet::new(),
         ctx,

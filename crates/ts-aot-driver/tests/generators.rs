@@ -8,7 +8,7 @@ fn compile(source: &str) -> DriverOutput {
         source,
         &CompileOptions {
             emit: EmitStage::Rust,
-            ..CompileOptions::default()
+            module: false,
         },
     )
 }

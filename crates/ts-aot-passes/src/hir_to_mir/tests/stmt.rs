@@ -2195,3 +2195,45 @@ fn convert_block_dowhile_continue_cond_binary_uses_bool_ty() {
         "continue_cond Binary ty must resolve to the bool type, got {continue_cond_ty:?}"
     );
 }
+
+#[test]
+fn convert_block_starts_struct_id_counter_at_one() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let ty = TypeId::from_raw(42);
+    let block = HirBlock(vec![HirStmt::Let {
+        id: LocalId::from_raw(0),
+        name: Atom::new_inline("p"),
+        ty,
+        init: Some(HirExpr::StructLiteral {
+            ty,
+            fields: Vec::new(),
+
+            span: Span::default(),
+        }),
+    }]);
+    let (mir_block, _locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
+    assert!(
+        !cx.has_errors(),
+        "unexpected diagnostics: {:?}",
+        cx.diagnostics()
+    );
+    let MirStmt::Let {
+        init: Some(init), ..
+    } = &mir_block.stmts[0]
+    else {
+        panic!(
+            "expected MirStmt::Let with init, got {:?}",
+            mir_block.stmts[0]
+        );
+    };
+    let MirExpr::StructLiteral { struct_id, .. } = init else {
+        panic!("expected init to be MirExpr::StructLiteral, got {init:?}");
+    };
+    assert_eq!(
+        *struct_id,
+        StructId::from_raw(1),
+        "first user struct literal in convert_block must be assigned StructId(1), not StructId(0) — \
+         StructId(0) is reserved for the placeholder Type::Void / Type::Error path; got {struct_id:?}"
+    );
+}
