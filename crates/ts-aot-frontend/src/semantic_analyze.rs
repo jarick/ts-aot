@@ -4,8 +4,9 @@ use oxc_ast::ast::Program;
 use oxc_diagnostics::OxcDiagnostic as OxcError;
 use oxc_parser::Parser;
 use oxc_semantic::{Semantic, SemanticBuilder};
-use oxc_span::SourceType;
 use ts_aot_core::{Diagnostic, DiagnosticBag, Span};
+
+use crate::util::source_type_for;
 
 const PARSE_ERROR_CODE: &str = "P0001";
 const SEMANTIC_ERROR_CODE: &str = "S0001";
@@ -27,7 +28,7 @@ fn error_span(err: &OxcError) -> Span {
 #[must_use]
 pub fn analyze_semantic(name: &str, source: &str) -> DiagnosticBag {
     let allocator = Allocator::default();
-    let source_type = source_type_for(name);
+    let source_type = source_type_for(name, false);
 
     let mut bag = DiagnosticBag::new();
 
@@ -60,7 +61,7 @@ pub fn analyze_semantic(name: &str, source: &str) -> DiagnosticBag {
 #[must_use]
 pub fn with_semantic<R>(name: &str, source: &str, f: impl FnOnce(&Semantic<'_>) -> R) -> Option<R> {
     let allocator = Allocator::default();
-    let source_type = source_type_for(name);
+    let source_type = source_type_for(name, false);
 
     let parser = Parser::new(&allocator, source, source_type);
     let ret = parser.parse();
@@ -77,10 +78,6 @@ pub fn with_semantic<R>(name: &str, source: &str, f: impl FnOnce(&Semantic<'_>) 
     }
 
     Some(f(&semantic_ret.semantic))
-}
-
-fn source_type_for(name: &str) -> SourceType {
-    SourceType::from_path(name).unwrap_or_else(|_| SourceType::default().with_typescript(true))
 }
 
 fn short_message(raw: &str, fallback: &str) -> String {
@@ -188,13 +185,13 @@ mod tests {
 
     #[test]
     fn source_type_for_ts_extension_marks_typescript() {
-        let st = source_type_for("hello.ts");
+        let st = source_type_for("hello.ts", false);
         assert!(st.is_typescript());
     }
 
     #[test]
     fn source_type_for_unknown_extension_falls_back_to_typescript() {
-        let st = source_type_for("hello");
+        let st = source_type_for("hello", false);
         assert!(st.is_typescript());
     }
 

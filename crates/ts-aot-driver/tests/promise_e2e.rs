@@ -16,6 +16,7 @@ fn has_closure_ref(haystack: &str) -> bool {
 fn e2e_promise_all_emits_runtime_call_with_element_turbofish() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -39,6 +40,7 @@ fn e2e_promise_all_emits_runtime_call_with_element_turbofish() {
 fn e2e_promise_race_emits_runtime_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -62,6 +64,7 @@ fn e2e_promise_race_emits_runtime_call() {
 fn e2e_promise_all_settled_emits_runtime_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -85,6 +88,7 @@ fn e2e_promise_all_settled_emits_runtime_call() {
 fn e2e_promise_any_emits_runtime_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -108,6 +112,7 @@ fn e2e_promise_any_emits_runtime_call() {
 fn e2e_promise_resolve_emits_runtime_call_with_value_ty() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -134,6 +139,7 @@ fn e2e_promise_resolve_emits_runtime_call_with_value_ty() {
 fn e2e_promise_reject_emits_runtime_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -155,6 +161,7 @@ fn e2e_promise_reject_emits_runtime_call() {
 fn e2e_promise_then_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -186,6 +193,7 @@ fn e2e_promise_then_with_named_handler_emits_instance_call() {
 fn e2e_promise_catch_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -208,6 +216,7 @@ fn e2e_promise_catch_with_named_handler_emits_instance_call() {
 fn e2e_promise_finally_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -230,6 +239,7 @@ fn e2e_promise_finally_with_named_handler_emits_instance_call() {
 fn e2e_promise_type_annotation_resolves_to_promise_emit_with_inner_type() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -255,6 +265,7 @@ fn e2e_promise_type_annotation_resolves_to_promise_emit_with_inner_type() {
 fn e2e_promise_reject_with_string_local_emits_jsstring_conversion_not_bare_tostring() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -288,6 +299,7 @@ fn e2e_promise_reject_with_string_local_emits_jsstring_conversion_not_bare_tostr
 fn e2e_promise_reject_with_string_index_access_emits_jsstring_conversion() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",
@@ -319,6 +331,7 @@ fn e2e_promise_reject_with_string_index_access_emits_jsstring_conversion() {
 fn e2e_promise_then_with_captureless_arrow_handler_emits_instance_call() {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
         "test.ts",

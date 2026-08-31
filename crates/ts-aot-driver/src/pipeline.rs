@@ -13,7 +13,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
     let mut types = TypeTable::new();
     let mut ctx = PassContext::new();
 
-    let frontend = FrontendPass::new().run_with_types(name, source, &mut types);
+    let frontend = FrontendPass::new().run_with_types(name, source, &mut types, opts.module);
     out.diagnostics.extend(frontend.diagnostics.iter().cloned());
     if frontend.diagnostics.has_errors() {
         return out;

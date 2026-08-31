@@ -278,6 +278,38 @@ fn class_method_with_destructured_param_falls_back_to_underscore_name() {
 }
 
 #[test]
+fn array_destructurings_in_same_function_get_unique_temp_names() {
+    let f = sole_function(
+        "function f(a: i32[], b: i32[]): i32 { let [x, y] = a; let [p, q] = b; return x + y + p + q; }",
+    );
+    let mut destructured_let_names: Vec<String> = Vec::new();
+    for stmt in &f.body {
+        if let HirStmt::Let {
+            name,
+            init: Some(_),
+            ..
+        } = stmt
+            && name.as_str().starts_with("_destructured_")
+        {
+            destructured_let_names.push(name.to_string());
+        }
+    }
+    assert_eq!(
+        destructured_let_names.len(),
+        2,
+        "expected exactly two destructured temps in body, got {destructured_let_names:?}"
+    );
+    let mut unique = destructured_let_names.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        destructured_let_names.len(),
+        "destructured temps must have unique names across multiple destructurings; got {destructured_let_names:?}"
+    );
+}
+
+#[test]
 fn type_alias_is_collected() {
     let output = FrontendPass::new().run("test.ts", "type Foo = i32;");
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
@@ -370,7 +402,13 @@ fn top_level_let_emits_global_decl() {
     match &output.program.declarations[0] {
         HirDecl::Global { name, init, .. } => {
             assert_eq!(name, &Atom::from("counter"));
-            assert!(init.is_none(), "foundation leaves init empty");
+            let init = init
+                .as_ref()
+                .expect("foundation now walks let init expressions");
+            assert!(
+                matches!(init, ts_aot_ir_hir::HirExpr::Int(0, _)),
+                "init should be the literal 0, got: {init:?}"
+            );
         }
         other => panic!("expected Global, got {other:?}"),
     }
@@ -595,8 +633,12 @@ fn parse_panic_does_not_emit_panic_when_input_is_clean() {
 #[test]
 fn function_with_unknown_return_type_yields_error_marker() {
     let mut types = TypeTable::new();
-    let output =
-        FrontendPass::new().run_with_types("test.ts", "function f(): UnknownType {}", &mut types);
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): UnknownType {}",
+        &mut types,
+        false,
+    );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
         HirDecl::Function(f) => {
@@ -661,8 +703,12 @@ fn e0401_rejects_object_inside_generic_type_argument() {
 #[test]
 fn e0401_returns_type_error_marker_not_warning() {
     let mut types = TypeTable::new();
-    let output =
-        FrontendPass::new().run_with_types("test.ts", "function f(): unknown {}", &mut types);
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): unknown {}",
+        &mut types,
+        false,
+    );
     let error = output
         .diagnostics
         .iter()
@@ -688,6 +734,7 @@ fn generic_function_resolves_param_and_return_to_generic_param() {
         "test.ts",
         "function id<T>(x: T): T { return x; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -717,6 +764,7 @@ fn multiple_generic_params_get_distinct_ordinal_ids() {
         "test.ts",
         "function pick<T, U>(a: T, b: U): T { return a; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -750,6 +798,7 @@ fn generic_class_method_inherits_class_type_params() {
         "test.ts",
         "class Box<T> { item: T; peek(): T { return this.item; } }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -774,6 +823,7 @@ fn generic_class_method_can_have_own_additional_type_params() {
         "test.ts",
         "class Box<T> { item: T; wrap<U>(other: U): U { return other; } }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -812,6 +862,7 @@ fn alias_declared_after_consumer_is_resolved_via_pre_scan_cache() {
         "test.ts",
         "function useFoo(x: Foo): i32 { return 0; }\n type Foo = string;",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -833,6 +884,7 @@ fn exported_alias_target_visible_to_other_declarations_via_pre_scan_cache() {
         "test.ts",
         "function useFoo(x: Foo): i32 { return 0; }\n export type Foo = i32;",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -870,6 +922,7 @@ fn never_keyword_annotation_resolves_to_type_never_not_error() {
         "test.ts",
         "function noReturn(x: never): never { throw x; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     match &output.program.declarations[0] {
@@ -896,6 +949,7 @@ fn union_type_in_param_resolves_to_type_union_with_primitive_variants() {
         "test.ts",
         "function pick(x: i64 | string): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let i64_id = types.intern(&Type::I64);
@@ -931,6 +985,7 @@ fn union_type_in_return_position_resolves_to_type_union() {
         "test.ts",
         "function either(): i64 | string { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -960,6 +1015,7 @@ fn union_type_with_three_variants_preserves_order() {
         "test.ts",
         "function f(x: i64 | string | bool): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -987,7 +1043,7 @@ fn union_type_with_three_variants_preserves_order() {
 fn union_type_with_alias_variant_resolves_to_underlying_type() {
     let mut types = TypeTable::new();
     let source = "type Foo = i64; function f(v: Foo | string): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1013,7 +1069,7 @@ fn union_type_with_alias_variant_resolves_to_underlying_type() {
 fn union_type_alias_resolves_through_alias_chain() {
     let mut types = TypeTable::new();
     let source = "type MaybeNumber = i64 | string; function f(x: MaybeNumber): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1052,7 +1108,7 @@ fn union_type_alias_resolves_through_alias_chain() {
 fn union_type_interning_is_idempotent() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64 | string): i64 { return 0; } function g(y: i64 | string): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1085,6 +1141,7 @@ fn intersection_type_in_param_resolves_to_type_intersection_with_primitive_parts
         "test.ts",
         "function combine(x: i64 & string): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let i64_id = types.intern(&Type::I64);
@@ -1120,6 +1177,7 @@ fn intersection_type_in_return_position_resolves_to_type_intersection() {
         "test.ts",
         "function both(): i64 & string { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1149,6 +1207,7 @@ fn intersection_type_with_three_parts_resolves_to_sorted_intersection() {
         "test.ts",
         "function f(x: i64 & string & bool): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1176,7 +1235,7 @@ fn intersection_type_with_three_parts_resolves_to_sorted_intersection() {
 fn intersection_type_is_commutative_under_part_reordering() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64 & string): i64 { return 0; }\nfunction g(y: string & i64): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1206,7 +1265,7 @@ fn intersection_type_is_commutative_under_part_reordering() {
 fn intersection_type_as_alias_body_pre_resolves_inner_aliases() {
     let mut types = TypeTable::new();
     let source = "type Foo = i64;\ntype Bar = string;\ntype Combined = Foo & Bar;\nfunction f(x: Combined): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1232,7 +1291,7 @@ fn intersection_type_as_alias_body_pre_resolves_inner_aliases() {
 fn intersection_type_with_repeated_member_dedups_to_canonical_form() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64 & i64): i64 { return 0; }\nfunction g(y: i64 & i64 & string): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1274,7 +1333,7 @@ fn intersection_type_with_repeated_member_dedups_to_canonical_form() {
 fn intersection_type_alias_resolves_through_alias_chain() {
     let mut types = TypeTable::new();
     let source = "type Combined = i64 & string; function f(x: Combined): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1303,6 +1362,7 @@ fn tuple_type_in_param_resolves_to_type_tuple_with_ordered_elements() {
         "test.ts",
         "function f(x: [i64, string]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1332,6 +1392,7 @@ fn tuple_type_in_return_position_resolves_to_type_tuple() {
         "test.ts",
         "function f(): [i64, string] { return [0, '']; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1361,6 +1422,7 @@ fn tuple_type_with_three_elements_preserves_source_order() {
         "test.ts",
         "function f(x: [i64, string, bool]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1388,7 +1450,7 @@ fn tuple_type_with_three_elements_preserves_source_order() {
 fn tuple_type_with_alias_element_resolves_through_alias() {
     let mut types = TypeTable::new();
     let source = "type Idx = i64; function f(x: [Idx, string]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1414,7 +1476,7 @@ fn tuple_type_with_alias_element_resolves_through_alias() {
 fn tuple_type_as_alias_body_resolves_to_same_type_as_inline_tuple() {
     let mut types = TypeTable::new();
     let source = "type Pair = [i64, string];\nfunction f(x: Pair): i64 { return 0; }\nfunction g(y: [i64, string]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1455,6 +1517,7 @@ fn nested_tuple_type_resolves_recursively() {
         "test.ts",
         "function f(x: [[i64, string], bool]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1488,6 +1551,7 @@ fn tuple_type_with_named_element_emits_warning_diagnostic() {
         "test.ts",
         "function f(x: [name: i64, string]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         output
@@ -1506,6 +1570,7 @@ fn tuple_type_with_rest_element_emits_warning_diagnostic() {
         "test.ts",
         "function f(x: [i64, ...string[]]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         output
@@ -1524,6 +1589,7 @@ fn tuple_type_with_optional_element_emits_warning_diagnostic() {
         "test.ts",
         "function f(x: [i64, string?]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         output
@@ -1542,6 +1608,7 @@ fn array_generic_syntax_in_param_resolves_to_type_array() {
         "test.ts",
         "function f(x: Array<i64>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1566,7 +1633,7 @@ fn array_generic_and_array_sugar_resolve_to_same_type() {
     let mut types = TypeTable::new();
     let source =
         "function f(x: Array<i64>): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1596,7 +1663,7 @@ fn array_generic_and_array_sugar_resolve_to_same_type() {
 fn array_generic_with_alias_element_resolves_through_alias() {
     let mut types = TypeTable::new();
     let source = "type Foo = i64; function f(x: Array<Foo>): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1622,6 +1689,7 @@ fn array_generic_with_nested_generic_resolves_recursively() {
         "test.ts",
         "function f(x: Array<Array<i64>>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1648,7 +1716,7 @@ fn array_generic_with_nested_generic_resolves_recursively() {
 fn user_defined_array_alias_overrides_builtin_array_generic_syntax() {
     let mut types = TypeTable::new();
     let source = "type Array = string;\nfunction f(x: Array<i64>): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1678,6 +1746,7 @@ fn array_generic_bare_reference_emits_e0403_and_resolves_to_type_error() {
         "test.ts",
         "function f(x: Array): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0403(&output.diagnostics),
@@ -1707,6 +1776,7 @@ fn array_generic_with_zero_type_arguments_emits_e0403_warning() {
         "test.ts",
         "function f(x: Array<>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0403(&output.diagnostics),
@@ -1722,6 +1792,7 @@ fn array_generic_with_too_many_type_arguments_emits_e0403_warning() {
         "test.ts",
         "function f(x: Array<i64, i32>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0403(&output.diagnostics),
@@ -1737,6 +1808,7 @@ fn array_generic_with_nested_wrong_arity_inside_emits_e0403_warning() {
         "test.ts",
         "function f(x: Array<Array<>>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0403(&output.diagnostics),
@@ -1767,6 +1839,7 @@ fn array_generic_with_nested_multiple_type_arguments_inside_emits_e0403_warning(
         "test.ts",
         "function f(x: Array<Array<i64, i32>>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0403(&output.diagnostics),
@@ -1797,6 +1870,7 @@ fn array_type_in_param_resolves_to_type_array() {
         "test.ts",
         "function f(x: i64[]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1823,6 +1897,7 @@ fn array_type_in_return_position_resolves_to_type_array() {
         "test.ts",
         "function f(): i64[] { return []; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1849,6 +1924,7 @@ fn nested_array_type_resolves_recursively() {
         "test.ts",
         "function f(x: i64[][]): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -1875,7 +1951,7 @@ fn nested_array_type_resolves_recursively() {
 fn array_type_with_alias_element_resolves_through_alias() {
     let mut types = TypeTable::new();
     let source = "type Foo = i64; function f(x: Foo[]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -1898,7 +1974,7 @@ fn array_type_with_alias_element_resolves_through_alias() {
 fn array_type_as_alias_body_resolves_to_same_type_as_inline_array() {
     let mut types = TypeTable::new();
     let source = "type Ints = i64[];\nfunction f(x: Ints): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1933,7 +2009,7 @@ fn array_type_as_alias_body_resolves_to_same_type_as_inline_array() {
 fn array_type_distinguishes_from_singleton_tuple() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64[]): i64 { return 0; }\nfunction g(y: [i64]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -1963,7 +2039,7 @@ fn array_type_distinguishes_from_singleton_tuple() {
 fn tuple_type_distinguishes_from_array_with_same_element() {
     let mut types = TypeTable::new();
     let source = "function f(x: [i64]): i64 { return 0; }\nfunction g(y: i64[]): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -2000,7 +2076,7 @@ fn tuple_type_distinguishes_from_array_with_same_element() {
 fn intersection_type_distinguishes_from_union_with_same_parts() {
     let mut types = TypeTable::new();
     let source = "function f(x: i64 & string): i64 { return 0; }\nfunction g(y: i64 | string): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let f_param = output
         .program
@@ -2044,7 +2120,7 @@ fn intersection_type_distinguishes_from_union_with_same_parts() {
 fn union_type_with_forward_declared_alias_pre_resolves_inner_alias() {
     let mut types = TypeTable::new();
     let source = "type Bar = Foo | string;\ntype Foo = i64;\nfunction f(x: Bar): i64 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -2083,7 +2159,7 @@ fn union_type_with_forward_declared_alias_pre_resolves_inner_alias() {
 fn chained_alias_forward_ref_resolves_via_cache_update_in_handle_type_alias() {
     let mut types = TypeTable::new();
     let source = "type Foo = Bar;\n type Bar = string;\n function f(x: Foo): i32 { return 0; }";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -2105,7 +2181,7 @@ fn chained_alias_forward_ref_resolves_via_cache_update_in_handle_type_alias() {
 fn consumer_before_alias_chain_resolves_via_pre_resolve() {
     let mut types = TypeTable::new();
     let source = "function f(x: Foo): i32 { return 0; }\n type Foo = Bar;\n type Bar = string;";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
         .program
@@ -2126,7 +2202,8 @@ fn consumer_before_alias_chain_resolves_via_pre_resolve() {
 #[test]
 fn self_referential_alias_emits_cycle_warning_and_resolves_to_error_without_panicking() {
     let mut types = TypeTable::new();
-    let output = FrontendPass::new().run_with_types("test.ts", "type Foo = Foo;", &mut types);
+    let output =
+        FrontendPass::new().run_with_types("test.ts", "type Foo = Foo;", &mut types, false);
     let diag = output
         .diagnostics
         .iter()
@@ -2154,7 +2231,7 @@ fn self_referential_alias_emits_cycle_warning_and_resolves_to_error_without_pani
 fn mutually_recursive_aliases_emit_cycle_warning_without_panicking() {
     let mut types = TypeTable::new();
     let source = "type A = B; type B = A;";
-    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types);
+    let output = FrontendPass::new().run_with_types("test.ts", source, &mut types, false);
     assert!(
         output
             .diagnostics
@@ -3968,13 +4045,9 @@ fn body_walker_yield_expression_in_non_generator_returns_unit_placeholder() {
 #[test]
 fn body_walker_yield_inside_nested_non_generator_rejects_with_e0500_error() {
     use crate::skeleton::SkeletonBuilder;
-    use ts_aot_core::{DiagnosticBag, ModuleId, Span as CoreSpan, TypeTable};
-    use ts_aot_ir_hir::HirProgram;
+    use ts_aot_core::Span as CoreSpan;
 
-    let mut types = TypeTable::new();
-    let mut diagnostics = DiagnosticBag::new();
-    let mut program = HirProgram::new(ModuleId::from_raw(0));
-    let mut builder = SkeletonBuilder::new("test.ts", &mut types, &mut diagnostics, &mut program);
+    let mut builder = SkeletonBuilder::new(0, false);
 
     builder.is_generator_stack.push(true);
     builder.is_generator_stack.push(false);
@@ -4084,6 +4157,7 @@ fn function_type_in_param_resolves_to_type_fn() {
         "test.ts",
         "function f(cb: (a: i64) => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -4114,6 +4188,7 @@ fn function_type_in_return_position_resolves_to_type_fn() {
         "test.ts",
         "function f(): (a: i64) => i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -4144,6 +4219,7 @@ fn function_type_with_no_params_resolves_to_type_fn() {
         "test.ts",
         "function f(cb: () => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -4174,6 +4250,7 @@ fn function_type_as_alias_body_resolves_to_same_type_as_inline() {
         "test.ts",
         "type F = (a: i64) => i64; function f(cb: F): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         !output_alias.diagnostics.has_errors(),
@@ -4185,6 +4262,7 @@ fn function_type_as_alias_body_resolves_to_same_type_as_inline() {
         "test.ts",
         "function f(cb: (a: i64) => i64): i64 { return 0; }",
         &mut types2,
+        false,
     );
     assert!(
         !output_inline.diagnostics.has_errors(),
@@ -4227,6 +4305,7 @@ fn function_type_with_nested_array_param_resolves_recursively() {
         "test.ts",
         "function f(cb: (a: i64[]) => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     let fn_decl = output
@@ -4258,6 +4337,7 @@ fn function_type_with_generic_params_emits_e0404_warning() {
         "test.ts",
         "function f(cb: <T>(a: T) => T): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0404(&output.diagnostics),
@@ -4273,6 +4353,7 @@ fn function_type_with_this_param_emits_e0404_warning() {
         "test.ts",
         "function f(cb: (this: string, a: i64) => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0404(&output.diagnostics),
@@ -4288,6 +4369,7 @@ fn function_type_with_untyped_param_emits_e0404_and_resolves_param_to_type_error
         "test.ts",
         "function f(cb: (a, b) => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0404(&output.diagnostics),
@@ -4323,6 +4405,7 @@ fn function_type_with_rest_param_emits_e0404_and_resolves_to_type_error() {
         "test.ts",
         "function f(cb: (...args: i64[]) => i64): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0404(&output.diagnostics),
@@ -4357,6 +4440,7 @@ fn conditional_type_in_param_annotation_emits_e0407_and_resolves_to_never() {
          type A = i64;\n\
          type B = string;",
         &mut types,
+        false,
     );
     assert!(
         has_e0407(&output.diagnostics),
@@ -4392,6 +4476,7 @@ fn conditional_type_in_alias_emits_e0407_and_resolves_to_never() {
         "type Conditional<T> = T extends i64 ? string : i32;\n\
          function f(x: Conditional<i64>): i64 { return 0; }",
         &mut types,
+        false,
     );
     assert!(
         has_e0407(&output.diagnostics),
@@ -4428,6 +4513,7 @@ fn conditional_type_with_branch_resolving_to_type_error_emits_e0400_per_branch()
          type T = i64;\n\
          type U = { a: i64, b: string };",
         &mut types,
+        false,
     );
     assert!(
         has_e0407(&output.diagnostics),
@@ -4472,6 +4558,7 @@ fn call_site_type_args_resolve_class_method_generic_param_not_error() {
          \x20 method<T>(x: T): T { return bar<T>(x); }\n\
          }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
 
@@ -4518,6 +4605,7 @@ fn call_site_type_args_resolve_functions_generic_param_not_error() {
         "function bar<T>(x: T): T { return x; }\n\
          function foo<T>(x: T): T { return bar<T>(x); }",
         &mut types,
+        false,
     );
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
     assert_eq!(output.program.decl_count(), 2);

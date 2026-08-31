@@ -5,7 +5,7 @@ use ts_aot_passes::{PassContext, convert_program};
 fn convert(src: &str) -> (MirProgram, Vec<String>) {
     let mut types = ts_aot_core::TypeTable::new();
     let mut ctx = PassContext::new();
-    let frontend = FrontendPass::new().run_with_types("test.ts", src, &mut types);
+    let frontend = FrontendPass::new().run_with_types("test.ts", src, &mut types, false);
     let mut diags: Vec<String> = frontend
         .diagnostics
         .iter()

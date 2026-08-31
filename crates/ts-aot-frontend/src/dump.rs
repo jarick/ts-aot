@@ -1,4 +1,4 @@
-use ts_aot_core::{Diagnostic, Severity};
+use ts_aot_core::{Diagnostic, DiagnosticBag, Severity};
 
 use crate::FrontendOutput;
 
@@ -56,7 +56,7 @@ impl FrontendOutput {
     }
 }
 
-fn dump_diagnostics(bag: &ts_aot_core::DiagnosticBag, d: &mut Dumper) {
+fn dump_diagnostics(bag: &DiagnosticBag, d: &mut Dumper) {
     d.line(&format!("diagnostics: {} [", bag.len()));
     d.push();
     for diag in bag {

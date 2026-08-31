@@ -5,6 +5,7 @@ mod common;
 fn compile(src: &str) -> DriverOutput {
     let opts = CompileOptions {
         emit: EmitStage::Rust,
+        ..CompileOptions::default()
     };
     Driver::new().compile_source("test.ts", src, &opts)
 }

@@ -7,7 +7,7 @@ use ts_aot_ir_mir::{
     RuntimeOp, UnaryOp,
 };
 
-use super::ctx::{BodyCtx, EmitCtx};
+use super::ctx::{BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec};
 use super::ident::ident_from;
 use super::literals::emit_whole_number_literal;
 use super::runtime_op::runtime_op_ident;
@@ -16,13 +16,14 @@ use crate::error::BackendError;
 
 pub(super) fn emit_body(
     f: &MirFunctionDecl,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     if f.body.block.is_empty() {
         return Ok(quote!({ unimplemented!() }));
     }
-    let stmts = emit_block_stmts(&f.body.block, ctx, body_ctx)?;
+    let stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
     if body_ctx.is_generator() {
         let co = body_ctx.gen_co().ok_or_else(|| {
             BackendError::Internal(
@@ -48,13 +49,14 @@ fn collect_assigned_locals(
 
 fn emit_block_stmts(
     block: &MirBlock,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<Vec<TokenStream>, BackendError> {
     block
         .stmts
         .iter()
-        .map(|stmt| emit_stmt(stmt, ctx, body_ctx))
+        .map(|stmt| emit_stmt(stmt, ctx, emit_env, body_ctx))
         .collect()
 }
 
@@ -62,13 +64,14 @@ fn emit_if_stmt(
     cond: &MirExpr,
     then_block: &MirBlock,
     else_block: Option<&MirBlock>,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let cond = emit_expr(cond, ctx, body_ctx)?;
-    let then_stmts = emit_block_stmts(then_block, ctx, body_ctx)?;
+    let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
+    let then_stmts = emit_block_stmts(then_block, ctx, emit_env, body_ctx)?;
     if let Some(else_block) = else_block {
-        let else_stmts = emit_block_stmts(else_block, ctx, body_ctx)?;
+        let else_stmts = emit_block_stmts(else_block, ctx, emit_env, body_ctx)?;
         Ok(quote!(if #cond { #(#then_stmts)* } else { #(#else_stmts)* }))
     } else {
         Ok(quote!(if #cond { #(#then_stmts)* }))
@@ -76,18 +79,23 @@ fn emit_if_stmt(
 }
 
 fn emit_runtime_stmt(
-    op: RuntimeOp,
-    args: &[MirExpr],
-    dest: Option<LocalId>,
-    ty: TypeId,
-    target_ty: Option<TypeId>,
-    ctx: &EmitCtx<'_>,
+    spec: &RuntimeCallSpec<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let call = emit_runtime_call(op, args, ty, target_ty, ctx, body_ctx)?;
-    if let Some(dest) = dest {
+    let call = emit_runtime_call(
+        spec.op,
+        spec.args,
+        spec.ty,
+        spec.target_ty,
+        ctx,
+        emit_env,
+        body_ctx,
+    )?;
+    if let Some(dest) = spec.dest {
         let dest = body_ctx.local_ident(dest);
-        let ty = emit_type_id_with_ctx(ty, ctx);
+        let ty = emit_type_id_with_ctx(spec.ty, emit_env, ctx);
         let mutability = quote!();
         Ok(quote!(let #mutability #dest: #ty = #call;))
     } else {
@@ -97,7 +105,8 @@ fn emit_runtime_stmt(
 
 fn emit_return_stmt(
     slot: Option<&MirExpr>,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     if body_ctx.try_label().is_some() {
@@ -106,13 +115,13 @@ fn emit_return_stmt(
             .expect("emit_return_stmt inside try requires return_slot to be set by emit_try");
         let value_ts = if body_ctx.is_generator() {
             if let Some(expr) = slot {
-                let expr = emit_expr(expr, ctx, body_ctx)?;
+                let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
                 quote!(Some(#expr))
             } else {
                 quote!(None)
             }
         } else if let Some(expr) = slot {
-            let expr = emit_expr(expr, ctx, body_ctx)?;
+            let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
             quote!(#expr)
         } else {
             quote!(())
@@ -120,13 +129,13 @@ fn emit_return_stmt(
         Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
     } else if body_ctx.is_generator() {
         if let Some(expr) = slot {
-            let expr = emit_expr(expr, ctx, body_ctx)?;
+            let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(return Some(#expr);))
         } else {
             Ok(quote!(return None;))
         }
     } else if let Some(expr) = slot {
-        let expr = emit_expr(expr, ctx, body_ctx)?;
+        let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
         Ok(quote!(return #expr;))
     } else {
         Ok(quote!(return;))
@@ -136,24 +145,27 @@ fn emit_return_stmt(
 fn emit_do_while(
     body: &MirBlock,
     cond: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let label = format_ident!("__do_while_{}", body.stmts.len());
     let prev_label = body_ctx.continue_label();
     body_ctx.set_continue_label(Some(label.clone()));
-    let body_stmts = emit_block_stmts(body, ctx, body_ctx);
+    let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
     body_ctx.set_continue_label(prev_label);
     let body_stmts = body_stmts?;
-    let cond = emit_expr(cond, ctx, body_ctx)?;
+    let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
     Ok(quote!(#label: loop { #(#body_stmts)* if !(#cond) { break #label; } }))
 }
 
 fn emit_stmt(
     stmt: &MirStmt,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     match stmt {
         MirStmt::Let {
             local,
@@ -162,37 +174,39 @@ fn emit_stmt(
             mutable,
         } => {
             let name = body_ctx.local_ident(*local);
-            let ty = emit_type_id_with_ctx(*ty, ctx);
+            let ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
             let mutability = if *mutable || body_ctx.local_mut(*local) {
                 quote!(mut)
             } else {
                 quote!()
             };
             if let Some(init) = init {
-                let init = emit_expr(init, ctx, body_ctx)?;
+                let init = emit_expr(init, ctx, emit_env, body_ctx)?;
                 Ok(quote!(let #mutability #name: #ty = #init;))
             } else {
                 Ok(quote!(let #mutability #name: #ty;))
             }
         }
         MirStmt::Assign { target, value } => {
-            if let Some(chain_assign) = emit_optional_chain_assign(target, value, ctx, body_ctx)? {
+            if let Some(chain_assign) =
+                emit_optional_chain_assign(target, value, ctx, emit_env, body_ctx)?
+            {
                 return Ok(chain_assign);
             }
-            let target = emit_place(target, ctx, body_ctx)?;
-            let value = emit_expr(value, ctx, body_ctx)?;
+            let target = emit_place(target, ctx, emit_env, body_ctx)?;
+            let value = emit_expr(value, ctx, emit_env, body_ctx)?;
             Ok(quote!(#target = #value;))
         }
         MirStmt::Expr(expr) => {
-            if matches!(expr, MirExpr::Local(_)) {
+            if matches!(expr, MirExpr::Local(_)) && !body_ctx.in_tla_main() {
                 return Ok(quote!());
             }
-            let expr = emit_expr(expr, ctx, body_ctx)?;
+            let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(#expr;))
         }
-        MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, body_ctx),
+        MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, emit_env, body_ctx),
         MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
-            let error = emit_expr(error, ctx, body_ctx)?;
+            let error = emit_expr(error, ctx, emit_env, body_ctx)?;
             if body_ctx.in_try() {
                 Ok(quote!(__ts_aot_throw(#error);))
             } else {
@@ -203,10 +217,17 @@ fn emit_stmt(
             cond,
             then_block,
             else_block,
-        } => emit_if_stmt(cond, then_block, else_block.as_ref(), ctx, body_ctx),
+        } => emit_if_stmt(
+            cond,
+            then_block,
+            else_block.as_ref(),
+            ctx,
+            emit_env,
+            body_ctx,
+        ),
         MirStmt::While { cond, body } => {
-            let cond = emit_expr(cond, ctx, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
+            let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
+            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
             Ok(quote!(while #cond { #(#body_stmts)* }))
         }
         MirStmt::ForOf {
@@ -227,10 +248,10 @@ fn emit_stmt(
             } else {
                 quote!(#item_ident)
             };
-            let iterable = emit_expr(iterable, ctx, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
+            let iterable = emit_expr(iterable, ctx, emit_env, body_ctx)?;
+            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
             let needs_mut_ref = matches!(
-                ctx.types.resolve(*iter_ty),
+                types.resolve(*iter_ty),
                 Some(ts_aot_core::Type::Generator { .. })
             );
             if needs_mut_ref {
@@ -241,8 +262,8 @@ fn emit_stmt(
         }
         MirStmt::ForIn { key, object, body } => {
             let key = body_ctx.local_ident(*key);
-            let object = emit_expr(object, ctx, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, body_ctx)?;
+            let object = emit_expr(object, ctx, emit_env, body_ctx)?;
+            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
             Ok(quote!(for #key in #object { #(#body_stmts)* }))
         }
         MirStmt::Break => Ok(quote!(break;)),
@@ -259,13 +280,22 @@ fn emit_stmt(
             dest,
             ty,
             target_ty,
-        } => emit_runtime_stmt(*op, args, *dest, *ty, *target_ty, ctx, body_ctx),
-        MirStmt::DoWhile { body, cond } => emit_do_while(body, cond, ctx, body_ctx),
+        } => {
+            let spec = RuntimeCallSpec {
+                op: *op,
+                args,
+                dest: *dest,
+                ty: *ty,
+                target_ty: *target_ty,
+            };
+            emit_runtime_stmt(&spec, ctx, emit_env, body_ctx)
+        }
+        MirStmt::DoWhile { body, cond } => emit_do_while(body, cond, ctx, emit_env, body_ctx),
         MirStmt::Switch {
             disc,
             cases,
             default,
-        } => emit_switch(disc, cases, default.as_ref(), ctx, body_ctx),
+        } => emit_switch(disc, cases, default.as_ref(), ctx, emit_env, body_ctx),
         MirStmt::Try {
             body,
             catch_param,
@@ -277,6 +307,7 @@ fn emit_stmt(
             catch.as_ref(),
             finally.as_ref(),
             ctx,
+            emit_env,
             body_ctx,
         ),
     }
@@ -284,24 +315,25 @@ fn emit_stmt(
 
 fn emit_place(
     place: &MirPlace,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     match place {
         MirPlace::Local { id } => Ok(body_ctx.local_ref(*id)),
         MirPlace::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
-            let struct_id = ctx
-                .types
+            let struct_id = types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented)?;
-            let base = emit_place_base(base, ctx, body_ctx)?;
+            let base = emit_place_base(base, ctx, emit_env, body_ctx)?;
             let field = ctx.struct_field_ident(struct_id, *field);
             Ok(quote!(#base.#field))
         }
         MirPlace::Index { base, index, .. } => {
-            let base = emit_expr(base, ctx, body_ctx)?;
-            let index = emit_expr(index, ctx, body_ctx)?;
+            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+            let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
     }
@@ -309,27 +341,28 @@ fn emit_place(
 
 fn emit_place_base(
     base: &MirPlaceBase,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_ref(*id)),
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
-            let struct_id = ctx
-                .types
+            let struct_id = types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented)?;
-            let base = emit_place_base(base, ctx, body_ctx)?;
+            let base = emit_place_base(base, ctx, emit_env, body_ctx)?;
             let field = ctx.struct_field_ident(struct_id, *field);
             Ok(quote!(#base.#field))
         }
         MirPlaceBase::Index { base, index, .. } => {
-            let base = emit_expr(base, ctx, body_ctx)?;
-            let index = emit_expr(index, ctx, body_ctx)?;
+            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+            let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
-        MirPlaceBase::Chain { base, .. } => emit_expr(base, ctx, body_ctx),
+        MirPlaceBase::Chain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
     }
 }
 
@@ -356,39 +389,43 @@ fn is_display_supported_reason(reason_ty: Option<&Type>) -> bool {
 
 fn optional_chain_map_arm(
     base: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<Option<TokenStream>, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     let MirExpr::OptionalChain { base: inner, ty } = base else {
         return Ok(None);
     };
-    let Some(resolved) = ctx.types.resolve(*ty) else {
+    let Some(resolved) = types.resolve(*ty) else {
         return Ok(None);
     };
     if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
         return Ok(None);
     }
-    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
+    let inner_tokens = emit_expr(inner, ctx, emit_env, body_ctx)?;
     Ok(Some(quote!(#inner_tokens.as_ref())))
 }
 
 fn optional_call_map_arm(
     callee: &MirExpr,
     args: &[MirExpr],
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<Option<TokenStream>, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     let MirExpr::OptionalChain { base: inner, ty } = callee else {
         return Ok(None);
     };
-    let Some(resolved) = ctx.types.resolve(*ty) else {
+    let Some(resolved) = types.resolve(*ty) else {
         return Ok(None);
     };
     if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
         return Ok(None);
     }
-    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
-    let args_tokens = emit_exprs(args, ctx, body_ctx)?;
+    let inner_tokens = emit_expr(inner, ctx, emit_env, body_ctx)?;
+    let args_tokens = emit_exprs(args, ctx, emit_env, body_ctx)?;
     Ok(Some(
         quote!(#inner_tokens.as_ref().map(|f| f(#(#args_tokens),*))),
     ))
@@ -397,9 +434,11 @@ fn optional_call_map_arm(
 fn emit_optional_chain_assign(
     target: &MirPlace,
     value: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<Option<TokenStream>, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     let MirPlace::Field { base, field, .. } = target else {
         return Ok(None);
     };
@@ -412,28 +451,27 @@ fn emit_optional_chain_assign(
     let MirExpr::OptionalChain { base: inner, ty } = chain_base.as_ref() else {
         return Ok(None);
     };
-    let Some(resolved) = ctx.types.resolve(*ty) else {
+    let Some(resolved) = types.resolve(*ty) else {
         return Ok(None);
     };
     if !matches!(resolved, ts_aot_core::Type::Optional { .. }) {
         return Ok(None);
     }
-    let inner_tokens = emit_expr(inner, ctx, body_ctx)?;
-    let inner_ty = match ctx.types.resolve(*ty) {
+    let inner_tokens = emit_expr(inner, ctx, emit_env, body_ctx)?;
+    let inner_ty = match types.resolve(*ty) {
         Some(ts_aot_core::Type::Optional { inner }) => *inner,
         _ => return Err(BackendError::NotImplemented),
     };
-    let field_ident = match ctx.types.resolve(inner_ty) {
+    let field_ident = match types.resolve(inner_ty) {
         Some(_) => {
-            let struct_id = ctx
-                .types
+            let struct_id = types
                 .struct_id(inner_ty)
                 .ok_or(BackendError::NotImplemented)?;
             ctx.struct_field_ident(struct_id, *field)
         }
         None => return Err(BackendError::NotImplemented),
     };
-    let value = emit_expr(value, ctx, body_ctx)?;
+    let value = emit_expr(value, ctx, emit_env, body_ctx)?;
     Ok(Some(quote! {
         if #inner_tokens.is_some() {
             #inner_tokens.as_mut().unwrap().#field_ident = #value;
@@ -443,9 +481,11 @@ fn emit_optional_chain_assign(
 
 fn emit_expr(
     expr: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     match expr {
         MirExpr::Unit | MirExpr::Null { .. } => Ok(quote!(())),
         MirExpr::Bool(value) => Ok(quote!(#value)),
@@ -461,47 +501,45 @@ fn emit_expr(
             Ok(quote!(#name))
         }
         MirExpr::Field { base, field, .. } => {
-            if let Some(map) = optional_chain_map_arm(base, ctx, body_ctx)? {
+            if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
                 let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
-                let inner_ty = match ctx.types.resolve(base_ty) {
+                let inner_ty = match types.resolve(base_ty) {
                     Some(ts_aot_core::Type::Optional { inner }) => *inner,
                     _ => return Err(BackendError::NotImplemented),
                 };
-                let struct_id = ctx
-                    .types
+                let struct_id = types
                     .struct_id(inner_ty)
                     .ok_or(BackendError::NotImplemented)?;
                 let field = ctx.struct_field_ident(struct_id, *field);
                 return Ok(quote!(#map.map(|o| o.#field)));
             }
             let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
-            let struct_id = ctx
-                .types
+            let struct_id = types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented)?;
             let field = ctx.struct_field_ident(struct_id, *field);
-            let base = emit_expr(base, ctx, body_ctx)?;
+            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base.#field))
         }
         MirExpr::Index { base, index, .. } => {
-            let index = emit_expr(index, ctx, body_ctx)?;
-            if let Some(map) = optional_chain_map_arm(base, ctx, body_ctx)? {
+            let index = emit_expr(index, ctx, emit_env, body_ctx)?;
+            if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
                 return Ok(quote!(#map.map(|o| o[#index])));
             }
-            let base = emit_expr(base, ctx, body_ctx)?;
+            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
         MirExpr::Call { callee, args, .. } => {
             let callee = ctx.function_ident(*callee);
-            let args = emit_exprs(args, ctx, body_ctx)?;
+            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
             Ok(quote!(#callee(#(#args),*)))
         }
         MirExpr::IndirectCall { callee, args, .. } => {
-            if let Some(map) = optional_call_map_arm(callee, args, ctx, body_ctx)? {
+            if let Some(map) = optional_call_map_arm(callee, args, ctx, emit_env, body_ctx)? {
                 return Ok(map);
             }
-            let callee = emit_expr(callee, ctx, body_ctx)?;
-            let args = emit_exprs(args, ctx, body_ctx)?;
+            let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
+            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
             Ok(quote!(#callee(#(#args),*)))
         }
         MirExpr::StructLiteral {
@@ -512,42 +550,42 @@ fn emit_expr(
                 .iter()
                 .map(|(field_id, value)| {
                     let field = ctx.struct_field_ident(*struct_id, *field_id);
-                    let value = emit_expr(value, ctx, body_ctx)?;
+                    let value = emit_expr(value, ctx, emit_env, body_ctx)?;
                     Ok(quote!(#field: #value))
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
             Ok(quote!(#name { #(#fields),* }))
         }
         MirExpr::ResultOk { value, .. } => {
-            let value = emit_expr(value, ctx, body_ctx)?;
+            let value = emit_expr(value, ctx, emit_env, body_ctx)?;
             Ok(quote!(Ok(#value)))
         }
         MirExpr::ResultErr { error, .. } => {
-            let error = emit_expr(error, ctx, body_ctx)?;
+            let error = emit_expr(error, ctx, emit_env, body_ctx)?;
             Ok(quote!(Err(#error)))
         }
         MirExpr::Binary {
             op, left, right, ..
-        } => emit_binary_expr(*op, left, right, ctx, body_ctx),
-        MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, body_ctx),
+        } => emit_binary_expr(*op, left, right, ctx, emit_env, body_ctx),
+        MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, emit_env, body_ctx),
         MirExpr::Await { expr, ty, .. } => {
-            let inner = emit_expr(expr, ctx, body_ctx)?;
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             let needs_helper = matches!(expr.as_ref(), MirExpr::Import { .. })
                 || expr_base_ty(expr, body_ctx)
-                    .and_then(|ty_id| ctx.types.resolve(ty_id))
+                    .and_then(|ty_id| types.resolve(ty_id))
                     .is_some_and(|ty| matches!(ty, Type::Promise { .. }));
             if needs_helper {
-                let ok_ty = emit_type_id_with_ctx(*ty, ctx);
+                let ok_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
                 Ok(quote!(ts_aot_runtime::__ts_aot_await_value::<#ok_ty>(&#inner)))
             } else {
                 Ok(inner)
             }
         }
-        MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, body_ctx),
-        MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, body_ctx),
+        MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
+        MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, emit_env, body_ctx),
         MirExpr::Cast { expr, ty } => {
-            let inner = emit_expr(expr, ctx, body_ctx)?;
-            if !is_numeric_primitive_target(ctx.types.resolve(*ty)) {
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            if !is_numeric_primitive_target(types.resolve(*ty)) {
                 return Err(BackendError::Internal(format!(
                     "MirExpr::Cast target TypeId({}) is not a numeric primitive; \
                      Rust's `as` cast cannot lower it. \
@@ -555,7 +593,7 @@ fn emit_expr(
                     ty.raw()
                 )));
             }
-            let cast_ty = emit_type_id_with_ctx(*ty, ctx);
+            let cast_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
             Ok(quote!((#inner as #cast_ty)))
         }
         MirExpr::TemplateStringsArray { cooked, .. } => {
@@ -578,8 +616,8 @@ fn emit_expr(
             Ok(quote!(ts_aot_runtime::__ts_aot_bigint_new(#value_lit)))
         }
         MirExpr::Import { source, ty } => {
-            let source = emit_expr(source, ctx, body_ctx)?;
-            let payload_ty = emit_type_id_with_ctx(*ty, ctx);
+            let source = emit_expr(source, ctx, emit_env, body_ctx)?;
+            let payload_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
             Ok(
                 quote!(ts_aot_runtime::__ts_aot_dynamic_import::<#payload_ty>(
                     &#source.to_string_lossy()
@@ -596,7 +634,7 @@ fn emit_expr(
                 )
             })?;
             let value = if let Some(inner) = expr {
-                emit_expr(inner, ctx, body_ctx)?
+                emit_expr(inner, ctx, emit_env, body_ctx)?
             } else {
                 quote!(())
             };
@@ -620,7 +658,7 @@ fn emit_expr(
                 candidates.insert(l.id);
             }
             let assigned: std::collections::HashSet<LocalId> =
-                collect_assigned_locals(&body.stmts, ctx.types, &candidates);
+                collect_assigned_locals(&body.stmts, types, &candidates);
             for l in locals {
                 let mutable = l.mutable || assigned.contains(&l.id);
                 let name = ident_from(&l.name);
@@ -634,7 +672,7 @@ fn emit_expr(
                 .iter()
                 .map(|p| {
                     let name = child_ctx.local_ident(p.id);
-                    let ty = emit_type_id_with_ctx(p.ty, ctx);
+                    let ty = emit_type_id_with_ctx(p.ty, emit_env, ctx);
                     if assigned.contains(&p.id) {
                         quote!(mut #name: #ty)
                     } else {
@@ -642,8 +680,8 @@ fn emit_expr(
                     }
                 })
                 .collect();
-            let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, ctx);
-            let inner_stmts = emit_block_stmts(body, ctx, &child_ctx)?;
+            let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, emit_env, ctx);
+            let inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
             Ok(quote!(move |#(#param_tokens),*| -> #ret_ty_tokens { #(#inner_stmts)* }))
         }
     }
@@ -651,12 +689,13 @@ fn emit_expr(
 
 fn emit_exprs(
     exprs: &[MirExpr],
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<Vec<TokenStream>, BackendError> {
     exprs
         .iter()
-        .map(|expr| emit_expr(expr, ctx, body_ctx))
+        .map(|expr| emit_expr(expr, ctx, emit_env, body_ctx))
         .collect()
 }
 
@@ -664,11 +703,12 @@ fn emit_binary_expr(
     op: BinaryOp,
     left: &MirExpr,
     right: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let left = emit_expr(left, ctx, body_ctx)?;
-    let right = emit_expr(right, ctx, body_ctx)?;
+    let left = emit_expr(left, ctx, emit_env, body_ctx)?;
+    let right = emit_expr(right, ctx, emit_env, body_ctx)?;
     Ok(match op {
         BinaryOp::Add => quote!((#left + #right)),
         BinaryOp::Sub => quote!((#left - #right)),
@@ -706,14 +746,15 @@ pub(super) fn emit_float(value: f64) -> TokenStream {
 
 fn emit_typeof(
     expr: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     match expr {
         MirExpr::Unit => Ok(quote!(String::from(__ts_aot_typeof_unit()))),
         MirExpr::Null { .. } => Ok(quote!(String::from(__ts_aot_typeof_null()))),
         _ => {
-            let inner = emit_expr(expr, ctx, body_ctx)?;
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(String::from(__ts_aot_typeof(&#inner))))
         }
     }
@@ -722,10 +763,11 @@ fn emit_typeof(
 fn emit_unary_expr(
     op: UnaryOp,
     expr: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let expr = emit_expr(expr, ctx, body_ctx)?;
+    let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
     Ok(match op {
         UnaryOp::Neg => quote!((-#expr)),
         UnaryOp::Not | UnaryOp::BitNot => quote!((!#expr)),
@@ -755,68 +797,80 @@ fn emit_runtime_call(
     args: &[MirExpr],
     ty: TypeId,
     target_ty: Option<TypeId>,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
     match op {
         RuntimeOp::TypedArrayNew => {
-            let length = emit_expr(&args[0], ctx, body_ctx)?;
-            let kind_id = emit_expr(&args[1], ctx, body_ctx)?;
+            let length = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let kind_id = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_typed_array_new(
                 (#length) as i64,
                 (#kind_id) as i64
             )))
         }
         RuntimeOp::ArrayGetOrDefault => {
-            let arr = emit_expr(&args[0], ctx, body_ctx)?;
-            let idx = emit_expr(&args[1], ctx, body_ctx)?;
-            let element_ty = emit_type_id_with_ctx(ty, ctx);
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
             Ok(quote!(__ts_aot_array_get_or_default::<#element_ty>(
                 &#arr,
                 #idx
             )))
         }
-        RuntimeOp::ArrayCreate => {
-            emit_array_op_with_element_type("__ts_aot_array_create", args, ty, ctx, body_ctx)
-        }
-        RuntimeOp::ArrayConcat => {
-            emit_array_op_with_element_type("__ts_aot_array_concat", args, ty, ctx, body_ctx)
-        }
+        RuntimeOp::ArrayCreate => emit_array_op_with_element_type(
+            "__ts_aot_array_create",
+            args,
+            ty,
+            ctx,
+            emit_env,
+            body_ctx,
+        ),
+        RuntimeOp::ArrayConcat => emit_array_op_with_element_type(
+            "__ts_aot_array_concat",
+            args,
+            ty,
+            ctx,
+            emit_env,
+            body_ctx,
+        ),
         RuntimeOp::ArrayHole => {
-            let element_ty_id = match ctx.types.resolve(ty) {
+            let element_ty_id = match types.resolve(ty) {
                 Some(Type::Array { element }) => *element,
                 _ => ty,
             };
-            let element_ty = emit_type_id_with_ctx(element_ty_id, ctx);
+            let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
             Ok(quote!(__ts_aot_array_hole::<#element_ty>()))
         }
         RuntimeOp::GeneratorNext => {
-            let owner = emit_expr(&args[0], ctx, body_ctx)?;
+            let owner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!((#owner).next()))
         }
         RuntimeOp::OpInstanceof => {
-            let value = emit_expr(&args[0], ctx, body_ctx)?;
+            let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let target_type_id: u32 = match args.get(2) {
                 Some(MirExpr::Int { value, .. }) => (*value).try_into().unwrap_or(0),
                 _ => 0,
             };
             Ok(quote!(__ts_aot_op_instanceof(&#value, #target_type_id)))
         }
-        RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, body_ctx),
+        RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, emit_env, body_ctx),
         RuntimeOp::ArrayPush => {
-            let arr = emit_expr(&args[0], ctx, body_ctx)?;
-            let item = emit_expr(&args[1], ctx, body_ctx)?;
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let item = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
         }
         RuntimeOp::ArraySet => {
-            let arr = emit_expr(&args[0], ctx, body_ctx)?;
-            let idx = emit_expr(&args[1], ctx, body_ctx)?;
-            let value = emit_expr(&args[2], ctx, body_ctx)?;
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let value = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
         }
         RuntimeOp::MathMax | RuntimeOp::MathMin => {
             let name = runtime_op_ident(op)?;
-            let args = emit_exprs(args, ctx, body_ctx)?;
+            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(&[#(#args),*])))
         }
         RuntimeOp::StringConcat
@@ -831,9 +885,9 @@ fn emit_runtime_call(
                 .enumerate()
                 .map(|(i, a)| {
                     if string_arg_indices.contains(&i) {
-                        emit_js_string_arg(a, ctx, body_ctx)
+                        emit_js_string_arg(a, ctx, emit_env, body_ctx)
                     } else {
-                        emit_expr(a, ctx, body_ctx)
+                        emit_expr(a, ctx, emit_env, body_ctx)
                     }
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
@@ -841,36 +895,36 @@ fn emit_runtime_call(
         }
         RuntimeOp::MapSet => {
             let name = runtime_op_ident(op)?;
-            let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
-            let key_expr = emit_js_string_owned(&args[1], ctx, body_ctx)?;
-            let value_expr = emit_js_string_owned(&args[2], ctx, body_ctx)?;
+            let map_expr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let key_expr = emit_js_string_owned(&args[1], ctx, emit_env, body_ctx)?;
+            let value_expr = emit_js_string_owned(&args[2], ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(&mut #map_expr, #key_expr, #value_expr)))
         }
         RuntimeOp::MapGet => {
             let name = runtime_op_ident(op)?;
-            let map_expr = emit_expr(&args[0], ctx, body_ctx)?;
-            let key_expr = emit_js_string_arg(&args[1], ctx, body_ctx)?;
+            let map_expr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let key_expr = emit_js_string_arg(&args[1], ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(&#map_expr, #key_expr)))
         }
         RuntimeOp::ArrayFromString => {
             let name = runtime_op_ident(op)?;
-            let source_expr = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+            let source_expr = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(#source_expr)))
         }
         RuntimeOp::HostConsoleLog | RuntimeOp::SymbolFor => {
             let name = runtime_op_ident(op)?;
-            let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+            let arg = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(#arg)))
         }
         RuntimeOp::JsonParse | RuntimeOp::JsonStringify => {
             let name = runtime_op_ident(op)?;
             let target = target_ty.unwrap_or(ty);
-            let ty_tokens = emit_type_id_with_ctx(target, ctx);
+            let ty_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             if op == RuntimeOp::JsonParse {
-                let arg = emit_js_string_arg(&args[0], ctx, body_ctx)?;
+                let arg = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(#arg)))
             } else {
-                let arg = emit_expr(&args[0], ctx, body_ctx)?;
+                let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(&#arg)))
             }
         }
@@ -881,7 +935,7 @@ fn emit_runtime_call(
             } else {
                 let desc_expr: TokenStream = match &args[0] {
                     MirExpr::Null { .. } => quote!(ts_aot_runtime::JsString::from("null")),
-                    _ => emit_js_string_arg(&args[0], ctx, body_ctx)?,
+                    _ => emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?,
                 };
                 Ok(quote!(__ts_aot_symbol_new_desc(&#desc_expr)))
             }
@@ -889,7 +943,7 @@ fn emit_runtime_call(
         RuntimeOp::PromiseResolveStatic | RuntimeOp::PromiseRejectStatic => {
             let name = runtime_op_ident(op)?;
             let target = target_ty.unwrap_or(ty);
-            let ty_tokens = emit_type_id_with_ctx(target, ctx);
+            let ty_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             if matches!(op, RuntimeOp::PromiseRejectStatic) {
                 let reason = match &args[0] {
                     MirExpr::String { id, .. } => {
@@ -898,26 +952,26 @@ fn emit_runtime_call(
                             .into_owned())
                     }
                     _ if matches!(
-                        expr_base_ty(&args[0], body_ctx).and_then(|ty| ctx.types.resolve(ty)),
+                        expr_base_ty(&args[0], body_ctx).and_then(|ty| types.resolve(ty)),
                         Some(Type::String)
                     ) =>
                     {
-                        let js = emit_js_string_owned(&args[0], ctx, body_ctx)?;
+                        let js = emit_js_string_owned(&args[0], ctx, emit_env, body_ctx)?;
                         quote!(#js.to_string_lossy().into_owned())
                     }
                     _ => {
                         let reason_ty =
-                            expr_base_ty(&args[0], body_ctx).and_then(|ty| ctx.types.resolve(ty));
+                            expr_base_ty(&args[0], body_ctx).and_then(|ty| types.resolve(ty));
                         if !is_display_supported_reason(reason_ty) {
                             return Err(BackendError::NotImplemented);
                         }
-                        let inner = emit_expr(&args[0], ctx, body_ctx)?;
+                        let inner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
                         quote!(#inner.to_string())
                     }
                 };
                 Ok(quote!(#name::<#ty_tokens>(#reason)))
             } else {
-                let value = emit_expr(&args[0], ctx, body_ctx)?;
+                let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(#value)))
             }
         }
@@ -925,17 +979,17 @@ fn emit_runtime_call(
         | RuntimeOp::PromiseCatchInstance
         | RuntimeOp::PromiseFinallyInstance => {
             let name = runtime_op_ident(op)?;
-            let promise = emit_expr(&args[0], ctx, body_ctx)?;
-            let handler = emit_expr(&args[1], ctx, body_ctx)?;
+            let promise = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let handler = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let input_ty_tokens = match target_ty {
-                Some(t) => emit_type_id_with_ctx(t, ctx),
-                None => emit_type_id_with_ctx(ty, ctx),
+                Some(t) => emit_type_id_with_ctx(t, emit_env, ctx),
+                None => emit_type_id_with_ctx(ty, emit_env, ctx),
             };
             Ok(quote!(#name::<#input_ty_tokens, _>(&#promise, #handler)))
         }
         _ => {
             let name = runtime_op_ident(op)?;
-            let args = emit_exprs(args, ctx, body_ctx)?;
+            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
             Ok(quote!(#name(#(#args),*)))
         }
     }
@@ -953,17 +1007,19 @@ fn emit_array_op_with_element_type(
     op_name: &'static str,
     args: &[MirExpr],
     ty: TypeId,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let element_ty_id = match ctx.types.resolve(ty) {
+    let EmitEnv { types, .. } = emit_env;
+    let element_ty_id = match types.resolve(ty) {
         Some(Type::Array { element }) => *element,
         _ => ty,
     };
-    let element_ty = emit_type_id_with_ctx(element_ty_id, ctx);
+    let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
     let parts: Vec<TokenStream> = args
         .iter()
-        .map(|a| emit_expr(a, ctx, body_ctx))
+        .map(|a| emit_expr(a, ctx, emit_env, body_ctx))
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
     Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))
@@ -971,18 +1027,20 @@ fn emit_array_op_with_element_type(
 
 fn emit_js_string_arg(
     arg: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    emit_js_string_expr(arg, StringOwnership::Borrowed, ctx, body_ctx)
+    emit_js_string_expr(arg, StringOwnership::Borrowed, ctx, emit_env, body_ctx)
 }
 
 fn emit_js_string_owned(
     arg: &MirExpr,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    emit_js_string_expr(arg, StringOwnership::Owned, ctx, body_ctx)
+    emit_js_string_expr(arg, StringOwnership::Owned, ctx, emit_env, body_ctx)
 }
 
 #[derive(Clone, Copy)]
@@ -994,7 +1052,8 @@ enum StringOwnership {
 fn emit_js_string_expr(
     arg: &MirExpr,
     ownership: StringOwnership,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let core = match arg {
@@ -1003,7 +1062,7 @@ fn emit_js_string_expr(
             quote!(ts_aot_runtime::JsString::from(#lit))
         }
         MirExpr::Local(id) => body_ctx.local_ref(*id),
-        _ => emit_expr(arg, ctx, body_ctx)?,
+        _ => emit_expr(arg, ctx, emit_env, body_ctx)?,
     };
     Ok(match ownership {
         StringOwnership::Borrowed => quote!(&#core),
@@ -1015,10 +1074,11 @@ fn emit_switch(
     disc: &MirExpr,
     cases: &[ts_aot_ir_mir::SwitchCase],
     default: Option<&MirBlock>,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let disc_expr = emit_expr(disc, ctx, body_ctx)?;
+    let disc_expr = emit_expr(disc, ctx, emit_env, body_ctx)?;
     let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
     for case in cases {
         let pat = match &case.value {
@@ -1031,11 +1091,11 @@ fn emit_switch(
                 quote!(#lit)
             }
         };
-        let body_stmts = emit_block_stmts(&case.body, ctx, body_ctx)?;
+        let body_stmts = emit_block_stmts(&case.body, ctx, emit_env, body_ctx)?;
         arms.push(quote!(#pat => { #(#body_stmts)* }));
     }
     if let Some(def) = default {
-        let body_stmts = emit_block_stmts(def, ctx, body_ctx)?;
+        let body_stmts = emit_block_stmts(def, ctx, emit_env, body_ctx)?;
         arms.push(quote!(_ => { #(#body_stmts)* }));
     } else {
         arms.push(quote!(_ => {}));
@@ -1048,7 +1108,8 @@ fn emit_try(
     catch_param: Option<LocalId>,
     catch: Option<&MirBlock>,
     finally: Option<&MirBlock>,
-    ctx: &EmitCtx<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let try_id = body_ctx.alloc_try_id();
@@ -1060,14 +1121,14 @@ fn emit_try(
     body_ctx.set_in_try(true);
     body_ctx.set_try_label(Some(label.clone()));
     body_ctx.set_return_slot(Some(slot_ident.clone()));
-    let body_stmts = emit_block_stmts(body, ctx, body_ctx);
+    let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
     body_ctx.set_try_label(prev_try_label);
     let body_stmts = body_stmts?;
 
     let catch_stmts = if let Some(catch_block) = catch {
         let prev = body_ctx.try_label();
         body_ctx.set_try_label(Some(label.clone()));
-        let stmts = emit_block_stmts(catch_block, ctx, body_ctx);
+        let stmts = emit_block_stmts(catch_block, ctx, emit_env, body_ctx);
         body_ctx.set_try_label(prev);
         Some(stmts?)
     } else {
@@ -1077,7 +1138,7 @@ fn emit_try(
     body_ctx.set_in_try(false);
     body_ctx.set_try_label(None);
     let finally_stmts = if let Some(fin) = finally {
-        Some(emit_block_stmts(fin, ctx, body_ctx)?)
+        Some(emit_block_stmts(fin, ctx, emit_env, body_ctx)?)
     } else {
         None
     };
@@ -1088,7 +1149,7 @@ fn emit_try(
     let assert_unwind_safe = format_ident!("AssertUnwindSafe");
     let resume_unwind = format_ident!("resume_unwind");
 
-    let inner_ret_ty = emit_type_id_with_ctx(body_ctx.return_type_id(), ctx);
+    let inner_ret_ty = emit_type_id_with_ctx(body_ctx.return_type_id(), emit_env, ctx);
     let slot_ty = if body_ctx.is_generator() {
         quote!(Option<Option<#inner_ret_ty>>)
     } else {
@@ -1118,7 +1179,7 @@ fn emit_try(
             let param_ident = body_ctx.local_ident(param);
             let param_ty = body_ctx
                 .local_ty(param)
-                .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, ctx));
+                .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
             quote! {
                 let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
                     Ok(v) => *v,

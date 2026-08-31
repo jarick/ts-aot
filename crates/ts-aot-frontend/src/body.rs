@@ -1,16 +1,14 @@
 use oxc_ast::ast::{FunctionBody, Statement};
-use ts_aot_core::{Diagnostic, LocalId, Type, TypeId};
+use ts_aot_core::{LocalId, TypeId};
 use ts_aot_ir_hir::{HirParam, HirStmt};
 
 use crate::scope::BodyScope;
-use crate::skeleton::SkeletonBuilder;
-use crate::util::core_span_from_oxc;
+use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 
-const UNSUPPORTED_BODY_CODE: &str = "E0500";
-
-impl SkeletonBuilder<'_, '_> {
+impl SkeletonBuilder {
     pub(crate) fn walk_function_body(
         &mut self,
+        senv: &mut SkeletonEnv,
         body: Option<&FunctionBody<'_>>,
         params: &[HirParam],
         is_generator: bool,
@@ -25,18 +23,19 @@ impl SkeletonBuilder<'_, '_> {
             let id = LocalId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
             scope.declare_param(p.name.as_str(), id, p.ty);
         }
-        let result = self.walk_block_with_predeclare(&body.statements, &mut scope);
+        let result = self.walk_block_with_predeclare(senv, &body.statements, &mut scope);
         self.is_generator_stack.pop();
         result
     }
 
     pub(crate) fn walk_block_with_predeclare(
         &mut self,
+        senv: &mut SkeletonEnv,
         stmts: &[oxc_ast::ast::Statement<'_>],
         scope: &mut BodyScope,
     ) -> Vec<HirStmt> {
-        predeclare_forward_declarations(stmts, scope, self.error_ty());
-        self.walk_stmts(stmts, scope)
+        predeclare_forward_declarations(stmts, scope, senv.error_ty());
+        self.walk_stmts(senv, stmts, scope)
     }
 
     pub(crate) fn current_function_is_generator(&self) -> bool {
@@ -44,18 +43,6 @@ impl SkeletonBuilder<'_, '_> {
             .last()
             .copied()
             .expect("is_generator_stack must be non-empty at every call site (walk_function_body pushes before invoking the walker)")
-    }
-
-    pub(crate) fn error_ty(&mut self) -> TypeId {
-        self.types.intern(&Type::Error)
-    }
-
-    pub(crate) fn report_unwalked(&mut self, message: &str, span: oxc_span::Span) {
-        self.diagnostics.push(Diagnostic::warning(
-            UNSUPPORTED_BODY_CODE,
-            message,
-            core_span_from_oxc(span),
-        ));
     }
 }
 

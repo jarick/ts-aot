@@ -1328,7 +1328,7 @@ fn struct_type_reference_uses_declared_struct_name() {
 }
 
 #[test]
-fn global_without_init_returns_not_implemented() {
+fn global_without_init_emits_default_initializer() {
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Global(MirGlobalDecl {
         name: Atom::from("counter"),
@@ -1338,8 +1338,14 @@ fn global_without_init_returns_not_implemented() {
         export_name: None,
         init: None,
     }));
-    let err = emit_decls(&prog, &TypeTable::new()).expect_err("global init is required");
-    assert_eq!(err, BackendError::NotImplemented);
+    let tokens = emit_decls(&prog, &TypeTable::new())
+        .expect("uninitialized global must emit a default-initialized static");
+    let s = tokens.to_string();
+    assert!(s.contains("static counter"), "expected static decl in: {s}");
+    assert!(
+        s.contains("Default :: default ()"),
+        "expected Default::default() initializer in: {s}"
+    );
 }
 
 #[test]

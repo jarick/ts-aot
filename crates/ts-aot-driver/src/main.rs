@@ -112,7 +112,7 @@ mod tests {
         stdout: &mut dyn Write,
     ) -> Result<(), String> {
         let out = Driver::new()
-            .compile_file(input, &CompileOptions { emit })
+            .compile_file(input, &CompileOptions { emit, module: true })
             .map_err(|e| e.to_string())?;
         write_artifact(&out, emit, output, stdout)
     }
@@ -330,6 +330,7 @@ mod tests {
             output: Some("out.rs".to_owned()),
             opts: CompileOptions {
                 emit: EmitStage::Mir,
+                ..CompileOptions::default()
             },
         };
         assert_eq!(parsed.input, "input.ts");

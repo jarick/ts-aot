@@ -1,10 +1,13 @@
+use std::cell::Cell;
+use std::collections::HashSet;
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
 use oxc_parser::Parser;
 use ts_aot_core::{Diagnostic, DiagnosticBag, ModuleId, Span as CoreSpan, TypeTable};
 use ts_aot_ir_hir::HirProgram;
 
-use crate::skeleton::SkeletonBuilder;
+use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 use crate::util::source_type_for;
 
 const PARSE_PANIC_CODE: &str = "E0100";
@@ -21,7 +24,7 @@ impl FrontendPass {
 
     #[must_use]
     pub fn run(&self, name: &str, source: &str) -> FrontendOutput {
-        self.run_with_types(name, source, &mut TypeTable::new())
+        self.run_with_types(name, source, &mut TypeTable::new(), false)
     }
 
     #[must_use]
@@ -30,16 +33,18 @@ impl FrontendPass {
         name: &str,
         source: &str,
         types: &mut TypeTable,
+        module: bool,
     ) -> FrontendOutput {
         let allocator = Allocator::default();
-        let source_type = source_type_for(name);
+        let source_type = source_type_for(name, module);
 
         let parser = Parser::new(&allocator, source, source_type);
         let ret = parser.parse();
 
         let mut diagnostics = DiagnosticBag::new();
-        let module = ModuleId::from_raw(0);
-        let mut program = HirProgram::new(module);
+        let module_id = ModuleId::from_raw(0);
+        let mut program = HirProgram::new(module_id);
+        program.is_module = module;
 
         let end = u32::try_from(source.len()).unwrap_or(u32::MAX);
         let fallback_span = CoreSpan::new(0, end);
@@ -66,7 +71,15 @@ impl FrontendPass {
         }
 
         let oxc_program: &Program<'_> = &ret.program;
-        SkeletonBuilder::new(source, types, &mut diagnostics, &mut program).build(oxc_program);
+        let mut senv = SkeletonEnv {
+            types,
+            diagnostics: &mut diagnostics,
+            program: &mut program,
+            next_destructured_id: Cell::new(0),
+            tla_only_bindings: HashSet::new(),
+        };
+        let source_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
+        SkeletonBuilder::new(source_len, module).build(&mut senv, oxc_program);
 
         program.diagnostics.extend(diagnostics.iter().cloned());
         FrontendOutput {

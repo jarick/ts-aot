@@ -32,6 +32,7 @@ impl EmitStage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CompileOptions {
     pub emit: EmitStage,
+    pub module: bool,
 }
 
 #[derive(Debug, Default)]
