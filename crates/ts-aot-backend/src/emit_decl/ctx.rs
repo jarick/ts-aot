@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
@@ -93,6 +93,7 @@ pub(super) struct BodyCtx {
     ret: TypeId,
     in_try: Cell<bool>,
     in_tla_main: bool,
+    pub(super) weakmap_liveness_per_key: RefCell<BTreeMap<LocalId, Ident>>,
     continue_label: RefCell<Option<Ident>>,
     try_label: RefCell<Option<Ident>>,
     return_slot: RefCell<Option<Ident>>,
@@ -139,6 +140,7 @@ impl BodyCtx {
             ret: f.ret,
             in_try: Cell::new(false),
             in_tla_main: false,
+            weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
@@ -164,6 +166,7 @@ impl BodyCtx {
             ret,
             in_try: Cell::new(false),
             in_tla_main: false,
+            weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
@@ -176,6 +179,47 @@ impl BodyCtx {
         self.locals_ty.insert(id, ty);
         self.locals_mut.insert(id, mutable);
         self.reserved_idents.insert(name);
+    }
+
+    pub(super) fn weakmap_liveness_for_key(&self, key_local: LocalId) -> Ident {
+        {
+            let cache = self.weakmap_liveness_per_key.borrow();
+            if let Some(ident) = cache.get(&key_local) {
+                return ident.clone();
+            }
+        }
+        let ident = self.alloc_weakmap_liveness_tmp();
+        self.weakmap_liveness_per_key
+            .borrow_mut()
+            .insert(key_local, ident.clone());
+        ident
+    }
+
+    pub(super) fn alloc_weakmap_liveness_tmp(&self) -> Ident {
+        let used_in_cache: std::collections::HashSet<Ident> = self
+            .weakmap_liveness_per_key
+            .borrow()
+            .values()
+            .cloned()
+            .collect();
+        let mut suffix: u32 = 0;
+        loop {
+            let candidate = format_ident!("__wm_liveness_{}", suffix);
+            if !self.reserved_idents.contains(&candidate) && !used_in_cache.contains(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    pub(super) fn has_weakmap_liveness(&self) -> bool {
+        !self.weakmap_liveness_per_key.borrow().is_empty()
+    }
+
+    pub(super) fn has_weakmap_liveness_for_key(&self, key_local: LocalId) -> bool {
+        self.weakmap_liveness_per_key
+            .borrow()
+            .contains_key(&key_local)
     }
 
     pub(super) fn is_generator(&self) -> bool {

@@ -47,6 +47,10 @@ pub enum Type {
     Date,
     Symbol,
     ArrayBuffer,
+    WeakMap {
+        key: TypeId,
+        value: TypeId,
+    },
     Int8Array,
     Uint8Array,
     Uint8ClampedArray,

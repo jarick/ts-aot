@@ -1,4 +1,4 @@
-use ts_aot_driver::{CompileOptions, Driver, EmitStage};
+use ts_aot_driver::{CompileOptions, Driver};
 
 mod common;
 
@@ -15,7 +15,7 @@ fn has_closure_ref(haystack: &str) -> bool {
 #[test]
 fn e2e_promise_all_emits_runtime_call_with_element_turbofish() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -39,7 +39,7 @@ fn e2e_promise_all_emits_runtime_call_with_element_turbofish() {
 #[test]
 fn e2e_promise_race_emits_runtime_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -63,7 +63,7 @@ fn e2e_promise_race_emits_runtime_call() {
 #[test]
 fn e2e_promise_all_settled_emits_runtime_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -87,7 +87,7 @@ fn e2e_promise_all_settled_emits_runtime_call() {
 #[test]
 fn e2e_promise_any_emits_runtime_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -111,7 +111,7 @@ fn e2e_promise_any_emits_runtime_call() {
 #[test]
 fn e2e_promise_resolve_emits_runtime_call_with_value_ty() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -138,7 +138,7 @@ fn e2e_promise_resolve_emits_runtime_call_with_value_ty() {
 #[test]
 fn e2e_promise_reject_emits_runtime_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -160,7 +160,7 @@ fn e2e_promise_reject_emits_runtime_call() {
 #[test]
 fn e2e_promise_then_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -192,7 +192,7 @@ fn e2e_promise_then_with_named_handler_emits_instance_call() {
 #[test]
 fn e2e_promise_catch_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -215,7 +215,7 @@ fn e2e_promise_catch_with_named_handler_emits_instance_call() {
 #[test]
 fn e2e_promise_finally_with_named_handler_emits_instance_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -238,7 +238,7 @@ fn e2e_promise_finally_with_named_handler_emits_instance_call() {
 #[test]
 fn e2e_promise_type_annotation_resolves_to_promise_emit_with_inner_type() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -264,7 +264,7 @@ fn e2e_promise_type_annotation_resolves_to_promise_emit_with_inner_type() {
 #[test]
 fn e2e_promise_reject_with_string_local_emits_jsstring_conversion_not_bare_tostring() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -298,7 +298,7 @@ fn e2e_promise_reject_with_string_local_emits_jsstring_conversion_not_bare_tostr
 #[test]
 fn e2e_promise_reject_with_string_index_access_emits_jsstring_conversion() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(
@@ -330,7 +330,7 @@ fn e2e_promise_reject_with_string_index_access_emits_jsstring_conversion() {
 #[test]
 fn e2e_promise_then_with_captureless_arrow_handler_emits_instance_call() {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     let out = Driver::new().compile_source(

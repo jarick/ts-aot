@@ -53,10 +53,7 @@ fn rust_emit_uses_pipeline_typetable_not_fresh_empty() {
 
 #[test]
 fn emit_hir_produces_hir_dump() {
-    let opts = CompileOptions {
-        emit: EmitStage::Hir,
-        module: false,
-    };
+    let opts = CompileOptions::with_emit(EmitStage::Hir);
     let out = Driver::new().compile_source(
         "test.ts",
         "export function id(x: number): number { return x; }",
@@ -71,10 +68,7 @@ fn emit_hir_produces_hir_dump() {
 
 #[test]
 fn emit_hir_skips_mir_conversion_for_hir_only_valid_input() {
-    let opts = CompileOptions {
-        emit: EmitStage::Hir,
-        module: false,
-    };
+    let opts = CompileOptions::with_emit(EmitStage::Hir);
     let out = Driver::new().compile_source(
         "test.ts",
         "export function f(x: number): string { return typeof x; }",
@@ -95,10 +89,7 @@ fn emit_hir_skips_mir_conversion_for_hir_only_valid_input() {
 
 #[test]
 fn emit_mir_produces_mir_dump() {
-    let opts = CompileOptions {
-        emit: EmitStage::Mir,
-        module: false,
-    };
+    let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
         "test.ts",
         "export function id(x: number): number { return x; }",
@@ -113,10 +104,7 @@ fn emit_mir_produces_mir_dump() {
 
 #[test]
 fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
-    let opts = CompileOptions {
-        emit: EmitStage::Mir,
-        module: false,
-    };
+    let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
         "test.ts",
         "function f(c: i64): never { throw c > 0 ? throwingFn() : 0; }",
@@ -159,10 +147,7 @@ fn parse_throws_id(mir_text: &str, fn_name: &str) -> Option<u32> {
 
 #[test]
 fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
-    let opts = CompileOptions {
-        emit: EmitStage::Mir,
-        module: false,
-    };
+    let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
         "test.ts",
         "function tag(strings: string[], sub: i64): i64 { return 0; } function f(): i64 { return tag`hi ${42}!`; }",
@@ -197,10 +182,7 @@ fn e2e_tagged_template_emits_indirect_call_with_string_slice_via_mir() {
 
 #[test]
 fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: false,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.ts",
         "function tag(strings: string[], sub: i64): i64 { return strings.len() as i64; } function f(): i64 { return tag`hi ${42}!`; }",
@@ -283,10 +265,7 @@ fn driver_output_artifact_returns_requested_field() {
     let out = Driver::new().compile_source(
         "test.ts",
         "export function id(x: number): number { return x; }",
-        &CompileOptions {
-            emit: EmitStage::Rust,
-            module: false,
-        },
+        &CompileOptions::default(),
     );
     assert!(!out.has_errors());
     let rust = out
@@ -374,10 +353,7 @@ fn driver_error_io_display_includes_path() {
 
 #[test]
 fn tla_module_mode_collects_top_level_expression_statement_into_tla_main() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "1 + 2;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -403,10 +379,7 @@ fn tla_module_mode_collects_top_level_expression_statement_into_tla_main() {
 
 #[test]
 fn tla_module_mode_top_level_await_on_promise_typed_value_passes_through_pipeline() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "await 1;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -428,10 +401,7 @@ fn tla_module_mode_top_level_await_on_promise_typed_value_passes_through_pipelin
 
 #[test]
 fn tla_module_mode_top_level_await_marks_main_async_and_drives_via_runtime_run() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "await 1;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -453,10 +423,7 @@ fn tla_module_mode_top_level_await_marks_main_async_and_drives_via_runtime_run()
 
 #[test]
 fn tla_module_mode_without_await_keeps_sync_main_entry() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "1 + 2;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -478,10 +445,7 @@ fn tla_module_mode_without_await_keeps_sync_main_entry() {
 
 #[test]
 fn tla_module_mode_multiple_expression_stmts_inline_in_tla_main_body() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "1 + 2;\n3 + 4;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -552,10 +516,7 @@ fn tla_script_mode_does_not_emit_tla_main_or_main() {
 
 #[test]
 fn tla_module_mode_with_only_declarations_still_emits_main_entry() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out =
         Driver::new().compile_source("test.mts", "function f(): number { return 1; }\n", &opts);
     assert!(
@@ -578,10 +539,7 @@ fn tla_module_mode_with_only_declarations_still_emits_main_entry() {
 
 #[test]
 fn tla_module_mode_top_level_let_with_init_and_global_ref_compiles() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "let a: i32 = 42;\na;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -611,10 +569,7 @@ fn tla_module_mode_top_level_let_with_init_and_global_ref_compiles() {
 
 #[test]
 fn tla_module_mode_preserves_source_order_in_tla_main_body() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out =
         Driver::new().compile_source("test.mts", "1 + 1;\nlet x: i32 = 1 + 2;\n2 + 2;\n", &opts);
     assert!(
@@ -663,10 +618,7 @@ fn tla_module_mode_preserves_source_order_in_tla_main_body() {
 
 #[test]
 fn tla_module_mode_top_level_expr_can_reference_runtime_let_binding() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "let x: i32 = 1 + 2;\nx;\n", &opts);
     assert!(
         !out.has_errors(),
@@ -716,10 +668,7 @@ fn tla_module_mode_top_level_expr_can_reference_runtime_let_binding() {
 
 #[test]
 fn tla_module_mode_rejects_user_declared_main_function() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out =
         Driver::new().compile_source("test.mts", "function main(): number { return 1; }\n", &opts);
     assert!(
@@ -741,10 +690,7 @@ fn tla_module_mode_rejects_user_declared_main_function() {
 
 #[test]
 fn tla_module_mode_rejects_user_declared_tla_main_sentinel() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "function __ts_aot_tla_main(): number { return 1; }\n",
@@ -769,10 +715,7 @@ fn tla_module_mode_rejects_user_declared_tla_main_sentinel() {
 
 #[test]
 fn tla_module_mode_rejects_user_declared_main_global() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "const main: i32 = 42;\n", &opts);
     assert!(
         out.has_errors(),
@@ -793,10 +736,7 @@ fn tla_module_mode_rejects_user_declared_main_global() {
 
 #[test]
 fn tla_module_mode_rejects_user_declared_tla_main_global() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out =
         Driver::new().compile_source("test.mts", "const __ts_aot_tla_main: i32 = 42;\n", &opts);
     assert!(
@@ -818,10 +758,7 @@ fn tla_module_mode_rejects_user_declared_tla_main_global() {
 
 #[test]
 fn tla_module_mode_rejects_user_declared_generated_tla_main_name() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "function __tla_main_42(): number { return 1; }\n",
@@ -846,10 +783,7 @@ fn tla_module_mode_rejects_user_declared_generated_tla_main_name() {
 
 #[test]
 fn tla_module_mode_allows_user_declared_name_with_tla_main_prefix_but_no_digits() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "function __tla_main_foo(): number { return 1; }\n",
@@ -864,10 +798,7 @@ fn tla_module_mode_allows_user_declared_name_with_tla_main_prefix_but_no_digits(
 
 #[test]
 fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "let a: i32 = 1 + 2;\nlet b: i32 = 3 + 4;\nlet c: i32 = 5 + 6;\n",
@@ -923,10 +854,7 @@ fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
 
 #[test]
 fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "let x: i32 = 1 + 2;\nfunction use_x(): i32 { return x; }\n",
@@ -951,10 +879,7 @@ fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
 
 #[test]
 fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
         "function use_cfg(): i32 { return cfg; }\nlet cfg: i32 = 1 + 2;\n",
@@ -979,10 +904,7 @@ fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function
 
 #[test]
 fn tla_module_mode_uninitialized_let_remains_module_wide_global() {
-    let opts = CompileOptions {
-        emit: EmitStage::Rust,
-        module: true,
-    };
+    let opts = CompileOptions::default();
     let out = Driver::new().compile_source("test.mts", "let cfg: i32;\n", &opts);
     assert!(
         !out.has_errors(),

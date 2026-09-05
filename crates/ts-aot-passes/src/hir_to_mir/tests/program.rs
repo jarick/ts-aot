@@ -1447,3 +1447,33 @@ fn convert_program_duplicate_class_consumes_method_function_ids_for_alignment() 
         bar.id
     );
 }
+
+#[test]
+fn convert_program_first_class_struct_id_starts_at_one() {
+    use ts_aot_ir_hir::{HirClass, HirField};
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("K"),
+        ty: TypeId::from_raw(100),
+        fields: vec![HirField {
+            name: Atom::new_inline("v"),
+            ty: unit_ty(),
+        }],
+        methods: Vec::new(),
+        extends: None,
+        type_params: Vec::new(),
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let first = mir
+        .structs()
+        .next()
+        .expect("program with one class must produce one MirStructDecl");
+    assert_eq!(
+        first.id,
+        StructId::from_raw(1),
+        "first user class in convert_program must be assigned StructId(1), not StructId(0) — \
+         StructId(0) is reserved for the placeholder Type::Void / Type::Error path; got {:?}",
+        first.id
+    );
+}

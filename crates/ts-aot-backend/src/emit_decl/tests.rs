@@ -4602,3 +4602,257 @@ fn closure_local_array_assigned_via_array_set_emits_mut() {
          binding); got tokens: `{s}`"
     );
 }
+
+fn normalize_token_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out
+}
+
+#[test]
+fn weakmap_liveness_reset_on_reassignment_emits_fresh_token() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let key_struct_id = StructId::from_raw(7);
+    let key_struct_ty = types.intern(&Type::Struct { id: key_struct_id });
+    let wm_handle_ty = types.intern(&Type::WeakMap {
+        key: key_struct_ty,
+        value: i64_ty,
+    });
+    let wm_param = LocalId::from_raw(0);
+    let key_param = LocalId::from_raw(1);
+    let mut f = empty_func("reassign_key");
+    f.ret = i64_ty;
+    f.params = vec![
+        MirParam {
+            id: wm_param,
+            name: Atom::from("wm"),
+            ty: wm_handle_ty,
+        },
+        MirParam {
+            id: key_param,
+            name: Atom::from("new_k"),
+            ty: key_struct_ty,
+        },
+    ];
+    let key_local = LocalId::from_raw(2);
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: key_local,
+            name: Atom::from("k"),
+            ty: key_struct_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Let {
+                    local: key_local,
+                    ty: key_struct_ty,
+                    init: Some(MirExpr::Local(key_param)),
+                    mutable: true,
+                },
+                MirStmt::Runtime {
+                    op: RuntimeOp::WeakMapSet,
+                    args: vec![
+                        MirExpr::Local(wm_param),
+                        MirExpr::Local(key_local),
+                        MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                    ],
+                    dest: None,
+                    ty: i64_ty,
+                    target_ty: None,
+                },
+                MirStmt::Assign {
+                    target: MirPlace::Local { id: key_local },
+                    value: MirExpr::Local(key_param),
+                },
+                MirStmt::Runtime {
+                    op: RuntimeOp::WeakMapSet,
+                    args: vec![
+                        MirExpr::Local(wm_param),
+                        MirExpr::Local(key_local),
+                        MirExpr::Int {
+                            value: 2,
+                            ty: i64_ty,
+                        },
+                    ],
+                    dest: None,
+                    ty: i64_ty,
+                    target_ty: None,
+                },
+                MirStmt::Return(Some(MirExpr::Int {
+                    value: 0,
+                    ty: i64_ty,
+                })),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: key_struct_id,
+        name: Atom::from("K"),
+        fields: Vec::new(),
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let fn_body = normalize_token_whitespace(
+        s.split("fn reassign_key (")
+            .nth(1)
+            .and_then(|rest| rest.split("return").next())
+            .unwrap_or(""),
+    );
+    assert!(
+        fn_body.contains("let mut __wm_liveness_0 : std :: rc :: Rc < () >"),
+        "WeakMap key local must be backed by a let mut liveness binding (identity must be refreshable on reassignment). Got body fragment: {fn_body}"
+    );
+    let assign_pos = fn_body.find("k = new_k ;");
+    let reset_pos = fn_body.find("__wm_liveness_0 = std :: rc :: Rc :: new (()) ;");
+    let first_set_pos = fn_body.find("__ts_aot_weak_map_set");
+    let second_set_pos = fn_body.rfind("__ts_aot_weak_map_set");
+    assert!(
+        first_set_pos.is_some()
+            && second_set_pos.is_some()
+            && assign_pos.is_some()
+            && reset_pos.is_some(),
+        "expected prelude + assignment + liveness reset + two WeakMapSet calls in body; got first_set={first_set_pos:?} second_set={second_set_pos:?} assign={assign_pos:?} reset={reset_pos:?}. body={fn_body}"
+    );
+    let (set1, assign, reset, set2) = (
+        first_set_pos.expect("set"),
+        assign_pos.expect("assign"),
+        reset_pos.expect("reset"),
+        second_set_pos.expect("set2"),
+    );
+    assert!(
+        set1 < assign && assign < reset && reset < set2,
+        "expected WeakMapSet -> Assign -> reset -> WeakMapSet ordering so the second set sees the refreshed identity; got positions set={set1} assign={assign} reset={reset} set2={set2}. body={fn_body}"
+    );
+}
+
+#[test]
+fn weakmap_liveness_unaffected_by_field_assignment_on_key_local() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let owner = StructId::from_raw(3);
+    let field_id = FieldId::from_raw(0);
+    let inner_ty = types.intern(&Type::Struct { id: owner });
+    let wm_handle_ty = types.intern(&Type::WeakMap {
+        key: inner_ty,
+        value: i64_ty,
+    });
+    let wm_param = LocalId::from_raw(0);
+    let key_local = LocalId::from_raw(1);
+    let mut f = empty_func("field_assign_key");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: wm_param,
+        name: Atom::from("wm"),
+        ty: wm_handle_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: key_local,
+            name: Atom::from("k"),
+            ty: inner_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Let {
+                    local: key_local,
+                    ty: inner_ty,
+                    init: None,
+                    mutable: true,
+                },
+                MirStmt::Runtime {
+                    op: RuntimeOp::WeakMapSet,
+                    args: vec![
+                        MirExpr::Local(wm_param),
+                        MirExpr::Local(key_local),
+                        MirExpr::Int {
+                            value: 1,
+                            ty: i64_ty,
+                        },
+                    ],
+                    dest: None,
+                    ty: i64_ty,
+                    target_ty: None,
+                },
+                MirStmt::Assign {
+                    target: MirPlace::Field {
+                        base: Box::new(MirPlaceBase::Local(key_local)),
+                        field: field_id,
+                        ty: i64_ty,
+                    },
+                    value: MirExpr::Int {
+                        value: 7,
+                        ty: i64_ty,
+                    },
+                },
+                MirStmt::Runtime {
+                    op: RuntimeOp::WeakMapSet,
+                    args: vec![
+                        MirExpr::Local(wm_param),
+                        MirExpr::Local(key_local),
+                        MirExpr::Int {
+                            value: 2,
+                            ty: i64_ty,
+                        },
+                    ],
+                    dest: None,
+                    ty: i64_ty,
+                    target_ty: None,
+                },
+                MirStmt::Return(Some(MirExpr::Int {
+                    value: 0,
+                    ty: i64_ty,
+                })),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: owner,
+        name: Atom::from("K"),
+        fields: vec![MirFieldDecl {
+            id: field_id,
+            name: Atom::from("v"),
+            ty: i64_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let fn_body = normalize_token_whitespace(
+        s.split("fn field_assign_key (")
+            .nth(1)
+            .and_then(|rest| rest.split("return").next())
+            .unwrap_or(""),
+    );
+    assert!(
+        fn_body.contains("let mut __wm_liveness_0 : std :: rc :: Rc < () >"),
+        "prelude must declare the liveness binding for the WeakMap key local. Got body fragment: {fn_body}"
+    );
+    assert!(
+        !fn_body.contains("__wm_liveness_0 = std :: rc :: Rc :: new (()) ;"),
+        "field assignment on the key local must NOT refresh the liveness (the local identity is unchanged); got body fragment: {fn_body}"
+    );
+}

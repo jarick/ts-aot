@@ -25,6 +25,7 @@ mod symbol_dispatch;
 mod template;
 mod typed_array_dispatch;
 mod util;
+pub(crate) mod weakmap_dispatch;
 
 impl ExprConverter {
     pub(super) fn convert_expr(

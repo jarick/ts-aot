@@ -1,10 +1,10 @@
-use ts_aot_driver::{CompileOptions, Driver, DriverOutput, EmitStage};
+use ts_aot_driver::{CompileOptions, Driver, DriverOutput};
 
 mod common;
 
 fn compile(src: &str) -> DriverOutput {
     let opts = CompileOptions {
-        emit: EmitStage::Rust,
+        module: false,
         ..CompileOptions::default()
     };
     Driver::new().compile_source("test.ts", src, &opts)
