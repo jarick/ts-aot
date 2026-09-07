@@ -6,24 +6,31 @@ use crate::util::core_span_from_oxc;
 
 use super::{TypeParamMap, resolve_simple_type, type_from_ident};
 
+#[derive(Default)]
+pub struct TypeLookup<'a> {
+    pub aliases: Option<&'a HashMap<String, TypeId>>,
+    pub class_types: Option<&'a HashMap<String, TypeId>>,
+    pub type_params: Option<&'a TypeParamMap>,
+}
+
 pub(super) fn resolve_type_reference(
     r: &oxc_ast::ast::TSTypeReference<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     mut diagnostics: Option<&mut DiagnosticBag>,
 ) -> TypeId {
     match &r.type_name {
         oxc_ast::ast::TSTypeName::IdentifierReference(id) => {
             let name = id.name.as_str();
-            if let Some(id) = type_params
+            if let Some(id) = lookup
+                .type_params
                 .and_then(|m| m.get(name).copied())
-                .or_else(|| aliases.and_then(|m| m.get(name).copied()))
+                .or_else(|| lookup.aliases.and_then(|m| m.get(name).copied()))
+                .or_else(|| lookup.class_types.and_then(|m| m.get(name).copied()))
             {
                 return id;
             }
-            if let Some(id) =
-                try_resolve_builtin_generic(name, r, types, aliases, type_params, &mut diagnostics)
+            if let Some(id) = try_resolve_builtin_generic(name, r, types, lookup, &mut diagnostics)
             {
                 return id;
             }
@@ -41,13 +48,12 @@ pub(super) fn try_resolve_builtin_generic(
     name: &str,
     r: &oxc_ast::ast::TSTypeReference<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     for builtin in BUILTIN_GENERICS {
         if builtin.name() == name
-            && let Some(id) = builtin.try_resolve(r, types, aliases, type_params, diagnostics)
+            && let Some(id) = builtin.try_resolve(r, types, lookup, diagnostics)
         {
             return Some(id);
         }
@@ -61,8 +67,7 @@ trait BuiltInGeneric {
         &self,
         r: &oxc_ast::ast::TSTypeReference<'_>,
         types: &mut TypeTable,
-        aliases: Option<&HashMap<String, TypeId>>,
-        type_params: Option<&TypeParamMap>,
+        lookup: &TypeLookup<'_>,
         diagnostics: &mut Option<&mut DiagnosticBag>,
     ) -> Option<TypeId>;
 }
@@ -71,8 +76,7 @@ fn resolve_single_arg_generic(
     name: &str,
     r: &oxc_ast::ast::TSTypeReference<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
     build: impl FnOnce(TypeId) -> Type,
 ) -> TypeId {
@@ -82,8 +86,7 @@ fn resolve_single_arg_generic(
             let inner_id = resolve_simple_type(
                 Some(&args.params[0]),
                 types,
-                aliases,
-                type_params,
+                lookup,
                 (*diagnostics).as_deref_mut(),
             )
             .unwrap_or_else(|| types.intern(&Type::Error));
@@ -122,16 +125,14 @@ impl BuiltInGeneric for ArrayGeneric {
         &self,
         r: &oxc_ast::ast::TSTypeReference<'_>,
         types: &mut TypeTable,
-        aliases: Option<&HashMap<String, TypeId>>,
-        type_params: Option<&TypeParamMap>,
+        lookup: &TypeLookup<'_>,
         diagnostics: &mut Option<&mut DiagnosticBag>,
     ) -> Option<TypeId> {
         Some(resolve_single_arg_generic(
             self.name(),
             r,
             types,
-            aliases,
-            type_params,
+            lookup,
             diagnostics,
             |element_id| Type::Array {
                 element: element_id,
@@ -150,16 +151,14 @@ impl BuiltInGeneric for PromiseGeneric {
         &self,
         r: &oxc_ast::ast::TSTypeReference<'_>,
         types: &mut TypeTable,
-        aliases: Option<&HashMap<String, TypeId>>,
-        type_params: Option<&TypeParamMap>,
+        lookup: &TypeLookup<'_>,
         diagnostics: &mut Option<&mut DiagnosticBag>,
     ) -> Option<TypeId> {
         Some(resolve_single_arg_generic(
             self.name(),
             r,
             types,
-            aliases,
-            type_params,
+            lookup,
             diagnostics,
             |ok_id| Type::Promise {
                 ok: ok_id,
@@ -179,8 +178,7 @@ impl BuiltInGeneric for WeakMapGeneric {
         &self,
         r: &oxc_ast::ast::TSTypeReference<'_>,
         types: &mut TypeTable,
-        aliases: Option<&HashMap<String, TypeId>>,
-        type_params: Option<&TypeParamMap>,
+        lookup: &TypeLookup<'_>,
         diagnostics: &mut Option<&mut DiagnosticBag>,
     ) -> Option<TypeId> {
         let type_args = r.type_arguments.as_ref();
@@ -189,16 +187,14 @@ impl BuiltInGeneric for WeakMapGeneric {
                 let key_id = resolve_simple_type(
                     Some(&args.params[0]),
                     types,
-                    aliases,
-                    type_params,
+                    lookup,
                     (*diagnostics).as_deref_mut(),
                 )
                 .unwrap_or_else(|| types.intern(&Type::Error));
                 let value_id = resolve_simple_type(
                     Some(&args.params[1]),
                     types,
-                    aliases,
-                    type_params,
+                    lookup,
                     (*diagnostics).as_deref_mut(),
                 )
                 .unwrap_or_else(|| types.intern(&Type::Error));

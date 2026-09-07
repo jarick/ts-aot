@@ -31,7 +31,8 @@ impl ExprConverter {
         let HirCallee::Indirect(inner) = callee else {
             return None;
         };
-        if let Some(callee_ty) = hir_expr_type_id(inner.as_ref())
+        if !matches!(inner.as_ref(), HirExpr::OptionalChain { .. })
+            && let Some(callee_ty) = hir_expr_type_id(inner.as_ref())
             && let Some(Type::Fn { .. }) = types.resolve(callee_ty)
         {
             ctx.error(

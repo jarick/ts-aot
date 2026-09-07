@@ -48,6 +48,7 @@ fn class_with_fields_and_methods(
             .collect(),
         extends: extends.map(Atom::new_inline),
         type_params: Vec::new(),
+        pre_pass_ty: None,
     }
 }
 

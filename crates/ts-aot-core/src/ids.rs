@@ -1,6 +1,12 @@
 #[derive(Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Atom(pub oxc_str::CompactStr);
 
+impl Default for Atom {
+    fn default() -> Self {
+        Self(oxc_str::CompactStr::from(""))
+    }
+}
+
 pub const STRUCT_ID_DYNAMIC: u32 = 0xFFFF_FFFE;
 
 impl Atom {
@@ -65,7 +71,7 @@ impl PartialEq<Atom> for &Atom {
 
 macro_rules! define_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(u32);
 
         impl $name {

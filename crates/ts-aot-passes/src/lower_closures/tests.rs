@@ -616,6 +616,7 @@ fn generated_name_skips_names_taken_by_class_methods() {
         ],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     });
 
     let outer = empty_function("outer");

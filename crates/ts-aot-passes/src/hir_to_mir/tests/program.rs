@@ -127,6 +127,7 @@ fn convert_program_assigns_distinct_struct_ids() {
             methods: Vec::new(),
             extends: None,
             type_params: Vec::new(),
+            ..Default::default()
         }));
     }
     let mut cx = ctx();
@@ -214,6 +215,7 @@ fn convert_program_class_methods_use_method_function_kind() {
         }],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);
@@ -250,6 +252,7 @@ fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("2"),
@@ -361,6 +364,7 @@ fn convert_program_class_struct_id_shared_even_when_function_decl_comes_first() 
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);
@@ -430,6 +434,7 @@ fn convert_program_class_method_with_no_params_is_skipped() {
         }],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);
@@ -494,6 +499,7 @@ fn convert_program_resolves_field_id_for_non_first_field() {
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getB"),
@@ -559,6 +565,7 @@ fn convert_program_resolves_field_id_after_lower_classes_flatten() {
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Class(HirClass {
         name: Atom::new_inline("Child"),
@@ -570,6 +577,7 @@ fn convert_program_resolves_field_id_after_lower_classes_flatten() {
         methods: Vec::new(),
         extends: Some(Atom::new_inline("Parent")),
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getC"),
@@ -635,6 +643,7 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getMissing"),
@@ -1143,6 +1152,7 @@ fn convert_program_methods_of_different_classes_do_not_collide() {
                 }],
                 extends: None,
                 type_params: Vec::new(),
+                ..Default::default()
             }),
             HirDecl::Class(HirClass {
                 name: Atom::new_inline("B"),
@@ -1165,6 +1175,7 @@ fn convert_program_methods_of_different_classes_do_not_collide() {
                 }],
                 extends: None,
                 type_params: Vec::new(),
+                ..Default::default()
             }),
         ],
     });
@@ -1387,6 +1398,7 @@ fn convert_program_duplicate_class_consumes_method_function_ids_for_alignment() 
         }],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Class(HirClass {
         name: Atom::new_inline("Foo"),
@@ -1409,6 +1421,7 @@ fn convert_program_duplicate_class_consumes_method_function_ids_for_alignment() 
         }],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("bar"),
@@ -1462,6 +1475,7 @@ fn convert_program_first_class_struct_id_starts_at_one() {
         methods: Vec::new(),
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);

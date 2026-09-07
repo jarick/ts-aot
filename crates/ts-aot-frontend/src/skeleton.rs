@@ -82,7 +82,9 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) next_generic_param: u32,
     pub(crate) next_anon_class_id: u32,
     pub(crate) next_closure_id: u32,
+    pub(crate) next_class_struct_id: u32,
     pub(crate) resolved_aliases: HashMap<String, TypeId>,
+    pub(crate) class_types: HashMap<String, TypeId>,
     pub(crate) is_generator_stack: Vec<bool>,
     pub(crate) type_param_stack: Vec<TypeParamMap>,
     pub(crate) module: bool,
@@ -138,7 +140,9 @@ impl SkeletonBuilder {
             next_generic_param: 0,
             next_anon_class_id: 0,
             next_closure_id: 0,
+            next_class_struct_id: 0,
             resolved_aliases: HashMap::new(),
+            class_types: HashMap::new(),
             is_generator_stack: Vec::new(),
             type_param_stack: Vec::new(),
             module,
@@ -150,6 +154,7 @@ impl SkeletonBuilder {
     }
 
     pub(crate) fn build(mut self, senv: &mut SkeletonEnv<'_>, program: &Program<'_>) {
+        self.pre_register_class_types(senv, program);
         self.pre_resolve_all_aliases(senv, program);
         self.pre_collect_tla_only_bindings(senv, program);
         for stmt in &program.body {
@@ -157,6 +162,41 @@ impl SkeletonBuilder {
         }
         self.check_reserved_names(senv);
         self.finalize_tla_main(senv);
+        senv.program.next_class_struct_id = self.next_class_struct_id;
+    }
+
+    fn pre_register_class_types(&mut self, senv: &mut SkeletonEnv, program: &Program<'_>) {
+        for stmt in &program.body {
+            let class_opt: Option<&oxc_ast::ast::Class<'_>> =
+                if let Some(decl) = stmt.as_declaration() {
+                    if let Declaration::ClassDeclaration(c) = decl {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                } else if let Some(m) = stmt.as_module_declaration() {
+                    if let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
+                        && let Some(Declaration::ClassDeclaration(c)) = e.declaration.as_ref()
+                    {
+                        Some(c)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            if let Some(class) = class_opt
+                && let Some(id) = class.id.as_ref()
+            {
+                let name = id.name.as_str().to_owned();
+                if !self.class_types.contains_key(&name) {
+                    let struct_id = ts_aot_core::StructId::from_raw(self.next_class_struct_id);
+                    self.next_class_struct_id = self.next_class_struct_id.saturating_add(1);
+                    let ty = senv.types.intern(&Type::Struct { id: struct_id });
+                    self.class_types.insert(name, ty);
+                }
+            }
+        }
     }
 
     fn pre_collect_tla_only_bindings(&mut self, senv: &mut SkeletonEnv, program: &Program<'_>) {

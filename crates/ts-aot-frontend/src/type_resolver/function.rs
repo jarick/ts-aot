@@ -1,24 +1,22 @@
-use std::collections::HashMap;
-
 use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
 
 use crate::util::core_span_from_oxc;
 
-use super::{TypeParamMap, resolve_simple_type};
+use super::reference::TypeLookup;
+use super::resolve_simple_type;
 
 pub(super) fn resolve_function(
     f: &oxc_ast::ast::TSFunctionType<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     report_unsupported_function_features(f, diagnostics);
     if f.params.rest.is_some() {
         return Some(types.intern(&Type::Error));
     }
-    let params = resolve_function_params(&f.params.items, types, aliases, type_params, diagnostics);
-    let ret = resolve_function_return(&f.return_type, types, aliases, type_params, diagnostics)?;
+    let params = resolve_function_params(&f.params.items, types, lookup, diagnostics);
+    let ret = resolve_function_return(&f.return_type, types, lookup, diagnostics)?;
     Some(types.intern(&Type::Fn {
         params,
         ret,
@@ -58,8 +56,7 @@ fn report_unsupported_function_features(
 fn resolve_function_params(
     items: &[oxc_ast::ast::FormalParameter<'_>],
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> Vec<TypeId> {
     let mut out: Vec<TypeId> = Vec::with_capacity(items.len());
@@ -68,8 +65,7 @@ fn resolve_function_params(
             let id = resolve_simple_type(
                 Some(&ann.type_annotation),
                 types,
-                aliases,
-                type_params,
+                lookup,
                 diagnostics.as_deref_mut(),
             )
             .unwrap_or_else(|| types.intern(&Type::Error));
@@ -91,15 +87,13 @@ fn resolve_function_params(
 fn resolve_function_return(
     return_type: &oxc_ast::ast::TSTypeAnnotation<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     resolve_simple_type(
         Some(&return_type.type_annotation),
         types,
-        aliases,
-        type_params,
+        lookup,
         diagnostics.as_deref_mut(),
     )
 }

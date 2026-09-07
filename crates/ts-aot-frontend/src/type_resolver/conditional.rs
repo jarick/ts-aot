@@ -1,52 +1,22 @@
-use std::collections::HashMap;
-
 use oxc_span::GetSpan;
 use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
 
 use crate::util::core_span_from_oxc;
 
-use super::{TypeParamMap, resolve_simple_type};
+use super::reference::TypeLookup;
+use super::resolve_simple_type;
 
 pub(super) fn resolve_conditional(
     c: &oxc_ast::ast::TSConditionalType<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> TypeId {
     report_unsupported_conditional_types(c, diagnostics);
-    resolve_branch(
-        &c.check_type,
-        "check",
-        types,
-        aliases,
-        type_params,
-        diagnostics,
-    );
-    resolve_branch(
-        &c.extends_type,
-        "extends",
-        types,
-        aliases,
-        type_params,
-        diagnostics,
-    );
-    resolve_branch(
-        &c.true_type,
-        "true",
-        types,
-        aliases,
-        type_params,
-        diagnostics,
-    );
-    resolve_branch(
-        &c.false_type,
-        "false",
-        types,
-        aliases,
-        type_params,
-        diagnostics,
-    );
+    resolve_branch(&c.check_type, "check", types, lookup, diagnostics);
+    resolve_branch(&c.extends_type, "extends", types, lookup, diagnostics);
+    resolve_branch(&c.true_type, "true", types, lookup, diagnostics);
+    resolve_branch(&c.false_type, "false", types, lookup, diagnostics);
     types.intern(&Type::Never)
 }
 
@@ -54,17 +24,10 @@ fn resolve_branch(
     branch: &oxc_ast::ast::TSType<'_>,
     label: &str,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) {
-    let resolved = resolve_simple_type(
-        Some(branch),
-        types,
-        aliases,
-        type_params,
-        diagnostics.as_deref_mut(),
-    );
+    let resolved = resolve_simple_type(Some(branch), types, lookup, diagnostics.as_deref_mut());
     let unresolved = match resolved {
         None => true,
         Some(id) => matches!(types.resolve(id), Some(Type::Error)),

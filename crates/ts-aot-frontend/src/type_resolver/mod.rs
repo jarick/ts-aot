@@ -9,7 +9,7 @@ mod aggregate;
 mod conditional;
 mod function;
 mod mapped;
-mod reference;
+pub(super) mod reference;
 
 #[derive(Clone)]
 pub(crate) struct TypeParamMap {
@@ -88,8 +88,7 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
 pub(crate) fn resolve_simple_type(
     ty: Option<&TSType<'_>>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &reference::TypeLookup<'_>,
     mut diagnostics: Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     match ty? {
@@ -103,8 +102,7 @@ pub(crate) fn resolve_simple_type(
         TSType::TSTypeReference(r) => Some(reference::resolve_type_reference(
             r,
             types,
-            aliases,
-            type_params,
+            lookup,
             diagnostics,
         )),
         TSType::TSNamedTupleMember(m) => {
@@ -123,46 +121,33 @@ pub(crate) fn resolve_simple_type(
         TSType::TSUnionType(u) => Some(aggregate::resolve_union(
             &u.types,
             types,
-            aliases,
-            type_params,
+            lookup,
             &mut diagnostics,
         )),
         TSType::TSIntersectionType(i) => Some(aggregate::resolve_intersection(
             &i.types,
             types,
-            aliases,
-            type_params,
+            lookup,
             &mut diagnostics,
         )),
         TSType::TSTupleType(t) => Some(aggregate::resolve_tuple(
             &t.element_types,
             types,
-            aliases,
-            type_params,
+            lookup,
             &mut diagnostics,
         )),
         TSType::TSArrayType(a) => Some(aggregate::resolve_array(
             &a.element_type,
             types,
-            aliases,
-            type_params,
+            lookup,
             &mut diagnostics,
         )),
-        TSType::TSFunctionType(f) => {
-            function::resolve_function(f, types, aliases, type_params, &mut diagnostics)
-        }
-        TSType::TSMappedType(m) => Some(mapped::resolve_mapped(
-            m,
-            types,
-            aliases,
-            type_params,
-            &mut diagnostics,
-        )),
+        TSType::TSFunctionType(f) => function::resolve_function(f, types, lookup, &mut diagnostics),
+        TSType::TSMappedType(m) => Some(mapped::resolve_mapped(m, types, lookup, &mut diagnostics)),
         TSType::TSConditionalType(c) => Some(conditional::resolve_conditional(
             c,
             types,
-            aliases,
-            type_params,
+            lookup,
             &mut diagnostics,
         )),
         _ => Some(types.intern(&Type::Error)),
@@ -226,7 +211,12 @@ mod tests {
     #[test]
     fn resolve_simple_type_returns_none_for_none_input() {
         let mut types = TypeTable::new();
-        let result = resolve_simple_type(None, &mut types, None, None, None);
+        let lookup = reference::TypeLookup {
+            aliases: None,
+            class_types: None,
+            type_params: None,
+        };
+        let result = resolve_simple_type(None, &mut types, &lookup, None);
         assert!(result.is_none());
         assert!(types.is_empty());
     }

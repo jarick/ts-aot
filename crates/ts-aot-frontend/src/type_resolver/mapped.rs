@@ -1,46 +1,31 @@
-use std::collections::HashMap;
-
 use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
 
 use crate::util::core_span_from_oxc;
 
-use super::{TypeParamMap, resolve_simple_type};
+use super::reference::TypeLookup;
+use super::resolve_simple_type;
 
 pub(super) fn resolve_mapped(
     m: &oxc_ast::ast::TSMappedType<'_>,
     types: &mut TypeTable,
-    aliases: Option<&HashMap<String, TypeId>>,
-    type_params: Option<&TypeParamMap>,
+    lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> TypeId {
     report_unsupported_mapped_features(m, diagnostics);
     if let Some(name_ty) = &m.name_type {
-        resolve_simple_type(
-            Some(name_ty),
-            types,
-            aliases,
-            type_params,
-            diagnostics.as_deref_mut(),
-        )
-        .unwrap_or_else(|| types.intern(&Type::Error));
+        resolve_simple_type(Some(name_ty), types, lookup, diagnostics.as_deref_mut())
+            .unwrap_or_else(|| types.intern(&Type::Error));
     }
     resolve_simple_type(
         Some(&m.constraint),
         types,
-        aliases,
-        type_params,
+        lookup,
         diagnostics.as_deref_mut(),
     )
     .unwrap_or_else(|| types.intern(&Type::Error));
     if let Some(value_ty) = &m.type_annotation {
-        resolve_simple_type(
-            Some(value_ty),
-            types,
-            aliases,
-            type_params,
-            diagnostics.as_deref_mut(),
-        )
-        .unwrap_or_else(|| types.intern(&Type::Error));
+        resolve_simple_type(Some(value_ty), types, lookup, diagnostics.as_deref_mut())
+            .unwrap_or_else(|| types.intern(&Type::Error));
     }
     types.intern(&Type::Error)
 }

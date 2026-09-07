@@ -214,6 +214,7 @@ mod tests {
             methods: vec![],
             extends: None,
             type_params: vec![],
+            ..Default::default()
         }));
         let text = prog.dump_text();
         assert!(text.contains("class Beta"));
@@ -303,6 +304,7 @@ mod tests {
             methods: vec![empty_func("m")],
             extends: Some(Atom::new_inline("Parent")),
             type_params: vec![],
+            ..Default::default()
         }));
         let text = prog.dump_text();
         assert!(text.contains("class Child extends Parent"));
@@ -388,6 +390,7 @@ mod tests {
             methods: Vec::new(),
             extends: None,
             type_params: Vec::new(),
+            ..Default::default()
         });
         let mut prog = HirProgram::new(ModuleId::from_raw(0));
         prog.imports.push(HirImport {

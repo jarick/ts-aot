@@ -44,6 +44,7 @@ pub struct HirProgram {
     pub diagnostics: DiagnosticBag,
     pub is_module: bool,
     pub tla_main_name: Option<Atom>,
+    pub next_class_struct_id: u32,
 }
 
 impl HirProgram {
@@ -57,6 +58,7 @@ impl HirProgram {
             diagnostics: DiagnosticBag::new(),
             is_module: false,
             tla_main_name: None,
+            next_class_struct_id: 0,
         }
     }
 
@@ -140,6 +142,7 @@ mod tests {
         prog.push_decl(HirDecl::Class(HirClass {
             name: Atom::new_inline("3"),
             ty: TypeId::from_raw(5),
+            pre_pass_ty: None,
             fields: vec![HirField {
                 name: Atom::new_inline("4"),
                 ty: TypeId::from_raw(5),

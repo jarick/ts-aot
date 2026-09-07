@@ -213,6 +213,7 @@ mod tests {
         let class = HirClass {
             name: Atom::new_inline("K"),
             ty: TypeId::from_raw(0),
+            pre_pass_ty: None,
             fields: vec![HirField {
                 name: Atom::new_inline("n"),
                 ty: TypeId::from_raw(3),
@@ -241,6 +242,7 @@ mod tests {
         let class = HirClass {
             name: Atom::new_inline("K"),
             ty: TypeId::from_raw(0),
+            pre_pass_ty: None,
             fields: Vec::new(),
             methods: vec![m],
             extends: None,
@@ -261,6 +263,7 @@ mod tests {
         let class = HirClass {
             name: Atom::new_inline("K"),
             ty: TypeId::from_raw(0),
+            pre_pass_ty: None,
             fields: Vec::new(),
             methods: vec![m],
             extends: None,
@@ -403,6 +406,7 @@ mod tests {
             &HirDecl::Class(HirClass {
                 name: Atom::new_inline("C"),
                 ty: TypeId::from_raw(0),
+                pre_pass_ty: None,
                 fields: vec![],
                 methods: vec![],
                 extends: None,

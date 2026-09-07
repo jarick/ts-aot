@@ -1,9 +1,9 @@
 use oxc_ast::ast::{
     Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, BindingPattern,
-    CallExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
-    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression,
-    match_assignment_target, match_assignment_target_pattern, match_expression,
-    match_member_expression,
+    CallExpression, ChainElement, ChainExpression, Expression, LogicalExpression,
+    SequenceExpression, SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral,
+    UnaryExpression, UpdateExpression, match_assignment_target, match_assignment_target_pattern,
+    match_expression, match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
@@ -96,6 +96,7 @@ impl SkeletonBuilder {
             other @ match_member_expression!(Expression) => {
                 self.walk_member(senv, other.to_member_expression(), scope)
             }
+            Expression::ChainExpression(chain) => self.walk_chain(senv, chain, scope),
             Expression::AssignmentExpression(a) => self.walk_assignment(senv, a, scope),
             Expression::AwaitExpression(a) => {
                 let inner = self.walk_expr(senv, &a.argument, scope);
@@ -713,6 +714,15 @@ impl SkeletonBuilder {
         }
     }
 
+    fn wrap_optional_chain(inner: HirExpr, span: Span) -> HirExpr {
+        let ty = inner.ty();
+        HirExpr::OptionalChain {
+            base: Box::new(inner),
+            ty,
+            span,
+        }
+    }
+
     fn walk_update(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -742,6 +752,11 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let callee_expr = self.walk_expr(senv, &call.callee, scope);
+        let callee_expr = if call.optional {
+            Self::wrap_optional_chain(callee_expr, core_span_from_oxc(call.callee.span()))
+        } else {
+            callee_expr
+        };
         let mut args = Vec::with_capacity(call.arguments.len());
         for arg in &call.arguments {
             match arg {
@@ -810,6 +825,11 @@ impl SkeletonBuilder {
         match m {
             ME::StaticMemberExpression(s) => {
                 let owner = self.walk_expr(senv, &s.object, scope);
+                let owner = if s.optional {
+                    Self::wrap_optional_chain(owner, core_span_from_oxc(s.object.span()))
+                } else {
+                    owner
+                };
                 let ty = senv.error_ty();
                 HirExpr::Field {
                     owner: Box::new(owner),
@@ -821,6 +841,11 @@ impl SkeletonBuilder {
             }
             ME::ComputedMemberExpression(computed) => {
                 let owner = self.walk_expr(senv, &computed.object, scope);
+                let owner = if computed.optional {
+                    Self::wrap_optional_chain(owner, core_span_from_oxc(computed.object.span()))
+                } else {
+                    owner
+                };
                 let index = self.walk_expr(senv, &computed.expression, scope);
                 let ty = senv.error_ty();
                 HirExpr::Index {
@@ -833,6 +858,23 @@ impl SkeletonBuilder {
             ME::PrivateFieldExpression(p) => {
                 senv.report_unwalked("private field access is not supported", p.span);
                 HirExpr::Unit(core_span_from_oxc(p.span))
+            }
+        }
+    }
+
+    fn walk_chain(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        chain: &ChainExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        match &chain.expression {
+            ChainElement::CallExpression(call) => self.walk_call(senv, call, scope),
+            ChainElement::TSNonNullExpression(non_null) => {
+                self.walk_expr(senv, &non_null.expression, scope)
+            }
+            other @ match_member_expression!(ChainElement) => {
+                self.walk_member(senv, other.to_member_expression(), scope)
             }
         }
     }
