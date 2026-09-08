@@ -26,6 +26,7 @@ fn resolve_field_id_call_owner_with_registered_struct_id_resolves_field() {
         &field_name,
         FieldId::from_raw(u32::MAX),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -53,6 +54,7 @@ fn resolve_field_id_non_typed_owner_emits_p0011() {
         &Atom::new_inline("x"),
         FieldId::from_raw(99),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -100,6 +102,7 @@ fn resolve_field_id_type_assertion_owner_with_registered_target_resolves_field()
         &field_name,
         FieldId::from_raw(u32::MAX),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -137,6 +140,7 @@ fn resolve_field_id_type_assertion_owner_without_registered_target_emits_p0012()
         &Atom::new_inline("x"),
         FieldId::from_raw(99),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -190,6 +194,7 @@ fn resolve_field_id_assignment_owner_with_registered_ty_resolves_field() {
         &field_name,
         FieldId::from_raw(u32::MAX),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(
@@ -235,6 +240,7 @@ fn resolve_field_id_compound_update_owner_with_registered_ty_resolves_field() {
         &field_name,
         FieldId::from_raw(u32::MAX),
         &struct_ids,
+        &empty_types(),
         &mut cx,
     );
     assert_eq!(

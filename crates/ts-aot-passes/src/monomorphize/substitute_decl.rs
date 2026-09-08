@@ -101,6 +101,9 @@ pub fn substitute_class(
     HirClass {
         name: class.name.clone(),
         ty: substitute_type(class.ty, mapping, types, result),
+        pre_pass_ty: class
+            .pre_pass_ty
+            .map(|t| substitute_type(t, mapping, types, result)),
         fields: class
             .fields
             .iter()

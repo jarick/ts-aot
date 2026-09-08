@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use ts_aot_core::{Atom, GenericParamId, LocalId, Severity, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{
-    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirStmt, ObjectLiteralField,
+    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirStmt, HirUnaryOp, ObjectLiteralField,
 };
 
 use super::*;
@@ -4657,4 +4657,189 @@ fn arrow_function_capturing_outer_local_emits_p0005_diagnostic() {
         .find(|d| d.code.as_str() == "P0005")
         .expect("expected P0005 diagnostic for capturing closure");
     assert!(diag.message.contains("captur"));
+}
+
+#[test]
+fn optional_chain_field_wraps_owner_in_optional_chain() {
+    let f = sole_function("function f(o: i64): i64 { return o?.x; }");
+    let HirStmt::Return {
+        value: Some(HirExpr::Field {
+            owner, field_name, ..
+        }),
+    } = &f.body[0]
+    else {
+        panic!("expected Return(Field), got {:?}", f.body[0]);
+    };
+    assert_eq!(field_name, &Atom::from("x"));
+    let HirExpr::OptionalChain { base, .. } = owner.as_ref() else {
+        panic!("expected Field.owner to be OptionalChain for `o?.x`, got {owner:?}");
+    };
+    assert!(
+        matches!(base.as_ref(), HirExpr::Local { .. }),
+        "OptionalChain.base must be the inner Local, got {base:?}"
+    );
+}
+
+#[test]
+fn optional_chain_index_wraps_owner_in_optional_chain() {
+    let f = sole_function("function f(o: i64, i: i64): i64 { return o?.[i]; }");
+    let HirStmt::Return {
+        value: Some(HirExpr::Index { owner, index, .. }),
+    } = &f.body[0]
+    else {
+        panic!("expected Return(Index), got {:?}", f.body[0]);
+    };
+    assert!(
+        matches!(index.as_ref(), HirExpr::Local { .. }),
+        "Index.index must be the Local, got {index:?}"
+    );
+    let HirExpr::OptionalChain { base, .. } = owner.as_ref() else {
+        panic!("expected Index.owner to be OptionalChain for `o?.[i]`, got {owner:?}");
+    };
+    assert!(
+        matches!(base.as_ref(), HirExpr::Local { .. }),
+        "OptionalChain.base must be the inner Local, got {base:?}"
+    );
+}
+
+#[test]
+fn optional_chain_call_wraps_callee_in_optional_chain() {
+    let f = sole_function("function f(o: () => i64): i64 { return o?.(); }");
+    let HirStmt::Return {
+        value: Some(HirExpr::Call { callee, .. }),
+    } = &f.body[0]
+    else {
+        panic!("expected Return(Call), got {:?}", f.body[0]);
+    };
+    let HirCallee::Indirect(inner) = callee else {
+        panic!("expected Indirect callee, got {callee:?}");
+    };
+    let HirExpr::OptionalChain { base, .. } = inner.as_ref() else {
+        panic!("expected Call.callee to wrap OptionalChain for `o?.()`, got {inner:?}");
+    };
+    assert!(
+        matches!(base.as_ref(), HirExpr::Local { .. }),
+        "OptionalChain.base must be the inner Local, got {base:?}"
+    );
+}
+
+#[test]
+fn delete_with_optional_chain_member_emits_unary_delete_over_optional_field() {
+    let f = sole_function("function f(o: i64): void { delete o?.x; }");
+    let HirStmt::Expr {
+        expr: HirExpr::Unary { op, expr, .. },
+    } = &f.body[0]
+    else {
+        panic!("expected Expr(Unary), got {:?}", f.body[0]);
+    };
+    assert_eq!(*op, HirUnaryOp::Delete, "must be `delete` operator");
+    let HirExpr::Field {
+        owner, field_name, ..
+    } = expr.as_ref()
+    else {
+        panic!("expected Unary.expr to be Field for `delete o?.x`, got {expr:?}");
+    };
+    assert_eq!(field_name, &Atom::from("x"));
+    let HirExpr::OptionalChain { base, .. } = owner.as_ref() else {
+        panic!("expected Field.owner to be OptionalChain for `delete o?.x`, got {owner:?}");
+    };
+    assert!(
+        matches!(base.as_ref(), HirExpr::Local { .. }),
+        "OptionalChain.base must be the inner Local, got {base:?}"
+    );
+}
+
+#[test]
+fn i64_or_null_resolves_to_optional_i64() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(c: i64 | null): i64 | null { return c; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let Some(Type::Optional { inner }) = types.resolve(fn_decl.params[0].ty) else {
+        panic!(
+            "i64 | null param type must resolve to Type::Optional {{ inner: ... }}, got {:?}",
+            types.resolve(fn_decl.params[0].ty)
+        );
+    };
+    assert_eq!(
+        types.resolve(*inner),
+        Some(&Type::I64),
+        "Optional inner must be i64, got {:?}",
+        types.resolve(*inner)
+    );
+}
+
+#[test]
+fn i64_or_null_or_undefined_resolves_to_optional_i64() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(c: i64 | null | undefined): i64 | null | undefined { return c; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let Some(Type::Optional { inner }) = types.resolve(fn_decl.params[0].ty) else {
+        panic!(
+            "i64 | null | undefined param type must resolve to Type::Optional {{ inner: ... }}, got {:?}",
+            types.resolve(fn_decl.params[0].ty)
+        );
+    };
+    assert_eq!(
+        types.resolve(*inner),
+        Some(&Type::I64),
+        "Optional inner must be i64, got {:?}",
+        types.resolve(*inner)
+    );
+}
+
+#[test]
+fn i64_or_string_preserved_as_union_not_optional() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(c: i64 | string): i64 | string { return c; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let Some(Type::Union { variants }) = types.resolve(fn_decl.params[0].ty) else {
+        panic!(
+            "i64 | string (multi non-nullish) must remain Type::Union, not collapse to Optional, \
+             got {:?}",
+            types.resolve(fn_decl.params[0].ty)
+        );
+    };
+    assert_eq!(variants.len(), 2, "union must preserve both variants");
 }

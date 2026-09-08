@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ts_aot_core::{
-    Atom, FieldId, FunctionId, LocalId, Span, StructId, TypeId, TypeTable, Visibility,
+    Atom, FieldId, FunctionId, LocalId, Span, StructId, Type, TypeId, TypeTable, Visibility,
     sanitize_rust_ident,
 };
 use ts_aot_ir_hir::{
@@ -213,12 +213,12 @@ pub fn convert_program(
         pre_id: 0,
         name_to_function: HashMap::new(),
         struct_id_map: HashMap::new(),
-        next_struct_id: 1,
+        next_struct_id: hir.next_class_struct_id.max(1),
         seen_names: HashSet::new(),
         seen_sanitized_names: HashSet::new(),
         ctx,
     };
-    pre_assign_ids_recursive(&hir.declarations, &mut pre_state, &[]);
+    pre_assign_ids_recursive(&hir.declarations, &mut pre_state, types, &[]);
     let mut field_id_lookup: HashMap<(StructId, Atom), FieldId> = HashMap::new();
     collect_field_id_lookup_recursive(
         &hir.declarations,
@@ -254,6 +254,7 @@ pub fn convert_program(
 fn pre_assign_ids_recursive(
     decls: &[HirDecl],
     state: &mut PreAssignState,
+    types: &TypeTable,
     namespace_path: &[String],
 ) {
     for decl in decls {
@@ -273,9 +274,20 @@ fn pre_assign_ids_recursive(
                 }
             }
             HirDecl::Class(c) => {
-                let sid = StructId::from_raw(state.next_struct_id);
-                state.next_struct_id += 1;
+                let sid = match types.resolve(c.ty) {
+                    Some(Type::Struct { id }) => *id,
+                    _ => {
+                        let sid = StructId::from_raw(state.next_struct_id);
+                        state.next_struct_id += 1;
+                        sid
+                    }
+                };
                 state.struct_id_map.insert(c.ty, sid);
+                if let Some(pre_pass_ty) = c.pre_pass_ty
+                    && pre_pass_ty != c.ty
+                {
+                    state.struct_id_map.insert(pre_pass_ty, sid);
+                }
                 let class_key = qualified_name(namespace_path, c.name.as_str());
                 let class_key_sanitized = sanitize_rust_ident(class_key.as_str());
                 let class_collides = state.seen_names.contains(&class_key)
@@ -310,7 +322,7 @@ fn pre_assign_ids_recursive(
             HirDecl::Namespace { name, members } => {
                 let mut child_path: Vec<String> = namespace_path.to_vec();
                 child_path.push(name.as_str().to_owned());
-                pre_assign_ids_recursive(members, state, &child_path);
+                pre_assign_ids_recursive(members, state, types, &child_path);
             }
             HirDecl::TypeAlias { .. } | HirDecl::Interface { .. } | HirDecl::Enum { .. } => {}
             HirDecl::Global { name, .. } => {

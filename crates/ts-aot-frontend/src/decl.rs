@@ -9,6 +9,7 @@ use ts_aot_ir_hir::{
 };
 
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv, TlaMainItem};
+use crate::type_resolver::reference::TypeLookup;
 use crate::type_resolver::{TypeParamMap, resolve_simple_type};
 use crate::util::{binding_pattern_name, core_span_from_oxc};
 
@@ -256,7 +257,10 @@ impl SkeletonBuilder {
             .as_ref()
             .map_or_else(|| Atom::from(""), |id| Atom::from(id.name.as_str()));
 
-        let ty = senv.types.intern(&Type::Error);
+        let struct_id = ts_aot_core::StructId::from_raw(self.next_class_struct_id);
+        self.next_class_struct_id = self.next_class_struct_id.saturating_add(1);
+        let ty = senv.types.intern(&Type::Struct { id: struct_id });
+        let prior_binding = self.class_types.insert(name.as_str().to_owned(), ty);
 
         let (class_type_param_ids, class_type_param_map) = build_type_param_context(
             senv.types,
@@ -305,9 +309,19 @@ impl SkeletonBuilder {
             .as_ref()
             .and_then(|expr| senv.resolve_superclass_name(expr));
 
+        match prior_binding {
+            Some(prior) => {
+                self.class_types.insert(name.as_str().to_owned(), prior);
+            }
+            None => {
+                self.class_types.remove(name.as_str());
+            }
+        }
+
         HirClass {
             name,
             ty,
+            pre_pass_ty: prior_binding,
             fields,
             methods,
             extends,
@@ -528,13 +542,14 @@ impl SkeletonBuilder {
             ));
             return senv.types.intern(&Type::Error);
         }
-        if let Some(id) = resolve_simple_type(
-            ty,
-            senv.types,
-            Some(&self.resolved_aliases),
-            type_params,
-            Some(&mut senv.diagnostics),
-        ) {
+        if let Some(id) = {
+            let lookup = TypeLookup {
+                aliases: Some(&self.resolved_aliases),
+                class_types: Some(&self.class_types),
+                type_params,
+            };
+            resolve_simple_type(ty, senv.types, &lookup, Some(&mut senv.diagnostics))
+        } {
             id
         } else {
             let span = ty.map_or_else(

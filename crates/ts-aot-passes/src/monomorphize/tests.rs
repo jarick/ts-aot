@@ -360,6 +360,7 @@ fn generic_class_method_with_call_is_monomorphized() {
         methods: vec![method],
         extends: None,
         type_params: vec![],
+        ..Default::default()
     };
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
@@ -399,6 +400,7 @@ fn empty_param_generic_class_method_is_not_monomorphized() {
         methods: vec![method],
         extends: None,
         type_params: vec![],
+        ..Default::default()
     };
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
@@ -454,6 +456,7 @@ fn monomorphize_class_method_with_call_e2e_keeps_function_ids_aligned() {
         methods: vec![method],
         extends: None,
         type_params: vec![],
+        ..Default::default()
     };
     program.push_decl(HirDecl::Class(class_with_method));
     let caller_body = vec![HirStmt::Expr {
@@ -1310,6 +1313,7 @@ fn class_method_body_types_are_substituted_in_mono_copy() {
         methods: vec![method],
         extends: None,
         type_params: vec![],
+        ..Default::default()
     };
     program.push_decl(HirDecl::Class(class));
 

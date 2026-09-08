@@ -867,6 +867,7 @@ fn lower_generators_rejects_generator_method_inside_class() {
         methods: vec![method],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     }));
     let stats = lower_generators(&mut hir, &mut types, &mut ctx);
     assert_eq!(
@@ -1118,6 +1119,7 @@ fn lower_generators_rejects_class_generator_method_inside_function_body_namespac
             type_params: Vec::new(),
             async_info: None,
         }],
+        ..Default::default()
     };
     let inner_ns = HirDecl::Namespace {
         name: Atom::from("ns1"),

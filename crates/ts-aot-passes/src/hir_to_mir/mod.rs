@@ -25,6 +25,9 @@ impl Deref for HirBlock {
 pub use converter::ExprConverter;
 pub use program::{convert_function, convert_program};
 
+#[cfg(test)]
+pub(crate) use converter::{ClassPath, build_class_index, class_at_path, index_decl};
+
 pub(crate) use program::qualified_name;
 
 #[cfg(test)]

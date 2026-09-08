@@ -477,6 +477,7 @@ fn clears_async_info_on_class_method() {
         methods: vec![method],
         extends: None,
         type_params: Vec::new(),
+        ..Default::default()
     };
     let mut program = build_program(HirDecl::Class(class));
 
@@ -915,6 +916,7 @@ fn skips_when_user_declares_top_level_class_named_promise() {
             methods: Vec::new(),
             extends: None,
             type_params: Vec::new(),
+            ..Default::default()
         }));
     program
         .declarations

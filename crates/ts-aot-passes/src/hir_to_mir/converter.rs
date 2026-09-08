@@ -1,8 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, ModuleId, Span, StructId, TypeId};
-use ts_aot_ir_hir::{HirCallee, HirExpr, HirProgram};
+use ts_aot_core::{
+    Atom, FieldId, FunctionId, LocalId, ModuleId, Span, StructId, Type, TypeId, TypeTable,
+};
+use ts_aot_ir_hir::{HirCallee, HirClass, HirDecl, HirExpr, HirProgram};
+
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 
 use crate::PassContext;
@@ -20,7 +23,11 @@ pub struct ExprConverter {
     pub(super) struct_ids: HashMap<TypeId, StructId>,
     pub(super) field_id_lookup: HashMap<(StructId, Atom), FieldId>,
     pub(super) current_call_type_args: Vec<TypeId>,
+    pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ClassPath(pub(crate) Vec<usize>);
 
 impl ExprConverter {
     #[must_use]
@@ -50,6 +57,7 @@ impl ExprConverter {
             struct_ids: HashMap::new(),
             field_id_lookup: HashMap::new(),
             current_call_type_args: Vec::new(),
+            class_index: OnceLock::new(),
         }
     }
 
@@ -63,6 +71,7 @@ impl ExprConverter {
 
     pub fn set_program(&mut self, program: Arc<HirProgram>) {
         self.program = program;
+        self.class_index = OnceLock::new();
     }
 
     pub(super) fn take_temp_locals(&mut self) -> Vec<MirLocalDecl> {
@@ -222,12 +231,19 @@ impl ExprConverter {
         field_name: &Atom,
         placeholder: FieldId,
         shared_ids: &HashMap<TypeId, StructId>,
+        types: &TypeTable,
         ctx: &mut PassContext,
     ) -> FieldId {
         let owner_ty = match owner {
+            HirExpr::OptionalChain { .. } | HirExpr::Field { .. } => {
+                let declarations = &self.program.declarations;
+                let class_index = self
+                    .class_index
+                    .get_or_init(|| build_class_index(declarations));
+                compute_chain_owner_ty(owner, class_index, declarations, types)
+            }
             HirExpr::Local { ty, .. }
             | HirExpr::Global { ty, .. }
-            | HirExpr::Field { ty, .. }
             | HirExpr::Index { ty, .. }
             | HirExpr::Call { ty, .. }
             | HirExpr::Binary { ty, .. }
@@ -239,13 +255,15 @@ impl ExprConverter {
             | HirExpr::Yield { ty, .. }
             | HirExpr::Template { ty, .. }
             | HirExpr::New { ty, .. }
-            | HirExpr::OptionalChain { ty, .. }
             | HirExpr::Assignment { ty, .. }
             | HirExpr::CompoundUpdate { ty, .. } => Some(*ty),
             HirExpr::TypeAssertion { target, .. } => Some(*target),
             _ => None,
         };
-        let Some(ty) = owner_ty else {
+        let Some(ty) = owner_ty.map(|t| match types.resolve(t) {
+            Some(Type::Optional { inner }) => *inner,
+            _ => t,
+        }) else {
             ctx.error(
                 "P0011",
                 format!(
@@ -306,4 +324,107 @@ const OBJECT_PROTOTYPE_METHODS: &[&str] = &["hasOwnProperty"];
 
 fn is_object_prototype_method(field_name: &Atom) -> bool {
     OBJECT_PROTOTYPE_METHODS.contains(&field_name.as_str())
+}
+
+fn compute_chain_owner_ty(
+    expr: &HirExpr,
+    class_index: &HashMap<TypeId, ClassPath>,
+    declarations: &[HirDecl],
+    types: &TypeTable,
+) -> Option<TypeId> {
+    let class_at = |ty: TypeId| -> Option<&HirClass> {
+        let path = class_index.get(&ty)?;
+        class_at_path(declarations, path.clone())
+    };
+    match expr {
+        HirExpr::OptionalChain { base, .. } => {
+            let inner = compute_chain_owner_ty(base, class_index, declarations, types)?;
+            Some(match types.resolve(inner) {
+                Some(Type::Optional { inner }) => *inner,
+                _ => inner,
+            })
+        }
+        HirExpr::Field {
+            owner, field_name, ..
+        } => {
+            let owner_class = compute_chain_owner_ty(owner, class_index, declarations, types)?;
+            let owner_class = match types.resolve(owner_class) {
+                Some(Type::Optional { inner }) => *inner,
+                _ => owner_class,
+            };
+            let class = class_at(owner_class)?;
+            let field_ty = class
+                .fields
+                .iter()
+                .find(|f| f.name == *field_name)
+                .map(|f| f.ty)?;
+            Some(match types.resolve(field_ty) {
+                Some(Type::Optional { inner }) => *inner,
+                _ => field_ty,
+            })
+        }
+        HirExpr::Index { owner, .. } => {
+            let owner_ty = compute_chain_owner_ty(owner, class_index, declarations, types)?;
+            Some(match types.resolve(owner_ty) {
+                Some(Type::Optional { inner }) => *inner,
+                _ => owner_ty,
+            })
+        }
+        HirExpr::Call {
+            callee: HirCallee::Indirect(inner),
+            ..
+        } => {
+            let inner_ty = compute_chain_owner_ty(inner, class_index, declarations, types)?;
+            Some(match types.resolve(inner_ty) {
+                Some(Type::Optional { inner }) => *inner,
+                _ => inner_ty,
+            })
+        }
+        HirExpr::Local { ty, .. } | HirExpr::Global { ty, .. } => Some(*ty),
+        _ => Some(expr.ty()),
+    }
+}
+
+pub(crate) fn build_class_index(declarations: &[HirDecl]) -> HashMap<TypeId, ClassPath> {
+    let mut index = HashMap::new();
+    for (idx, decl) in declarations.iter().enumerate() {
+        index_decl(decl, ClassPath(vec![idx]), &mut index);
+    }
+    index
+}
+
+pub(crate) fn index_decl(decl: &HirDecl, path: ClassPath, index: &mut HashMap<TypeId, ClassPath>) {
+    match decl {
+        HirDecl::Class(c) => {
+            index.insert(c.ty, path.clone());
+            if let Some(pre_pass_ty) = c.pre_pass_ty
+                && pre_pass_ty != c.ty
+            {
+                index.insert(pre_pass_ty, path.clone());
+            }
+        }
+        HirDecl::Namespace { members, .. } => {
+            for (member_idx, member) in members.iter().enumerate() {
+                let mut member_path = path.clone();
+                member_path.0.push(member_idx);
+                index_decl(member, member_path, index);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn class_at_path(declarations: &[HirDecl], path: ClassPath) -> Option<&HirClass> {
+    let (first, rest) = path.0.split_first()?;
+    let mut current = declarations.get(*first)?;
+    for &idx in rest {
+        current = match current {
+            HirDecl::Namespace { members, .. } => members.get(idx)?,
+            _ => return None,
+        };
+    }
+    match current {
+        HirDecl::Class(c) => Some(c),
+        _ => None,
+    }
 }

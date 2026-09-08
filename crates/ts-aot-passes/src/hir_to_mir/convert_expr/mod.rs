@@ -66,7 +66,7 @@ impl ExprConverter {
                 ..
             } => {
                 let resolved_field =
-                    self.resolve_field_id(owner, field_name, *field, shared_struct_ids, ctx);
+                    self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
                 MirExpr::Field {
                     base: Box::new(self.convert_expr(
                         owner,

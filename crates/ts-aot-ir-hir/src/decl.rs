@@ -60,10 +60,11 @@ impl Default for HirFunction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct HirClass {
     pub name: Atom,
     pub ty: TypeId,
+    pub pre_pass_ty: Option<TypeId>,
     pub fields: Vec<HirField>,
     pub methods: Vec<HirFunction>,
     pub extends: Option<Atom>,

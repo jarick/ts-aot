@@ -1,4 +1,5 @@
 mod array_builtins;
+mod class_index;
 mod common;
 mod convert_binop;
 mod convert_global;
