@@ -107,6 +107,10 @@ impl SkeletonEnv<'_> {
         self.types.intern(&Type::Error)
     }
 
+    pub(crate) fn bigint_ty(&mut self) -> TypeId {
+        self.types.intern(&Type::BigInt)
+    }
+
     pub(crate) fn record_export(&mut self, name: &str) {
         self.program.exports.push(HirExport {
             name: Atom::from(name),
