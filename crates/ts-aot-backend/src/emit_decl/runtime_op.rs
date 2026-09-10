@@ -109,5 +109,26 @@ pub(super) fn runtime_op_ident(op: RuntimeOp) -> Result<Ident, BackendError> {
                 "RuntimeOp::GeneratorNext must be emitted by emit_runtime_call, not by runtime_op_ident".to_string(),
             ));
         }
+        RuntimeOp::BigIntNew => format_ident!("__ts_aot_bigint_new"),
+        RuntimeOp::BigIntAdd => format_ident!("__ts_aot_bigint_add"),
+        RuntimeOp::BigIntSub => format_ident!("__ts_aot_bigint_sub"),
+        RuntimeOp::BigIntMul => format_ident!("__ts_aot_bigint_mul"),
+        RuntimeOp::BigIntDiv => format_ident!("__ts_aot_bigint_div"),
+        RuntimeOp::BigIntRem => format_ident!("__ts_aot_bigint_rem"),
+        RuntimeOp::BigIntNeg => format_ident!("__ts_aot_bigint_neg"),
+        RuntimeOp::BigIntNot => format_ident!("__ts_aot_bigint_not"),
+        RuntimeOp::BigIntAnd => format_ident!("__ts_aot_bigint_and"),
+        RuntimeOp::BigIntOr => format_ident!("__ts_aot_bigint_or"),
+        RuntimeOp::BigIntXor => format_ident!("__ts_aot_bigint_xor"),
+        RuntimeOp::BigIntShl => format_ident!("__ts_aot_bigint_shl"),
+        RuntimeOp::BigIntShr => format_ident!("__ts_aot_bigint_shr"),
+        RuntimeOp::BigIntLt => format_ident!("__ts_aot_bigint_lt"),
+        RuntimeOp::BigIntLe => format_ident!("__ts_aot_bigint_le"),
+        RuntimeOp::BigIntGt => format_ident!("__ts_aot_bigint_gt"),
+        RuntimeOp::BigIntGe => format_ident!("__ts_aot_bigint_ge"),
+        RuntimeOp::BigIntEq => format_ident!("__ts_aot_bigint_eq"),
+        RuntimeOp::BigIntNeq => format_ident!("__ts_aot_bigint_neq"),
+        RuntimeOp::BigIntToString => format_ident!("__ts_aot_bigint_to_string"),
+        RuntimeOp::BigIntToNumber => format_ident!("__ts_aot_bigint_to_number"),
     })
 }

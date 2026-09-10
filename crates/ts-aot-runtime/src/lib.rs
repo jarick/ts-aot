@@ -27,7 +27,14 @@ pub use array::{
     __ts_aot_array_len, __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
 };
 pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
-pub use bigint::{__ts_aot_bigint_new, BigIntHandle};
+pub use bigint::{
+    __ts_aot_bigint_add, __ts_aot_bigint_and, __ts_aot_bigint_div, __ts_aot_bigint_eq,
+    __ts_aot_bigint_ge, __ts_aot_bigint_gt, __ts_aot_bigint_le, __ts_aot_bigint_lt,
+    __ts_aot_bigint_mul, __ts_aot_bigint_neg, __ts_aot_bigint_neq, __ts_aot_bigint_new,
+    __ts_aot_bigint_not, __ts_aot_bigint_or, __ts_aot_bigint_rem, __ts_aot_bigint_shl,
+    __ts_aot_bigint_shr, __ts_aot_bigint_sub, __ts_aot_bigint_to_number, __ts_aot_bigint_to_string,
+    __ts_aot_bigint_xor, BigIntHandle,
+};
 pub use date::{
     __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,
     __ts_aot_date_get_milliseconds, __ts_aot_date_get_minutes, __ts_aot_date_get_month,

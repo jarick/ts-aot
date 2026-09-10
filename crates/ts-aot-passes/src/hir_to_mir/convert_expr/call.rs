@@ -106,6 +106,42 @@ impl ExprConverter {
         ) {
             return mir;
         }
+        if let Some(mir) = self.try_bigint_new_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
+        if let Some(mir) = self.try_bigint_to_string_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
+        if let Some(mir) = self.try_bigint_to_number_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         if let HirCallee::Runtime { name, .. } = callee {
             return self.convert_runtime_call(
                 name.as_str(),
