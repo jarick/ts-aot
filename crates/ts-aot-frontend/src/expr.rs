@@ -139,7 +139,7 @@ impl SkeletonBuilder {
                         || Atom::from(big_int.value.as_str()),
                         |bi| Atom::from(bi.to_string()),
                     );
-                let ty = senv.error_ty();
+                let ty = senv.bigint_ty();
                 HirExpr::BigInt {
                     value,
                     ty,
