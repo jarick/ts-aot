@@ -46,6 +46,7 @@ pub enum Type {
     },
     Date,
     Symbol,
+    BigInt,
     ArrayBuffer,
     WeakMap {
         key: TypeId,

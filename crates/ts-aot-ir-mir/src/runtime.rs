@@ -16,6 +16,7 @@ pub enum RuntimeFeature {
     Date,
     Json,
     Symbol,
+    BigInt,
     ArrayBuffer,
     TypedArray,
     Generator,
@@ -38,6 +39,7 @@ impl RuntimeFeature {
             Self::Date => "date",
             Self::Json => "json",
             Self::Symbol => "symbol",
+            Self::BigInt => "bigint",
             Self::ArrayBuffer => "array_buffer",
             Self::TypedArray => "typed_array",
             Self::Generator => "generator",
@@ -87,7 +89,7 @@ impl RuntimeRequirements {
 
 fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
     use RuntimeFeature::{
-        Array, ArrayBuffer, Console, Date, Generator, HostIo, Json, Map, Math, Promise,
+        Array, ArrayBuffer, BigInt, Console, Date, Generator, HostIo, Json, Map, Math, Promise,
         Result as ResultFeat, Scheduler, String as StringFeat, Symbol, TypedArray, WeakMap,
     };
     match op {
@@ -166,6 +168,27 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::JsonStringify
         | RuntimeOp::JsonStringifyString => &[Json],
         RuntimeOp::SymbolNew | RuntimeOp::SymbolFor | RuntimeOp::SymbolKeyFor => &[Symbol],
+        RuntimeOp::BigIntNew
+        | RuntimeOp::BigIntAdd
+        | RuntimeOp::BigIntSub
+        | RuntimeOp::BigIntMul
+        | RuntimeOp::BigIntDiv
+        | RuntimeOp::BigIntRem
+        | RuntimeOp::BigIntNeg
+        | RuntimeOp::BigIntNot
+        | RuntimeOp::BigIntAnd
+        | RuntimeOp::BigIntOr
+        | RuntimeOp::BigIntXor
+        | RuntimeOp::BigIntShl
+        | RuntimeOp::BigIntShr
+        | RuntimeOp::BigIntLt
+        | RuntimeOp::BigIntLe
+        | RuntimeOp::BigIntGt
+        | RuntimeOp::BigIntGe
+        | RuntimeOp::BigIntEq
+        | RuntimeOp::BigIntNeq
+        | RuntimeOp::BigIntToString
+        | RuntimeOp::BigIntToNumber => &[BigInt],
         RuntimeOp::ArrayBufferNew | RuntimeOp::ArrayBufferSlice => &[ArrayBuffer],
         RuntimeOp::TypedArrayNew => &[TypedArray],
         RuntimeOp::WeakMapNew
