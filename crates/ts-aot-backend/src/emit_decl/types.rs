@@ -52,6 +52,7 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
         Type::I16 => quote!(i16),
         Type::I32 => quote!(i32),
         Type::I64 | Type::Date | Type::Symbol => quote!(i64),
+        Type::BigInt => quote!(ts_aot_runtime::BigIntHandle),
         Type::U8 => quote!(u8),
         Type::U16 => quote!(u16),
         Type::U32 => quote!(u32),

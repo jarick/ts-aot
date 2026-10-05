@@ -29,6 +29,8 @@ tz-utc-only = []
 [dependencies]
 ts-aot-core = { path = "../ts-aot-core" }
 indexmap = { workspace = true }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
 regex = "1"
 fastrand = { workspace = true }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }

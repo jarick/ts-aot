@@ -69,6 +69,7 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "null" => Some(Type::Null),
         "never" => Some(Type::Never),
         "Date" => Some(Type::Date),
+        "bigint" => Some(Type::BigInt),
         "Symbol" => Some(Type::Symbol),
         "ArrayBuffer" => Some(Type::ArrayBuffer),
         "Int8Array" => Some(Type::Int8Array),
@@ -99,6 +100,7 @@ pub(crate) fn resolve_simple_type(
         TSType::TSVoidKeyword(_) | TSType::TSUndefinedKeyword(_) => Some(types.intern(&Type::Void)),
         TSType::TSNullKeyword(_) => Some(types.intern(&Type::Null)),
         TSType::TSSymbolKeyword(_) => Some(types.intern(&Type::Symbol)),
+        TSType::TSBigIntKeyword(_) => Some(types.intern(&Type::BigInt)),
         TSType::TSTypeReference(r) => Some(reference::resolve_type_reference(
             r,
             types,

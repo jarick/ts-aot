@@ -1143,6 +1143,47 @@ fn emit_runtime_call(
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_weak_map_clear(&#handle)))
         }
+        RuntimeOp::BigIntNeg | RuntimeOp::BigIntNot | RuntimeOp::BigIntToNumber => {
+            let name = runtime_op_ident(op)?;
+            let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(&#arg)))
+        }
+        RuntimeOp::BigIntToString => {
+            let name = runtime_op_ident(op)?;
+            let owner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            if args.len() == 1 {
+                Ok(quote!(#name(&#owner, None)))
+            } else {
+                let radix = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+                Ok(quote!(#name(&#owner, Some(#radix))))
+            }
+        }
+        RuntimeOp::BigIntNew => {
+            let name = runtime_op_ident(op)?;
+            let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(#arg.to_string_lossy())))
+        }
+        RuntimeOp::BigIntAdd
+        | RuntimeOp::BigIntSub
+        | RuntimeOp::BigIntMul
+        | RuntimeOp::BigIntDiv
+        | RuntimeOp::BigIntRem
+        | RuntimeOp::BigIntAnd
+        | RuntimeOp::BigIntOr
+        | RuntimeOp::BigIntXor
+        | RuntimeOp::BigIntShl
+        | RuntimeOp::BigIntShr
+        | RuntimeOp::BigIntLt
+        | RuntimeOp::BigIntLe
+        | RuntimeOp::BigIntGt
+        | RuntimeOp::BigIntGe
+        | RuntimeOp::BigIntEq
+        | RuntimeOp::BigIntNeq => {
+            let name = runtime_op_ident(op)?;
+            let lhs = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let rhs = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(&#lhs, &#rhs)))
+        }
         _ => {
             let name = runtime_op_ident(op)?;
             let args = emit_exprs(args, ctx, emit_env, body_ctx)?;

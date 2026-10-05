@@ -8,6 +8,7 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 mod array_buffer_dispatch;
+mod bigint_dispatch;
 mod binary;
 mod call;
 mod control;
