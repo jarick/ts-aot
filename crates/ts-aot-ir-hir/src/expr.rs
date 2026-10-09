@@ -38,6 +38,24 @@ impl HirExpr {
         }
     }
 
+    /// Whether this expression carries a static type. Leaf literals
+    /// (`Unit`/`Null`/`Undefined`/`Bool`/`Int`/`Float`/`String`) have no static
+    /// type: `ty()` returns the `TypeId(0)` sentinel for them, which must not be
+    /// mistaken for an interned type.
+    #[must_use]
+    pub fn has_static_type(&self) -> bool {
+        !matches!(
+            self,
+            Self::Unit(_)
+                | Self::Null(_)
+                | Self::Undefined(_)
+                | Self::Bool(_, _)
+                | Self::Int(_, _)
+                | Self::Float(_, _)
+                | Self::String(_, _)
+        )
+    }
+
     #[must_use]
     pub fn span(&self) -> Span {
         match self {

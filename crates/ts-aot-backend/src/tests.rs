@@ -16,7 +16,7 @@ fn compile_empty_program_emits_empty_token_stream() {
 fn compile_to_string_for_empty_program_yields_empty_string() {
     let program = MirProgram::new(ModuleId::from_raw(0));
     let s = compile_to_string(&program).expect("empty MIR should compile to Ok");
-    assert!(s.is_empty());
+    assert_eq!(s, String::new());
 }
 
 #[test]

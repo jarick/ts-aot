@@ -2406,7 +2406,7 @@ fn body_walker_call_uses_indirect_global_callee() {
         HirStmt::Expr {
             expr: HirExpr::Call { callee, args, .. },
         } => {
-            assert!(args.is_empty());
+            assert_eq!(args, &Vec::<HirExpr>::new());
             match callee {
                 HirCallee::Indirect(inner) => {
                     assert!(
@@ -4842,4 +4842,276 @@ fn i64_or_string_preserved_as_union_not_optional() {
         );
     };
     assert_eq!(variants.len(), 2, "union must preserve both variants");
+}
+
+#[test]
+fn ts_as_expression_produces_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i32): f64 { return x as f64; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`as f64` must not degrade to the unwalked fallback (E0500 + Unit): {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .all(|d| d.code.as_str() != "E0500"),
+        "`as` casts must not emit E0500 unwalked warnings: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(fn_decl.body.len(), 1);
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { expr, target, .. }),
+    } = &fn_decl.body[0]
+    else {
+        panic!(
+            "`return x as f64;` must lower to Return(TypeAssertion), got {:?}",
+            fn_decl.body[0]
+        );
+    };
+    assert!(
+        matches!(expr.as_ref(), HirExpr::Local { .. }),
+        "TypeAssertion.expr must preserve the inner `x` access",
+    );
+    assert!(
+        matches!(types.resolve(*target), Some(Type::F64)),
+        "TypeAssertion.target must resolve to f64, got {:?}",
+        types.resolve(*target)
+    );
+}
+
+#[test]
+fn ts_type_assertion_angle_bracket_produces_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i32): i64 { return <i64>x; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`<i64>x` must not degrade to the unwalked fallback: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { expr, .. }),
+    } = &fn_decl.body[0]
+    else {
+        panic!(
+            "`return <i64>x;` must lower to Return(TypeAssertion), got {:?}",
+            fn_decl.body[0]
+        );
+    };
+    assert!(
+        matches!(expr.as_ref(), HirExpr::Local { .. }),
+        "TypeAssertion.expr must preserve the inner `x` access",
+    );
+}
+
+#[test]
+fn ts_satisfies_expression_is_not_a_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64): i64 { return x satisfies i64; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`x satisfies i64` must not emit errors: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(fn_decl.body.len(), 1);
+    assert!(
+        !matches!(
+            fn_decl.body[0],
+            HirStmt::Return {
+                value: Some(HirExpr::TypeAssertion { .. })
+            }
+        ),
+        "`satisfies` checks assignability but must NOT lower to a TypeAssertion cast, got {:?}",
+        fn_decl.body[0]
+    );
+    assert!(
+        matches!(
+            fn_decl.body[0],
+            HirStmt::Return {
+                value: Some(HirExpr::Local { .. })
+            }
+        ),
+        "`x satisfies i64` must walk through to the inner `x` expression, got {:?}",
+        fn_decl.body[0]
+    );
+}
+
+#[test]
+fn type_assertion_target_resolves_active_generic_param() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f<T>(x: T): T { return x as T; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { target, .. }),
+    } = &f.body[0]
+    else {
+        panic!("expected `return x as T`, got {:?}", f.body[0]);
+    };
+    assert_eq!(
+        types.resolve(*target),
+        Some(&Type::GenericParam {
+            id: GenericParamId::from_raw(0),
+        }),
+        "`as T` target must resolve to the active GenericParam, not Type::Error; got {:?}",
+        types.resolve(*target)
+    );
+}
+
+#[test]
+fn ts_satisfies_expression_reports_unchecked_constraint() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64): i64 { return x satisfies i64; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`satisfies` must not become a hard error: {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.code.as_str() == "E0500"),
+        "`satisfies` must report its unchecked constraint as unsupported (E0500 warning) \
+         instead of silently erasing it; got {:?}",
+        output.diagnostics
+    );
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    assert!(
+        matches!(
+            &f.body[0],
+            HirStmt::Return {
+                value: Some(HirExpr::Local { .. })
+            }
+        ),
+        "`satisfies` must still lower to the inner expression (runtime no-op), got {:?}",
+        f.body[0]
+    );
+}
+
+#[test]
+fn non_null_assertion_narrows_optional_type() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64 | null): i64 { return x!; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { expr, target, .. }),
+    } = &f.body[0]
+    else {
+        panic!("`x!` must lower to a TypeAssertion, got {:?}", f.body[0]);
+    };
+    assert!(
+        matches!(expr.as_ref(), HirExpr::Local { .. }),
+        "`x!` must keep the runtime expression unchanged, got {expr:?}",
+    );
+    assert_eq!(
+        types.resolve(*target),
+        Some(&Type::I64),
+        "`x!` on `i64 | null` must narrow the type to `i64`, got {:?}",
+        types.resolve(*target)
+    );
+}
+
+#[test]
+fn non_null_assertion_removes_null_from_union() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64 | string | null) { const y = x!; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Let {
+        init: Some(HirExpr::TypeAssertion { target, .. }),
+        ..
+    } = &f.body[0]
+    else {
+        panic!(
+            "`const y = x!` must lower to a TypeAssertion, got {:?}",
+            f.body[0]
+        );
+    };
+    let Some(Type::Union { variants }) = types.resolve(*target) else {
+        panic!(
+            "`x!` on `i64 | string | null` must narrow to a union, got {:?}",
+            types.resolve(*target)
+        );
+    };
+    assert_eq!(variants.len(), 2, "null must be removed, got {variants:?}");
+    assert!(
+        variants
+            .iter()
+            .all(|v| !matches!(types.resolve(*v), Some(Type::Null | Type::Void))),
+        "null/undefined must be removed from the narrowed union, got {variants:?}"
+    );
 }

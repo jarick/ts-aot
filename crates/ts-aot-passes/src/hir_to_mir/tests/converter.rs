@@ -132,3 +132,174 @@ fn resolve_callee_runtime_is_placeholder_and_diagnostics() {
     assert_eq!(fid, PLACEHOLDER_FUNCTION);
     assert!(cx.has_errors());
 }
+
+#[test]
+fn global_decl_type_resolves_through_namespace_paths() {
+    let root_ty = TypeId::from_raw(11);
+    let ns_ty = TypeId::from_raw(22);
+    let shared_ty = TypeId::from_raw(33);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("counter"),
+        ty: root_ty,
+        init: None,
+    });
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("shared"),
+        ty: shared_ty,
+        init: None,
+    });
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns"),
+        members: vec![HirDecl::Global {
+            name: Atom::new_inline("counter"),
+            ty: ns_ty,
+            init: None,
+        }],
+    });
+
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+
+    c.set_namespace_path(&[]);
+    assert_eq!(
+        c.global_decl_type(&Atom::new_inline("counter")),
+        Some(root_ty),
+        "at the root, `counter` must resolve to the top-level global"
+    );
+
+    c.set_namespace_path(&["ns".to_owned()]);
+    assert_eq!(
+        c.global_decl_type(&Atom::new_inline("counter")),
+        Some(ns_ty),
+        "inside `ns`, `counter` must resolve to the namespace global, not the top-level one"
+    );
+    assert_eq!(
+        c.global_decl_type(&Atom::new_inline("shared")),
+        Some(shared_ty),
+        "a root-level global must still resolve from inside a namespace (probe inward to root)"
+    );
+    assert_eq!(
+        c.global_decl_type(&Atom::new_inline("missing")),
+        None,
+        "an unknown name must resolve to None"
+    );
+}
+
+#[test]
+fn resolve_field_id_resolves_global_owner_from_declared_type() {
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let box_ty = types.intern(&Type::Struct {
+        id: StructId::from_raw(7),
+    });
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("g"),
+        ty: box_ty,
+        init: None,
+    });
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    let mut field_id_lookup = HashMap::new();
+    field_id_lookup.insert(
+        (StructId::from_raw(7), Atom::new_inline("x")),
+        FieldId::from_raw(3),
+    );
+    c.set_field_id_lookup(field_id_lookup);
+    let mut shared_ids = HashMap::new();
+    shared_ids.insert(box_ty, StructId::from_raw(7));
+
+    let owner = HirExpr::Global {
+        name: Atom::new_inline("g"),
+        ty: error_ty,
+        span: Span::default(),
+    };
+    let mut cx = ctx();
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("x"),
+        FieldId::from_raw(99),
+        &shared_ids,
+        &types,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(3),
+        "a `HirExpr::Global` owner must resolve its field via the global's declared type; \
+         diagnostics: {:?}",
+        cx.diagnostics()
+    );
+    assert!(!cx.has_errors(), "{:?}", cx.diagnostics());
+}
+
+#[test]
+fn resolve_field_id_carries_global_declared_type_through_chains() {
+    use ts_aot_ir_hir::{HirClass, HirField};
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let inner_ty = types.intern(&Type::Struct {
+        id: StructId::from_raw(2),
+    });
+    let box_ty = types.intern(&Type::Struct {
+        id: StructId::from_raw(1),
+    });
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("Box"),
+        ty: box_ty,
+        fields: vec![HirField {
+            name: Atom::new_inline("sub"),
+            ty: inner_ty,
+        }],
+        methods: Vec::new(),
+        extends: None,
+        type_params: Vec::new(),
+        ..Default::default()
+    }));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("g"),
+        ty: box_ty,
+        init: None,
+    });
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    let mut field_id_lookup = HashMap::new();
+    field_id_lookup.insert(
+        (StructId::from_raw(2), Atom::new_inline("x")),
+        FieldId::from_raw(5),
+    );
+    c.set_field_id_lookup(field_id_lookup);
+    let mut shared_ids = HashMap::new();
+    shared_ids.insert(inner_ty, StructId::from_raw(2));
+
+    let owner = HirExpr::Field {
+        owner: Box::new(HirExpr::Global {
+            name: Atom::new_inline("g"),
+            ty: error_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("sub"),
+        ty: error_ty,
+        span: Span::default(),
+    };
+    let mut cx = ctx();
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("x"),
+        FieldId::from_raw(99),
+        &shared_ids,
+        &types,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(5),
+        "the global's declared type must be carried through chained field resolution (g.sub.x); \
+         diagnostics: {:?}",
+        cx.diagnostics()
+    );
+    assert!(!cx.has_errors(), "{:?}", cx.diagnostics());
+}

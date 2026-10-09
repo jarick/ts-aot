@@ -7,7 +7,7 @@ use ts_aot_ir_mir::{
     RuntimeOp, UnaryOp,
 };
 
-use super::ctx::{BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec};
+use super::ctx::{BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, place_root_global_name};
 use super::ident::ident_from;
 use super::literals::emit_whole_number_literal;
 use super::runtime_op::runtime_op_ident;
@@ -203,10 +203,17 @@ fn emit_stmt(
             let target_tokens = emit_place(target, ctx, emit_env, body_ctx)?;
             let value_tokens = emit_expr(value, ctx, emit_env, body_ctx)?;
             let reset = emit_weakmap_liveness_reset(target, body_ctx);
-            Ok(quote! {
+            let assignment = quote! {
                 #target_tokens = #value_tokens;
                 #reset
-            })
+            };
+            if place_root_global_name(target).is_some_and(|name| ctx.is_mutable_global(name)) {
+                Ok(quote! {
+                    unsafe { #assignment }
+                })
+            } else {
+                Ok(assignment)
+            }
         }
         MirStmt::Expr(expr) => {
             if matches!(expr, MirExpr::Local(_)) && !body_ctx.in_tla_main() {
@@ -339,6 +346,10 @@ fn emit_place(
     let EmitEnv { types, .. } = emit_env;
     match place {
         MirPlace::Local { id } => Ok(body_ctx.local_ref(*id)),
+        MirPlace::Global(name) => {
+            let name = ident_from(name);
+            Ok(quote!(#name))
+        }
         MirPlace::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = types
@@ -365,6 +376,10 @@ fn emit_place_base(
     let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirPlaceBase::Global(name) => {
+            let name = ident_from(name);
+            Ok(quote!(#name))
+        }
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = types
@@ -514,8 +529,12 @@ fn emit_expr(
         }
         MirExpr::Local(id) => Ok(body_ctx.local_ref(*id)),
         MirExpr::Global(name) => {
-            let name = ident_from(name);
-            Ok(quote!(#name))
+            let ident = ident_from(name);
+            if ctx.is_mutable_global(name) {
+                Ok(quote!(unsafe { #ident }))
+            } else {
+                Ok(quote!(#ident))
+            }
         }
         MirExpr::Field { base, field, .. } => {
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
@@ -968,6 +987,17 @@ fn emit_runtime_call(
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let value = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
+        }
+        RuntimeOp::ArrayLen => {
+            let name = runtime_op_ident(op)?;
+            if let MirExpr::OptionalChain { base, ty: chain_ty } = &args[0]
+                && matches!(types.resolve(*chain_ty), Some(Type::Optional { .. }))
+            {
+                let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+                return Ok(quote!(#base.as_ref().map(|o| #name(o))));
+            }
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(&#arr)))
         }
         RuntimeOp::MathMax | RuntimeOp::MathMin => {
             let name = runtime_op_ident(op)?;

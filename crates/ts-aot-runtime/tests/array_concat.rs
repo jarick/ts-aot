@@ -20,7 +20,7 @@ fn array_concat_with_empty_vector_preserves_other_parts() {
 #[test]
 fn array_concat_with_all_empty_returns_empty() {
     let out = __ts_aot_array_concat::<i64>(vec![Vec::new(), Vec::new()]);
-    assert!(out.is_empty());
+    assert_eq!(out, [] as [i64; 0]);
 }
 
 #[test]

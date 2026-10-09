@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn cli_module_exposes_program_constants() {
         assert_eq!(super::PROGRAM_NAME, "ts-aot");
-        assert!(!super::VERSION.is_empty());
+        assert_ne!(super::VERSION, "");
     }
 
     #[test]

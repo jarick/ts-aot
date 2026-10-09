@@ -396,7 +396,7 @@ fn runtime_array_is_array_returns_false_for_non_vec() {
 #[test]
 fn runtime_array_create_with_len_zero_returns_empty_vec() {
     let v: Vec<i64> = __ts_aot_array_create_with_len(0);
-    assert!(v.is_empty());
+    assert_eq!(v, [] as [i64; 0]);
     assert_eq!(__ts_aot_array_len(&v), 0);
 }
 
@@ -462,7 +462,7 @@ fn runtime_array_from_string_returns_code_point_strings() {
     let scalars: Vec<JsString> = __ts_aot_array_from_string(&js("abc"));
     assert_eq!(scalars, vec![js("a"), js("b"), js("c")]);
     let empty: Vec<JsString> = __ts_aot_array_from_string(&js(""));
-    assert!(empty.is_empty());
+    assert_eq!(empty, [] as [JsString; 0]);
     let cafe: Vec<JsString> = __ts_aot_array_from_string(&js("café"));
     assert_eq!(cafe, vec![js("c"), js("a"), js("f"), js("é")]);
 }
@@ -516,7 +516,7 @@ fn runtime_array_from_mapped_passes_zero_based_index_to_mapper() {
     let only_index: Vec<i64> = __ts_aot_array_from_mapped(&src, |_x, i| i);
     assert_eq!(only_index, vec![0, 1, 2]);
     let empty: Vec<i64> = __ts_aot_array_from_mapped::<i64, i64, _>(&[], |_x, i| i * 10);
-    assert!(empty.is_empty());
+    assert_eq!(empty, [] as [i64; 0]);
 }
 
 #[test]
@@ -524,7 +524,7 @@ fn runtime_array_from_length_mapped_calls_mapfn_with_index() {
     let result: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(3, |_v, i| i * 2);
     assert_eq!(result, vec![0, 2, 4]);
     let empty: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(0, |_v, _i| 99);
-    assert!(empty.is_empty());
+    assert_eq!(empty, [] as [i64; 0]);
     let str_result: Vec<String> =
         __ts_aot_array_from_length_mapped::<(), String, _>(2, |_v, i| format!("idx{i}"));
     assert_eq!(str_result, vec!["idx0".to_owned(), "idx1".to_owned()]);
