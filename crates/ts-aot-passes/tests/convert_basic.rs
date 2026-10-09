@@ -89,3 +89,58 @@ fn convert_function_without_throw_leaves_throws_none() {
     assert!(f.throws.is_none());
     assert!(!f.effects.can_throw);
 }
+
+#[test]
+fn global_var_increment_assigns_to_global_place_without_error() {
+    use ts_aot_frontend::FrontendPass;
+    let mut types = TypeTable::new();
+    let mut ctx = PassContext::new();
+    let frontend = FrontendPass::new().run_with_types(
+        "test.ts",
+        "var counter = 0;\
+         export function bump(): i64 {\
+           counter = counter + 1;\
+           return counter;\
+         }",
+        &mut types,
+        false,
+    );
+    let mut diags = frontend
+        .diagnostics
+        .iter()
+        .map(|d| format!("{:?}", d))
+        .collect::<Vec<_>>();
+    if frontend.diagnostics.has_errors() {
+        panic!("frontend failed: {diags:?}");
+    }
+    let mut hir = frontend.program;
+    ts_aot_passes::lower_enums(&mut hir, &mut types, &mut ctx);
+    ts_aot_passes::monomorphize(&mut hir, &mut types, &mut ctx);
+    ts_aot_passes::lower_closures(&mut hir, &mut types, &mut ctx);
+    let _ = ts_aot_passes::lower_async(&mut hir, &mut types, &mut ctx);
+    let mir = convert_program(&hir, &mut types, &mut ctx);
+    diags.extend(ctx.diagnostics().iter().map(|d| format!("{:?}", d)));
+
+    let failed = ctx
+        .diagnostics()
+        .iter()
+        .filter(|d| d.severity == ts_aot_core::Severity::Error)
+        .count();
+    assert_eq!(
+        failed, 0,
+        "mutating a module-level `var` must not produce errors (P0006): {diags:?}"
+    );
+    let mir_text = mir.dump_text();
+    assert!(
+        mir_text.contains("global counter"),
+        "MIR must keep the mutable global decl, got:\n{mir_text}"
+    );
+    assert!(
+        mir_text.contains("mut: true"),
+        "MIR must mark the mutated global as mutable, got:\n{mir_text}"
+    );
+    assert!(
+        mir_text.contains("counter = "),
+        "MIR must emit an assignment to the global, got:\n{mir_text}"
+    );
+}

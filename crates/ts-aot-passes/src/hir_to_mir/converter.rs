@@ -264,6 +264,18 @@ impl ExprConverter {
             Some(Type::Optional { inner }) => *inner,
             _ => t,
         }) else {
+            if matches!(types.resolve(owner.ty()), Some(Type::Error)) {
+                ctx.warning(
+                    "P0013",
+                    format!(
+                        "field access `{}` on an already-erroneous owner was skipped; \
+                         the owner type failed to resolve earlier",
+                        field_name.as_str()
+                    ),
+                    Span::new(0, 0),
+                );
+                return placeholder;
+            }
             ctx.error(
                 "P0011",
                 format!(
@@ -274,6 +286,18 @@ impl ExprConverter {
             );
             return placeholder;
         };
+        if matches!(types.resolve(ty), Some(Type::Error)) {
+            ctx.warning(
+                "P0013",
+                format!(
+                    "field access `{}` on an already-erroneous owner was skipped; \
+                     the owner type failed to resolve earlier",
+                    field_name.as_str()
+                ),
+                Span::new(0, 0),
+            );
+            return placeholder;
+        }
         let Some(&sid) = self.struct_ids.get(&ty).or_else(|| shared_ids.get(&ty)) else {
             ctx.error(
                 "P0012",

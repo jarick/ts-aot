@@ -286,6 +286,7 @@ pub(crate) fn dump_stmt(stmt: &MirStmt, d: &mut Dumper) {
 pub(crate) fn dump_place(place: &MirPlace, d: &mut Dumper) {
     match place {
         MirPlace::Local { id } => d.write(&format!("local({})", id.raw())),
+        MirPlace::Global(sym) => d.write(&dump_sym(sym, d)),
         MirPlace::Field { base, field, ty } => {
             d.write("field(");
             dump_place_base(base, d);
@@ -304,6 +305,7 @@ pub(crate) fn dump_place(place: &MirPlace, d: &mut Dumper) {
 fn dump_place_base(base: &MirPlaceBase, d: &mut Dumper) {
     match base {
         MirPlaceBase::Local(id) => d.write(&format!("local({})", id.raw())),
+        MirPlaceBase::Global(sym) => d.write(&dump_sym(sym, d)),
         MirPlaceBase::Field { base, field, .. } => {
             dump_place_base(base, d);
             d.write(&format!(".{}", field.raw()));

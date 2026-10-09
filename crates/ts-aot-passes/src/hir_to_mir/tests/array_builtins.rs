@@ -1965,3 +1965,239 @@ fn array_from_with_three_args_and_non_global_mapfn_emits_e0406() {
     assert!(matches!(mir, MirExpr::Unit));
     assert!(out.is_empty());
 }
+
+
+#[test]
+fn array_instance_len_call_emits_array_len_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: arr_ty,
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("len"),
+            ty: i64_ty,
+            span: Span::default(),
+        })),
+        args: Vec::new(),
+        ty: i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0012"),
+        0,
+        "arr.len() on an Array must not emit P0012, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Local(_)), "must return Local, got {mir:?}");
+    let len_args = out.iter().find_map(|s| {
+        if let MirStmt::Runtime {
+            op: RuntimeOp::ArrayLen,
+            args,
+            ..
+        } = s
+        {
+            Some(args)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        len_args.map(Vec::len),
+        Some(1),
+        "arr.len() must pass exactly 1 arg (the receiver) to __ts_aot_array_len; got args={len_args:?}, full out: {out:?}"
+    );
+}
+
+
+#[test]
+fn array_instance_length_property_emits_array_len_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let expr = HirExpr::Field {
+        owner: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: arr_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("length"),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0012"),
+        0,
+        "arr.length on an Array must not emit P0012, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Local(_)), "must return Local, got {mir:?}");
+    let len_args = out.iter().find_map(|s| {
+        if let MirStmt::Runtime {
+            op: RuntimeOp::ArrayLen,
+            args,
+            ..
+        } = s
+        {
+            Some(args)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        len_args.map(Vec::len),
+        Some(1),
+        "arr.length must pass exactly 1 arg (the receiver) to __ts_aot_array_len; got args={len_args:?}, full out: {out:?}"
+    );
+}
+
+
+#[test]
+fn array_instance_length_property_on_optional_array_emits_array_len_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
+    let expr = HirExpr::Field {
+        owner: Box::new(HirExpr::OptionalChain {
+            base: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: opt_arr_ty,
+                span: Span::default(),
+            }),
+            ty: opt_arr_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("length"),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0011"),
+        0,
+        "arr?.length on an optional Array must not emit P0011, got {:?}",
+        cx.diagnostics()
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0012"),
+        0,
+        "arr?.length on an optional Array must not emit P0012, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Local(_)), "must return Local, got {mir:?}");
+    assert!(
+        out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                ..
+            }
+        )),
+        "arr?.length must lower to RuntimeOp::ArrayLen, got: {out:?}"
+    );
+}
+
+
+#[test]
+fn array_instance_len_call_on_optional_array_emits_array_len_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::OptionalChain {
+                base: Box::new(HirExpr::Local {
+                    id: LocalId::from_raw(0),
+                    ty: opt_arr_ty,
+                    span: Span::default(),
+                }),
+                ty: opt_arr_ty,
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("len"),
+            ty: i64_ty,
+            span: Span::default(),
+        })),
+        args: Vec::new(),
+        ty: i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0011"),
+        0,
+        "arr?.len() on an optional Array must not emit P0011, got {:?}",
+        cx.diagnostics()
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0012"),
+        0,
+        "arr?.len() on an optional Array must not emit P0012, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(matches!(mir, MirExpr::Local(_)), "must return Local, got {mir:?}");
+    assert!(
+        out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                ..
+            }
+        )),
+        "arr?.len() must lower to RuntimeOp::ArrayLen, got: {out:?}"
+    );
+}

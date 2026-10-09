@@ -262,6 +262,18 @@ impl ExprConverter {
             });
             return MirExpr::Local(final_dest);
         }
+        if let Some(mir) = self.try_array_instance_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         if let Some(mir) = self.try_string_instance_method_dispatch(
             callee,
             args,

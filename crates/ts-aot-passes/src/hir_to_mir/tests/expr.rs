@@ -2468,6 +2468,7 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
     fn assert_place_is_pure(place: &MirPlace, path: &str, out: &[MirStmt]) {
         match place {
             MirPlace::Local { .. } => {}
+            MirPlace::Global(_) => {}
             MirPlace::Field { base, .. } => {
                 assert_place_base_is_pure(base, &format!("{path}.field-base"), out);
             }
@@ -2480,6 +2481,7 @@ fn convert_expr_compound_update_postfix_index_target_materializes_base_and_index
     fn assert_place_base_is_pure(base: &MirPlaceBase, path: &str, out: &[MirStmt]) {
         match base {
             MirPlaceBase::Local(_) => {}
+            MirPlaceBase::Global(_) => {}
             MirPlaceBase::Field { base, .. } => {
                 assert_place_base_is_pure(base, &format!("{path}.field-base"), out);
             }
@@ -2755,6 +2757,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
     fn visit_place(p: &MirPlace, counts: &mut HashMap<u32, usize>) {
         match p {
             MirPlace::Local { .. } => {}
+            MirPlace::Global(_) => {}
             MirPlace::Field { base, .. } => visit_place_base(base, counts),
             MirPlace::Index { base, index, .. } => {
                 visit(base, counts);
@@ -2765,6 +2768,7 @@ fn convert_expr_compound_update_index_target_plus_call_rhs_each_call_once() {
     fn visit_place_base(b: &MirPlaceBase, counts: &mut HashMap<u32, usize>) {
         match b {
             MirPlaceBase::Local(_) => {}
+            MirPlaceBase::Global(_) => {}
             MirPlaceBase::Field { base, .. } => visit_place_base(base, counts),
             MirPlaceBase::Index { base, index, .. } => {
                 visit(base, counts);

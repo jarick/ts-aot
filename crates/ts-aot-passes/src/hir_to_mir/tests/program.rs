@@ -238,6 +238,88 @@ fn convert_program_class_methods_use_method_function_kind() {
 }
 
 #[test]
+fn convert_program_overloaded_constructors_do_not_collide() {
+    use ts_aot_ir_hir::{HirClass, HirParam};
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(HirClass {
+        name: Atom::new_inline("Date_"),
+        ty: TypeId::from_raw(4242),
+        fields: vec![],
+        methods: vec![
+            HirFunction {
+                name: Atom::new_inline("constructor"),
+                params: vec![HirParam {
+                    name: Atom::new_inline("this"),
+                    ty: unit_ty(),
+                }],
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            },
+            HirFunction {
+                name: Atom::new_inline("constructor"),
+                params: vec![
+                    HirParam {
+                        name: Atom::new_inline("this"),
+                        ty: unit_ty(),
+                    },
+                    HirParam {
+                        name: Atom::new_inline("v"),
+                        ty: unit_ty(),
+                    },
+                ],
+                ret: unit_ty(),
+                throws: None,
+                body: vec![HirStmt::Return { value: None }],
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            },
+        ],
+        extends: None,
+        type_params: Vec::new(),
+        ..Default::default()
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    assert!(
+        !cx.has_errors(),
+        "overloaded ctors must not emit E0503 collision, got: {:?}",
+        cx.diagnostics()
+    );
+    let struct_decl = mir.structs().next().expect("expected one struct");
+    assert_eq!(
+        struct_decl.methods.len(),
+        2,
+        "both constructor overloads must be kept: {:?}",
+        struct_decl
+            .methods
+            .iter()
+            .map(|m| &m.name)
+            .collect::<Vec<_>>()
+    );
+    let names: Vec<_> = struct_decl.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        names[0] != names[1],
+        "constructor overloads must get distinct MIR names, got {names:?}"
+    );
+    for m in &struct_decl.methods {
+        assert!(
+            matches!(m.kind, FunctionKind::Method { .. }),
+            "ctor overloads must emit as methods, got {:?}",
+            m.kind
+        );
+    }
+}
+
+#[test]
 fn convert_program_class_struct_id_shared_with_new_and_struct_literal() {
     use ts_aot_ir_hir::{HirClass, HirField};
     let class_ty = TypeId::from_raw(7777);
@@ -1489,5 +1571,64 @@ fn convert_program_first_class_struct_id_starts_at_one() {
         "first user class in convert_program must be assigned StructId(1), not StructId(0) — \
          StructId(0) is reserved for the placeholder Type::Void / Type::Error path; got {:?}",
         first.id
+    );
+}
+
+#[test]
+fn collect_mutated_globals_marks_only_direct_reassignment() {
+    let g_ty = TypeId::from_raw(0);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("counter"),
+        ty: g_ty,
+        init: Some(HirExpr::Int(0, Span::default())),
+    });
+    prog.push_decl(HirDecl::Global {
+        name: Atom::new_inline("untouched"),
+        ty: g_ty,
+        init: Some(HirExpr::Int(0, Span::default())),
+    });
+    // TLA main is lowered to a `HirDecl::Function` (see skeleton.rs), so scanning
+    // functions covers both TLA-main/top-level statements and ordinary functions.
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("__tla_main"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Assignment {
+                target: Box::new(HirExpr::Global {
+                    name: Atom::new_inline("counter"),
+                    ty: g_ty,
+                    span: Span::default(),
+                }),
+                value: Box::new(HirExpr::Int(1, Span::default())),
+                ty: g_ty,
+                span: Span::default(),
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    let counter = mir
+        .globals()
+        .find(|g| g.name == Atom::new_inline("counter"))
+        .expect("counter global must be present in MIR");
+    let untouched = mir
+        .globals()
+        .find(|g| g.name == Atom::new_inline("untouched"))
+        .expect("untouched global must be present in MIR");
+    assert!(
+        counter.mutable,
+        "direct reassignment `counter = 1` must mark the global mutable"
+    );
+    assert!(
+        !untouched.mutable,
+        "a global that is never directly reassigned must stay immutable"
     );
 }
