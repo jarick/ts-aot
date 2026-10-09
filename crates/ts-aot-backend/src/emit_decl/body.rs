@@ -339,6 +339,10 @@ fn emit_place(
     let EmitEnv { types, .. } = emit_env;
     match place {
         MirPlace::Local { id } => Ok(body_ctx.local_ref(*id)),
+        MirPlace::Global(name) => {
+            let name = ident_from(name);
+            Ok(quote!(#name))
+        }
         MirPlace::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = types
@@ -365,6 +369,10 @@ fn emit_place_base(
     let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirPlaceBase::Global(name) => {
+            let name = ident_from(name);
+            Ok(quote!(#name))
+        }
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = types

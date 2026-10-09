@@ -7,6 +7,7 @@ use ts_aot_core::{
 };
 use ts_aot_ir_hir::{
     HirClass, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, HirSwitchCase, ObjectLiteralField,
+    Visitor, walk_expr, walk_stmt,
 };
 use ts_aot_ir_mir::{
     FunctionEffects, FunctionKind, MirBody, MirDecl, MirExpr, MirFieldDecl, MirFunctionDecl,
@@ -174,6 +175,7 @@ struct ConvertState<'a> {
     ctx: &'a mut PassContext,
     converted_names: HashSet<Atom>,
     seen_sanitized_names: HashSet<String>,
+    mutated_globals: HashSet<Atom>,
 }
 
 impl<'a> ConvertState<'a> {
@@ -245,10 +247,68 @@ pub fn convert_program(
         ctx,
         converted_names: HashSet::new(),
         seen_sanitized_names: HashSet::new(),
+        mutated_globals: collect_mutated_globals(&hir.declarations),
     };
     convert_decls_recursive(&hir.declarations, &mut mir, &mut convert_state, &[]);
     debug_check_name_to_function(&mir, &convert_state.name_to_function);
     mir
+}
+
+/// Collects globals that are directly reassigned somewhere in the program.
+///
+/// Limitation: a global is marked mutable only when the *entire* assignment
+/// target is exactly `HirExpr::Global`. Indirect mutation (`globalArr.push(x)`,
+/// `globalObj.f = 1`, `globalArr[0] = 1`) is intentionally out of scope and is
+/// NOT tracked here; such globals keep their declared mutability.
+struct MutatedGlobalCollector<'a> {
+    names: &'a mut HashSet<Atom>,
+}
+
+impl MutatedGlobalCollector<'_> {
+    fn note_target(&mut self, target: &HirExpr) {
+        if let HirExpr::Global { name, .. } = target {
+            self.names.insert(name.clone());
+        }
+    }
+}
+
+impl Visitor for MutatedGlobalCollector<'_> {
+    fn visit_stmt(&mut self, stmt: &HirStmt) {
+        walk_stmt(self, stmt);
+    }
+    fn visit_expr(&mut self, expr: &HirExpr) {
+        match expr {
+            HirExpr::Assignment { target, .. } | HirExpr::CompoundUpdate { target, .. } => {
+                self.note_target(target);
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+}
+
+fn collect_mutated_globals(decls: &[HirDecl]) -> HashSet<Atom> {
+    let mut names = HashSet::new();
+    fn scan_decls(decls: &[HirDecl], names: &mut HashSet<Atom>) {
+        for decl in decls {
+            match decl {
+                HirDecl::Function(f) => {
+                    let mut v = MutatedGlobalCollector { names };
+                    v.visit_block(&f.body);
+                }
+                HirDecl::Class(c) => {
+                    for m in &c.methods {
+                        let mut v = MutatedGlobalCollector { names };
+                        v.visit_block(&m.body);
+                    }
+                }
+                HirDecl::Namespace { members, .. } => scan_decls(members, names),
+                _ => {}
+            }
+        }
+    }
+    scan_decls(decls, &mut names);
+    names
 }
 
 fn pre_assign_ids_recursive(
@@ -306,17 +366,19 @@ fn pre_assign_ids_recursive(
                     if class_collides {
                         continue;
                     }
-                    let method_key = extend_qualified(&class_key, method.name.as_str());
-                    let method_key_sanitized = sanitize_rust_ident(method_key.as_str());
-                    if state.seen_names.contains(&method_key)
-                        || state.seen_sanitized_names.contains(&method_key_sanitized)
-                    {
-                        report_collision(state.ctx, &method_key);
-                    } else {
-                        state.seen_names.insert(method_key.clone());
-                        state.seen_sanitized_names.insert(method_key_sanitized);
-                        state.name_to_function.insert(method_key, id);
-                    }
+                    let method_base = extend_qualified(&class_key, method.name.as_str());
+                    let (method_key, method_key_sanitized) = match disambiguate_rust_ident(
+                        &method_base,
+                        &state.seen_names,
+                        &state.seen_sanitized_names,
+                        state.ctx,
+                    ) {
+                        Ok(pair) => pair,
+                        Err(()) => continue,
+                    };
+                    state.seen_names.insert(method_key.clone());
+                    state.seen_sanitized_names.insert(method_key_sanitized);
+                    state.name_to_function.insert(method_key, id);
                 }
             }
             HirDecl::Namespace { name, members } => {
@@ -511,7 +573,7 @@ fn convert_decl(
             Some(MirDecl::Global(MirGlobalDecl {
                 name: final_mir_name,
                 ty: *ty,
-                mutable: false,
+                mutable: state.mutated_globals.contains(name),
                 visibility: Visibility::Public,
                 export_name: None,
                 init: mir_init,
@@ -554,10 +616,6 @@ fn convert_struct(
             continue;
         }
         let method_qualified = extend_qualified(&final_class_name, method.name.as_str());
-        if state.converted_names.contains(&method_qualified) {
-            state.skip_function_id();
-            continue;
-        }
         let (final_method_name, final_method_sanitized) = match disambiguate_rust_ident(
             &method_qualified,
             &state.converted_names,

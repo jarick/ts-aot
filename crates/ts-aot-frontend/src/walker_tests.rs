@@ -4843,3 +4843,140 @@ fn i64_or_string_preserved_as_union_not_optional() {
     };
     assert_eq!(variants.len(), 2, "union must preserve both variants");
 }
+
+#[test]
+fn ts_as_expression_produces_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i32): f64 { return x as f64; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`as f64` must not degrade to the unwalked fallback (E0500 + Unit): {:?}",
+        output.diagnostics
+    );
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .all(|d| d.code.as_str() != "E0500"),
+        "`as` casts must not emit E0500 unwalked warnings: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(fn_decl.body.len(), 1);
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { expr, target, .. }),
+    } = &fn_decl.body[0]
+    else {
+        panic!(
+            "`return x as f64;` must lower to Return(TypeAssertion), got {:?}",
+            fn_decl.body[0]
+        );
+    };
+    assert!(
+        matches!(expr.as_ref(), HirExpr::Local { .. }),
+        "TypeAssertion.expr must preserve the inner `x` access",
+    );
+    assert!(
+        matches!(types.resolve(*target), Some(Type::F64)),
+        "TypeAssertion.target must resolve to f64, got {:?}",
+        types.resolve(*target)
+    );
+}
+
+#[test]
+fn ts_type_assertion_angle_bracket_produces_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i32): i64 { return <i64>x; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`<i64>x` must not degrade to the unwalked fallback: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    let HirStmt::Return {
+        value: Some(HirExpr::TypeAssertion { expr, .. }),
+    } = &fn_decl.body[0]
+    else {
+        panic!(
+            "`return <i64>x;` must lower to Return(TypeAssertion), got {:?}",
+            fn_decl.body[0]
+        );
+    };
+    assert!(
+        matches!(expr.as_ref(), HirExpr::Local { .. }),
+        "TypeAssertion.expr must preserve the inner `x` access",
+    );
+}
+
+#[test]
+fn ts_satisfies_expression_is_not_a_type_assertion() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: i64): i64 { return x satisfies i64; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "`x satisfies i64` must not emit errors: {:?}",
+        output.diagnostics
+    );
+    let fn_decl = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f.clone()),
+            _ => None,
+        })
+        .expect("function should be present");
+    assert_eq!(fn_decl.body.len(), 1);
+    assert!(
+        !matches!(
+            fn_decl.body[0],
+            HirStmt::Return {
+                value: Some(HirExpr::TypeAssertion { .. })
+            }
+        ),
+        "`satisfies` checks assignability but must NOT lower to a TypeAssertion cast, got {:?}",
+        fn_decl.body[0]
+    );
+    assert!(
+        matches!(
+            fn_decl.body[0],
+            HirStmt::Return {
+                value: Some(HirExpr::Local { .. })
+            }
+        ),
+        "`x satisfies i64` must walk through to the inner `x` expression, got {:?}",
+        fn_decl.body[0]
+    );
+}
+

@@ -74,6 +74,102 @@ fn resolve_field_id_non_typed_owner_emits_p0011() {
 }
 
 #[test]
+fn resolve_field_id_error_typed_owner_does_not_emit_p0012() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    c.set_field_id_lookup(HashMap::new());
+
+    let owner = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: error_ty,
+        span: Span::default(),
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("foo"),
+        FieldId::from_raw(99),
+        &struct_ids,
+        &types,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(99),
+        "Error-typed owner must fall back to the placeholder field id"
+    );
+    assert!(
+        !cx.diagnostics()
+            .iter()
+            .any(|d| d.severity == ts_aot_core::Severity::Error),
+        "field access on an already-erroneous (Type::Error) owner must not emit any \
+         error-severity diagnostic; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| {
+            d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "P0013"
+        }),
+        "field access on an already-erroneous (Type::Error) owner must emit a visible P0013 \
+         warning instead of silently hiding it; got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn resolve_field_id_field_chain_over_error_typed_base_does_not_emit_p0011() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let struct_ids: HashMap<TypeId, ts_aot_core::StructId> = HashMap::new();
+    c.set_field_id_lookup(HashMap::new());
+
+    let owner = HirExpr::Field {
+        owner: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: error_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("prototype"),
+        ty: error_ty,
+        span: Span::default(),
+    };
+    let resolved = c.resolve_field_id(
+        &owner,
+        &Atom::new_inline("get"),
+        FieldId::from_raw(99),
+        &struct_ids,
+        &types,
+        &mut cx,
+    );
+    assert_eq!(
+        resolved,
+        FieldId::from_raw(99),
+        "field chain over an Error-typed base must fall back to the placeholder field id"
+    );
+    assert!(
+        !cx.diagnostics()
+            .iter()
+            .any(|d| d.severity == ts_aot_core::Severity::Error),
+        "field chain over an already-erroneous (Type::Error) base must not emit any \
+         error-severity diagnostic; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        cx.diagnostics().iter().any(|d| {
+            d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "P0013"
+        }),
+        "field chain over an already-erroneous (Type::Error) base must emit a visible P0013 \
+         warning instead of silently hiding it; got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
 fn resolve_field_id_type_assertion_owner_with_registered_target_resolves_field() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();

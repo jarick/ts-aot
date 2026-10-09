@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Span, StructId, TypeId, TypeTable};
-use ts_aot_ir_hir::HirCallee;
+use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
-use super::globals::is_string_typed_source;
+use super::util::hir_expr_type_id;
 
 impl ExprConverter {
-    pub(in crate::hir_to_mir::convert_expr) fn try_string_len_property_dispatch(
+    pub(in crate::hir_to_mir::convert_expr) fn try_array_len_property_dispatch(
         &mut self,
-        owner: &ts_aot_ir_hir::HirExpr,
+        owner: &HirExpr,
         field_name: &str,
         ty: TypeId,
         out: &mut Vec<MirStmt>,
@@ -21,10 +21,15 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> Option<MirExpr> {
-        if field_name != "length" {
+        if field_name != "len" && field_name != "length" {
             return None;
         }
-        if !is_string_typed_source(owner, types) {
+        let owner_ty = hir_expr_type_id(owner)?;
+        let owner_ty = match types.resolve(owner_ty) {
+            Some(Type::Optional { inner }) => *inner,
+            _ => owner_ty,
+        };
+        if !matches!(types.resolve(owner_ty), Some(Type::Array { .. })) {
             return None;
         }
         let receiver_mir = self.convert_expr(
@@ -38,7 +43,7 @@ impl ExprConverter {
         let dest = self.fresh_local();
         self.push_temp_local(dest, ty);
         out.push(MirStmt::Runtime {
-            op: RuntimeOp::StringLen,
+            op: RuntimeOp::ArrayLen,
             args: vec![receiver_mir],
             dest: Some(dest),
             ty,
@@ -47,10 +52,10 @@ impl ExprConverter {
         Some(MirExpr::Local(dest))
     }
 
-    pub(in crate::hir_to_mir::convert_expr) fn try_string_instance_method_dispatch(
+    pub(in crate::hir_to_mir::convert_expr) fn try_array_instance_method_dispatch(
         &mut self,
         callee: &HirCallee,
-        args: &[ts_aot_ir_hir::HirExpr],
+        args: &[HirExpr],
         ty: TypeId,
         out: &mut Vec<MirStmt>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
@@ -58,39 +63,34 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> Option<MirExpr> {
-        use ts_aot_ir_hir::HirExpr;
         let HirCallee::Indirect(inner) = callee else {
             return None;
         };
         let HirExpr::Field {
-            owner: method_owner,
-            field_name: method_field,
+            owner: receiver,
+            field_name,
             ..
         } = inner.as_ref()
         else {
             return None;
         };
-        if !is_string_typed_source(method_owner, types) {
+        let owner_ty = hir_expr_type_id(receiver)?;
+        let owner_ty = match types.resolve(owner_ty) {
+            Some(Type::Optional { inner }) => *inner,
+            _ => owner_ty,
+        };
+        if !matches!(types.resolve(owner_ty), Some(Type::Array { .. })) {
             return None;
         }
-        let op = match method_field.as_str() {
-            "indexOf" => Some(RuntimeOp::StringIndexOf),
-            "charAt" => Some(RuntimeOp::StringCharAt),
-            _ => None,
-        }?;
-        let (min_arity, max_arity) = match op {
-            RuntimeOp::StringIndexOf => (1, 2),
-            RuntimeOp::StringCharAt => (1, 1),
-            _ => unreachable!("string method arity"),
-        };
-        if args.len() < min_arity || args.len() > max_arity {
+        if field_name.as_str() != "len" && field_name.as_str() != "length" {
+            return None;
+        }
+        if !args.is_empty() {
             ctx.error(
                 "E0406",
                 format!(
-                    "String.prototype.{} requires {}..={} argument(s); got {}",
-                    method_field.as_str(),
-                    min_arity,
-                    max_arity,
+                    "Array.{}() requires no arguments; got {}",
+                    field_name.as_str(),
                     args.len()
                 ),
                 Span::new(0, 0),
@@ -98,31 +98,18 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         let receiver_mir = self.convert_expr(
-            method_owner,
+            receiver,
             out,
             shared_struct_ids,
             shared_next_struct,
             types,
             ctx,
         );
-        let converted_args: Vec<MirExpr> = args
-            .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
-            .collect();
-        let mut full_args = Vec::with_capacity(1 + max_arity);
-        full_args.push(receiver_mir);
-        full_args.extend(converted_args);
-        if op == RuntimeOp::StringIndexOf && full_args.len() == 2 {
-            full_args.push(MirExpr::Int {
-                value: 0,
-                ty: TypeId::from_raw(0),
-            });
-        }
         let dest = self.fresh_local();
         self.push_temp_local(dest, ty);
         out.push(MirStmt::Runtime {
-            op,
-            args: full_args,
+            op: RuntimeOp::ArrayLen,
+            args: vec![receiver_mir],
             dest: Some(dest),
             ty,
             target_ty: None,

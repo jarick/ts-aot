@@ -313,6 +313,7 @@ impl BodyCtx {
 fn place_root_local_id(place: &MirPlace) -> Option<LocalId> {
     match place {
         MirPlace::Local { id } => Some(*id),
+        MirPlace::Global(_) => None,
         MirPlace::Field { base, .. } => place_base_root_local_id(base),
         MirPlace::Index { base, .. } => expr_root_local_id(base),
     }
@@ -321,6 +322,7 @@ fn place_root_local_id(place: &MirPlace) -> Option<LocalId> {
 fn place_base_root_local_id(base: &MirPlaceBase) -> Option<LocalId> {
     match base {
         MirPlaceBase::Local(id) => Some(*id),
+        MirPlaceBase::Global(_) => None,
         MirPlaceBase::Field { base: inner, .. } => place_base_root_local_id(inner),
         MirPlaceBase::Index { base: inner, .. } | MirPlaceBase::Chain { base: inner, .. } => {
             expr_root_local_id(inner)

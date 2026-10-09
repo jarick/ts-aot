@@ -168,6 +168,30 @@ impl SkeletonBuilder {
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => self.walk_arrow(senv, arrow, scope),
+            Expression::TSAsExpression(as_expr) => {
+                let expr = self.walk_expr(senv, &as_expr.expression, scope);
+                let target = self.resolve_ts_type(senv, Some(&as_expr.type_annotation));
+                HirExpr::TypeAssertion {
+                    expr: Box::new(expr),
+                    target,
+                    span: core_span_from_oxc(as_expr.span),
+                }
+            }
+            Expression::TSTypeAssertion(type_assertion) => {
+                let expr = self.walk_expr(senv, &type_assertion.expression, scope);
+                let target = self.resolve_ts_type(senv, Some(&type_assertion.type_annotation));
+                HirExpr::TypeAssertion {
+                    expr: Box::new(expr),
+                    target,
+                    span: core_span_from_oxc(type_assertion.span),
+                }
+            }
+            Expression::TSSatisfiesExpression(satisfies) => {
+                self.walk_expr(senv, &satisfies.expression, scope)
+            }
+            Expression::TSNonNullExpression(non_null) => {
+                self.walk_expr(senv, &non_null.expression, scope)
+            }
             other => {
                 senv.report_unwalked(
                     "expression form is not supported by the body walker",

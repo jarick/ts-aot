@@ -390,3 +390,59 @@ fn string_index_of_call_evaluates_receiver_before_arguments() {
          receiver StringFromCharCode at index {receiver_idx}, StringIndexOf at index {indexof_idx}, out: {out:?}"
     );
 }
+
+#[test]
+fn string_length_property_emits_string_len_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let str_ty = types.intern(&Type::String);
+    let expr = HirExpr::Field {
+        owner: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: str_ty,
+            span: Span::default(),
+        }),
+        field: FieldId::from_raw(0),
+        field_name: Atom::new_inline("length"),
+        ty: i64_ty,
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "P0012"),
+        0,
+        "s.length on a string must not emit P0012, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "s.length must return Local, got {mir:?}"
+    );
+    let len_args = out.iter().find_map(|s| {
+        if let MirStmt::Runtime {
+            op: RuntimeOp::StringLen,
+            args,
+            ..
+        } = s
+        {
+            Some(args)
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        len_args.map(Vec::len),
+        Some(1),
+        "s.length must pass exactly 1 arg (the receiver) to __ts_aot_string_len; got args={len_args:?}, full out: {out:?}"
+    );
+}
