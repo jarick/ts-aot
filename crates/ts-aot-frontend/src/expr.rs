@@ -346,32 +346,20 @@ impl SkeletonBuilder {
                 return HirExpr::Unit(core_span_from_oxc(arrow.span));
             };
             let name = Atom::from(name);
-            if param.type_annotation.is_none() {
-                senv.diagnostics.push(Diagnostic::error(
-                    "E0502",
-                    "arrow function parameters require an explicit type annotation in this PR; \
-                     type inference for closure parameters is not yet implemented",
-                    core_span_from_oxc(arrow.span),
-                ));
-                return HirExpr::Unit(core_span_from_oxc(arrow.span));
-            }
-            let ty = self.resolve_ts_type_from_annotation(senv, param.type_annotation.as_deref());
+            let ty = match param.type_annotation.as_deref() {
+                Some(ann) => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+                None => senv.error_ty(),
+            };
             params.push(HirParam {
                 name: name.clone(),
                 ty,
             });
             param_locals.push((name, ty));
         }
-        if arrow.return_type.is_none() {
-            senv.diagnostics.push(Diagnostic::error(
-                "E0502",
-                "arrow function return type must be annotated in this PR; \
-                 type inference for closure return types is not yet implemented",
-                core_span_from_oxc(arrow.span),
-            ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
-        }
-        let ret_ty = self.resolve_ts_type_from_annotation(senv, arrow.return_type.as_deref());
+        let ret_ty = match arrow.return_type.as_deref() {
+            Some(ann) => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+            None => senv.error_ty(),
+        };
         let mut outer_locals: std::collections::HashSet<String> =
             scope.names().into_iter().collect();
         outer_locals.insert("this".to_owned());
