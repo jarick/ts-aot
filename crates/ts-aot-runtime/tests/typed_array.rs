@@ -47,7 +47,7 @@ fn typed_array_new_zero_length_produces_empty_buffer() {
     let arr = __ts_aot_typed_array_new(0, 0);
     assert_eq!(arr.length(), 0);
     assert_eq!(arr.byte_length(), 0);
-    assert!(arr.raw_buffer().bytes().is_empty());
+    assert_eq!(arr.raw_buffer().bytes(), &[] as &[u8]);
 }
 
 #[test]

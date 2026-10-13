@@ -4,7 +4,7 @@ use ts_aot_runtime::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, Arr
 fn array_buffer_new_with_zero_size_produces_empty_buffer() {
     let buf = __ts_aot_array_buffer_new(0);
     assert_eq!(buf.byte_length(), 0);
-    assert!(buf.bytes().is_empty());
+    assert_eq!(buf.bytes(), &[] as &[u8]);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn array_buffer_slice_begin_after_end_yields_empty() {
     let src = ArrayBufferHandle::from_slice(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
     let slice = __ts_aot_array_buffer_slice(&src, 7, 3);
     assert_eq!(slice.byte_length(), 0);
-    assert!(slice.bytes().is_empty());
+    assert_eq!(slice.bytes(), &[] as &[u8]);
 }
 
 #[test]

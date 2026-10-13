@@ -8,7 +8,7 @@ use oxc_ast::ast::{
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
-use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId};
+use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirParam, HirStmt};
 
 use crate::ops::{
@@ -50,6 +50,31 @@ impl SkeletonEnv<'_> {
                 span,
             }
         }
+    }
+}
+
+/// Narrows a type by removing `null` and `undefined` (used by the non-null
+/// assertion `x!`). Runtime behaviour is unaffected.
+fn strip_nullish(ty: TypeId, types: &mut TypeTable) -> TypeId {
+    match types.resolve(ty).cloned() {
+        Some(Type::Optional { inner }) => inner,
+        Some(Type::Union { variants }) => {
+            let mut kept: Vec<TypeId> = Vec::with_capacity(variants.len());
+            for v in variants {
+                if matches!(types.resolve(v), Some(Type::Null | Type::Void)) {
+                    continue;
+                }
+                if !kept.contains(&v) {
+                    kept.push(v);
+                }
+            }
+            match kept.len() {
+                0 => ty,
+                1 => kept[0],
+                _ => types.intern(&Type::Union { variants: kept }),
+            }
+        }
+        _ => ty,
     }
 }
 
@@ -168,6 +193,52 @@ impl SkeletonBuilder {
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => self.walk_arrow(senv, arrow, scope),
+            Expression::TSAsExpression(as_expr) => {
+                let expr = self.walk_expr(senv, &as_expr.expression, scope);
+                let merged = self.merged_type_params();
+                let target = self.resolve_ts_type_with_params(
+                    senv,
+                    Some(&as_expr.type_annotation),
+                    merged.as_ref(),
+                );
+                HirExpr::TypeAssertion {
+                    expr: Box::new(expr),
+                    target,
+                    span: core_span_from_oxc(as_expr.span),
+                }
+            }
+            Expression::TSTypeAssertion(type_assertion) => {
+                let expr = self.walk_expr(senv, &type_assertion.expression, scope);
+                let merged = self.merged_type_params();
+                let target = self.resolve_ts_type_with_params(
+                    senv,
+                    Some(&type_assertion.type_annotation),
+                    merged.as_ref(),
+                );
+                HirExpr::TypeAssertion {
+                    expr: Box::new(expr),
+                    target,
+                    span: core_span_from_oxc(type_assertion.span),
+                }
+            }
+            Expression::TSSatisfiesExpression(satisfies) => {
+                senv.report_unwalked(
+                    "`satisfies` expressions are not supported by the body walker; the \
+                     assignability constraint is not checked and is dropped (the expression's \
+                     runtime value is unchanged)",
+                    satisfies.span,
+                );
+                self.walk_expr(senv, &satisfies.expression, scope)
+            }
+            Expression::TSNonNullExpression(non_null) => {
+                let expr = self.walk_expr(senv, &non_null.expression, scope);
+                let target = strip_nullish(expr.ty(), senv.types);
+                HirExpr::TypeAssertion {
+                    expr: Box::new(expr),
+                    target,
+                    span: core_span_from_oxc(non_null.span),
+                }
+            }
             other => {
                 senv.report_unwalked(
                     "expression form is not supported by the body walker",

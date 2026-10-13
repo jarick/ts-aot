@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Test262 harness for ts-aot — multi-emit sampler.
 
-For each test in tests/harness-out, runs `ts-aot compile --emit {rust,hir,mir}`
-and records pass/fail. Defaults to a 500-file sample for fast feedback; set
-MAX_TESTS = None in __main__ for the full 53k set.
+For each test in tests/harness-out, runs `ts-aot compile --module --emit {rust,hir,mir}`
+and records pass/fail. Compilation happens in module mode because the extracted
+test262 files contain top-level `let`/`const` bindings with non-constant
+initializers (object-literal namespaces), which the compiler only accepts in
+module mode (see E0300).
+
+A test counts as *pass* if ts-aot exits 0 (no error-severity diagnostics).
+Failures are classified by the FIRST error-severity diagnostic code (warnings
+such as E0500 are printed first by the driver but do not fail compilation, so
+they are not used for classification).
+
+Defaults to a 500-file sample for fast feedback; pass --max 0 for the full set.
 """
 import argparse
 import json
@@ -19,15 +28,17 @@ ROOT = Path(__file__).parent
 HARNESS_DIR = ROOT / "harness-out"
 TS_AOT = ROOT.parent / "target" / "release" / "ts-aot.exe"
 
-DIAG_RE = re.compile(r"\b([EPS]\d{4}):")
+ERROR_RE = re.compile(r"\b([EPS]\d{4}): error:")
 
 
 def compile_one(ts_path: Path, emit: str, timeout_s: int = 15):
     try:
         r = subprocess.run(
-            [str(TS_AOT), "compile", str(ts_path), "--emit", emit],
+            [str(TS_AOT), "compile", str(ts_path), "--module", "--emit", emit],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_s,
         )
         return r.returncode, r.stderr or ""
@@ -35,11 +46,6 @@ def compile_one(ts_path: Path, emit: str, timeout_s: int = 15):
         return -1, "TIMEOUT"
     except Exception as e:
         return -2, f"EXCEPTION: {e}"
-
-
-def primary_code(stderr: str) -> str:
-    codes = DIAG_RE.findall(stderr)
-    return codes[0] if codes else "UNKNOWN"
 
 
 def main():
@@ -87,17 +93,21 @@ def main():
                 slot["other"] += 1
             else:
                 slot["fail"] += 1
-                codes = DIAG_RE.findall(stderr)
+                codes = ERROR_RE.findall(stderr)
                 primary = codes[0] if codes else "UNKNOWN"
                 slot["primary"][primary] += 1
                 for c in codes:
                     slot["all_codes"][c] += 1
                 if len(slot["sample"]) < 8:
                     err_lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+                    first_err = next(
+                        (ln for ln in err_lines if ": error:" in ln),
+                        err_lines[0] if err_lines else "",
+                    )
                     slot["sample"].append({
                         "file": ts.name,
                         "primary": primary,
-                        "first_err": err_lines[0] if err_lines else "",
+                        "first_err": first_err,
                     })
             done += 1
             if done % 500 == 0 or done == total_jobs:

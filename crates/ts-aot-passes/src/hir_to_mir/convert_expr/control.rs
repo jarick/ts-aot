@@ -109,6 +109,24 @@ impl ExprConverter {
         }
     }
 
+    /// Static type of an assignment target. `HirExpr::Global` references are
+    /// untyped in HIR (they carry `Type::Error`), so fall back to the declared
+    /// type of the module-level global so the value temp is typed correctly.
+    fn assignment_target_ty(
+        &self,
+        target: &HirExpr,
+        fallback: TypeId,
+        types: &TypeTable,
+    ) -> TypeId {
+        if let HirExpr::Global { name, ty, .. } = target
+            && matches!(types.resolve(*ty), Some(Type::Error))
+            && let Some(decl_ty) = self.global_decl_type(name)
+        {
+            return decl_ty;
+        }
+        hir_expr_type_id(target).unwrap_or(fallback)
+    }
+
     pub(super) fn convert_assignment(
         &mut self,
         target: &HirExpr,
@@ -121,7 +139,7 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> MirExpr {
         let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
-        let target_ty = hir_expr_type_id(target).unwrap_or(ty);
+        let target_ty = self.assignment_target_ty(target, ty, types);
         if !is_assignment_compatible(value, rhs_ty, target_ty, types, target.span(), ctx) {
             return MirExpr::Unit;
         }
@@ -198,7 +216,7 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        let target_ty = hir_expr_type_id(target).unwrap_or(ty);
+        let target_ty = self.assignment_target_ty(target, ty, types);
         let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
         if !is_assignment_compatible(rhs, rhs_ty, target_ty, types, target.span(), ctx) {
             return MirExpr::Unit;

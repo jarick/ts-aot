@@ -73,5 +73,5 @@ fn object_keys_integer_indices_first_then_string_keys_in_insertion_order() {
 fn object_keys_returns_empty_vec_for_empty_map() {
     let map: IndexMap<JsString, JsString> = IndexMap::new();
     let keys = __ts_aot_object_keys(&map);
-    assert!(keys.is_empty());
+    assert_eq!(keys, [] as [JsString; 0]);
 }

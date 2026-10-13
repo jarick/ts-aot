@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
-use ts_aot_core::{FieldId, FunctionId, LocalId, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_mir::{
     FunctionKind, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirProgram,
     MirStmt, RuntimeOp,
@@ -24,6 +24,7 @@ pub(super) struct EmitCtx {
     struct_names: HashMap<StructId, Ident>,
     function_names: HashMap<FunctionId, Ident>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
+    mutable_globals: HashSet<Atom>,
 }
 
 pub(super) struct EmitEnv<'a> {
@@ -36,6 +37,7 @@ impl EmitCtx {
         let mut struct_names = HashMap::new();
         let mut function_names = HashMap::new();
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
+        let mut mutable_globals = HashSet::new();
         for decl in &program.declarations {
             match decl {
                 MirDecl::Function(f) => {
@@ -50,14 +52,31 @@ impl EmitCtx {
                         function_names.insert(method.id, ident_from(&method.name));
                     }
                 }
-                MirDecl::Global(_) => {}
+                MirDecl::Global(g) => {
+                    if g.mutable {
+                        mutable_globals.insert(g.name.clone());
+                    }
+                }
             }
         }
         Self {
             struct_names,
             function_names,
             struct_fields,
+            mutable_globals,
         }
+    }
+
+    /// Whether the named global is emitted as a `static mut` (and therefore its
+    /// reads and writes require an `unsafe` block in the generated Rust).
+    ///
+    /// Keyed by the global's MIR name (`MirGlobalDecl::name`). References
+    /// (`MirExpr::Global` / `MirPlace::Global`) carry the same name: HIR→MIR
+    /// never renames a global reference, and a global whose sanitized name would
+    /// collide with another declaration is rejected earlier with `E0503`, so the
+    /// decl name and the reference name cannot diverge in a compiled program.
+    pub(super) fn is_mutable_global(&self, name: &Atom) -> bool {
+        self.mutable_globals.contains(name)
     }
 
     pub(super) fn struct_ident(&self, id: StructId) -> Ident {
@@ -313,14 +332,48 @@ impl BodyCtx {
 fn place_root_local_id(place: &MirPlace) -> Option<LocalId> {
     match place {
         MirPlace::Local { id } => Some(*id),
+        MirPlace::Global(_) => None,
         MirPlace::Field { base, .. } => place_base_root_local_id(base),
         MirPlace::Index { base, .. } => expr_root_local_id(base),
+    }
+}
+
+/// Returns the name of the global at the root of a place, if any
+/// (e.g. `global`, `global.field`, `global[i]`).
+pub(super) fn place_root_global_name(place: &MirPlace) -> Option<&Atom> {
+    match place {
+        MirPlace::Global(name) => Some(name),
+        MirPlace::Local { .. } => None,
+        MirPlace::Field { base, .. } => place_base_root_global_name(base),
+        MirPlace::Index { base, .. } => expr_root_global_name(base),
+    }
+}
+
+fn place_base_root_global_name(base: &MirPlaceBase) -> Option<&Atom> {
+    match base {
+        MirPlaceBase::Global(name) => Some(name),
+        MirPlaceBase::Local(_) => None,
+        MirPlaceBase::Field { base: inner, .. } => place_base_root_global_name(inner),
+        MirPlaceBase::Index { base: inner, .. } | MirPlaceBase::Chain { base: inner, .. } => {
+            expr_root_global_name(inner)
+        }
+    }
+}
+
+fn expr_root_global_name(expr: &MirExpr) -> Option<&Atom> {
+    match expr {
+        MirExpr::Global(name) => Some(name),
+        MirExpr::Field { base, .. }
+        | MirExpr::Index { base, .. }
+        | MirExpr::OptionalChain { base, .. } => expr_root_global_name(base),
+        _ => None,
     }
 }
 
 fn place_base_root_local_id(base: &MirPlaceBase) -> Option<LocalId> {
     match base {
         MirPlaceBase::Local(id) => Some(*id),
+        MirPlaceBase::Global(_) => None,
         MirPlaceBase::Field { base: inner, .. } => place_base_root_local_id(inner),
         MirPlaceBase::Index { base: inner, .. } | MirPlaceBase::Chain { base: inner, .. } => {
             expr_root_local_id(inner)

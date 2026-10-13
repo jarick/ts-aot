@@ -8,6 +8,7 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 mod array_buffer_dispatch;
+mod array_instance_dispatch;
 mod bigint_dispatch;
 mod binary;
 mod call;
@@ -66,6 +67,30 @@ impl ExprConverter {
                 ty,
                 ..
             } => {
+                if let Some(mir) = self.try_array_len_property_dispatch(
+                    owner,
+                    field_name.as_str(),
+                    *ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                ) {
+                    return mir;
+                }
+                if let Some(mir) = self.try_string_len_property_dispatch(
+                    owner,
+                    field_name.as_str(),
+                    *ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                ) {
+                    return mir;
+                }
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
                 MirExpr::Field {

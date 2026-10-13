@@ -1349,6 +1349,275 @@ fn global_without_init_emits_default_initializer() {
 }
 
 #[test]
+fn assignment_to_mutable_global_is_wrapped_in_unsafe() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("counter"),
+        ty: i64_ty,
+        mutable: true,
+        visibility: Visibility::Private,
+        export_name: None,
+        init: Some(MirExpr::Int {
+            value: 0,
+            ty: i64_ty,
+        }),
+    }));
+    let mut f = empty_func("bump");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("counter")),
+                value: MirExpr::Int {
+                    value: 1,
+                    ty: i64_ty,
+                },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("static mut counter"),
+        "reassigned global must be a mutable static, got: {s}"
+    );
+    assert!(
+        s.contains("unsafe { counter ="),
+        "assignment to a mutable static must be wrapped in `unsafe`, got: {s}"
+    );
+}
+
+#[test]
+fn read_of_mutable_global_is_wrapped_in_unsafe() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("counter"),
+        ty: i64_ty,
+        mutable: true,
+        visibility: Visibility::Private,
+        export_name: None,
+        init: Some(MirExpr::Int {
+            value: 0,
+            ty: i64_ty,
+        }),
+    }));
+    let mut f = empty_func("get");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Global(Atom::from(
+                "counter",
+            ))))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("unsafe { counter }"),
+        "read of a mutable static must be wrapped in `unsafe`, got: {s}"
+    );
+}
+
+#[test]
+fn read_of_immutable_global_is_not_wrapped_in_unsafe() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("answer"),
+        ty: i64_ty,
+        mutable: false,
+        visibility: Visibility::Private,
+        export_name: None,
+        init: Some(MirExpr::Int {
+            value: 42,
+            ty: i64_ty,
+        }),
+    }));
+    let mut f = empty_func("get");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Global(Atom::from("answer"))))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("unsafe"),
+        "reads of an immutable static must not require `unsafe`, got: {s}"
+    );
+}
+
+#[test]
+fn place_root_global_name_recurses_through_field_index_and_chain() {
+    let root = |p: &MirPlace| super::ctx::place_root_global_name(p).map(|a| a.as_str().to_owned());
+    let field_base = MirPlaceBase::Field {
+        base: Box::new(MirPlaceBase::Global(Atom::from("g"))),
+        field: FieldId::from_raw(0),
+        ty: TypeId::from_raw(0),
+    };
+    let index_base = MirPlaceBase::Index {
+        base: Box::new(MirExpr::Global(Atom::from("g"))),
+        index: Box::new(MirExpr::Int {
+            value: 0,
+            ty: TypeId::from_raw(0),
+        }),
+        ty: TypeId::from_raw(0),
+    };
+    let chain_base = MirPlaceBase::Chain {
+        base: Box::new(MirExpr::OptionalChain {
+            base: Box::new(MirExpr::Global(Atom::from("g"))),
+            ty: TypeId::from_raw(0),
+        }),
+        ty: TypeId::from_raw(0),
+    };
+    for place in [
+        MirPlace::Global(Atom::from("g")),
+        MirPlace::Field {
+            base: Box::new(field_base),
+            field: FieldId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        },
+        MirPlace::Index {
+            base: Box::new(MirExpr::Global(Atom::from("g"))),
+            index: Box::new(MirExpr::Int {
+                value: 0,
+                ty: TypeId::from_raw(0),
+            }),
+            ty: TypeId::from_raw(0),
+        },
+        MirPlace::Field {
+            base: Box::new(index_base),
+            field: FieldId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        },
+        MirPlace::Field {
+            base: Box::new(chain_base),
+            field: FieldId::from_raw(0),
+            ty: TypeId::from_raw(0),
+        },
+    ] {
+        assert_eq!(
+            root(&place),
+            Some("g".to_owned()),
+            "a place rooted at a global (incl. field/index/optional-chain bases) must be \
+             detected so its assignment can be wrapped in `unsafe`, got place: {place:?}"
+        );
+    }
+
+    let local = MirPlace::Local {
+        id: LocalId::from_raw(0),
+    };
+    assert_eq!(
+        root(&local),
+        None,
+        "a local-rooted place must not be reported as global-rooted"
+    );
+}
+
+#[test]
+fn array_len_borrows_plain_array_receiver() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let arr_param = LocalId::from_raw(0);
+    let temp = LocalId::from_raw(1);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let mut f = empty_func("len_of");
+    f.ret = i64_ty;
+    f.params = vec![MirParam {
+        id: arr_param,
+        name: Atom::from("a"),
+        ty: arr_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: temp,
+            name: Atom::from(""),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                args: vec![MirExpr::Local(arr_param)],
+                dest: Some(temp),
+                ty: i64_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("__ts_aot_array_len (& a)"),
+        "an ordinary array local must be passed by reference (slice) to the array-length helper, got: {s}"
+    );
+}
+
+#[test]
+fn array_len_maps_over_optional_chain_receiver() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
+    let opt_i64_ty = types.intern(&Type::Optional { inner: i64_ty });
+    let arr_param = LocalId::from_raw(0);
+    let temp = LocalId::from_raw(1);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let mut f = empty_func("len_opt");
+    f.ret = opt_i64_ty;
+    f.params = vec![MirParam {
+        id: arr_param,
+        name: Atom::from("a"),
+        ty: opt_arr_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: temp,
+            name: Atom::from(""),
+            ty: opt_i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                args: vec![MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(arr_param)),
+                    ty: opt_arr_ty,
+                }],
+                dest: Some(temp),
+                ty: opt_i64_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains(". as_ref () . map (| o | __ts_aot_array_len (o))"),
+        "an optional receiver must map the array-length helper over `as_ref()` (Some-only), got: {s}"
+    );
+    assert!(
+        s.contains("Option < i64 >"),
+        "the optional array-length result must stay optional, got: {s}"
+    );
+}
+
+#[test]
 fn global_with_non_const_init_returns_not_implemented() {
     let err = emit_global(
         &MirGlobalDecl {

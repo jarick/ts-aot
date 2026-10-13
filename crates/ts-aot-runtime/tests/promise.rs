@@ -396,7 +396,7 @@ fn aggregate_error_display_includes_all_reasons() {
 #[test]
 fn aggregate_error_constructs_with_empty_errors() {
     let err = AggregateError::new(Vec::new());
-    assert!(err.errors.is_empty());
+    assert_eq!(err.errors, [] as [String; 0]);
     assert_eq!(format!("{err}"), "AggregateError: []");
 }
 

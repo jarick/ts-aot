@@ -548,7 +548,7 @@ impl SkeletonBuilder {
                 class_types: Some(&self.class_types),
                 type_params,
             };
-            resolve_simple_type(ty, senv.types, &lookup, Some(&mut senv.diagnostics))
+            resolve_simple_type(ty, senv.types, &lookup, Some(&mut *senv.diagnostics))
         } {
             id
         } else {

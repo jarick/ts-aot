@@ -64,7 +64,7 @@ mod tests {
         let table = TypeTable::new();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
-        assert!(table.types().is_empty());
+        assert_eq!(table.types(), &[] as &[Type]);
     }
 
     #[test]

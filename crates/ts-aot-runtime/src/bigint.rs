@@ -200,10 +200,9 @@ impl Div for BigIntHandle {
     fn div(self, rhs: Self) -> Self {
         if rhs.value.is_zero() {
             __ts_aot_throw("RangeError: Division by zero".to_string())
-        } else {
-            Self {
-                value: self.value / rhs.value,
-            }
+        }
+        Self {
+            value: self.value / rhs.value,
         }
     }
 }
@@ -213,10 +212,9 @@ impl Rem for BigIntHandle {
     fn rem(self, rhs: Self) -> Self {
         if rhs.value.is_zero() {
             __ts_aot_throw("RangeError: Division by zero".to_string())
-        } else {
-            Self {
-                value: self.value % rhs.value,
-            }
+        }
+        Self {
+            value: self.value % rhs.value,
         }
     }
 }
@@ -286,18 +284,16 @@ pub fn __ts_aot_bigint_mul(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHand
 pub fn __ts_aot_bigint_div(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHandle {
     if rhs.value().is_zero() {
         __ts_aot_throw("RangeError: Division by zero".to_string())
-    } else {
-        BigIntHandle::from_bigint(lhs.value() / rhs.value())
     }
+    BigIntHandle::from_bigint(lhs.value() / rhs.value())
 }
 
 #[must_use]
 pub fn __ts_aot_bigint_rem(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHandle {
     if rhs.value().is_zero() {
         __ts_aot_throw("RangeError: Division by zero".to_string())
-    } else {
-        BigIntHandle::from_bigint(lhs.value() % rhs.value())
     }
+    BigIntHandle::from_bigint(lhs.value() % rhs.value())
 }
 
 #[must_use]

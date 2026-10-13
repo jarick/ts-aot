@@ -10,6 +10,43 @@ use crate::hir_to_mir::converter::ExprConverter;
 use super::globals::is_string_typed_source;
 
 impl ExprConverter {
+    pub(in crate::hir_to_mir::convert_expr) fn try_string_len_property_dispatch(
+        &mut self,
+        owner: &ts_aot_ir_hir::HirExpr,
+        field_name: &str,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        if field_name != "length" {
+            return None;
+        }
+        if !is_string_typed_source(owner, types) {
+            return None;
+        }
+        let receiver_mir = self.convert_expr(
+            owner,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, ty);
+        out.push(MirStmt::Runtime {
+            op: RuntimeOp::StringLen,
+            args: vec![receiver_mir],
+            dest: Some(dest),
+            ty,
+            target_ty: None,
+        });
+        Some(MirExpr::Local(dest))
+    }
+
     pub(in crate::hir_to_mir::convert_expr) fn try_string_instance_method_dispatch(
         &mut self,
         callee: &HirCallee,

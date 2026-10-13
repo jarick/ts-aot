@@ -27,7 +27,7 @@ fn simple_function_default_emit_produces_rust_source() {
     let rust = out
         .rust_source
         .expect("default emit must produce rust source");
-    assert!(!rust.is_empty());
+    assert_ne!(rust, String::new());
     assert!(out.hir_text.is_none());
     assert!(out.mir_text.is_none());
 }
@@ -223,6 +223,63 @@ fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
 }
 
 #[test]
+fn e2e_array_length_borrows_plain_and_maps_optional_receiver() {
+    for src in [
+        "function f(a: i32[] | null): i64 | null { return a?.length; }",
+        "function f(a: i32[] | null): i64 | null { return a?.len(); }",
+    ] {
+        let out = compile(src);
+        assert!(
+            !out.has_errors(),
+            "`{src}` must compile; got {:?}",
+            out.diagnostics
+        );
+        let rust = out.rust_source.expect("rust_source");
+        assert!(
+            rust.contains(". as_ref () . map (| o | __ts_aot_array_len (o))"),
+            "optional array length must map the helper over `as_ref()` (Some-only) for `{src}`, got:\n{rust}"
+        );
+        assert!(
+            rust.contains("Option < i64 >"),
+            "optional array length result must stay optional for `{src}`, got:\n{rust}"
+        );
+    }
+
+    let out = compile("function f(a: i32[]): i64 { return a.length; }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("__ts_aot_array_len (& a)"),
+        "plain array length must borrow its receiver (slice) for both property and method dispatch, got:\n{rust}"
+    );
+}
+
+#[test]
+fn global_name_collision_is_rejected_before_global_name_can_diverge() {
+    let out = compile(
+        "var counter: i64 = 0; \
+         function counter(): i64 { return 0; } \
+         export function bump(): i64 { counter = counter + 1; return counter; }",
+    );
+    assert!(
+        out.has_errors(),
+        "a global/function name collision must be rejected; got no errors: {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0503"),
+        "collision must surface E0503 so a global's MIR decl name cannot diverge from its \
+         reference name (which would break the mutable-global `unsafe` lookup); got: {combined}"
+    );
+}
+
+#[test]
 fn parse_error_surfaces_as_diagnostic_and_no_artifact() {
     let out = compile("const = 1;");
     assert!(out.has_errors());
@@ -271,7 +328,7 @@ fn driver_output_artifact_returns_requested_field() {
     let rust = out
         .artifact(EmitStage::Rust)
         .expect("artifact(rust) returns the rust_source field");
-    assert!(!rust.is_empty());
+    assert_ne!(rust, String::new());
     assert!(out.artifact(EmitStage::Hir).is_none());
     assert!(out.artifact(EmitStage::Mir).is_none());
 }

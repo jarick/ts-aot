@@ -146,6 +146,7 @@ pub enum MirPlace {
     Local {
         id: LocalId,
     },
+    Global(Atom),
     Field {
         base: Box<MirPlaceBase>,
         field: FieldId,
@@ -161,6 +162,7 @@ pub enum MirPlace {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirPlaceBase {
     Local(LocalId),
+    Global(Atom),
     Field {
         base: Box<MirPlaceBase>,
         field: FieldId,
@@ -181,7 +183,7 @@ impl MirPlace {
     #[must_use]
     pub fn ty(&self) -> Option<TypeId> {
         match self {
-            MirPlace::Local { .. } => None,
+            MirPlace::Local { .. } | MirPlace::Global(_) => None,
             MirPlace::Field { ty, .. } | MirPlace::Index { ty, .. } => Some(*ty),
         }
     }
@@ -191,7 +193,7 @@ impl MirPlaceBase {
     #[must_use]
     pub fn ty(&self) -> Option<TypeId> {
         match self {
-            MirPlaceBase::Local(_) => None,
+            MirPlaceBase::Local(_) | MirPlaceBase::Global(_) => None,
             MirPlaceBase::Field { ty, .. }
             | MirPlaceBase::Index { ty, .. }
             | MirPlaceBase::Chain { ty, .. } => Some(*ty),

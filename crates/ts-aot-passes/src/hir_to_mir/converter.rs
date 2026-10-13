@@ -24,6 +24,7 @@ pub struct ExprConverter {
     pub(super) field_id_lookup: HashMap<(StructId, Atom), FieldId>,
     pub(super) current_call_type_args: Vec<TypeId>,
     pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
+    pub(super) global_types: OnceLock<HashMap<Atom, TypeId>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ impl ExprConverter {
             field_id_lookup: HashMap::new(),
             current_call_type_args: Vec::new(),
             class_index: OnceLock::new(),
+            global_types: OnceLock::new(),
         }
     }
 
@@ -72,6 +74,42 @@ impl ExprConverter {
     pub fn set_program(&mut self, program: Arc<HirProgram>) {
         self.program = program;
         self.class_index = OnceLock::new();
+        self.global_types = OnceLock::new();
+    }
+
+    pub(super) fn global_decl_type(&self, name: &Atom) -> Option<TypeId> {
+        let map = self.global_types.get_or_init(|| {
+            let mut map = HashMap::new();
+            fn scan(
+                decls: &[HirDecl],
+                namespace_path: &mut Vec<String>,
+                map: &mut HashMap<Atom, TypeId>,
+            ) {
+                for decl in decls {
+                    match decl {
+                        HirDecl::Global { name, ty, .. } => {
+                            map.insert(qualified_name(namespace_path, name.as_str()), *ty);
+                        }
+                        HirDecl::Namespace { name, members } => {
+                            namespace_path.push(name.as_str().to_owned());
+                            scan(members, namespace_path, map);
+                            namespace_path.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut namespace_path = Vec::new();
+            scan(&self.program.declarations, &mut namespace_path, &mut map);
+            map
+        });
+        for depth in (0..=self.namespace_path.len()).rev() {
+            let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+            if let Some(&ty) = map.get(&probe) {
+                return Some(ty);
+            }
+        }
+        None
     }
 
     pub(super) fn take_temp_locals(&mut self) -> Vec<MirLocalDecl> {
@@ -225,6 +263,14 @@ impl ExprConverter {
         id
     }
 
+    fn global_owner_ty(&self, name: &Atom, ty: TypeId, types: &TypeTable) -> TypeId {
+        if matches!(types.resolve(ty), Some(Type::Error)) {
+            self.global_decl_type(name).unwrap_or(ty)
+        } else {
+            ty
+        }
+    }
+
     pub(super) fn resolve_field_id(
         &self,
         owner: &HirExpr,
@@ -240,10 +286,11 @@ impl ExprConverter {
                 let class_index = self
                     .class_index
                     .get_or_init(|| build_class_index(declarations));
-                compute_chain_owner_ty(owner, class_index, declarations, types)
+                let resolve_global = |name: &Atom| self.global_decl_type(name);
+                compute_chain_owner_ty(owner, class_index, declarations, types, &resolve_global)
             }
+            HirExpr::Global { name, ty, .. } => Some(self.global_owner_ty(name, *ty, types)),
             HirExpr::Local { ty, .. }
-            | HirExpr::Global { ty, .. }
             | HirExpr::Index { ty, .. }
             | HirExpr::Call { ty, .. }
             | HirExpr::Binary { ty, .. }
@@ -264,6 +311,18 @@ impl ExprConverter {
             Some(Type::Optional { inner }) => *inner,
             _ => t,
         }) else {
+            if owner.has_static_type() && matches!(types.resolve(owner.ty()), Some(Type::Error)) {
+                ctx.warning(
+                    "P0013",
+                    format!(
+                        "field access `{}` on an already-erroneous owner was skipped; \
+                         the owner type failed to resolve earlier",
+                        field_name.as_str()
+                    ),
+                    Span::new(0, 0),
+                );
+                return placeholder;
+            }
             ctx.error(
                 "P0011",
                 format!(
@@ -274,6 +333,18 @@ impl ExprConverter {
             );
             return placeholder;
         };
+        if matches!(types.resolve(ty), Some(Type::Error)) {
+            ctx.warning(
+                "P0013",
+                format!(
+                    "field access `{}` on an already-erroneous owner was skipped; \
+                     the owner type failed to resolve earlier",
+                    field_name.as_str()
+                ),
+                Span::new(0, 0),
+            );
+            return placeholder;
+        }
         let Some(&sid) = self.struct_ids.get(&ty).or_else(|| shared_ids.get(&ty)) else {
             ctx.error(
                 "P0012",
@@ -331,6 +402,7 @@ fn compute_chain_owner_ty(
     class_index: &HashMap<TypeId, ClassPath>,
     declarations: &[HirDecl],
     types: &TypeTable,
+    resolve_global: &dyn Fn(&Atom) -> Option<TypeId>,
 ) -> Option<TypeId> {
     let class_at = |ty: TypeId| -> Option<&HirClass> {
         let path = class_index.get(&ty)?;
@@ -338,7 +410,8 @@ fn compute_chain_owner_ty(
     };
     match expr {
         HirExpr::OptionalChain { base, .. } => {
-            let inner = compute_chain_owner_ty(base, class_index, declarations, types)?;
+            let inner =
+                compute_chain_owner_ty(base, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(inner) {
                 Some(Type::Optional { inner }) => *inner,
                 _ => inner,
@@ -347,7 +420,8 @@ fn compute_chain_owner_ty(
         HirExpr::Field {
             owner, field_name, ..
         } => {
-            let owner_class = compute_chain_owner_ty(owner, class_index, declarations, types)?;
+            let owner_class =
+                compute_chain_owner_ty(owner, class_index, declarations, types, resolve_global)?;
             let owner_class = match types.resolve(owner_class) {
                 Some(Type::Optional { inner }) => *inner,
                 _ => owner_class,
@@ -364,7 +438,8 @@ fn compute_chain_owner_ty(
             })
         }
         HirExpr::Index { owner, .. } => {
-            let owner_ty = compute_chain_owner_ty(owner, class_index, declarations, types)?;
+            let owner_ty =
+                compute_chain_owner_ty(owner, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(owner_ty) {
                 Some(Type::Optional { inner }) => *inner,
                 _ => owner_ty,
@@ -374,13 +449,21 @@ fn compute_chain_owner_ty(
             callee: HirCallee::Indirect(inner),
             ..
         } => {
-            let inner_ty = compute_chain_owner_ty(inner, class_index, declarations, types)?;
+            let inner_ty =
+                compute_chain_owner_ty(inner, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(inner_ty) {
                 Some(Type::Optional { inner }) => *inner,
                 _ => inner_ty,
             })
         }
-        HirExpr::Local { ty, .. } | HirExpr::Global { ty, .. } => Some(*ty),
+        HirExpr::Local { ty, .. } => Some(*ty),
+        HirExpr::Global { name, ty, .. } => {
+            if matches!(types.resolve(*ty), Some(Type::Error)) {
+                Some(resolve_global(name).unwrap_or(*ty))
+            } else {
+                Some(*ty)
+            }
+        }
         _ => Some(expr.ty()),
     }
 }

@@ -8,6 +8,7 @@ use crate::hir_to_mir::converter::ExprConverter;
 pub(super) fn mir_place_to_expr(p: MirPlace) -> MirExpr {
     match p {
         MirPlace::Local { id } => MirExpr::Local(id),
+        MirPlace::Global(name) => MirExpr::Global(name),
         MirPlace::Field { base, field, ty } => MirExpr::Field {
             base: Box::new(mir_place_base_to_expr(*base)),
             field,
@@ -20,6 +21,7 @@ pub(super) fn mir_place_to_expr(p: MirPlace) -> MirExpr {
 pub(super) fn mir_place_base_to_expr(b: MirPlaceBase) -> MirExpr {
     match b {
         MirPlaceBase::Local(id) => MirExpr::Local(id),
+        MirPlaceBase::Global(name) => MirExpr::Global(name),
         MirPlaceBase::Field { base, field, ty } => MirExpr::Field {
             base: Box::new(mir_place_base_to_expr(*base)),
             field,
@@ -40,6 +42,7 @@ where
 {
     match e {
         MirExpr::Local(id) => Some(MirPlace::Local { id }),
+        MirExpr::Global(name) => Some(MirPlace::Global(name)),
         MirExpr::Field { base, field, ty } => {
             let base_pb = mir_expr_to_place_base(*base, ctx, materialize)?;
             Some(MirPlace::Field {
@@ -81,6 +84,7 @@ where
 {
     match e {
         MirExpr::Local(id) => Some(MirPlaceBase::Local(id)),
+        MirExpr::Global(name) => Some(MirPlaceBase::Global(name)),
         MirExpr::Field { base, field, ty } => {
             let inner = materialize_place_base(*base, ctx, materialize)?;
             Some(MirPlaceBase::Field {
@@ -109,6 +113,7 @@ impl ExprConverter {
     ) -> MirPlace {
         match place {
             MirPlace::Local { id } => MirPlace::Local { id },
+            MirPlace::Global(name) => MirPlace::Global(name),
             MirPlace::Field { base, field, ty } => {
                 let new_base = self.ensure_place_base_pure_components(*base, out);
                 MirPlace::Field {
@@ -136,6 +141,7 @@ impl ExprConverter {
     ) -> MirPlaceBase {
         match base {
             MirPlaceBase::Local(id) => MirPlaceBase::Local(id),
+            MirPlaceBase::Global(name) => MirPlaceBase::Global(name),
             MirPlaceBase::Field { base, field, ty } => {
                 let inner = self.ensure_place_base_pure_components(*base, out);
                 MirPlaceBase::Field {
