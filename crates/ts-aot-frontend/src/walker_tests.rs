@@ -5115,3 +5115,88 @@ fn non_null_assertion_removes_null_from_union() {
         "null/undefined must be removed from the narrowed union, got {variants:?}"
     );
 }
+
+#[test]
+fn arrow_without_return_annotation_does_not_emit_e0502() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function h(): void { const g = () => 1; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0502"),
+        "an arrow without a return-type annotation must not be rejected with E0502; got {:?}",
+        output.diagnostics
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Let {
+        init: Some(HirExpr::Closure { ty, .. }),
+        ..
+    } = &f.body[0]
+    else {
+        panic!(
+            "expected `const g = () => 1` to lower to a Closure, got {:?}",
+            f.body[0]
+        );
+    };
+    let Some(Type::Fn { ret, .. }) = types.resolve(*ty) else {
+        panic!(
+            "closure type must be Type::Fn, got {:?}",
+            types.resolve(*ty)
+        );
+    };
+    assert_eq!(
+        types.resolve(*ret),
+        Some(&Type::Error),
+        "a missing return annotation must resolve to Type::Error, got {:?}",
+        types.resolve(*ret)
+    );
+}
+
+#[test]
+fn arrow_without_param_annotation_does_not_emit_e0502() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function h(): void { const g = (x) => x; }",
+        &mut types,
+        false,
+    );
+    assert!(
+        !output
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0502"),
+        "an arrow parameter without a type annotation must not be rejected with E0502; got {:?}",
+        output.diagnostics
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Let {
+        init: Some(HirExpr::Closure { params, .. }),
+        ..
+    } = &f.body[0]
+    else {
+        panic!(
+            "expected `const g = (x) => x` to lower to a Closure, got {:?}",
+            f.body[0]
+        );
+    };
+    assert_eq!(params.len(), 1);
+    assert_eq!(
+        types.resolve(params[0].ty),
+        Some(&Type::Error),
+        "a missing parameter annotation must resolve to Type::Error, got {:?}",
+        types.resolve(params[0].ty)
+    );
+}
