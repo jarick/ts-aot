@@ -979,3 +979,239 @@ fn tla_module_mode_uninitialized_let_remains_module_wide_global() {
         "uninitialized top-level let is a module-wide global; cross-scope references must NOT raise E0513; got diagnostics:\n{combined}"
     );
 }
+
+#[test]
+fn e2e_object_literal_lowers_to_anonymous_struct() {
+    let out = compile("function f(): i64 { const o = { a: 1, b: true }; return o.a; }");
+    assert!(
+        !out.has_errors(),
+        "an object literal must lower (no E0402); got {:?}",
+        out.diagnostics
+    );
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("struct __object_lit_0"),
+        "an object literal must lower to an anonymous struct, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("__object_lit_0 { a : 1 , b : true }"),
+        "the anonymous struct must be built with the literal's fields, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_field_access_is_not_p0013() {
+    let out = compile("function f(): i64 { const o = { a: 7 }; return o.a; }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !combined.contains("P0013"),
+        "field access on a lowered object literal must resolve, not fall back to P0013; got:\n{combined}"
+    );
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("return o . a ;"),
+        "field access must resolve to the struct field, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_type_assertion_uses_target_struct() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } function f(): Point { return { x: 1, y: 2 } as Point; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Point { x : 1 , y : 2 }"),
+        "a type-asserted object literal must lower to the target struct, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "a type-asserted object literal must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_typed_let_uses_target_struct() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } function f(): i64 { let p: Point = { x: 1, y: 2 }; return p.x; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Point { x : 1 , y : 2 }"),
+        "a typed `let` object literal must lower to the target struct, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "a typed `let` object literal must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_assignment_uses_target_struct() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } function f(): i64 { let p: Point = { x: 0, y: 0 }; p = { x: 1, y: 2 }; return p.x; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Point { x : 1 , y : 2 }"),
+        "an assigned object literal must lower to the target struct, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "an assigned object literal must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_return_uses_function_return_type() {
+    let out =
+        compile("class Point { x: i64; y: i64; } function f(): Point { return { x: 1, y: 2 }; }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Point { x : 1 , y : 2 }"),
+        "a returned object literal must lower to the function's return struct, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "a returned object literal must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_call_argument_uses_param_type() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } \
+         function g(p: Point): i64 { return p.x; } \
+         function f(): i64 { return g({ x: 1, y: 2 }); }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("g (Point { x : 1 , y : 2 })"),
+        "an object-literal argument must lower to the parameter's struct, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "an object-literal argument must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_nested_object_literal_field_type_is_inferred() {
+    let out = compile("function f(): i64 { const o = { a: { x: 1 } }; return 0; }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("pub a : __object_lit_"),
+        "the outer struct field must reference the inferred nested struct type, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_typed_nested_object_literal_uses_field_type() {
+    let out = compile(
+        "class Inner { a: i64; } class Outer { inner: Inner; } \
+         function f(): i64 { const o: Outer = { inner: { a: 1 } }; return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Inner { a : 1 }"),
+        "the nested literal must lower to the declared field struct `Inner`, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("__object_lit_"),
+        "the nested literal must not synthesize an anonymous struct, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_missing_target_field_stays_e0402() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } \
+         function f(): i64 { const p: Point = { x: 1 }; return p.x; }",
+    );
+    assert!(
+        out.has_errors(),
+        "a typed object literal missing a struct field must not lower; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0402"),
+        "a field-count mismatch must keep the object literal unsupported (E0402); got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_with_duplicate_keys_stays_e0402() {
+    let out = compile("function f(): i64 { const o = { a: 1, a: 2 }; return 0; }");
+    assert!(
+        out.has_errors(),
+        "duplicate object-literal keys must not lower to an invalid struct; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0402"),
+        "duplicate keys must keep the object literal unsupported (E0402); got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_with_primitive_target_stays_e0402() {
+    let out = compile("function f(): i64 { const n: i64 = { a: 1 }; return n; }");
+    assert!(
+        out.has_errors(),
+        "an object literal targeting a primitive type must not lower; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0402"),
+        "an object literal targeting a primitive type must keep E0402; got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_object_literal_type_assertion_let_sets_local_type() {
+    let out = compile(
+        "class Point { x: i64; y: i64; } \
+         function f(): i64 { const p = { x: 1, y: 2 } as Point; return p.x; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Point { x : 1 , y : 2 }"),
+        "the asserted object literal must lower to the target struct, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("return p . x ;"),
+        "field access must resolve after a type-asserted let, got:\n{rust}"
+    );
+}

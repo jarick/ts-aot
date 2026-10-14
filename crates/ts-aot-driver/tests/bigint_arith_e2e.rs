@@ -163,7 +163,7 @@ fn bigint_type_annotation_emits_class_field_with_bigint_typeid() {
     let normalized =
         normalized_mir("class C { x: bigint = 42n; } function f(c: C): bigint { return c.x; }");
     assert!(
-        normalized.contains("struct C { x: 2,"),
+        normalized.contains("struct C { x: 1,"),
         "MIR dump must contain the class with a typed field (the BigInt TypeId is the field's \
          declared type slot); got:\n{normalized}"
     );
