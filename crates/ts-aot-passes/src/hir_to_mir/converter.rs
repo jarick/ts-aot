@@ -22,6 +22,10 @@ pub struct ExprConverter {
     pub(super) temp_locals: Vec<MirLocalDecl>,
     pub(super) struct_ids: HashMap<TypeId, StructId>,
     pub(super) field_id_lookup: HashMap<(StructId, Atom), FieldId>,
+    pub(super) method_map: HashMap<(StructId, Atom, bool), FunctionId>,
+    pub(super) method_ret: HashMap<(StructId, Atom, bool), TypeId>,
+    pub(super) method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
+    pub(super) class_struct_by_name: HashMap<Atom, StructId>,
     pub(super) current_call_type_args: Vec<TypeId>,
     pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
     pub(super) global_types: OnceLock<HashMap<Atom, TypeId>>,
@@ -57,6 +61,10 @@ impl ExprConverter {
             temp_locals: Vec::new(),
             struct_ids: HashMap::new(),
             field_id_lookup: HashMap::new(),
+            method_map: HashMap::new(),
+            method_ret: HashMap::new(),
+            method_param_tys: HashMap::new(),
+            class_struct_by_name: HashMap::new(),
             current_call_type_args: Vec::new(),
             class_index: OnceLock::new(),
             global_types: OnceLock::new(),
@@ -65,6 +73,21 @@ impl ExprConverter {
 
     pub fn set_field_id_lookup(&mut self, lookup: HashMap<(StructId, Atom), FieldId>) {
         self.field_id_lookup = lookup;
+    }
+
+    pub(crate) fn set_program_tables(
+        &mut self,
+        field_id_lookup: HashMap<(StructId, Atom), FieldId>,
+        method_map: HashMap<(StructId, Atom, bool), FunctionId>,
+        method_ret: HashMap<(StructId, Atom, bool), TypeId>,
+        method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
+        class_struct_by_name: HashMap<Atom, StructId>,
+    ) {
+        self.field_id_lookup = field_id_lookup;
+        self.method_map = method_map;
+        self.method_ret = method_ret;
+        self.method_param_tys = method_param_tys;
+        self.class_struct_by_name = class_struct_by_name;
     }
 
     pub fn set_namespace_path(&mut self, path: &[String]) {
@@ -199,6 +222,24 @@ impl ExprConverter {
         }
     }
 
+    pub(crate) fn reset_for_function(
+        &mut self,
+        function_remap: HashMap<FunctionId, FunctionId>,
+        param_count: u32,
+        namespace_path: &[String],
+    ) {
+        self.local_map.clear();
+        self.local_names.clear();
+        self.function_remap = function_remap;
+        self.namespace_path.clear();
+        self.namespace_path.extend_from_slice(namespace_path);
+        self.next_local = param_count;
+        self.temp_locals.clear();
+        self.struct_ids.clear();
+        self.current_call_type_args.clear();
+        self.seed_params(param_count);
+    }
+
     pub(super) fn resolve_callee(
         &mut self,
         callee: &HirCallee,
@@ -243,6 +284,16 @@ impl ExprConverter {
         }
     }
 
+    pub(super) fn lookup_class_struct_by_name(&self, name: &Atom) -> Option<StructId> {
+        for depth in (0..=self.namespace_path.len()).rev() {
+            let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+            if let Some(&sid) = self.class_struct_by_name.get(&probe) {
+                return Some(sid);
+            }
+        }
+        None
+    }
+
     pub(super) fn lookup_or_alloc_struct_id(
         &mut self,
         ty: TypeId,
@@ -269,6 +320,26 @@ impl ExprConverter {
         } else {
             ty
         }
+    }
+
+    pub(super) fn owner_struct_id(
+        &self,
+        owner: &HirExpr,
+        shared_ids: &HashMap<TypeId, StructId>,
+        types: &TypeTable,
+    ) -> Option<StructId> {
+        let owner_ty = match owner {
+            HirExpr::Global { name, ty, .. } => self.global_owner_ty(name, *ty, types),
+            _ => owner.ty(),
+        };
+        let owner_ty = match types.resolve(owner_ty) {
+            Some(Type::Optional { inner }) => *inner,
+            _ => owner_ty,
+        };
+        self.struct_ids
+            .get(&owner_ty)
+            .or_else(|| shared_ids.get(&owner_ty))
+            .copied()
     }
 
     pub(super) fn resolve_field_id(

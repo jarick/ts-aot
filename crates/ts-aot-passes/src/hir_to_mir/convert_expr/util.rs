@@ -2,8 +2,8 @@ use ts_aot_core::{Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::MirExpr;
 
-pub(super) fn has_potential_side_effects(e: &MirExpr) -> bool {
-    !matches!(
+fn is_effect_free_leaf(e: &MirExpr) -> bool {
+    matches!(
         e,
         MirExpr::Unit
             | MirExpr::Bool(_)
@@ -14,6 +14,21 @@ pub(super) fn has_potential_side_effects(e: &MirExpr) -> bool {
             | MirExpr::Local(_)
             | MirExpr::Global(_)
     )
+}
+
+pub(super) fn has_potential_side_effects(e: &MirExpr) -> bool {
+    !is_effect_free_leaf(e)
+}
+
+pub(super) fn is_pure_place(e: &MirExpr) -> bool {
+    if is_effect_free_leaf(e) {
+        return true;
+    }
+    match e {
+        MirExpr::Field { base, .. } => is_pure_place(base),
+        MirExpr::Index { base, index, .. } => is_pure_place(base) && is_pure_place(index),
+        _ => false,
+    }
 }
 
 pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {

@@ -17,9 +17,8 @@ pub use ts_aot_ir_mir::{
 #[cfg(test)]
 pub(crate) use super::super::is_local_reassigned;
 pub(crate) use super::super::ops::{convert_binop, convert_unaryop};
-pub(crate) use super::super::{
-    ExprConverter, HirBlock, PLACEHOLDER_FUNCTION, convert_function, convert_program,
-};
+pub(crate) use super::super::program::convert_function;
+pub(crate) use super::super::{ExprConverter, HirBlock, PLACEHOLDER_FUNCTION, convert_program};
 pub(crate) use crate::PassContext;
 pub(crate) use crate::lower_classes;
 pub(crate) use crate::lower_generators::GENERATOR_DIAG_DEFERRED_METHOD;
@@ -52,10 +51,6 @@ pub fn empty_types() -> TypeTable {
     TypeTable::new()
 }
 
-pub fn empty_field_id_lookup() -> HashMap<(ts_aot_core::StructId, Atom), FieldId> {
-    HashMap::new()
-}
-
 pub fn run_convert(
     f: &HirFunction,
     id: FunctionId,
@@ -68,11 +63,9 @@ pub fn run_convert(
         id,
         export_name,
         remap,
-        &Arc::new(HashMap::new()),
-        &Arc::new(empty_hir()),
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
-        &empty_field_id_lookup(),
+        &mut ExprConverter::new(),
         &mut empty_types(),
         cx,
         &[],

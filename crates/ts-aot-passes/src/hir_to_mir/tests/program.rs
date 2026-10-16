@@ -200,10 +200,16 @@ fn convert_program_class_methods_use_method_function_kind() {
         fields: Vec::new(),
         methods: vec![HirFunction {
             name: Atom::new_inline("100"),
-            params: vec![HirParam {
-                name: Atom::new_inline("200"),
-                ty: unit_ty(),
-            }],
+            params: vec![
+                HirParam {
+                    name: Atom::new_inline("this"),
+                    ty: unit_ty(),
+                },
+                HirParam {
+                    name: Atom::new_inline("200"),
+                    ty: unit_ty(),
+                },
+            ],
             ret: unit_ty(),
             throws: None,
             body: vec![HirStmt::Return { value: None }],
@@ -498,7 +504,7 @@ fn convert_program_preserves_import_module_path_from_atom() {
 }
 
 #[test]
-fn convert_program_class_method_with_no_params_is_skipped() {
+fn convert_program_class_method_with_no_params_is_static() {
     use ts_aot_ir_hir::HirClass;
     let class_ty = TypeId::from_raw(5555);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
@@ -525,9 +531,11 @@ fn convert_program_class_method_with_no_params_is_skipped() {
     let mut cx = ctx();
     let mir = convert_program(&prog, &mut empty_types(), &mut cx);
     let struct_decl = mir.structs().next().expect("expected one struct");
+    assert_eq!(struct_decl.methods.len(), 1);
     assert!(
-        struct_decl.methods.is_empty(),
-        "method without receiver parameter must be dropped from the struct, not converted to Method {{ self_param: LocalId(0) }}"
+        matches!(struct_decl.methods[0].kind, FunctionKind::Plain),
+        "method without a `this` parameter must be lowered as a static Plain method, got {:?}",
+        struct_decl.methods[0].kind
     );
 }
 

@@ -70,28 +70,20 @@ fn disambiguate_rust_ident(
         };
     }
 }
-pub fn convert_function(
+pub(crate) fn convert_function(
     f: &HirFunction,
     id: FunctionId,
     export_name: Option<String>,
     function_remap: HashMap<FunctionId, FunctionId>,
-    name_to_function: &Arc<HashMap<Atom, FunctionId>>,
-    hir: &Arc<HirProgram>,
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
-    field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
+    converter: &mut ExprConverter,
     types: &mut TypeTable,
     ctx: &mut PassContext,
     namespace_path: &[String],
 ) -> MirFunctionDecl {
     let param_count = f.params.len();
-    let mut converter =
-        ExprConverter::with_function_remap_and_offset(function_remap, param_count as u32);
-    converter.name_to_function = Arc::clone(name_to_function);
-    converter.set_program(Arc::clone(hir));
-    converter.set_field_id_lookup(field_id_lookup.clone());
-    converter.set_namespace_path(namespace_path);
-    converter.seed_params(param_count as u32);
+    converter.reset_for_function(function_remap, param_count as u32, namespace_path);
     let (block, locals) = converter.convert_block_with_shared_struct_ids(
         &f.body,
         struct_id_map,
@@ -150,6 +142,10 @@ struct PreAssignState<'a> {
     pre_id: u32,
     name_to_function: HashMap<Atom, FunctionId>,
     struct_id_map: HashMap<TypeId, StructId>,
+    method_map: HashMap<(StructId, Atom, bool), FunctionId>,
+    method_ret: HashMap<(StructId, Atom, bool), TypeId>,
+    method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
+    class_struct_by_name: HashMap<Atom, StructId>,
     next_struct_id: u32,
     seen_names: HashSet<Atom>,
     seen_sanitized_names: HashSet<String>,
@@ -167,10 +163,9 @@ impl<'a> PreAssignState<'a> {
 struct ConvertState<'a> {
     next_function_id: u32,
     name_to_function: Arc<HashMap<Atom, FunctionId>>,
-    hir: Arc<HirProgram>,
     struct_id_map: HashMap<TypeId, StructId>,
     next_struct_id: u32,
-    field_id_lookup: HashMap<(StructId, Atom), FieldId>,
+    converter: ExprConverter,
     types: &'a mut TypeTable,
     ctx: &'a mut PassContext,
     converted_names: HashSet<Atom>,
@@ -215,6 +210,10 @@ pub fn convert_program(
         pre_id: 0,
         name_to_function: HashMap::new(),
         struct_id_map: HashMap::new(),
+        method_map: HashMap::new(),
+        method_ret: HashMap::new(),
+        method_param_tys: HashMap::new(),
+        class_struct_by_name: HashMap::new(),
         next_struct_id: hir.next_class_struct_id.max(1),
         seen_names: HashSet::new(),
         seen_sanitized_names: HashSet::new(),
@@ -231,18 +230,32 @@ pub fn convert_program(
         pre_id: _,
         name_to_function,
         struct_id_map,
+        method_map,
+        method_ret,
+        method_param_tys,
+        class_struct_by_name,
         next_struct_id,
         seen_names: _,
         seen_sanitized_names: _,
         ctx,
     } = pre_state;
+    let name_to_function = Arc::new(name_to_function);
+    let mut converter = ExprConverter::with_function_remap_and_offset(HashMap::new(), 0);
+    converter.name_to_function = Arc::clone(&name_to_function);
+    converter.set_program(Arc::new(HirProgram::clone(hir)));
+    converter.set_program_tables(
+        field_id_lookup,
+        method_map,
+        method_ret,
+        method_param_tys,
+        class_struct_by_name,
+    );
     let mut convert_state = ConvertState {
         next_function_id: 0,
-        name_to_function: Arc::new(name_to_function),
-        hir: Arc::new(HirProgram::clone(hir)),
+        name_to_function,
         struct_id_map,
         next_struct_id,
-        field_id_lookup,
+        converter,
         types,
         ctx,
         converted_names: HashSet::new(),
@@ -254,12 +267,6 @@ pub fn convert_program(
     mir
 }
 
-/// Collects globals that are directly reassigned somewhere in the program.
-///
-/// Limitation: a global is marked mutable only when the *entire* assignment
-/// target is exactly `HirExpr::Global`. Indirect mutation (`globalArr.push(x)`,
-/// `globalObj.f = 1`, `globalArr[0] = 1`) is intentionally out of scope and is
-/// NOT tracked here; such globals keep their declared mutability.
 struct MutatedGlobalCollector<'a> {
     names: &'a mut HashSet<Atom>,
 }
@@ -358,10 +365,8 @@ fn pre_assign_ids_recursive(
                     state.seen_names.insert(class_key.clone());
                     state.seen_sanitized_names.insert(class_key_sanitized);
                 }
+                state.class_struct_by_name.insert(class_key.clone(), sid);
                 for method in &c.methods {
-                    if method.params.is_empty() {
-                        continue;
-                    }
                     let id = state.alloc_function_id();
                     if class_collides {
                         continue;
@@ -378,7 +383,21 @@ fn pre_assign_ids_recursive(
                     };
                     state.seen_names.insert(method_key.clone());
                     state.seen_sanitized_names.insert(method_key_sanitized);
+                    let is_static = method
+                        .params
+                        .first()
+                        .is_none_or(|p| p.name.as_str() != "this");
                     state.name_to_function.insert(method_key, id);
+                    state
+                        .method_map
+                        .insert((sid, method.name.clone(), is_static), id);
+                    state
+                        .method_ret
+                        .insert((sid, method.name.clone(), is_static), method.ret);
+                    state.method_param_tys.insert(
+                        (sid, method.name.clone(), is_static),
+                        method.params.iter().map(|p| p.ty).collect(),
+                    );
                 }
             }
             HirDecl::Namespace { name, members } => {
@@ -516,11 +535,9 @@ fn convert_decl(
                 id,
                 export_name,
                 HashMap::new(),
-                &state.name_to_function,
-                &state.hir,
                 &mut state.struct_id_map,
                 &mut state.next_struct_id,
-                &state.field_id_lookup,
+                &mut state.converter,
                 state.types,
                 state.ctx,
                 namespace_path,
@@ -583,10 +600,7 @@ fn convert_decl(
     }
 }
 fn skip_class_method_ids(c: &HirClass, state: &mut ConvertState) {
-    for method in &c.methods {
-        if method.params.is_empty() {
-            continue;
-        }
+    for _ in &c.methods {
         state.skip_function_id();
     }
 }
@@ -612,10 +626,16 @@ fn convert_struct(
         .collect();
     let mut methods = Vec::new();
     for method in &c.methods {
-        if method.params.is_empty() {
-            continue;
-        }
-        let method_qualified = extend_qualified(&final_class_name, method.name.as_str());
+        let name = method.name.as_str();
+        let emitted_leaf = name
+            .strip_prefix("__get_")
+            .map(|prop| format!("get_{prop}"))
+            .or_else(|| {
+                name.strip_prefix("__set_")
+                    .map(|prop| format!("set_{prop}"))
+            })
+            .unwrap_or_else(|| name.to_owned());
+        let method_qualified = extend_qualified(&final_class_name, &emitted_leaf);
         let (final_method_name, final_method_sanitized) = match disambiguate_rust_ident(
             &method_qualified,
             &state.converted_names,
@@ -644,18 +664,26 @@ fn convert_struct(
             id,
             export_name,
             method_remap,
-            &state.name_to_function,
-            &state.hir,
             &mut state.struct_id_map,
             &mut state.next_struct_id,
-            &state.field_id_lookup,
+            &mut state.converter,
             state.types,
             state.ctx,
             namespace_path,
         );
         let mut m = m;
         m.name = final_method_name;
-        m.kind = if method.is_generator {
+        let is_static = method
+            .params
+            .first()
+            .is_none_or(|p| p.name.as_str() != "this");
+        m.kind = if is_static {
+            if method.is_generator {
+                FunctionKind::Generator
+            } else {
+                FunctionKind::Plain
+            }
+        } else if method.is_generator {
             FunctionKind::GeneratorMethod {
                 owner: sid,
                 self_param,

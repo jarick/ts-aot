@@ -18,6 +18,5 @@ ts-aot-frontend = { path = "../ts-aot-frontend" }
 
 [lints.clippy]
 match_same_arms = "allow"
-too_many_arguments = "allow"
 only_used_in_recursion = "allow"
 module_name_repetitions = "allow"

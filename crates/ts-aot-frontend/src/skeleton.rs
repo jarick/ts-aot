@@ -8,17 +8,15 @@ use ts_aot_ir_hir::{
     HirDecl, HirExport, HirExpr, HirFunction, HirParam, HirProgram, HirStmt, Visitor, walk_expr,
 };
 
-use crate::decl::is_const_initializer_ast;
 use crate::scope::BodyScope;
 use crate::type_resolver::TypeParamMap;
-use crate::util::{binding_pattern_name, core_span_from_oxc};
+use crate::util::core_span_from_oxc;
 
 const ALIAS_CYCLE_CODE: &str = "E0401";
 const UNSUPPORTED_BODY_CODE: &str = "E0500";
 const RESERVED_NAME_MAIN_CODE: &str = "E0510";
 const RESERVED_NAME_TLA_MAIN_CODE: &str = "E0511";
 const RESERVED_NAME_TLA_GENERATED_CODE: &str = "E0512";
-pub(crate) const TLA_ONLY_BINDING_CODE: &str = "E0513";
 
 fn reserved_name_reason(name: &str) -> Option<(&'static str, &'static str)> {
     if name == "main" {
@@ -87,6 +85,7 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) class_types: HashMap<String, TypeId>,
     pub(crate) is_generator_stack: Vec<bool>,
     pub(crate) type_param_stack: Vec<TypeParamMap>,
+    pub(crate) in_static_method: bool,
     pub(crate) module: bool,
     pub(crate) tla_main_body: Vec<TlaMainItem>,
     pub(crate) tla_main_name: Atom,
@@ -99,7 +98,6 @@ pub(crate) struct SkeletonEnv<'b> {
     pub(crate) diagnostics: &'b mut DiagnosticBag,
     pub(crate) program: &'b mut HirProgram,
     pub(crate) next_destructured_id: Cell<u32>,
-    pub(crate) tla_only_bindings: HashSet<String>,
 }
 
 impl SkeletonEnv<'_> {
@@ -128,7 +126,6 @@ impl SkeletonEnv<'_> {
 }
 
 pub(crate) enum TlaMainItem {
-    Let(HirStmt),
     Expr(HirExpr),
 }
 
@@ -149,6 +146,7 @@ impl SkeletonBuilder {
             class_types: HashMap::new(),
             is_generator_stack: Vec::new(),
             type_param_stack: Vec::new(),
+            in_static_method: false,
             module,
             tla_main_body: Vec::new(),
             tla_main_name,
@@ -160,7 +158,6 @@ impl SkeletonBuilder {
     pub(crate) fn build(mut self, senv: &mut SkeletonEnv<'_>, program: &Program<'_>) {
         self.pre_register_class_types(senv, program);
         self.pre_resolve_all_aliases(senv, program);
-        self.pre_collect_tla_only_bindings(senv, program);
         for stmt in &program.body {
             self.walk_top_level(senv, stmt);
         }
@@ -198,34 +195,6 @@ impl SkeletonBuilder {
                     self.next_class_struct_id = self.next_class_struct_id.saturating_add(1);
                     let ty = senv.types.intern(&Type::Struct { id: struct_id });
                     self.class_types.insert(name, ty);
-                }
-            }
-        }
-    }
-
-    fn pre_collect_tla_only_bindings(&mut self, senv: &mut SkeletonEnv, program: &Program<'_>) {
-        if !self.module {
-            return;
-        }
-        for stmt in &program.body {
-            let decl = if let Some(d) = stmt.as_declaration() {
-                Some(d)
-            } else if let Some(m) = stmt.as_module_declaration()
-                && let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
-            {
-                e.declaration.as_ref()
-            } else {
-                None
-            };
-            let Some(Declaration::VariableDeclaration(v)) = decl else {
-                continue;
-            };
-            for declarator in &v.declarations {
-                if let Some(ident) = binding_pattern_name(&declarator.id)
-                    && let Some(init) = declarator.init.as_ref()
-                    && !is_const_initializer_ast(init)
-                {
-                    senv.tla_only_bindings.insert(ident.to_string());
                 }
             }
         }
@@ -270,10 +239,8 @@ impl SkeletonBuilder {
         let unit_ty = senv.types.intern(&Type::Void);
         let mut body: Vec<HirStmt> = Vec::with_capacity(items.len());
         for item in items {
-            match item {
-                TlaMainItem::Let(stmt) => body.push(stmt),
-                TlaMainItem::Expr(expr) => body.push(HirStmt::Expr { expr }),
-            }
+            let TlaMainItem::Expr(expr) = item;
+            body.push(HirStmt::Expr { expr });
         }
         if body.is_empty() {
             return;

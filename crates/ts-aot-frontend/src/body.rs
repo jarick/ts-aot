@@ -12,10 +12,15 @@ impl SkeletonBuilder {
         body: Option<&FunctionBody<'_>>,
         params: &[HirParam],
         is_generator: bool,
+        inherit_this_scope: bool,
     ) -> Vec<HirStmt> {
         let Some(body) = body else {
             return Vec::new();
         };
+        let saved_static = self.in_static_method;
+        if !inherit_this_scope {
+            self.in_static_method = false;
+        }
         self.is_generator_stack.push(is_generator);
         let param_count = u32::try_from(params.len()).unwrap_or(u32::MAX);
         let mut scope = BodyScope::new(param_count);
@@ -25,6 +30,7 @@ impl SkeletonBuilder {
         }
         let result = self.walk_block_with_predeclare(senv, &body.statements, &mut scope);
         self.is_generator_stack.pop();
+        self.in_static_method = saved_static;
         result
     }
 
