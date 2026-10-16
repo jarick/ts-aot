@@ -6,6 +6,7 @@ mod lower_classes;
 mod lower_closures;
 mod lower_enums;
 mod lower_generators;
+mod lower_object_literals;
 mod lower_result;
 mod monomorphize;
 mod source_map;
@@ -20,6 +21,7 @@ pub use lower_enums::lower_enums;
 pub use lower_generators::{
     GENERATOR_DIAG_DEFERRED_METHOD, LowerGeneratorsStats, lower_generators,
 };
+pub use lower_object_literals::lower_object_literals;
 pub use lower_result::lower_result;
 pub use monomorphize::{MonomorphizeStats, monomorphize};
 pub use source_map::{LineCol, SourceMap};

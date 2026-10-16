@@ -3,7 +3,7 @@ use ts_aot_core::{Diagnostic, Span, TypeTable};
 use ts_aot_frontend::FrontendPass;
 use ts_aot_passes::{
     PassContext, convert_program, lower_async, lower_classes, lower_closures, lower_enums,
-    lower_generators, lower_result, monomorphize,
+    lower_generators, lower_object_literals, lower_result, monomorphize,
 };
 
 use crate::{CompileOptions, DriverOutput, EmitStage};
@@ -21,6 +21,7 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
     let mut hir = frontend.program;
 
     lower_enums(&mut hir, &mut types, &mut ctx);
+    lower_object_literals(&mut hir, &mut types, &mut ctx);
     lower_classes(&mut hir, &mut types, &mut ctx);
     monomorphize(&mut hir, &mut types, &mut ctx);
     lower_closures(&mut hir, &mut types, &mut ctx);

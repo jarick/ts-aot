@@ -95,7 +95,7 @@ impl SkeletonBuilder {
                     .push_decl(ts_aot_ir_hir::HirDecl::Function(hir_fn));
             }
             Declaration::ClassDeclaration(c) => {
-                let hir_class = self.build_class(senv, c, false);
+                let hir_class = self.build_class(senv, c, true);
                 senv.program
                     .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
             }
@@ -250,16 +250,20 @@ impl SkeletonBuilder {
         &mut self,
         senv: &mut SkeletonEnv,
         class: &Class<'_>,
-        _is_exported: bool,
+        reuse: bool,
     ) -> HirClass {
         let name = class
             .id
             .as_ref()
             .map_or_else(|| Atom::from(""), |id| Atom::from(id.name.as_str()));
 
-        let struct_id = ts_aot_core::StructId::from_raw(self.next_class_struct_id);
-        self.next_class_struct_id = self.next_class_struct_id.saturating_add(1);
-        let ty = senv.types.intern(&Type::Struct { id: struct_id });
+        let ty = if reuse && let Some(pre_ty) = self.class_types.get(name.as_str()).copied() {
+            pre_ty
+        } else {
+            let struct_id = ts_aot_core::StructId::from_raw(self.next_class_struct_id);
+            self.next_class_struct_id = self.next_class_struct_id.saturating_add(1);
+            senv.types.intern(&Type::Struct { id: struct_id })
+        };
         let prior_binding = self.class_types.insert(name.as_str().to_owned(), ty);
 
         let (class_type_param_ids, class_type_param_map) = build_type_param_context(
@@ -321,7 +325,7 @@ impl SkeletonBuilder {
         HirClass {
             name,
             ty,
-            pre_pass_ty: prior_binding,
+            pre_pass_ty: None,
             fields,
             methods,
             extends,

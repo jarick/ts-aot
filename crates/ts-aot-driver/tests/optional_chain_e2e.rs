@@ -151,7 +151,7 @@ fn e2e_short_circuit_chain_wraps_each_question_dot_in_optional_chain() {
     assert_node_with_op(
         &normalized,
         "opt",
-        "opt(local(0)):5.0:7",
+        "opt(local(0)):2.0:5",
         ".1",
         "a?.b?.d outer: second OptionalChain wraps the inner OptionalChain (with its `.0` field \
          access) directly, and `.1` (d) field access is applied to the outer OptionalChain result",
@@ -176,7 +176,7 @@ fn e2e_optional_method_call_wraps_owner_then_uses_indirect_call() {
     assert_node_with_op(
         &normalized,
         "indirect_call",
-        "opt(local(0)):6.0:7",
+        "opt(local(0)):5.0:6",
         "()",
         "c?.m(): indirect_call's argument is the OptionalChain with its `.0` (m) field access, \
          and the call `()` is applied directly to indirect_call's result",
