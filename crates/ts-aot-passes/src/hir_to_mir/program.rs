@@ -80,6 +80,9 @@ pub fn convert_function(
     struct_id_map: &mut HashMap<TypeId, StructId>,
     next_struct_id: &mut u32,
     field_id_lookup: &HashMap<(StructId, Atom), FieldId>,
+    method_map: &HashMap<(StructId, Atom, bool), FunctionId>,
+    method_ret: &HashMap<(StructId, Atom, bool), TypeId>,
+    class_struct_by_name: &HashMap<Atom, StructId>,
     types: &mut TypeTable,
     ctx: &mut PassContext,
     namespace_path: &[String],
@@ -90,6 +93,9 @@ pub fn convert_function(
     converter.name_to_function = Arc::clone(name_to_function);
     converter.set_program(Arc::clone(hir));
     converter.set_field_id_lookup(field_id_lookup.clone());
+    converter.method_map = method_map.clone();
+    converter.method_ret = method_ret.clone();
+    converter.class_struct_by_name = class_struct_by_name.clone();
     converter.set_namespace_path(namespace_path);
     converter.seed_params(param_count as u32);
     let (block, locals) = converter.convert_block_with_shared_struct_ids(
@@ -150,6 +156,9 @@ struct PreAssignState<'a> {
     pre_id: u32,
     name_to_function: HashMap<Atom, FunctionId>,
     struct_id_map: HashMap<TypeId, StructId>,
+    method_map: HashMap<(StructId, Atom, bool), FunctionId>,
+    method_ret: HashMap<(StructId, Atom, bool), TypeId>,
+    class_struct_by_name: HashMap<Atom, StructId>,
     next_struct_id: u32,
     seen_names: HashSet<Atom>,
     seen_sanitized_names: HashSet<String>,
@@ -169,6 +178,9 @@ struct ConvertState<'a> {
     name_to_function: Arc<HashMap<Atom, FunctionId>>,
     hir: Arc<HirProgram>,
     struct_id_map: HashMap<TypeId, StructId>,
+    method_map: HashMap<(StructId, Atom, bool), FunctionId>,
+    method_ret: HashMap<(StructId, Atom, bool), TypeId>,
+    class_struct_by_name: HashMap<Atom, StructId>,
     next_struct_id: u32,
     field_id_lookup: HashMap<(StructId, Atom), FieldId>,
     types: &'a mut TypeTable,
@@ -215,6 +227,9 @@ pub fn convert_program(
         pre_id: 0,
         name_to_function: HashMap::new(),
         struct_id_map: HashMap::new(),
+        method_map: HashMap::new(),
+        method_ret: HashMap::new(),
+        class_struct_by_name: HashMap::new(),
         next_struct_id: hir.next_class_struct_id.max(1),
         seen_names: HashSet::new(),
         seen_sanitized_names: HashSet::new(),
@@ -231,6 +246,9 @@ pub fn convert_program(
         pre_id: _,
         name_to_function,
         struct_id_map,
+        method_map,
+        method_ret,
+        class_struct_by_name,
         next_struct_id,
         seen_names: _,
         seen_sanitized_names: _,
@@ -241,6 +259,9 @@ pub fn convert_program(
         name_to_function: Arc::new(name_to_function),
         hir: Arc::new(HirProgram::clone(hir)),
         struct_id_map,
+        method_map,
+        method_ret,
+        class_struct_by_name,
         next_struct_id,
         field_id_lookup,
         types,
@@ -358,10 +379,8 @@ fn pre_assign_ids_recursive(
                     state.seen_names.insert(class_key.clone());
                     state.seen_sanitized_names.insert(class_key_sanitized);
                 }
+                state.class_struct_by_name.insert(class_key.clone(), sid);
                 for method in &c.methods {
-                    if method.params.is_empty() {
-                        continue;
-                    }
                     let id = state.alloc_function_id();
                     if class_collides {
                         continue;
@@ -378,7 +397,17 @@ fn pre_assign_ids_recursive(
                     };
                     state.seen_names.insert(method_key.clone());
                     state.seen_sanitized_names.insert(method_key_sanitized);
+                    let is_static = method
+                        .params
+                        .first()
+                        .is_none_or(|p| p.name.as_str() != "this");
                     state.name_to_function.insert(method_key, id);
+                    state
+                        .method_map
+                        .insert((sid, method.name.clone(), is_static), id);
+                    state
+                        .method_ret
+                        .insert((sid, method.name.clone(), is_static), method.ret);
                 }
             }
             HirDecl::Namespace { name, members } => {
@@ -521,6 +550,9 @@ fn convert_decl(
                 &mut state.struct_id_map,
                 &mut state.next_struct_id,
                 &state.field_id_lookup,
+                &state.method_map,
+                &state.method_ret,
+                &state.class_struct_by_name,
                 state.types,
                 state.ctx,
                 namespace_path,
@@ -583,10 +615,7 @@ fn convert_decl(
     }
 }
 fn skip_class_method_ids(c: &HirClass, state: &mut ConvertState) {
-    for method in &c.methods {
-        if method.params.is_empty() {
-            continue;
-        }
+    for _ in &c.methods {
         state.skip_function_id();
     }
 }
@@ -612,10 +641,16 @@ fn convert_struct(
         .collect();
     let mut methods = Vec::new();
     for method in &c.methods {
-        if method.params.is_empty() {
-            continue;
-        }
-        let method_qualified = extend_qualified(&final_class_name, method.name.as_str());
+        let name = method.name.as_str();
+        let emitted_leaf = name
+            .strip_prefix("__get_")
+            .map(|prop| format!("get_{prop}"))
+            .or_else(|| {
+                name.strip_prefix("__set_")
+                    .map(|prop| format!("set_{prop}"))
+            })
+            .unwrap_or_else(|| name.to_owned());
+        let method_qualified = extend_qualified(&final_class_name, &emitted_leaf);
         let (final_method_name, final_method_sanitized) = match disambiguate_rust_ident(
             &method_qualified,
             &state.converted_names,
@@ -649,13 +684,26 @@ fn convert_struct(
             &mut state.struct_id_map,
             &mut state.next_struct_id,
             &state.field_id_lookup,
+            &state.method_map,
+            &state.method_ret,
+            &state.class_struct_by_name,
             state.types,
             state.ctx,
             namespace_path,
         );
         let mut m = m;
         m.name = final_method_name;
-        m.kind = if method.is_generator {
+        let is_static = method
+            .params
+            .first()
+            .is_none_or(|p| p.name.as_str() != "this");
+        m.kind = if is_static {
+            if method.is_generator {
+                FunctionKind::Generator
+            } else {
+                FunctionKind::Plain
+            }
+        } else if method.is_generator {
             FunctionKind::GeneratorMethod {
                 owner: sid,
                 self_param,

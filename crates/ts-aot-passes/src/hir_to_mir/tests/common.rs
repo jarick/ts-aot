@@ -56,6 +56,18 @@ pub fn empty_field_id_lookup() -> HashMap<(ts_aot_core::StructId, Atom), FieldId
     HashMap::new()
 }
 
+pub fn empty_method_map() -> HashMap<(ts_aot_core::StructId, Atom, bool), FunctionId> {
+    HashMap::new()
+}
+
+pub fn empty_method_ret() -> HashMap<(ts_aot_core::StructId, Atom, bool), ts_aot_core::TypeId> {
+    HashMap::new()
+}
+
+pub fn empty_class_struct_by_name() -> HashMap<Atom, ts_aot_core::StructId> {
+    HashMap::new()
+}
+
 pub fn run_convert(
     f: &HirFunction,
     id: FunctionId,
@@ -73,6 +85,9 @@ pub fn run_convert(
         &mut empty_struct_ids(),
         &mut empty_next_struct(),
         &empty_field_id_lookup(),
+        &empty_method_map(),
+        &empty_method_ret(),
+        &empty_class_struct_by_name(),
         &mut empty_types(),
         cx,
         &[],

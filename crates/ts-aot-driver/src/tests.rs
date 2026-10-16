@@ -661,15 +661,15 @@ fn tla_module_mode_preserves_source_order_in_tla_main_body() {
     let first = main_body
         .find("1 + 1")
         .expect("first inlined expr `1 + 1` must appear in __tla_main body");
-    let let_x = main_body
-        .find("let x")
-        .expect("let x must appear in __tla_main body");
+    let assign_x = main_body
+        .find("x =")
+        .expect("x assignment must appear in __tla_main body");
     let second = main_body
         .find("2 + 2")
         .expect("second inlined expr `2 + 2` must appear in __tla_main body");
     assert!(
-        first < let_x && let_x < second,
-        "source order must be preserved in __tla_main body: first ({first}) < let_x ({let_x}) < second ({second}); got __tla_main body:\n{main_body}"
+        first < assign_x && assign_x < second,
+        "source order must be preserved in __tla_main body: first ({first}) < assign_x ({assign_x}) < second ({second}); got __tla_main body:\n{main_body}"
     );
 }
 
@@ -710,16 +710,19 @@ fn tla_module_mode_top_level_expr_can_reference_runtime_let_binding() {
         }
     }
     let main_body = &rust[main_body_start..main_body_end];
-    let let_x = main_body
-        .find("let x")
-        .expect("let x must appear in __tla_main body");
-    let x_ref = main_body
-        .find("x ;")
-        .or_else(|| main_body.find("x;"))
-        .expect("inlined expr `x;` must appear in __tla_main body (after let x)");
     assert!(
-        let_x < x_ref,
-        "let x must be emitted before the inlined `x;` reference (shared scope: runtime binding must be in scope); got body:\n{main_body}"
+        rust.contains("static mut x"),
+        "runtime top-level `let x` must become a module-level mutable global; got rust:\n{rust}"
+    );
+    let assign_x = main_body
+        .find("x =")
+        .expect("x assignment must appear in __tla_main body");
+    let x_ref = main_body
+        .find("unsafe { x }")
+        .expect("inlined expr `x;` must appear in __tla_main body (after the assignment)");
+    assert!(
+        assign_x < x_ref,
+        "the assignment to `x` must be emitted before the inlined `x;` reference; got body:\n{main_body}"
     );
 }
 
@@ -854,7 +857,7 @@ fn tla_module_mode_allows_user_declared_name_with_tla_main_prefix_but_no_digits(
 }
 
 #[test]
-fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
+fn tla_module_mode_assigns_runtime_let_bindings_to_module_globals() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -894,23 +897,29 @@ fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
         }
     }
     let main_body = &rust[main_body_start..main_body_end];
-    let let_a = main_body
-        .find("let a")
-        .expect("let a must be inlined into __tla_main body");
-    let let_b = main_body
-        .find("let b")
-        .expect("let b must be inlined into __tla_main body");
-    let let_c = main_body
-        .find("let c")
-        .expect("let c must be inlined into __tla_main body");
+    let assign_a = main_body
+        .find("a =")
+        .expect("a assignment must appear in __tla_main body");
+    let assign_b = main_body
+        .find("b =")
+        .expect("b assignment must appear in __tla_main body");
+    let assign_c = main_body
+        .find("c =")
+        .expect("c assignment must appear in __tla_main body");
     assert!(
-        let_a < let_b && let_b < let_c,
-        "source order must be preserved: let a ({let_a}) < let b ({let_b}) < let c ({let_c}); got body:\n{main_body}"
+        assign_a < assign_b && assign_b < assign_c,
+        "source order must be preserved: a ({assign_a}) < b ({assign_b}) < c ({assign_c}); got body:\n{main_body}"
     );
+    for g in ["static mut a", "static mut b", "static mut c"] {
+        assert!(
+            rust.contains(g),
+            "runtime let binding must become a module-level mutable global `{g}`; got rust:\n{rust}"
+        );
+    }
 }
 
 #[test]
-fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
+fn tla_module_mode_allows_cross_scope_reference_to_runtime_let_binding() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -918,24 +927,25 @@ fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
         &opts,
     );
     assert!(
-        out.has_errors(),
-        "cross-scope reference to a TLA-only binding must produce a diagnostic (otherwise the backend would emit an undeclared Rust identifier); got diagnostics: {:?}",
+        !out.has_errors(),
+        "cross-scope reference to a runtime top-level binding must compile: the binding becomes a module-level mutable global; got diagnostics: {:?}",
         out.diagnostics
     );
-    let combined: String = out
-        .diagnostics
-        .iter()
-        .map(|d| format!("{d:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let rust = out
+        .rust_source
+        .expect("module mode rust emit must populate rust_source");
     assert!(
-        combined.contains("E0513"),
-        "expected E0513 cross-scope diagnostic for `x`; got: {combined}"
+        rust.contains("static mut x"),
+        "runtime top-level `let x` must become a module-level mutable global; got rust:\n{rust}"
+    );
+    assert!(
+        rust.contains("fn use_x"),
+        "function `use_x` must be emitted; got rust:\n{rust}"
     );
 }
 
 #[test]
-fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function() {
+fn tla_module_mode_allows_cross_scope_reference_even_when_let_follows_function() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -943,19 +953,16 @@ fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function
         &opts,
     );
     assert!(
-        out.has_errors(),
-        "cross-scope reference to a TLA-only binding must be rejected even when the function is declared before the let; got diagnostics: {:?}",
+        !out.has_errors(),
+        "cross-scope reference to a runtime top-level binding must compile regardless of declaration order; got diagnostics: {:?}",
         out.diagnostics
     );
-    let combined: String = out
-        .diagnostics
-        .iter()
-        .map(|d| format!("{d:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let rust = out
+        .rust_source
+        .expect("module mode rust emit must populate rust_source");
     assert!(
-        combined.contains("E0513"),
-        "expected E0513 cross-scope diagnostic for `cfg` (function-before-let order); got: {combined}"
+        rust.contains("static mut cfg"),
+        "runtime top-level `let cfg` must become a module-level mutable global; got rust:\n{rust}"
     );
 }
 

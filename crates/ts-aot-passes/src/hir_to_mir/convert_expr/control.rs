@@ -138,6 +138,23 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if let HirExpr::Field {
+            owner, field_name, ..
+        } = target
+            && let Some(mir) = self.try_accessor_setter_dispatch(
+                owner,
+                field_name,
+                value,
+                ty,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            )
+        {
+            return mir;
+        }
         let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
         let target_ty = self.assignment_target_ty(target, ty, types);
         if !is_assignment_compatible(value, rhs_ty, target_ty, types, target.span(), ctx) {

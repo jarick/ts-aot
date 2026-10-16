@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
@@ -405,6 +405,18 @@ impl ExprConverter {
         ) {
             return mir;
         }
+        if let Some(mir) = self.try_user_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         let callee_id = self.resolve_callee(callee, ctx);
         let mir_args: Vec<MirExpr> = args
             .iter()
@@ -778,5 +790,148 @@ impl ExprConverter {
             target_ty: None,
         });
         MirExpr::Local(dest)
+    }
+
+    fn try_user_method_dispatch(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        let owner_ty = owner.ty();
+        let static_sid = match owner.as_ref() {
+            HirExpr::Global { name, .. } => self.class_struct_by_name.get(name).copied(),
+            _ => None,
+        };
+        let (sid, is_static) = match static_sid {
+            Some(sid) => (sid, true),
+            None => {
+                let sid = *self
+                    .struct_ids
+                    .get(&owner_ty)
+                    .or_else(|| shared_struct_ids.get(&owner_ty))?;
+                (sid, false)
+            }
+        };
+        let key = (sid, field_name.clone(), is_static);
+        let fid = *self.method_map.get(&key)?;
+        let call_ty = self.method_ret.get(&key).copied().unwrap_or(ty);
+        let mut mir_args = Vec::with_capacity(args.len() + 1);
+        if !is_static {
+            mir_args.push(self.convert_expr(
+                owner,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ));
+        }
+        for a in args {
+            mir_args.push(self.convert_expr(
+                a,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ));
+        }
+        Some(MirExpr::Call {
+            callee: fid,
+            args: mir_args,
+            ty: call_ty,
+        })
+    }
+
+    pub(super) fn try_accessor_getter_dispatch(
+        &mut self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let owner_ty = owner.ty();
+        let sid = *self
+            .struct_ids
+            .get(&owner_ty)
+            .or_else(|| shared_struct_ids.get(&owner_ty))?;
+        let getter_name = Atom::from(format!("__get_{field_name}"));
+        let key = (sid, getter_name, false);
+        let fid = *self.method_map.get(&key)?;
+        let call_ty = self.method_ret.get(&key).copied().unwrap_or(ty);
+        let owner_mir = self.convert_expr(
+            owner,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        Some(MirExpr::Call {
+            callee: fid,
+            args: vec![owner_mir],
+            ty: call_ty,
+        })
+    }
+
+    pub(super) fn try_accessor_setter_dispatch(
+        &mut self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        value: &HirExpr,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let owner_ty = owner.ty();
+        let sid = *self
+            .struct_ids
+            .get(&owner_ty)
+            .or_else(|| shared_struct_ids.get(&owner_ty))?;
+        let setter_name = Atom::from(format!("__set_{field_name}"));
+        let fid = *self.method_map.get(&(sid, setter_name, false))?;
+        let owner_mir = self.convert_expr(
+            owner,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        let value_mir = self.convert_expr(
+            value,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        Some(MirExpr::Call {
+            callee: fid,
+            args: vec![owner_mir, value_mir],
+            ty,
+        })
     }
 }
