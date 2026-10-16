@@ -91,6 +91,18 @@ impl ExprConverter {
                 ) {
                     return mir;
                 }
+                if let Some(mir) = self.try_accessor_getter_dispatch(
+                    owner,
+                    field_name,
+                    *ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                ) {
+                    return mir;
+                }
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
                 MirExpr::Field {

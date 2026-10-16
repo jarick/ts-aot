@@ -2974,78 +2974,84 @@ fn body_walker_unlabeled_break_does_not_warn() {
 }
 
 #[test]
-fn class_static_method_with_params_is_rejected_with_diagnostic() {
+fn class_static_method_with_params_builds_plain_method() {
     let output =
         FrontendPass::new().run("test.ts", "class C { static s(a: i32): i32 { return a; } }");
     assert!(
-        output.diagnostics.has_errors(),
-        "static methods are out of scope and must emit a diagnostic, got {:?}",
+        !output.diagnostics.has_errors(),
+        "static methods must now be supported, got {:?}",
         output.diagnostics
     );
     let class = match &output.program.declarations[0] {
         HirDecl::Class(c) => c,
         other => panic!("expected Class, got {other:?}"),
     };
-    assert!(
-        class.methods.is_empty(),
-        "rejected static method must NOT enter HIR class.methods (downstream treats every method as instance), got {} methods: {:?}",
+    assert_eq!(
         class.methods.len(),
-        class.methods
+        1,
+        "static method must enter HIR class.methods"
     );
-    assert!(
-        output.diagnostics.iter().any(|d| d.code == "E0300".into()),
-        "E0300 (unsupported declaration form) must be reported for static methods, got {:?}",
-        output
-            .diagnostics
-            .iter()
-            .map(|d| (d.code.as_str(), d.message.as_str()))
-            .collect::<Vec<_>>()
+    assert_eq!(
+        class.methods[0].params.len(),
+        1,
+        "static method must NOT receive synthetic `this`, got {:?}",
+        class.methods[0].params
     );
+    assert_eq!(class.methods[0].params[0].name, Atom::from("a"));
 }
 
 #[test]
-fn class_static_method_without_params_is_rejected_with_diagnostic() {
+fn class_static_method_without_params_builds_plain_method() {
     let output = FrontendPass::new().run("test.ts", "class C { static s(): i32 { return 0; } }");
     assert!(
-        output.diagnostics.has_errors(),
-        "no-arg static methods must also emit a diagnostic (previously silently dropped at MIR), got {:?}",
+        !output.diagnostics.has_errors(),
+        "no-arg static methods must now be supported, got {:?}",
         output.diagnostics
     );
     let class = match &output.program.declarations[0] {
         HirDecl::Class(c) => c,
         other => panic!("expected Class, got {other:?}"),
     };
+    assert_eq!(
+        class.methods.len(),
+        1,
+        "no-arg static method must enter HIR class.methods"
+    );
     assert!(
-        class.methods.is_empty(),
-        "no-arg static method must also NOT enter HIR class.methods, got {} methods",
-        class.methods.len()
+        class.methods[0].params.is_empty(),
+        "no-arg static method must have no params (no synthetic `this`), got {:?}",
+        class.methods[0].params
     );
 }
 
 #[test]
-fn class_with_only_static_methods_emits_diagnostic_and_empty_methods() {
+fn class_with_only_static_methods_builds_all() {
     let output = FrontendPass::new().run(
         "test.ts",
         "class C { static a(): void {} static b(x: i32): i32 { return x; } }",
     );
-    assert!(output.diagnostics.has_errors());
+    assert!(
+        !output.diagnostics.has_errors(),
+        "static methods must now be supported, got {:?}",
+        output.diagnostics
+    );
     let class = match &output.program.declarations[0] {
         HirDecl::Class(c) => c,
         other => panic!("expected Class, got {other:?}"),
     };
-    assert!(
-        class.methods.is_empty(),
-        "a class whose every method is static must still have an empty methods vec, got {:?}",
+    assert_eq!(
+        class.methods.len(),
+        2,
+        "both static methods must enter HIR class.methods, got {:?}",
         class.methods
     );
-    let e0300_count = output
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == "E0300".into())
-        .count();
-    assert_eq!(
-        e0300_count, 2,
-        "each static method must produce its own E0300 diagnostic, got {e0300_count} diagnostics"
+    assert!(
+        class.methods.iter().all(|m| m
+            .params
+            .first()
+            .is_none_or(|p| p.name != Atom::from("this"))),
+        "static methods must not receive synthetic `this`, got {:?}",
+        class.methods
     );
 }
 
@@ -3062,70 +3068,11 @@ fn class_instance_method_still_receives_synthetic_this() {
 }
 
 #[test]
-fn class_getter_without_params_is_rejected_with_diagnostic() {
+fn class_getter_builds_accessor_method() {
     let output = FrontendPass::new().run("test.ts", "class C { get foo(): i32 { return 1; } }");
     assert!(
-        output.diagnostics.has_errors(),
-        "getter must emit a diagnostic (previously slipped through to MIR where `params.is_empty()` silently dropped it), got {:?}",
-        output.diagnostics
-    );
-    let class = match &output.program.declarations[0] {
-        HirDecl::Class(c) => c,
-        other => panic!("expected Class, got {other:?}"),
-    };
-    assert!(
-        class.methods.is_empty(),
-        "rejected getter must NOT enter HIR class.methods, got {} methods",
-        class.methods.len()
-    );
-    assert!(
-        output.diagnostics.iter().any(|d| d.code == "E0300".into()),
-        "E0300 must be reported for getter, got {:?}",
-        output
-            .diagnostics
-            .iter()
-            .map(|d| (d.code.as_str(), d.message.as_str()))
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn class_setter_with_value_param_is_rejected_with_diagnostic() {
-    let output = FrontendPass::new().run("test.ts", "class C { set foo(v: i32) { return; } }");
-    assert!(
-        output.diagnostics.has_errors(),
-        "setter must emit a diagnostic (previously slipped through and treated its `v` as `this` in MIR), got {:?}",
-        output.diagnostics
-    );
-    let class = match &output.program.declarations[0] {
-        HirDecl::Class(c) => c,
-        other => panic!("expected Class, got {other:?}"),
-    };
-    assert!(
-        class.methods.is_empty(),
-        "rejected setter must NOT enter HIR class.methods (its `v` would otherwise be misbound to `self_param = Local(0)`), got {} methods",
-        class.methods.len()
-    );
-    assert!(
-        output.diagnostics.iter().any(|d| d.code == "E0300".into()),
-        "E0300 must be reported for setter, got {:?}",
-        output
-            .diagnostics
-            .iter()
-            .map(|d| (d.code.as_str(), d.message.as_str()))
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn class_with_get_set_and_instance_method_rejects_only_accessors() {
-    let output = FrontendPass::new().run(
-        "test.ts",
-        "class C { get foo(): i32 { return 1; } set foo(v: i32) { return; } m(a: i32): i32 { return a; } }",
-    );
-    assert!(
-        output.diagnostics.has_errors(),
-        "class with get+set+method must surface diagnostics for accessors, got {:?}",
+        !output.diagnostics.has_errors(),
+        "getter must now be supported, got {:?}",
         output.diagnostics
     );
     let class = match &output.program.declarations[0] {
@@ -3135,26 +3082,73 @@ fn class_with_get_set_and_instance_method_rejects_only_accessors() {
     assert_eq!(
         class.methods.len(),
         1,
-        "only the instance method must survive, got methods: {:?}",
-        class.methods
+        "getter must enter HIR class.methods"
     );
-    assert_eq!(class.methods[0].name, Atom::from("m"));
+    assert_eq!(class.methods[0].name, Atom::from("__get_foo"));
     assert_eq!(
         class.methods[0].params.len(),
-        2,
-        "the surviving `m` must still receive synthetic `this`, got params: {:?}",
+        1,
+        "getter receives synthetic `this` only, got {:?}",
         class.methods[0].params
     );
     assert_eq!(class.methods[0].params[0].name, Atom::from("this"));
-    assert_eq!(class.methods[0].params[1].name, Atom::from("a"));
-    let e0300_count = output
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == "E0300".into())
-        .count();
+}
+
+#[test]
+fn class_setter_builds_accessor_method() {
+    let output = FrontendPass::new().run("test.ts", "class C { set foo(v: i32) { return; } }");
+    assert!(
+        !output.diagnostics.has_errors(),
+        "setter must now be supported, got {:?}",
+        output.diagnostics
+    );
+    let class = match &output.program.declarations[0] {
+        HirDecl::Class(c) => c,
+        other => panic!("expected Class, got {other:?}"),
+    };
     assert_eq!(
-        e0300_count, 2,
-        "each of get+set must produce its own E0300, got {e0300_count}"
+        class.methods.len(),
+        1,
+        "setter must enter HIR class.methods"
+    );
+    assert_eq!(class.methods[0].name, Atom::from("__set_foo"));
+    assert_eq!(
+        class.methods[0].params.len(),
+        2,
+        "setter receives `this` and the value param, got {:?}",
+        class.methods[0].params
+    );
+    assert_eq!(class.methods[0].params[0].name, Atom::from("this"));
+    assert_eq!(class.methods[0].params[1].name, Atom::from("v"));
+}
+
+#[test]
+fn class_with_get_set_and_instance_method_builds_all() {
+    let output = FrontendPass::new().run(
+        "test.ts",
+        "class C { get foo(): i32 { return 1; } set foo(v: i32) { return; } m(a: i32): i32 { return a; } }",
+    );
+    assert!(
+        !output.diagnostics.has_errors(),
+        "get+set+instance method must all be supported, got {:?}",
+        output.diagnostics
+    );
+    let class = match &output.program.declarations[0] {
+        HirDecl::Class(c) => c,
+        other => panic!("expected Class, got {other:?}"),
+    };
+    let names: Vec<_> = class.methods.iter().map(|m| m.name.clone()).collect();
+    assert!(
+        names.contains(&Atom::from("__get_foo")),
+        "getter must be present, got {names:?}"
+    );
+    assert!(
+        names.contains(&Atom::from("__set_foo")),
+        "setter must be present, got {names:?}"
+    );
+    assert!(
+        names.contains(&Atom::from("m")),
+        "instance method must be present, got {names:?}"
     );
 }
 
