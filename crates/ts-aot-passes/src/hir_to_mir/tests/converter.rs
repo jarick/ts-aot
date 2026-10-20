@@ -303,3 +303,34 @@ fn resolve_field_id_carries_global_declared_type_through_chains() {
     );
     assert!(!cx.has_errors(), "{:?}", cx.diagnostics());
 }
+
+#[test]
+fn lookup_class_struct_by_name_walks_namespace_depths() {
+    let mut c = ExprConverter::new();
+    c.set_namespace_path(&["Outer".to_owned(), "Inner".to_owned()]);
+    c.class_struct_by_name = HashMap::from([
+        (Atom::new_inline("Outer::Inner::C"), StructId::from_raw(7)),
+        (Atom::new_inline("Outer::D"), StructId::from_raw(8)),
+        (Atom::new_inline("Root"), StructId::from_raw(9)),
+        (Atom::new_inline("C"), StructId::from_raw(10)),
+    ]);
+    assert_eq!(
+        c.lookup_class_struct_by_name(&Atom::new_inline("C")),
+        Some(StructId::from_raw(7)),
+        "a namespace-local class must shadow a top-level class with the same name"
+    );
+    assert_eq!(
+        c.lookup_class_struct_by_name(&Atom::new_inline("D")),
+        Some(StructId::from_raw(8)),
+        "a class declared in an enclosing namespace must resolve by its leaf name"
+    );
+    assert_eq!(
+        c.lookup_class_struct_by_name(&Atom::new_inline("Root")),
+        Some(StructId::from_raw(9)),
+        "a top-level class must resolve by its leaf name"
+    );
+    assert_eq!(
+        c.lookup_class_struct_by_name(&Atom::new_inline("Missing")),
+        None
+    );
+}

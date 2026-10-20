@@ -13,7 +13,7 @@ mod source_map;
 
 pub use context::PassContext;
 pub use error::{PassError, PassResult};
-pub use hir_to_mir::{ExprConverter, HirBlock, convert_function, convert_program};
+pub use hir_to_mir::{ExprConverter, HirBlock, convert_program};
 pub use lower_async::{LowerAsyncStats, lower_async};
 pub use lower_classes::{LowerClassesStats, lower_classes};
 pub use lower_closures::{LowerClosuresResult, LowerClosuresStats, lower_closures};

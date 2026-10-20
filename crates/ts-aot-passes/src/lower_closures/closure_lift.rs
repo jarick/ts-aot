@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ts_aot_core::{Atom, LocalId, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirDecl, HirExpr, HirFunction, HirParam, HirStmt};
 
-use super::LowerClosuresStats;
+use super::ClosureLowerer;
 use crate::PassContext;
 
 pub(super) fn fresh_closure_name(next_id: u32) -> Atom {
@@ -37,46 +37,32 @@ pub(super) fn build_closure_fn_decl(
         async_info: None,
     })
 }
-pub(super) fn lift_non_capturing_closure(
-    id: LocalId,
-    params: &[HirParam],
-    body: &mut [HirStmt],
-    ty: TypeId,
-    span: Span,
-    next_id: &mut u32,
-    closure_names: &mut HashMap<LocalId, Atom>,
-    new_decls: &mut Vec<HirDecl>,
-    generated: &mut Vec<Atom>,
-    taken: &mut HashSet<Atom>,
-    stats: &mut LowerClosuresStats,
-    types: &mut TypeTable,
-    walk_body: WalkBodyFn,
-    ctx: &mut PassContext,
-) -> HirExpr {
-    walk_body(
-        body,
-        next_id,
-        closure_names,
-        new_decls,
-        generated,
-        taken,
-        stats,
-        types,
-        ctx,
-    );
-    super::rewrite::rewrite_in_body(body, closure_names, ctx);
 
-    let name = next_unused_closure_name(next_id, taken);
-    *next_id += 1;
-    taken.insert(name.clone());
+impl ClosureLowerer<'_> {
+    pub(super) fn lift_non_capturing_closure(
+        &mut self,
+        id: LocalId,
+        params: &[HirParam],
+        body: &mut [HirStmt],
+        ty: TypeId,
+        span: Span,
+    ) -> HirExpr {
+        self.walk_body(body);
+        super::rewrite::rewrite_in_body(body, &self.closure_names, self.ctx);
 
-    let fn_decl = build_closure_fn_decl(&name, params, body, ret_ty_from_fn_type(ty, types));
-    new_decls.push(fn_decl);
-    closure_names.insert(id, name.clone());
-    generated.push(name.clone());
-    stats.emitted_fns += 1;
+        let name = next_unused_closure_name(self.next_id, self.taken);
+        *self.next_id += 1;
+        self.taken.insert(name.clone());
 
-    HirExpr::Global { name, ty, span }
+        let fn_decl =
+            build_closure_fn_decl(&name, params, body, ret_ty_from_fn_type(ty, self.types));
+        self.new_decls.push(fn_decl);
+        self.closure_names.insert(id, name.clone());
+        self.generated.push(name.clone());
+        self.stats.emitted_fns += 1;
+
+        HirExpr::Global { name, ty, span }
+    }
 }
 
 fn ret_ty_from_fn_type(ty: TypeId, types: &TypeTable) -> TypeId {
@@ -85,18 +71,6 @@ fn ret_ty_from_fn_type(ty: TypeId, types: &TypeTable) -> TypeId {
     }
     ty
 }
-
-pub(super) type WalkBodyFn = fn(
-    body: &mut [HirStmt],
-    next_id: &mut u32,
-    closure_names: &mut HashMap<LocalId, Atom>,
-    new_decls: &mut Vec<HirDecl>,
-    generated: &mut Vec<Atom>,
-    taken: &mut HashSet<Atom>,
-    stats: &mut LowerClosuresStats,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
-);
 
 pub(super) fn closure_callee_ty(new_decls: &[HirDecl], name: &Atom) -> TypeId {
     for d in new_decls {

@@ -38,9 +38,29 @@ pub fn lower_object_literals(
         fn_ret,
         fn_params,
         current_ret_ty: None,
+        global_ty: HashMap::new(),
     };
-    for decl in &mut program.declarations {
+    let tla_main_name = program.tla_main_name.clone();
+    let tla_main_index = program.declarations.iter().position(
+        |decl| matches!(decl, HirDecl::Function(f) if Some(&f.name) == tla_main_name.as_ref()),
+    );
+    if let Some(index) = tla_main_index {
+        rewriter.visit_decl(&mut program.declarations[index]);
+    }
+    for (index, decl) in program.declarations.iter_mut().enumerate() {
+        if Some(index) == tla_main_index {
+            continue;
+        }
         rewriter.visit_decl(decl);
+    }
+    let global_ty = std::mem::take(&mut rewriter.global_ty);
+    for decl in &mut program.declarations {
+        if let HirDecl::Global { name, ty, .. } = decl
+            && matches!(rewriter.types.resolve(*ty), Some(Type::Error) | None)
+            && let Some(&inferred) = global_ty.get(name)
+        {
+            *ty = inferred;
+        }
     }
     program.next_class_struct_id = rewriter.next_struct;
     program.declarations.extend(rewriter.synth);
@@ -119,6 +139,7 @@ struct ObjectLitRewriter<'a> {
     fn_ret: HashMap<Atom, TypeId>,
     fn_params: HashMap<Atom, Vec<TypeId>>,
     current_ret_ty: Option<TypeId>,
+    global_ty: HashMap<Atom, TypeId>,
 }
 
 impl ObjectLitRewriter<'_> {
@@ -373,6 +394,12 @@ impl ObjectLitRewriter<'_> {
             self.visit_expr_mut(target);
             let target_ty = target.ty();
             self.visit_expr_with_expected(value, Some(target_ty));
+            if let HirExpr::Global { name, .. } = target.as_ref() {
+                let name = name.clone();
+                if let Some(result_ty) = self.expr_result_ty(value) {
+                    self.global_ty.entry(name).or_insert(result_ty);
+                }
+            }
             return;
         }
 

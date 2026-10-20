@@ -1,269 +1,67 @@
-use std::collections::{HashMap, HashSet};
-
-use ts_aot_core::{Atom, LocalId, TypeTable};
 use ts_aot_ir_hir::HirStmt;
 
-use super::LowerClosuresStats;
-use super::walk::walk_decl;
-use super::walk_expr::walk_expr;
-use crate::PassContext;
-pub(super) fn walk_body(
-    body: &mut [HirStmt],
-    next_id: &mut u32,
-    closure_names: &mut HashMap<LocalId, Atom>,
-    new_decls: &mut Vec<ts_aot_ir_hir::HirDecl>,
-    generated: &mut Vec<Atom>,
-    taken: &mut HashSet<Atom>,
-    stats: &mut LowerClosuresStats,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
-) {
-    for stmt in body.iter_mut() {
-        walk_stmt(
-            stmt,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            types,
-            ctx,
-        );
+use super::ClosureLowerer;
+
+impl ClosureLowerer<'_> {
+    pub(super) fn walk_body(&mut self, body: &mut [HirStmt]) {
+        for stmt in body.iter_mut() {
+            self.walk_stmt(stmt);
+        }
     }
-}
-pub(super) fn walk_stmt(
-    stmt: &mut HirStmt,
-    next_id: &mut u32,
-    closure_names: &mut HashMap<LocalId, Atom>,
-    new_decls: &mut Vec<ts_aot_ir_hir::HirDecl>,
-    generated: &mut Vec<Atom>,
-    taken: &mut HashSet<Atom>,
-    stats: &mut LowerClosuresStats,
-    types: &mut TypeTable,
-    ctx: &mut PassContext,
-) {
-    match stmt {
-        HirStmt::Block(stmts) => walk_body(
-            stmts,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            types,
-            ctx,
-        ),
-        HirStmt::Let { init: Some(e), .. } | HirStmt::Expr { expr: e } => walk_expr(
-            e,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            types,
-            ctx,
-        ),
-        HirStmt::Let { init: None, .. } => {}
-        HirStmt::If {
-            cond,
-            then,
-            otherwise,
-        } => {
-            walk_expr(
+
+    pub(super) fn walk_stmt(&mut self, stmt: &mut HirStmt) {
+        match stmt {
+            HirStmt::Block(stmts) => self.walk_body(stmts),
+            HirStmt::Let { init: Some(e), .. } | HirStmt::Expr { expr: e } => self.walk_expr(e),
+            HirStmt::Let { init: None, .. } => {}
+            HirStmt::If {
                 cond,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            walk_stmt(
                 then,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            if let Some(else_stmt) = otherwise {
-                walk_stmt(
-                    else_stmt,
-                    next_id,
-                    closure_names,
-                    new_decls,
-                    generated,
-                    taken,
-                    stats,
-                    types,
-                    ctx,
-                );
-            }
-        }
-        HirStmt::While { cond, body } | HirStmt::DoWhile { body, cond } => {
-            walk_expr(
-                cond,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            walk_stmt(
-                body,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-        }
-        HirStmt::ForOf { iter, body, .. }
-        | HirStmt::ForAwaitOf { iter, body, .. }
-        | HirStmt::ForIn { iter, body, .. } => {
-            walk_expr(
-                iter,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            walk_stmt(
-                body,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-        }
-        HirStmt::Switch { disc, cases } => {
-            walk_expr(
-                disc,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            for case in cases {
-                if let Some(test) = &mut case.test {
-                    walk_expr(
-                        test,
-                        next_id,
-                        closure_names,
-                        new_decls,
-                        generated,
-                        taken,
-                        stats,
-                        types,
-                        ctx,
-                    );
+                otherwise,
+            } => {
+                self.walk_expr(cond);
+                self.walk_stmt(then);
+                if let Some(else_stmt) = otherwise {
+                    self.walk_stmt(else_stmt);
                 }
-                walk_body(
-                    &mut case.body,
-                    next_id,
-                    closure_names,
-                    new_decls,
-                    generated,
-                    taken,
-                    stats,
-                    types,
-                    ctx,
-                );
             }
-        }
-        HirStmt::Return { value: Some(e) } => walk_expr(
-            e,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            types,
-            ctx,
-        ),
-        HirStmt::Return { value: None } => {}
-        HirStmt::Throw { expr } => walk_expr(
-            expr,
-            next_id,
-            closure_names,
-            new_decls,
-            generated,
-            taken,
-            stats,
-            types,
-            ctx,
-        ),
-        HirStmt::Try {
-            body,
-            catch,
-            finally,
-        } => {
-            walk_stmt(
+            HirStmt::While { cond, body } | HirStmt::DoWhile { body, cond } => {
+                self.walk_expr(cond);
+                self.walk_stmt(body);
+            }
+            HirStmt::ForOf { iter, body, .. }
+            | HirStmt::ForAwaitOf { iter, body, .. }
+            | HirStmt::ForIn { iter, body, .. } => {
+                self.walk_expr(iter);
+                self.walk_stmt(body);
+            }
+            HirStmt::Switch { disc, cases } => {
+                self.walk_expr(disc);
+                for case in cases {
+                    if let Some(test) = &mut case.test {
+                        self.walk_expr(test);
+                    }
+                    self.walk_body(&mut case.body);
+                }
+            }
+            HirStmt::Return { value: Some(e) } => self.walk_expr(e),
+            HirStmt::Return { value: None } => {}
+            HirStmt::Throw { expr } => self.walk_expr(expr),
+            HirStmt::Try {
                 body,
-                next_id,
-                closure_names,
-                new_decls,
-                generated,
-                taken,
-                stats,
-                types,
-                ctx,
-            );
-            if let Some(c) = catch {
-                walk_stmt(
-                    &mut c.body,
-                    next_id,
-                    closure_names,
-                    new_decls,
-                    generated,
-                    taken,
-                    stats,
-                    types,
-                    ctx,
-                );
+                catch,
+                finally,
+            } => {
+                self.walk_stmt(body);
+                if let Some(c) = catch {
+                    self.walk_stmt(&mut c.body);
+                }
+                if let Some(f) = finally {
+                    self.walk_stmt(f);
+                }
             }
-            if let Some(f) = finally {
-                walk_stmt(
-                    f,
-                    next_id,
-                    closure_names,
-                    new_decls,
-                    generated,
-                    taken,
-                    stats,
-                    types,
-                    ctx,
-                );
-            }
+            HirStmt::Decl(d) => self.walk_decl(d),
+            HirStmt::Break { .. } | HirStmt::Continue { .. } => {}
         }
-        HirStmt::Decl(d) => walk_decl(d, next_id, new_decls, generated, taken, stats, types, ctx),
-        HirStmt::Break { .. } | HirStmt::Continue { .. } => {}
     }
 }

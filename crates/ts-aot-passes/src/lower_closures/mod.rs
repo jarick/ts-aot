@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, TypeTable};
+use ts_aot_core::{Atom, LocalId, TypeTable};
 use ts_aot_ir_hir::{HirDecl, HirProgram};
 
 use crate::PassContext;
@@ -24,6 +24,17 @@ pub struct LowerClosuresStats {
 pub struct LowerClosuresResult {
     pub stats: LowerClosuresStats,
     pub closure_names: Vec<Atom>,
+}
+
+struct ClosureLowerer<'a> {
+    next_id: &'a mut u32,
+    new_decls: &'a mut Vec<HirDecl>,
+    generated: &'a mut Vec<Atom>,
+    taken: &'a mut HashSet<Atom>,
+    stats: &'a mut LowerClosuresStats,
+    types: &'a mut TypeTable,
+    ctx: &'a mut PassContext,
+    closure_names: HashMap<LocalId, Atom>,
 }
 
 fn collect_taken_names(decls: &[HirDecl], taken: &mut HashSet<Atom>) {
@@ -59,7 +70,7 @@ pub fn lower_closures(
     ctx: &mut PassContext,
 ) -> LowerClosuresResult {
     let mut stats = LowerClosuresStats::default();
-    let mut closure_names: Vec<Atom> = Vec::new();
+    let mut generated: Vec<Atom> = Vec::new();
     let mut new_decls: Vec<HirDecl> = Vec::new();
 
     let mut taken: HashSet<Atom> = HashSet::new();
@@ -70,22 +81,25 @@ pub fn lower_closures(
         next_closure_id += 1;
     }
 
-    for decl in &mut program.declarations {
-        walk::walk_decl(
-            decl,
-            &mut next_closure_id,
-            &mut new_decls,
-            &mut closure_names,
-            &mut taken,
-            &mut stats,
+    {
+        let mut lowerer = ClosureLowerer {
+            next_id: &mut next_closure_id,
+            new_decls: &mut new_decls,
+            generated: &mut generated,
+            taken: &mut taken,
+            stats: &mut stats,
             types,
             ctx,
-        );
+            closure_names: HashMap::new(),
+        };
+        for decl in &mut program.declarations {
+            lowerer.walk_decl(decl);
+        }
     }
     program.declarations.extend(new_decls);
 
     LowerClosuresResult {
         stats,
-        closure_names,
+        closure_names: generated,
     }
 }

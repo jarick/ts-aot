@@ -15,7 +15,7 @@ use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
 use crate::scope::BodyScope;
-use crate::skeleton::{SkeletonBuilder, SkeletonEnv, TLA_ONLY_BINDING_CODE};
+use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 impl SkeletonEnv<'_> {
@@ -25,23 +25,6 @@ impl SkeletonEnv<'_> {
         }
         if let Some((id, ty)) = scope.lookup(name) {
             HirExpr::Local { id, ty, span }
-        } else if self.tla_only_bindings.contains(name) {
-            self.diagnostics.push(Diagnostic::error(
-                TLA_ONLY_BINDING_CODE,
-                format!(
-                    "binding `{name}` is initialized inside `__ts_aot_tla_main` and is not \
-                     visible to other functions or globals; move the let into a smaller scope \
-                     (e.g. inside the function that uses it) or use a const literal initializer \
-                     to make it module-level"
-                ),
-                span,
-            ));
-            let ty = self.error_ty();
-            HirExpr::Global {
-                name: Atom::from(name),
-                ty,
-                span,
-            }
         } else {
             let ty = self.error_ty();
             HirExpr::Global {
@@ -103,12 +86,20 @@ impl SkeletonBuilder {
                         span: core_span_from_oxc(this_expr.span),
                     }
                 } else {
-                    let ty = senv.error_ty();
-                    HirExpr::Global {
-                        name: Atom::from("this"),
-                        ty,
-                        span: core_span_from_oxc(this_expr.span),
-                    }
+                    let message = if self.in_static_method {
+                        "`this` in a static method is not supported in this AOT target (a \
+                         static method has no class receiver) and is lowered to `undefined`."
+                    } else {
+                        "`this` outside an instance method is not supported in this AOT target \
+                         and is lowered to `undefined`; arrow/function-scope `this` and module \
+                         top-level `this` are not modelled."
+                    };
+                    senv.diagnostics.push(Diagnostic::warning(
+                        "P0014",
+                        message,
+                        core_span_from_oxc(this_expr.span),
+                    ));
+                    HirExpr::Undefined(core_span_from_oxc(this_expr.span))
                 }
             }
             Expression::ParenthesizedExpression(p) => self.walk_expr(senv, &p.expression, scope),
@@ -375,7 +366,7 @@ impl SkeletonBuilder {
             }
             stmts
         } else {
-            self.walk_function_body(senv, Some(&arrow.body), &params, false)
+            self.walk_function_body(senv, Some(&arrow.body), &params, false, true)
         };
         if exprs_reference_outer_local(&body, &outer_locals) {
             senv.diagnostics.push(Diagnostic::error(

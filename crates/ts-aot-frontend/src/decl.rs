@@ -1,12 +1,12 @@
+use std::collections::HashSet;
+
 use oxc_ast::ast::{
     Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind, TSType,
     TSTypeName, match_member_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{
-    HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam, HirStmt,
-};
+use ts_aot_ir_hir::{HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam};
 
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv, TlaMainItem};
 use crate::type_resolver::reference::TypeLookup;
@@ -229,7 +229,8 @@ impl SkeletonBuilder {
         );
 
         self.type_param_stack.push(type_param_map.clone());
-        let body = self.walk_function_body(senv, func.body.as_deref(), &params, func.generator);
+        let body =
+            self.walk_function_body(senv, func.body.as_deref(), &params, func.generator, false);
         self.type_param_stack.pop();
 
         HirFunction {
@@ -296,17 +297,36 @@ impl SkeletonBuilder {
             })
             .collect();
 
-        let methods = class
-            .body
-            .body
-            .iter()
-            .filter_map(|m| match m {
-                oxc_ast::ast::ClassElement::MethodDefinition(md) => {
-                    self.build_method(senv, md, ty, &class_type_param_map)
-                }
-                _ => None,
-            })
-            .collect();
+        let mut methods = Vec::new();
+        let mut accessor_names = HashSet::new();
+        let mut ordinary_names = HashSet::new();
+        for element in &class.body.body {
+            let oxc_ast::ast::ClassElement::MethodDefinition(md) = element else {
+                continue;
+            };
+            let is_accessor = matches!(
+                md.kind,
+                MethodDefinitionKind::Get | MethodDefinitionKind::Set
+            );
+            let func = self.build_method(senv, md, ty, &class_type_param_map);
+            if is_accessor {
+                accessor_names.insert(func.name.clone());
+            } else {
+                ordinary_names.insert(func.name.clone());
+            }
+            methods.push(func);
+        }
+        for colliding in accessor_names.intersection(&ordinary_names) {
+            senv.diagnostics.push(Diagnostic::error(
+                UNSUPPORTED_DECL_CODE,
+                format!(
+                    "class method `{name}` collides with the lowered HIR name of an accessor \
+                     (`get`/`set`); rename the method or the accessor so their names stay distinct",
+                    name = colliding.as_str()
+                ),
+                core_span_from_oxc(class.span),
+            ));
+        }
 
         let extends = class
             .super_class
@@ -339,30 +359,17 @@ impl SkeletonBuilder {
         md: &oxc_ast::ast::MethodDefinition<'_>,
         class_ty: TypeId,
         class_type_param_map: &TypeParamMap,
-    ) -> Option<HirFunction> {
-        if md.r#static {
-            senv.report_unsupported(
-                UNSUPPORTED_DECL_CODE,
-                "static class methods are not supported by the foundation pass",
-                md.span,
-            );
-            return None;
-        }
-
-        if md.kind == MethodDefinitionKind::Get || md.kind == MethodDefinitionKind::Set {
-            senv.report_unsupported(
-                UNSUPPORTED_DECL_CODE,
-                "accessor class methods (get/set) are not supported by the foundation pass",
-                md.span,
-            );
-            return None;
-        }
-
+    ) -> HirFunction {
         let value = &*md.value;
-        let method_name = md
+        let base_name = md
             .key
             .static_name()
             .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
+        let method_name = match md.kind {
+            MethodDefinitionKind::Get => Atom::from(format!("__get_{base_name}")),
+            MethodDefinitionKind::Set => Atom::from(format!("__set_{base_name}")),
+            _ => base_name,
+        };
 
         let (method_type_param_ids, method_param_map) = build_type_param_context(
             senv.types,
@@ -378,10 +385,7 @@ impl SkeletonBuilder {
         }
 
         let mut params = Vec::with_capacity(value.params.items.len() + 1);
-        let needs_synthetic_this = matches!(
-            md.kind,
-            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor
-        );
+        let needs_synthetic_this = !md.r#static;
         if needs_synthetic_this {
             params.push(HirParam {
                 name: Atom::from("this"),
@@ -407,9 +411,13 @@ impl SkeletonBuilder {
             Some(&combined_map),
         );
         self.type_param_stack.push(combined_map.clone());
-        let body = self.walk_function_body(senv, value.body.as_deref(), &params, value.generator);
+        let saved_static = self.in_static_method;
+        self.in_static_method = md.r#static;
+        let body =
+            self.walk_function_body(senv, value.body.as_deref(), &params, value.generator, true);
+        self.in_static_method = saved_static;
         self.type_param_stack.pop();
-        Some(HirFunction {
+        HirFunction {
             name: method_name,
             params,
             ret,
@@ -420,7 +428,7 @@ impl SkeletonBuilder {
             is_exported: false,
             type_params: method_type_param_ids,
             async_info: None,
-        })
+        }
     }
 
     fn handle_type_alias(
@@ -469,21 +477,25 @@ impl SkeletonBuilder {
     ) {
         if let Some(init_expr) = init {
             if is_const_initializer(&init_expr) {
-                senv.tla_only_bindings.remove(name.as_str());
                 senv.program.push_decl(HirDecl::Global {
                     name,
                     ty,
                     init: Some(init_expr),
                 });
             } else if self.module {
-                let id = self.tla_top_level_scope.declare(name.as_str(), ty);
-                let stmt = HirStmt::Let {
-                    id,
+                senv.program.push_decl(HirDecl::Global {
                     name: name.clone(),
                     ty,
-                    init: Some(init_expr),
+                    init: None,
+                });
+                let span = core_span_from_oxc(span);
+                let assign = HirExpr::Assignment {
+                    target: Box::new(HirExpr::Global { name, ty, span }),
+                    value: Box::new(init_expr),
+                    ty,
+                    span,
                 };
-                self.record_tla_main_let_stmt(stmt);
+                self.tla_main_body.push(TlaMainItem::Expr(assign));
             } else {
                 senv.diagnostics.push(Diagnostic::error(
                     UNSUPPORTED_DECL_CODE,
@@ -497,17 +509,12 @@ impl SkeletonBuilder {
                 ));
             }
         } else {
-            senv.tla_only_bindings.remove(name.as_str());
             senv.program.push_decl(HirDecl::Global {
                 name,
                 ty,
                 init: None,
             });
         }
-    }
-
-    fn record_tla_main_let_stmt(&mut self, stmt: HirStmt) {
-        self.tla_main_body.push(TlaMainItem::Let(stmt));
     }
 
     pub(crate) fn resolve_ts_type(
@@ -627,14 +634,4 @@ fn is_const_initializer(expr: &HirExpr) -> bool {
             | HirExpr::Float(_, _)
             | HirExpr::Null(_)
     )
-}
-
-pub(crate) fn is_const_initializer_ast(expr: &Expression<'_>) -> bool {
-    match expr {
-        Expression::BooleanLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::NullLiteral(_) => true,
-        Expression::Identifier(id) => id.name == "undefined",
-        _ => false,
-    }
 }

@@ -7,7 +7,7 @@ use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt};
 use crate::PassContext;
 use crate::hir_to_mir::convert_expr::place::{mir_expr_to_place, mir_place_to_expr};
 use crate::hir_to_mir::convert_expr::util::{
-    has_potential_side_effects, hir_expr_type_id, mir_expr_ty,
+    has_potential_side_effects, hir_expr_type_id, is_pure_place, mir_expr_ty,
 };
 use crate::hir_to_mir::converter::ExprConverter;
 use crate::hir_to_mir::ops::convert_binop;
@@ -28,6 +28,34 @@ impl ExprConverter {
             mutable: false,
         });
         temp
+    }
+
+    fn convert_accessor_receiver(
+        &mut self,
+        owner: &HirExpr,
+        is_static: bool,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        if is_static {
+            return None;
+        }
+        let recv = self.convert_expr(
+            owner,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        if is_pure_place(&recv) {
+            Some(recv)
+        } else {
+            Some(MirExpr::Local(self.materialize_non_place(recv, out)))
+        }
     }
 
     pub(super) fn convert_ternary(
@@ -138,6 +166,64 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if let HirExpr::Field {
+            owner, field_name, ..
+        } = target
+            && let Some((setter_fid, value_ty, is_static)) =
+                self.resolve_accessor_setter(owner, field_name, shared_struct_ids, types)
+        {
+            let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
+            if !is_assignment_compatible(value, rhs_ty, value_ty, types, target.span(), ctx) {
+                return MirExpr::Unit;
+            }
+            let receiver = self.convert_accessor_receiver(
+                owner,
+                is_static,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            let value_mir = self.convert_expr(
+                value,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            let value_temp = self.fresh_local();
+            self.push_temp_local(value_temp, value_ty);
+            let needs_cast = rhs_ty != value_ty
+                && matches!(types.resolve(value_ty), Some(t) if is_primitive_cast_target(t))
+                && matches!(types.resolve(rhs_ty), Some(t) if is_primitive_cast_target(t));
+            let init = if needs_cast {
+                MirExpr::Cast {
+                    expr: Box::new(value_mir),
+                    ty: value_ty,
+                }
+            } else {
+                value_mir
+            };
+            out.push(MirStmt::Let {
+                local: value_temp,
+                ty: value_ty,
+                init: Some(init),
+                mutable: false,
+            });
+            let mut args = Vec::new();
+            if let Some(receiver) = receiver {
+                args.push(receiver);
+            }
+            args.push(MirExpr::Local(value_temp));
+            out.push(MirStmt::Expr(MirExpr::Call {
+                callee: setter_fid,
+                args,
+                ty: types.intern(&Type::Void),
+            }));
+            return MirExpr::Local(value_temp);
+        }
         let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
         let target_ty = self.assignment_target_ty(target, ty, types);
         if !is_assignment_compatible(value, rhs_ty, target_ty, types, target.span(), ctx) {
@@ -216,6 +302,21 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if let Some(mir) = self.convert_accessor_compound_update(
+            target,
+            op,
+            rhs,
+            post,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
+
         let target_ty = self.assignment_target_ty(target, ty, types);
         let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
         if !is_assignment_compatible(rhs, rhs_ty, target_ty, types, target.span(), ctx) {
@@ -297,6 +398,148 @@ impl ExprConverter {
                 value: MirExpr::Local(new_temp),
             });
             MirExpr::Local(new_temp)
+        }
+    }
+
+    fn convert_accessor_compound_update(
+        &mut self,
+        target: &HirExpr,
+        op: HirBinaryOp,
+        rhs: &HirExpr,
+        post: bool,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = target
+        else {
+            return None;
+        };
+        let getter = self.resolve_accessor_getter(owner, field_name, shared_struct_ids, types, ty);
+        let setter = self.resolve_accessor_setter(owner, field_name, shared_struct_ids, types);
+        let ((getter_fid, getter_ret_ty, is_static), (setter_fid, value_ty, setter_static)) =
+            match (getter, setter) {
+                (Some(getter), Some(setter)) => (getter, setter),
+                (Some(_), None) => {
+                    ctx.error(
+                        "E0411",
+                        format!(
+                            "accessor `{field_name}` is read-only: a compound update requires \
+                             both a getter and a setter"
+                        ),
+                        target.span(),
+                    );
+                    return Some(MirExpr::Unit);
+                }
+                (None, Some(_)) => {
+                    ctx.error(
+                        "E0412",
+                        format!(
+                            "accessor `{field_name}` is write-only: a compound update requires \
+                             both a getter and a setter"
+                        ),
+                        target.span(),
+                    );
+                    return Some(MirExpr::Unit);
+                }
+                (None, None) => return None,
+            };
+        debug_assert_eq!(
+            is_static, setter_static,
+            "accessor getter and setter must agree on static-ness"
+        );
+
+        let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
+        if !is_assignment_compatible(rhs, rhs_ty, value_ty, types, target.span(), ctx) {
+            return Some(MirExpr::Unit);
+        }
+
+        let receiver = self.convert_accessor_receiver(
+            owner,
+            is_static,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+
+        let old_temp = self.fresh_local();
+        self.push_temp_local(old_temp, getter_ret_ty);
+        let mut getter_args = Vec::new();
+        if let Some(recv) = &receiver {
+            getter_args.push(recv.clone());
+        }
+        out.push(MirStmt::Let {
+            local: old_temp,
+            ty: getter_ret_ty,
+            init: Some(MirExpr::Call {
+                callee: getter_fid,
+                args: getter_args,
+                ty: getter_ret_ty,
+            }),
+            mutable: false,
+        });
+
+        let rhs_mir =
+            self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+        let needs_rhs_cast = rhs_ty != value_ty
+            && matches!(types.resolve(value_ty), Some(t) if is_primitive_cast_target(t))
+            && matches!(types.resolve(rhs_ty), Some(t) if is_primitive_cast_target(t));
+        let rhs_for_binop = if needs_rhs_cast {
+            MirExpr::Cast {
+                expr: Box::new(rhs_mir),
+                ty: value_ty,
+            }
+        } else {
+            rhs_mir
+        };
+        let needs_old_cast = getter_ret_ty != value_ty
+            && matches!(types.resolve(value_ty), Some(t) if is_primitive_cast_target(t))
+            && matches!(types.resolve(getter_ret_ty), Some(t) if is_primitive_cast_target(t));
+        let old_for_binop = if needs_old_cast {
+            MirExpr::Cast {
+                expr: Box::new(MirExpr::Local(old_temp)),
+                ty: value_ty,
+            }
+        } else {
+            MirExpr::Local(old_temp)
+        };
+
+        let new_temp = self.fresh_local();
+        self.push_temp_local(new_temp, value_ty);
+        out.push(MirStmt::Let {
+            local: new_temp,
+            ty: value_ty,
+            init: Some(MirExpr::Binary {
+                op: convert_binop(op, ctx),
+                left: Box::new(old_for_binop),
+                right: Box::new(rhs_for_binop),
+                ty: value_ty,
+            }),
+            mutable: false,
+        });
+
+        let mut setter_args = Vec::new();
+        if let Some(recv) = receiver {
+            setter_args.push(recv);
+        }
+        setter_args.push(MirExpr::Local(new_temp));
+        out.push(MirStmt::Expr(MirExpr::Call {
+            callee: setter_fid,
+            args: setter_args,
+            ty: types.intern(&Type::Void),
+        }));
+
+        if post {
+            Some(MirExpr::Local(old_temp))
+        } else {
+            Some(MirExpr::Local(new_temp))
         }
     }
 }

@@ -661,15 +661,15 @@ fn tla_module_mode_preserves_source_order_in_tla_main_body() {
     let first = main_body
         .find("1 + 1")
         .expect("first inlined expr `1 + 1` must appear in __tla_main body");
-    let let_x = main_body
-        .find("let x")
-        .expect("let x must appear in __tla_main body");
+    let assign_x = main_body
+        .find("x =")
+        .expect("x assignment must appear in __tla_main body");
     let second = main_body
         .find("2 + 2")
         .expect("second inlined expr `2 + 2` must appear in __tla_main body");
     assert!(
-        first < let_x && let_x < second,
-        "source order must be preserved in __tla_main body: first ({first}) < let_x ({let_x}) < second ({second}); got __tla_main body:\n{main_body}"
+        first < assign_x && assign_x < second,
+        "source order must be preserved in __tla_main body: first ({first}) < assign_x ({assign_x}) < second ({second}); got __tla_main body:\n{main_body}"
     );
 }
 
@@ -710,16 +710,19 @@ fn tla_module_mode_top_level_expr_can_reference_runtime_let_binding() {
         }
     }
     let main_body = &rust[main_body_start..main_body_end];
-    let let_x = main_body
-        .find("let x")
-        .expect("let x must appear in __tla_main body");
-    let x_ref = main_body
-        .find("x ;")
-        .or_else(|| main_body.find("x;"))
-        .expect("inlined expr `x;` must appear in __tla_main body (after let x)");
     assert!(
-        let_x < x_ref,
-        "let x must be emitted before the inlined `x;` reference (shared scope: runtime binding must be in scope); got body:\n{main_body}"
+        rust.contains("static mut x"),
+        "runtime top-level `let x` must become a module-level mutable global; got rust:\n{rust}"
+    );
+    let assign_x = main_body
+        .find("x =")
+        .expect("x assignment must appear in __tla_main body");
+    let x_ref = main_body
+        .find("unsafe { x }")
+        .expect("inlined expr `x;` must appear in __tla_main body (after the assignment)");
+    assert!(
+        assign_x < x_ref,
+        "the assignment to `x` must be emitted before the inlined `x;` reference; got body:\n{main_body}"
     );
 }
 
@@ -854,7 +857,7 @@ fn tla_module_mode_allows_user_declared_name_with_tla_main_prefix_but_no_digits(
 }
 
 #[test]
-fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
+fn tla_module_mode_assigns_runtime_let_bindings_to_module_globals() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -894,23 +897,29 @@ fn tla_module_mode_assigns_distinct_local_ids_to_runtime_let_bindings() {
         }
     }
     let main_body = &rust[main_body_start..main_body_end];
-    let let_a = main_body
-        .find("let a")
-        .expect("let a must be inlined into __tla_main body");
-    let let_b = main_body
-        .find("let b")
-        .expect("let b must be inlined into __tla_main body");
-    let let_c = main_body
-        .find("let c")
-        .expect("let c must be inlined into __tla_main body");
+    let assign_a = main_body
+        .find("a =")
+        .expect("a assignment must appear in __tla_main body");
+    let assign_b = main_body
+        .find("b =")
+        .expect("b assignment must appear in __tla_main body");
+    let assign_c = main_body
+        .find("c =")
+        .expect("c assignment must appear in __tla_main body");
     assert!(
-        let_a < let_b && let_b < let_c,
-        "source order must be preserved: let a ({let_a}) < let b ({let_b}) < let c ({let_c}); got body:\n{main_body}"
+        assign_a < assign_b && assign_b < assign_c,
+        "source order must be preserved: a ({assign_a}) < b ({assign_b}) < c ({assign_c}); got body:\n{main_body}"
     );
+    for g in ["static mut a", "static mut b", "static mut c"] {
+        assert!(
+            rust.contains(g),
+            "runtime let binding must become a module-level mutable global `{g}`; got rust:\n{rust}"
+        );
+    }
 }
 
 #[test]
-fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
+fn tla_module_mode_allows_cross_scope_reference_to_runtime_let_binding() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -918,24 +927,25 @@ fn tla_module_mode_rejects_cross_scope_reference_to_runtime_let_binding() {
         &opts,
     );
     assert!(
-        out.has_errors(),
-        "cross-scope reference to a TLA-only binding must produce a diagnostic (otherwise the backend would emit an undeclared Rust identifier); got diagnostics: {:?}",
+        !out.has_errors(),
+        "cross-scope reference to a runtime top-level binding must compile: the binding becomes a module-level mutable global; got diagnostics: {:?}",
         out.diagnostics
     );
-    let combined: String = out
-        .diagnostics
-        .iter()
-        .map(|d| format!("{d:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let rust = out
+        .rust_source
+        .expect("module mode rust emit must populate rust_source");
     assert!(
-        combined.contains("E0513"),
-        "expected E0513 cross-scope diagnostic for `x`; got: {combined}"
+        rust.contains("static mut x"),
+        "runtime top-level `let x` must become a module-level mutable global; got rust:\n{rust}"
+    );
+    assert!(
+        rust.contains("fn use_x"),
+        "function `use_x` must be emitted; got rust:\n{rust}"
     );
 }
 
 #[test]
-fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function() {
+fn tla_module_mode_allows_cross_scope_reference_even_when_let_follows_function() {
     let opts = CompileOptions::default();
     let out = Driver::new().compile_source(
         "test.mts",
@@ -943,19 +953,16 @@ fn tla_module_mode_cross_scope_reference_rejected_even_when_let_follows_function
         &opts,
     );
     assert!(
-        out.has_errors(),
-        "cross-scope reference to a TLA-only binding must be rejected even when the function is declared before the let; got diagnostics: {:?}",
+        !out.has_errors(),
+        "cross-scope reference to a runtime top-level binding must compile regardless of declaration order; got diagnostics: {:?}",
         out.diagnostics
     );
-    let combined: String = out
-        .diagnostics
-        .iter()
-        .map(|d| format!("{d:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let rust = out
+        .rust_source
+        .expect("module mode rust emit must populate rust_source");
     assert!(
-        combined.contains("E0513"),
-        "expected E0513 cross-scope diagnostic for `cfg` (function-before-let order); got: {combined}"
+        rust.contains("static mut cfg"),
+        "runtime top-level `let cfg` must become a module-level mutable global; got rust:\n{rust}"
     );
 }
 
@@ -1213,5 +1220,297 @@ fn e2e_object_literal_type_assertion_let_sets_local_type() {
     assert!(
         rust.contains("return p . x ;"),
         "field access must resolve after a type-asserted let, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_accessor_ordinary_name_collision_stays_e0300() {
+    let out = compile(
+        "class C { get value(): i64 { return 1; } \
+         __get_value(): i64 { return 2; } } \
+         function f(): i64 { return 0; }",
+    );
+    assert!(
+        out.has_errors(),
+        "an ordinary method named like a lowered accessor name must be rejected; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0300"),
+        "an accessor/ordinary name collision must report E0300; got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_static_method_this_is_reported_as_unsupported() {
+    let out = compile("class C { static f(): i64 { return this; } }");
+    assert!(
+        !out.has_errors(),
+        "`this` in a static method lowers to `undefined`, which must not be a hard error; \
+         got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("P0014"),
+        "`this` in a static method must emit the P0014 unsupported-`this` diagnostic; \
+         got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_instance_method_this_still_resolves_to_self() {
+    let out = compile("class C { x: i64 = 0; f(): i64 { return this.x; } }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("self . x"),
+        "instance method `this.x` must still resolve to the receiver field, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_top_level_this_is_reported_as_unsupported() {
+    let out = compile("function g(): i64 { return this; }");
+    assert!(
+        !out.has_errors(),
+        "top-level `this` lowers to `undefined`, which must not be a hard error; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("P0014"),
+        "`this` outside an instance method must emit the P0014 unsupported-`this` diagnostic; \
+         got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_unsupported_this_field_access_cascades_to_error() {
+    let out = compile("function g(): i64 { return this.x; }");
+    assert!(
+        out.has_errors(),
+        "member access on unsupported `this` must cascade to a hard error; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("P0014"),
+        "the unsupported-`this` warning must be present before the cascade; got:\n{combined}"
+    );
+    assert!(
+        combined.contains("P0011"),
+        "member access on unsupported `this` must cascade to P0011; got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_method_on_class_typed_global_resolves_via_declared_type() {
+    let out = compile(
+        "class C { x: i64 = 0; foo(): i64 { return this.x; } get y(): i64 { return this.x; } } \
+         let obj: C; \
+         function f(): i64 { return obj.foo() + obj.y; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("C__foo (obj)"),
+        "a method call on a class-typed global must resolve via the declared global type, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("C__get_y (obj)"),
+        "an accessor read on a class-typed global must resolve via the declared global type, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_static_accessor_dispatches_without_receiver() {
+    let out = compile(
+        "class C { static get y(): i64 { return 1; } static set y(v: i64) {} } \
+         function f(): i64 { C.y = 5; return C.y; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("C__get_y ()"),
+        "a static getter must dispatch without a receiver, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("C__set_y (__tmp"),
+        "a static setter must dispatch without a receiver (value only), got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_setter_assignment_checks_value_compatibility() {
+    let out = compile(
+        "class C { x: i64 = 0; set y(v: i64) { this.x = v; } } \
+         function f(c: C): i64 { c.y = \"s\"; return 0; }",
+    );
+    assert!(
+        out.has_errors(),
+        "assigning a string to a numeric setter must be rejected; got {:?}",
+        out.diagnostics
+    );
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("E0408"),
+        "a string assigned to a numeric setter must report E0408; got:\n{combined}"
+    );
+}
+
+#[test]
+fn e2e_setter_assignment_evaluates_to_assigned_value() {
+    let out = compile(
+        "class C { x: i64 = 0; set y(v: i64) { this.x = v; } } \
+         function f(c: C): i64 { let z: i64 = 0; z = (c.y = 5); return z; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("C__set_y (c ,"),
+        "the setter must be invoked, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("z = C__set_y"),
+        "the assignment must evaluate to the assigned value, not the setter's result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_accessor_compound_update_routes_through_getter_and_setter() {
+    let out = compile(
+        "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
+         function f(c: C): i64 { let a: i64 = (c.y += 1); let b: i64 = (c.y++); return a + b; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("C__get_y (c)"),
+        "a compound accessor update must read through the getter, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("C__set_y (c ,"),
+        "a compound accessor update must write through the setter, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
+    let out = compile(
+        "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
+         let g: C; \
+         function f(): i64 { return g.y += 1; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("C__get_y (g)"),
+        "a place-like (global) receiver must be forwarded without a by-value temp, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("C__set_y (g ,"),
+        "a place-like (global) receiver must be forwarded to the setter as-is, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_accessor_compound_update_preserves_prefix_and_postfix_results() {
+    fn setter_value_arg(rust: &str) -> String {
+        let call = rust.rsplit("C__set_y (").next().expect("setter call");
+        let args = call.split(')').next().expect("setter args");
+        args.rsplit(", ").next().unwrap().trim().to_owned()
+    }
+    fn returned_local(rust: &str) -> String {
+        rust.rsplit("return ")
+            .next()
+            .expect("return")
+            .split(' ')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    let prefix = compile(
+        "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
+         function f(c: C): i64 { return ++c.y; }",
+    );
+    assert!(!prefix.has_errors(), "got {:?}", prefix.diagnostics);
+    let prefix_rust = prefix.rust_source.expect("rust_source");
+    assert_eq!(
+        returned_local(&prefix_rust),
+        setter_value_arg(&prefix_rust),
+        "a prefix update must evaluate to the new value passed to the setter, got:\n{prefix_rust}"
+    );
+
+    let postfix = compile(
+        "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
+         function f(c: C): i64 { return c.y++; }",
+    );
+    assert!(!postfix.has_errors(), "got {:?}", postfix.diagnostics);
+    let postfix_rust = postfix.rust_source.expect("rust_source");
+    assert_ne!(
+        returned_local(&postfix_rust),
+        setter_value_arg(&postfix_rust),
+        "a postfix update must evaluate to the previous value, not the new setter argument, got:\n{postfix_rust}"
+    );
+}
+
+#[test]
+fn e2e_accessor_compound_update_rejects_partial_accessors() {
+    fn codes(out: &DriverOutput) -> String {
+        out.diagnostics
+            .iter()
+            .map(|d| format!("{d:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let read_only = compile(
+        "class C { get y(): i64 { return 1; } } \
+         function f(c: C): i64 { return c.y += 1; }",
+    );
+    assert!(read_only.has_errors(), "got {:?}", read_only.diagnostics);
+    assert!(
+        codes(&read_only).contains("E0411"),
+        "a getter-only accessor must reject a compound update with E0411, got:\n{}",
+        codes(&read_only)
+    );
+
+    let write_only = compile(
+        "class C { set y(v: i64) {} } \
+         function f(c: C): i64 { return c.y += 1; }",
+    );
+    assert!(write_only.has_errors(), "got {:?}", write_only.diagnostics);
+    assert!(
+        codes(&write_only).contains("E0412"),
+        "a setter-only accessor must reject a compound update with E0412, got:\n{}",
+        codes(&write_only)
     );
 }

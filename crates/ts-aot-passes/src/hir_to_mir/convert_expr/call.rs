@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
@@ -405,6 +405,18 @@ impl ExprConverter {
         ) {
             return mir;
         }
+        if let Some(mir) = self.try_user_method_dispatch(
+            callee,
+            args,
+            ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        ) {
+            return mir;
+        }
         let callee_id = self.resolve_callee(callee, ctx);
         let mir_args: Vec<MirExpr> = args
             .iter()
@@ -591,7 +603,6 @@ impl ExprConverter {
         Some(MirExpr::Local(dest))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn validate_promise_handler_param_and_return(
         &self,
         op: RuntimeOp,
@@ -778,5 +789,160 @@ impl ExprConverter {
             target_ty: None,
         });
         MirExpr::Local(dest)
+    }
+
+    fn try_user_method_dispatch(
+        &mut self,
+        callee: &HirCallee,
+        args: &[HirExpr],
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        let static_sid = match owner.as_ref() {
+            HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name),
+            _ => None,
+        };
+        let (sid, is_static) = match static_sid {
+            Some(sid) => (sid, true),
+            None => (
+                self.owner_struct_id(owner, shared_struct_ids, types)?,
+                false,
+            ),
+        };
+        let key = (sid, field_name.clone(), is_static);
+        let fid = *self.method_map.get(&key)?;
+        let call_ty = self.method_ret.get(&key).copied().unwrap_or(ty);
+        let mut mir_args = Vec::with_capacity(args.len() + 1);
+        if !is_static {
+            mir_args.push(self.convert_expr(
+                owner,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ));
+        }
+        for a in args {
+            mir_args.push(self.convert_expr(
+                a,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ));
+        }
+        Some(MirExpr::Call {
+            callee: fid,
+            args: mir_args,
+            ty: call_ty,
+        })
+    }
+
+    fn resolve_accessor_target(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        shared_struct_ids: &HashMap<TypeId, StructId>,
+        types: &TypeTable,
+    ) -> Option<(StructId, bool)> {
+        let static_sid = match owner {
+            HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name),
+            _ => None,
+        };
+        let (sid, is_static) = match static_sid {
+            Some(sid) => (sid, true),
+            None => (
+                self.owner_struct_id(owner, shared_struct_ids, types)?,
+                false,
+            ),
+        };
+        if !is_static
+            && self
+                .field_id_lookup
+                .contains_key(&(sid, field_name.clone()))
+        {
+            return None;
+        }
+        Some((sid, is_static))
+    }
+
+    pub(super) fn resolve_accessor_getter(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        shared_struct_ids: &HashMap<TypeId, StructId>,
+        types: &TypeTable,
+        fallback_ty: TypeId,
+    ) -> Option<(FunctionId, TypeId, bool)> {
+        let (sid, is_static) =
+            self.resolve_accessor_target(owner, field_name, shared_struct_ids, types)?;
+        let key = (sid, Atom::from(format!("__get_{field_name}")), is_static);
+        let fid = *self.method_map.get(&key)?;
+        let ret_ty = self.method_ret.get(&key).copied().unwrap_or(fallback_ty);
+        Some((fid, ret_ty, is_static))
+    }
+
+    pub(super) fn try_accessor_getter_dispatch(
+        &mut self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<MirExpr> {
+        let (fid, call_ty, is_static) =
+            self.resolve_accessor_getter(owner, field_name, shared_struct_ids, types, ty)?;
+        let mut mir_args = Vec::new();
+        if !is_static {
+            mir_args.push(self.convert_expr(
+                owner,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            ));
+        }
+        Some(MirExpr::Call {
+            callee: fid,
+            args: mir_args,
+            ty: call_ty,
+        })
+    }
+
+    pub(super) fn resolve_accessor_setter(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        shared_struct_ids: &HashMap<TypeId, StructId>,
+        types: &TypeTable,
+    ) -> Option<(FunctionId, TypeId, bool)> {
+        let (sid, is_static) =
+            self.resolve_accessor_target(owner, field_name, shared_struct_ids, types)?;
+        let key = (sid, Atom::from(format!("__set_{field_name}")), is_static);
+        let fid = *self.method_map.get(&key)?;
+        let value_ty = self
+            .method_param_tys
+            .get(&key)
+            .and_then(|params| params.last().copied())?;
+        Some((fid, value_ty, is_static))
     }
 }
