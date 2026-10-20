@@ -498,6 +498,34 @@ fn object_get_prototype_of_call_emits_unsupported_builtin_diagnostic() {
 }
 
 #[test]
+fn object_get_prototype_of_evaluates_side_effecting_argument() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let effect = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(11)),
+        args: Vec::new(),
+        ty: unit_ty(),
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+    c.convert_expr(
+        &object_method_call_with_arg("getPrototypeOf", effect),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        out.iter()
+            .any(|s| matches!(s, MirStmt::Expr(MirExpr::Call { .. }))),
+        "Object.getPrototypeOf must evaluate its side-effecting argument before lowering to \
+         undefined; got: {out:?}"
+    );
+}
+
+#[test]
 fn object_set_prototype_of_call_inlines_assign_no_runtime_call() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();

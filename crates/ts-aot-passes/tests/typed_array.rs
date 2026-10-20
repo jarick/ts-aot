@@ -76,6 +76,23 @@ fn new_typed_array_with_wrong_arity_emits_e0406() {
         has_e0406,
         "new Int8Array(4, 8) with 2 args must emit E0406 about arity, got: {diags:?}"
     );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("E0406") && d.contains("extra arguments are ignored")),
+        "extra TypedArray arguments must report that they are ignored; got {diags:?}"
+    );
+}
+
+#[test]
+fn new_typed_array_without_length_defaults_to_zero() {
+    let (_, diags) = convert("function f(): Int8Array { return new Int8Array(); }");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("E0406") && d.contains("defaults to 0")),
+        "a missing TypedArray length must report the zero default; got {diags:?}"
+    );
 }
 
 #[test]
@@ -87,5 +104,22 @@ fn new_typed_array_with_non_numeric_length_emits_e0406() {
     assert!(
         has_e0406,
         "new Int8Array(\"hello\") with non-numeric length must emit E0406, got: {diags:?}"
+    );
+}
+
+#[test]
+fn new_typed_array_extra_args_are_still_evaluated() {
+    let (mir, _diags) = convert(
+        "function side(): i64 { return 1; } \
+         function f(): Int8Array { return new Int8Array(4, side()); }",
+    );
+    assert!(
+        mir.contains("call fn(0)()"),
+        "extra TypedArray constructor arguments must still be evaluated for side effects; \
+         got:\n{mir}"
+    );
+    assert!(
+        mir.contains("typed_array_new"),
+        "the numeric length must still lower to the typed array runtime op; got:\n{mir}"
     );
 }

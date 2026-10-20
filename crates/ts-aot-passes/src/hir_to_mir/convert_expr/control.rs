@@ -627,8 +627,22 @@ fn is_assignment_compatible(
     span: Span,
     ctx: &mut PassContext,
 ) -> bool {
-    let target_cat = classify(types.resolve(target_ty));
+    let target_resolved = types.resolve(target_ty);
     let value_cat = classify_hir(value, value_ty, types);
+    if value_cat == TypeCategory::Void && !matches!(target_resolved, Some(Type::Void)) {
+        return report_compat_error(
+            ctx,
+            "E0409",
+            "void/Unit value cannot be assigned to a typed target; \
+             this AOT target has no implicit Unit-to-value coercion",
+            span,
+        );
+    }
+
+    if target_resolved.is_none() || matches!(target_resolved, Some(Type::Error)) {
+        return true;
+    }
+    let target_cat = classify(target_resolved);
 
     if target_cat == value_cat {
         return true;
@@ -640,11 +654,11 @@ fn is_assignment_compatible(
         return true;
     }
     match (target_cat, value_cat) {
-        (_, TypeCategory::Void) | (TypeCategory::Void, _) => report_compat_error(
+        (TypeCategory::Void, _) => report_compat_error(
             ctx,
             "E0409",
-            "void/Unit value cannot be assigned to a typed target; \
-             this AOT target has no implicit Unit-to-value coercion",
+            "a value cannot be assigned to a void-typed target; \
+             this AOT target has no implicit value-to-Unit coercion",
             span,
         ),
         (TypeCategory::Numeric, TypeCategory::String)

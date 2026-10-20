@@ -1,6 +1,6 @@
 use oxc_ast::ast::{FunctionBody, Statement};
-use ts_aot_core::{LocalId, TypeId};
-use ts_aot_ir_hir::{HirParam, HirStmt};
+use ts_aot_core::{Atom, LocalId, TypeId};
+use ts_aot_ir_hir::{HirExpr, HirParam, HirStmt};
 
 use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
@@ -13,6 +13,7 @@ impl SkeletonBuilder {
         params: &[HirParam],
         is_generator: bool,
         inherit_this_scope: bool,
+        extra_locals: &[(Atom, TypeId, HirExpr)],
     ) -> Vec<HirStmt> {
         let Some(body) = body else {
             return Vec::new();
@@ -28,9 +29,23 @@ impl SkeletonBuilder {
             let id = LocalId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
             scope.declare_param(p.name.as_str(), id, p.ty);
         }
-        let result = self.walk_block_with_predeclare(senv, &body.statements, &mut scope);
+        let mut prelude: Vec<HirStmt> = Vec::with_capacity(extra_locals.len());
+        for (name, ty, init) in extra_locals {
+            let id = scope.declare(name.as_str(), *ty);
+            prelude.push(HirStmt::Let {
+                id,
+                name: name.clone(),
+                ty: *ty,
+                init: Some(init.clone()),
+            });
+        }
+        let mut result = self.walk_block_with_predeclare(senv, &body.statements, &mut scope);
         self.is_generator_stack.pop();
         self.in_static_method = saved_static;
+        if !prelude.is_empty() {
+            prelude.append(&mut result);
+            result = prelude;
+        }
         result
     }
 

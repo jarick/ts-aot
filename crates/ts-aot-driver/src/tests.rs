@@ -88,6 +88,46 @@ fn emit_hir_skips_mir_conversion_for_hir_only_valid_input() {
 }
 
 #[test]
+fn parameter_default_value_is_reported_as_ignored() {
+    let opts = CompileOptions::with_emit(EmitStage::Hir);
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f(x = 1): number { return x; }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "a parameter default must be a warning, not an error; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code.as_str() == "P0017"),
+        "a parameter default must be reported as ignored (P0017), got {:?}",
+        out.diagnostics
+    );
+}
+
+#[test]
+fn destructured_parameter_default_value_is_reported_as_ignored() {
+    let opts = CompileOptions::with_emit(EmitStage::Hir);
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f({a = 1}: { a: i32 }): i32 { return a; }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "a destructured parameter default must be a warning, not an error; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code.as_str() == "P0016"),
+        "a destructured parameter default must be reported as ignored (P0016), got {:?}",
+        out.diagnostics
+    );
+}
+
+#[test]
 fn emit_mir_produces_mir_dump() {
     let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
@@ -1512,5 +1552,50 @@ fn e2e_accessor_compound_update_rejects_partial_accessors() {
         codes(&write_only).contains("E0412"),
         "a setter-only accessor must reject a compound update with E0412, got:\n{}",
         codes(&write_only)
+    );
+}
+
+#[test]
+fn e2e_destructuring_arrow_parameter_binds_property_value() {
+    let out = compile(
+        "class P { x: i64 = 0; } \
+         function run(): void { const f = ({ x }: P) => x; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("let x : i64 = __tmp0 . x"),
+        "a destructured arrow parameter must initialize the bound name from the argument's \
+         property, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_destructuring_function_parameter_binds_property_value() {
+    let out = compile(
+        "class P { x: i64 = 0; } \
+         function g({ x }: P): i64 { return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("let x : i64 = __tmp0 . x"),
+        "a destructured function parameter must initialize the bound name from the argument's \
+         property, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_destructuring_method_parameter_binds_property_value() {
+    let out = compile(
+        "class P { x: i64 = 0; } \
+         class C { m({ x }: P): i64 { return x; } }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("let x : i64 = __tmp1 . x"),
+        "a destructured method parameter must read the property from the value parameter \
+         (after the synthetic `this`), got:\n{rust}"
     );
 }

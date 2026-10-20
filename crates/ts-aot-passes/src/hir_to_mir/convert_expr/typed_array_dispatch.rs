@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Span, StructId, TypeId, TypeTable};
+use ts_aot_core::{StructId, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::convert_expr::globals::is_global_typed_array_reference;
-use crate::hir_to_mir::convert_expr::util::is_numeric_type_for_array_len;
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
@@ -51,33 +50,15 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        if args.len() != 1 {
-            ctx.error(
-                "E0406",
-                format!(
-                    "new TypedArray requires exactly 1 argument (length) in MVP; \
-                     got {} (typedArray/array/buffer constructor overloads are not yet supported)",
-                    args.len()
-                ),
-                Span::new(0, 0),
-            );
-            return MirExpr::Unit;
-        }
-        if !is_numeric_type_for_array_len(&args[0], types) {
-            ctx.error(
-                "E0406",
-                "new TypedArray length argument must be a number (per ECMAScript spec)",
-                Span::new(0, 0),
-            );
-            return MirExpr::Unit;
-        }
-        let length_mir = self.convert_expr(
-            &args[0],
+        let length_mir = self.convert_length_argument(
+            args,
             out,
             shared_struct_ids,
             shared_next_struct,
             types,
             ctx,
+            "new TypedArray",
+            " (typedArray/array/buffer constructor overloads are not yet supported)",
         );
         let dest = self.fresh_local();
         self.push_temp_local(dest, ty);

@@ -34,6 +34,54 @@ fn generator_next_method_lowers_to_runtime_generator_next_op() {
 }
 
 #[test]
+fn instance_generator_method_call_then_next_lowers_to_generator_next() {
+    let (mir, _types, diags, _hir) = convert(
+        r"
+        class Counter {
+            *stream(): i64 {
+                yield 1;
+            }
+        }
+        function main(c: Counter): i64 {
+            const g = c.stream();
+            g.next();
+            return 0;
+        }
+        ",
+    );
+    assert!(!has_errors(&diags), "errors in: {diags:?}");
+    let count = count_runtime_ops(&mir, RuntimeOp::GeneratorNext);
+    assert_eq!(
+        count, 1,
+        "c.stream().next() must emit exactly one GeneratorNext op; diags: {diags:?}"
+    );
+}
+
+#[test]
+fn static_generator_method_call_then_next_lowers_to_generator_next() {
+    let (mir, _types, diags, _hir) = convert(
+        r"
+        class Counter {
+            static *stream(): i64 {
+                yield 1;
+            }
+        }
+        function main(): i64 {
+            const g = Counter.stream();
+            g.next();
+            return 0;
+        }
+        ",
+    );
+    assert!(!has_errors(&diags), "errors in: {diags:?}");
+    let count = count_runtime_ops(&mir, RuntimeOp::GeneratorNext);
+    assert_eq!(
+        count, 1,
+        "Counter.stream().next() must emit exactly one GeneratorNext op; diags: {diags:?}"
+    );
+}
+
+#[test]
 fn generator_local_type_is_propagated_from_call() {
     let (mir, _types, diags, _hir) = convert(
         r"
@@ -323,7 +371,7 @@ fn expression_position_yield_is_rejected() {
 }
 
 #[test]
-fn generator_method_is_rejected() {
+fn generator_method_is_supported() {
     let (_, _types, diags, _hir) = convert(
         r"
         class Counter {
@@ -335,8 +383,8 @@ fn generator_method_is_rejected() {
         ",
     );
     assert!(
-        has_code(&diags, "E0501"),
-        "generator methods must be rejected, got: {diags:?}"
+        !has_code(&diags, "E0501"),
+        "generator methods must be lowered (not rejected with E0501), got: {diags:?}"
     );
 }
 
@@ -495,7 +543,7 @@ fn void_yield_type_with_valued_yield_is_rejected() {
 }
 
 #[test]
-fn generator_without_return_type_is_rejected() {
+fn generator_without_return_type_uses_error_yield_type() {
     let (_, _types, diags, _hir) = convert(
         r"
         function* gen() {
@@ -504,8 +552,29 @@ fn generator_without_return_type_is_rejected() {
         ",
     );
     assert!(
-        has_code(&diags, "E0501"),
-        "generators without a resolvable yield type must be rejected, got: {diags:?}"
+        !has_code(&diags, "E0501"),
+        "a generator without a resolvable yield type must fall back to an error yield type \
+         instead of being rejected, got: {diags:?}"
+    );
+}
+
+#[test]
+fn generator_without_return_type_warns_about_unresolved_yield_type() {
+    let (_, _types, diags, _hir) = convert(
+        r"
+        function* gen() {
+            yield 1;
+        }
+        ",
+    );
+    assert!(
+        has_code(&diags, "E0505"),
+        "an unannotated generator with a valued yield must warn about the unresolved yield \
+         type, got: {diags:?}"
+    );
+    assert!(
+        !has_errors(&diags),
+        "the unresolved-yield-type diagnostic must be a warning, got: {diags:?}"
     );
 }
 
@@ -522,10 +591,9 @@ fn generator_method_mir_function_decl_carries_self_param_and_generator_status() 
         ",
     );
     assert!(
-        has_code(&diags, "E0501"),
-        "class generator method `stream` must be rejected by lower_generators with E0501; \
-         the MIR assertions below validate best-effort lowering despite the rejection, \
-         got: {diags:?}"
+        !has_code(&diags, "E0501"),
+        "class generator method `stream` must be lowered by lower_generators without E0501; \
+         the MIR assertions below validate the lowering, got: {diags:?}"
     );
     let struct_decl = mir
         .declarations

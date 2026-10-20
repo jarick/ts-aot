@@ -164,3 +164,35 @@ fn e2e_weakmap_bare_type_annotation_rejected_with_e0403() {
         "backend must not emit a WeakMapHandle type for the bare-`WeakMap` annotation, got rust: {rust}"
     );
 }
+
+#[test]
+fn e2e_weakmap_constructor_evaluates_initializer_for_side_effects() {
+    let opts = CompileOptions {
+        module: false,
+        ..CompileOptions::default()
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "function makeEntries() { return []; } \
+         function f() { return new WeakMap(makeEntries()); }",
+        &opts,
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out
+        .rust_source
+        .expect("emit-rust must populate rust_source for WeakMap e2e check");
+    let rust = normalize_rust(&rust);
+    assert!(
+        rust.matches("makeEntries").count() >= 2,
+        "the WeakMap initializer must be evaluated for side effects (expected the call in \
+         addition to the declaration), got:\n{rust}"
+    );
+    let call = rust.rfind("makeEntries").expect("initializer call");
+    let new_map = rust
+        .find("__ts_aot_weak_map_new")
+        .expect("weak map new call");
+    assert!(
+        call < new_map,
+        "the initializer must be evaluated before __ts_aot_weak_map_new; got:\n{rust}"
+    );
+}

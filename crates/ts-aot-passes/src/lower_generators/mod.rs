@@ -9,7 +9,10 @@ use crate::hir_to_mir::qualified_name;
 mod diagnostics;
 mod type_propagation;
 
-use diagnostics::{GENERATOR_DIAG_UNSUPPORTED_YIELD, analyze_generator_body, first_body_span};
+use diagnostics::{
+    GENERATOR_DIAG_UNRESOLVED_YIELD_TYPE, GENERATOR_DIAG_UNSUPPORTED_YIELD, analyze_generator_body,
+    first_body_span,
+};
 use type_propagation::propagate_generator_types;
 
 pub use diagnostics::GENERATOR_DIAG_DEFERRED_METHOD;
@@ -39,7 +42,6 @@ pub fn lower_generators(
         &[],
     );
 
-    reject_generator_methods(program, ctx, &mut stats);
     reject_nested_generator_decls(&program.declarations, ctx, &mut stats);
 
     if !generator_fn_names.is_empty() {
@@ -81,6 +83,20 @@ fn process_decls(
             }
             HirDecl::Class(c) => {
                 non_generator_names.insert(qualified_name(namespace_path, c.name.as_str()));
+                let mut class_path = namespace_path.to_vec();
+                class_path.push(c.name.as_str().to_owned());
+                for m in &mut c.methods {
+                    if m.is_generator {
+                        process_generator_function(
+                            m,
+                            types,
+                            ctx,
+                            generator_fn_names,
+                            stats,
+                            &class_path,
+                        );
+                    }
+                }
             }
             HirDecl::Global { name, .. } => {
                 non_generator_names.insert(qualified_name(namespace_path, name.as_str()));
@@ -117,22 +133,18 @@ fn process_generator_function(
     let analysis = analyze_generator_body(&f.body);
     let inner_ty = f.ret;
     let inner_resolved = types.resolve(inner_ty);
-    let inner_is_error = matches!(inner_resolved, Some(Type::Error) | None);
-    if inner_is_error {
+
+    if matches!(inner_resolved, Some(Type::Error) | None) && analysis.has_valued_yield {
         let span = analysis
             .first_valued_yield_span
-            .or(analysis.first_throw_span)
-            .or(analysis.first_expression_yield_span)
-            .or_else(|| first_body_span(&f.body))
             .unwrap_or_else(|| Span::new(0, 0));
-        ctx.error(
-            GENERATOR_DIAG_UNSUPPORTED_YIELD,
-            "generator functions must declare their yield type \
+        ctx.warning(
+            GENERATOR_DIAG_UNRESOLVED_YIELD_TYPE,
+            "generator yield type could not be resolved; the generator is lowered with an \
+             error yield type — declare an explicit yield type \
              (e.g. `function* gen(): i64 { yield 1; }`)",
             span,
         );
-        stats.generators_rejected += 1;
-        return;
     }
 
     if matches!(inner_resolved, Some(Type::Void)) && analysis.has_valued_yield {
@@ -209,47 +221,6 @@ fn process_generator_function(
     f.ret = generator_ty;
     generator_fn_names.insert(qualified_name(namespace_path, f.name.as_str()));
     stats.generators_transformed += 1;
-}
-
-fn reject_generator_methods(
-    program: &HirProgram,
-    ctx: &mut PassContext,
-    stats: &mut LowerGeneratorsStats,
-) {
-    fn reject_decl(decl: &HirDecl, ctx: &mut PassContext, stats: &mut LowerGeneratorsStats) {
-        match decl {
-            HirDecl::Class(c) => {
-                for m in &c.methods {
-                    if m.is_generator {
-                        let span = first_body_span(&m.body).unwrap_or_else(|| Span::new(0, 0));
-                        ctx.error(
-                            GENERATOR_DIAG_UNSUPPORTED_YIELD,
-                            format!(
-                                "generator method `{}()` is not supported yet \
-                                 (move the generator out of the class)",
-                                m.name.as_str()
-                            ),
-                            span,
-                        );
-                        stats.generators_rejected += 1;
-                    }
-                }
-            }
-            HirDecl::Namespace { members, .. } => {
-                for m in members {
-                    reject_decl(m, ctx, stats);
-                }
-            }
-            HirDecl::Function(_)
-            | HirDecl::TypeAlias { .. }
-            | HirDecl::Enum { .. }
-            | HirDecl::Global { .. }
-            | HirDecl::Interface { .. } => {}
-        }
-    }
-    for decl in &program.declarations {
-        reject_decl(decl, ctx, stats);
-    }
 }
 
 fn reject_nested_generator_decls(

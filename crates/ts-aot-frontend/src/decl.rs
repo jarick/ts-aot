@@ -207,20 +207,8 @@ impl SkeletonBuilder {
             func.type_parameters.as_deref(),
         );
 
-        let mut params = Vec::with_capacity(func.params.items.len());
-        for param in &func.params.items {
-            let param_name =
-                binding_pattern_name(&param.pattern).map_or_else(|| Atom::from("_"), Atom::from);
-            let param_ty = self.resolve_ts_type_from_annotation_with_params(
-                senv,
-                param.type_annotation.as_deref(),
-                Some(&type_param_map),
-            );
-            params.push(HirParam {
-                name: param_name,
-                ty: param_ty,
-            });
-        }
+        let (params, extra_locals) =
+            self.build_params_and_locals(senv, &func.params.items, 0, Some(&type_param_map));
 
         let ret = self.resolve_ts_type_from_annotation_with_params(
             senv,
@@ -229,8 +217,14 @@ impl SkeletonBuilder {
         );
 
         self.type_param_stack.push(type_param_map.clone());
-        let body =
-            self.walk_function_body(senv, func.body.as_deref(), &params, func.generator, false);
+        let body = self.walk_function_body(
+            senv,
+            func.body.as_deref(),
+            &params,
+            func.generator,
+            false,
+            &extra_locals,
+        );
         self.type_param_stack.pop();
 
         HirFunction {
@@ -384,27 +378,21 @@ impl SkeletonBuilder {
             combined_map.bind(k, v);
         }
 
-        let mut params = Vec::with_capacity(value.params.items.len() + 1);
         let needs_synthetic_this = !md.r#static;
+        let (method_params, extra_locals) = self.build_params_and_locals(
+            senv,
+            &value.params.items,
+            u32::from(needs_synthetic_this),
+            Some(&combined_map),
+        );
+        let mut params = Vec::with_capacity(method_params.len() + 1);
         if needs_synthetic_this {
             params.push(HirParam {
                 name: Atom::from("this"),
                 ty: class_ty,
             });
         }
-        for param in &value.params.items {
-            let param_name =
-                binding_pattern_name(&param.pattern).map_or_else(|| Atom::from("_"), Atom::from);
-            let param_ty = self.resolve_ts_type_from_annotation_with_params(
-                senv,
-                param.type_annotation.as_deref(),
-                Some(&combined_map),
-            );
-            params.push(HirParam {
-                name: param_name,
-                ty: param_ty,
-            });
-        }
+        params.extend(method_params);
         let ret = self.resolve_ts_type_from_annotation_with_params(
             senv,
             value.return_type.as_deref(),
@@ -413,8 +401,14 @@ impl SkeletonBuilder {
         self.type_param_stack.push(combined_map.clone());
         let saved_static = self.in_static_method;
         self.in_static_method = md.r#static;
-        let body =
-            self.walk_function_body(senv, value.body.as_deref(), &params, value.generator, true);
+        let body = self.walk_function_body(
+            senv,
+            value.body.as_deref(),
+            &params,
+            value.generator,
+            true,
+            &extra_locals,
+        );
         self.in_static_method = saved_static;
         self.type_param_stack.pop();
         HirFunction {

@@ -289,35 +289,15 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> MirExpr {
         let _ = callee;
-        if args.len() != 1 {
-            ctx.error(
-                "E0406",
-                format!(
-                    "new ArrayBuffer(byteLength) requires exactly 1 argument; got {}",
-                    args.len()
-                ),
-                Span::new(0, 0),
-            );
-            return MirExpr::Unit;
-        }
-        if !is_numeric_type_for_array_len(&args[0], types) {
-            ctx.error(
-                "E0406",
-                "new ArrayBuffer(byteLength) argument must be a non-negative integer (per \
-                 ECMAScript spec); got non-numeric expression. Coerce the length to an integer \
-                 (e.g. Math.floor(n)) before calling new ArrayBuffer(n)."
-                    .to_string(),
-                Span::new(0, 0),
-            );
-            return MirExpr::Unit;
-        }
-        let byte_length_mir = self.convert_expr(
-            &args[0],
+        let byte_length_mir = self.convert_length_argument(
+            args,
             out,
             shared_struct_ids,
             shared_next_struct,
             types,
             ctx,
+            "new ArrayBuffer(byteLength)",
+            " (per ECMAScript spec the byte length must be a non-negative integer)",
         );
         let array_buffer_ty = types.intern(&Type::ArrayBuffer);
         let dest = self.fresh_local();
@@ -376,8 +356,8 @@ impl ExprConverter {
         if !captures.is_empty() {
             ctx.error(
                 "P0005",
-                "capturing closures are not supported in this PR; \
-                 only no-capture arrow functions are accepted",
+                "capturing closures are not supported in this AOT target; \
+                 only no-capture closures are accepted",
                 *span,
             );
             return MirExpr::Unit;

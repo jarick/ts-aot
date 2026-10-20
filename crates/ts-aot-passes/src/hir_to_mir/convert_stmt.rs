@@ -347,6 +347,16 @@ impl ExprConverter {
                     Some(Type::Array { element }) | Some(Type::Generator { inner: element }) => {
                         *element
                     }
+                    Some(Type::Error) => types.intern(&Type::Error),
+                    None => {
+                        ctx.warning(
+                            "E0406",
+                            "for-of iterable type could not be resolved in this AOT target; \
+                             AOT for-of requires a concrete Array<T> or Generator<T>",
+                            iter_span,
+                        );
+                        types.intern(&Type::Error)
+                    }
                     Some(unsupported) => {
                         let message = match unsupported {
                             Type::String => "for-of over String is not yet supported in \
@@ -375,15 +385,6 @@ impl ExprConverter {
                             ),
                         };
                         ctx.error("E0406", message, iter_span);
-                        types.intern(&Type::Error)
-                    }
-                    None => {
-                        ctx.error(
-                            "E0406",
-                            "for-of iterable type could not be resolved in this AOT target; \
-                             AOT for-of requires a concrete Array<T> or Generator<T>",
-                            iter_span,
-                        );
                         types.intern(&Type::Error)
                     }
                 };
@@ -421,6 +422,16 @@ impl ExprConverter {
                 let iter_span = iter.span();
                 let item_ty = match types.resolve(iter.ty()) {
                     Some(Type::Generator { inner: element }) => *element,
+                    Some(Type::Error) => types.intern(&Type::Error),
+                    None => {
+                        ctx.warning(
+                            "E0406",
+                            "for-await-of iterable type could not be resolved in this AOT \
+                             target; AOT for-await-of requires a concrete Generator<T>",
+                            iter_span,
+                        );
+                        types.intern(&Type::Error)
+                    }
                     Some(unsupported) => {
                         let message = match unsupported {
                             Type::String => "for-await-of over String is not yet supported in \
@@ -434,15 +445,6 @@ impl ExprConverter {
                             ),
                         };
                         ctx.error("E0406", message, iter_span);
-                        types.intern(&Type::Error)
-                    }
-                    None => {
-                        ctx.error(
-                            "E0406",
-                            "for-await-of iterable type could not be resolved in this AOT \
-                             target; AOT for-await-of requires a concrete Generator<T>",
-                            iter_span,
-                        );
                         types.intern(&Type::Error)
                     }
                 };
