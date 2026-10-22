@@ -5,9 +5,12 @@ use oxc_ast::ast::{
     TSTypeName, match_member_expression,
 };
 use oxc_span::GetSpan;
-use ts_aot_core::{Atom, Diagnostic, GenericParamId, Span as CoreSpan, Type, TypeId, TypeTable};
+use ts_aot_core::{
+    Atom, Diagnostic, GenericParamId, LocalId, Span as CoreSpan, Type, TypeId, TypeTable,
+};
 use ts_aot_ir_hir::{HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam};
 
+use crate::body::FunctionBodyInput;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv, TlaMainItem};
 use crate::type_resolver::reference::TypeLookup;
 use crate::type_resolver::{TypeParamMap, resolve_simple_type};
@@ -27,6 +30,16 @@ impl SkeletonEnv<'_> {
             .push(Diagnostic::error(code, message, core_span_from_oxc(span)));
     }
 
+    pub(crate) fn report_unsupported_warning(
+        &mut self,
+        code: &'static str,
+        message: &str,
+        span: oxc_span::Span,
+    ) {
+        self.diagnostics
+            .push(Diagnostic::warning(code, message, core_span_from_oxc(span)));
+    }
+
     pub(crate) fn resolve_superclass_name(&mut self, expr: &Expression<'_>) -> Option<Atom> {
         match expr {
             Expression::Identifier(id) => Some(Atom::from(id.name.as_str())),
@@ -37,18 +50,20 @@ impl SkeletonEnv<'_> {
                 }) {
                     Some(Atom::from(s.property.name.as_str()))
                 } else {
-                    self.report_unsupported(
+                    self.report_unsupported_warning(
                         UNSUPPORTED_DECL_CODE,
-                        "extends must be an identifier or member access expression",
+                        "extends must be an identifier or static member access expression; \
+                         the class is lowered without its parent",
                         expr.span(),
                     );
                     None
                 }
             }
             other => {
-                self.report_unsupported(
+                self.report_unsupported_warning(
                     UNSUPPORTED_DECL_CODE,
-                    "extends must be an identifier or member access expression",
+                    "extends must be an identifier or static member access expression; \
+                     the class is lowered without its parent",
                     other.span(),
                 );
                 None
@@ -217,13 +232,16 @@ impl SkeletonBuilder {
         );
 
         self.type_param_stack.push(type_param_map.clone());
-        let body = self.walk_function_body(
+        let (body, _) = self.walk_function_body(
             senv,
-            func.body.as_deref(),
-            &params,
+            &FunctionBodyInput {
+                body: func.body.as_deref(),
+                params: &params,
+                extra_locals: &extra_locals,
+                param_base: 0,
+            },
             func.generator,
             false,
-            &extra_locals,
         );
         self.type_param_stack.pop();
 
@@ -388,6 +406,7 @@ impl SkeletonBuilder {
         let mut params = Vec::with_capacity(method_params.len() + 1);
         if needs_synthetic_this {
             params.push(HirParam {
+                id: LocalId::from_raw(0),
                 name: Atom::from("this"),
                 ty: class_ty,
             });
@@ -401,13 +420,16 @@ impl SkeletonBuilder {
         self.type_param_stack.push(combined_map.clone());
         let saved_static = self.in_static_method;
         self.in_static_method = md.r#static;
-        let body = self.walk_function_body(
+        let (body, _) = self.walk_function_body(
             senv,
-            value.body.as_deref(),
-            &params,
+            &FunctionBodyInput {
+                body: value.body.as_deref(),
+                params: &params,
+                extra_locals: &extra_locals,
+                param_base: 0,
+            },
             value.generator,
             true,
-            &extra_locals,
         );
         self.in_static_method = saved_static;
         self.type_param_stack.pop();

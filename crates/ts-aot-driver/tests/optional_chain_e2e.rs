@@ -96,7 +96,7 @@ fn e2e_optional_call_lowering_wires_callee_through_optional_chain() {
     assert_node_with_op(
         &normalized,
         "indirect_call",
-        "opt(local(0)):6",
+        "opt(local(0)):3",
         "()",
         "g?.(): indirect_call's argument is the OptionalChain wrapping the Local callee directly, \
          and the call `()` is applied directly to indirect_call's result",
@@ -215,7 +215,7 @@ fn e2e_optional_chain_inside_no_capture_closure_body_with_typed_param() {
     assert_node_with_op(
         &normalized,
         "opt",
-        "local(0)",
+        "local(1)",
         ".0",
         "closure c?.x: OptionalChain wraps the Local owner directly inside the closure body, \
          and `.0` field access is applied to the OptionalChain result",

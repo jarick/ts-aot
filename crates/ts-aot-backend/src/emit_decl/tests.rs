@@ -741,7 +741,7 @@ fn function_body_let_binary_and_return_emits_statements() {
     };
     let tokens = emit_function(&f, &types).expect("function should emit");
     let s = tokens.to_string();
-    assert!(s.contains("let total : i32 = (1 + 2)"), "got: {s}");
+    assert!(s.contains("let total : i32 = 1 + 2"), "got: {s}");
     assert!(s.contains("return total"), "got: {s}");
 }
 
@@ -3910,7 +3910,7 @@ fn function_typed_param_and_return_exclude_function_from_dispatch_table() {
 }
 
 #[test]
-fn function_typed_param_emits_unit_placeholder() {
+fn function_typed_param_emits_fn_value_enum() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
@@ -3934,13 +3934,14 @@ fn function_typed_param_emits_unit_placeholder() {
     let sig = signature_fragment(&s, "take_fn");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("cb:()"),
-        "param typed `(a: i64) => i64` must emit as `cb:()` (unit placeholder) in the function signature \n         until Phase 5 introduces a real function-typed runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+        sig_norm.contains("cb:__TsFnValue0"),
+        "param typed `(a: i64) => i64` must emit as the generated Fn-value enum type. \
+         Whitespace-insensitive. Got signature fragment: `{sig}`"
     );
 }
 
 #[test]
-fn function_typed_return_emits_unit_placeholder() {
+fn function_typed_return_emits_fn_value_enum() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
@@ -3960,8 +3961,103 @@ fn function_typed_return_emits_unit_placeholder() {
     let sig = signature_fragment(&s, "make_fn");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("->()"),
-        "return type `(a: i64) => i64` must emit as `->()` (unit placeholder) in the function signature \n         until Phase 5 introduces a real function-typed runtime. Whitespace-insensitive. \n         Got signature fragment: `{sig}`"
+        sig_norm.contains("->__TsFnValue0"),
+        "return type `(a: i64) => i64` must emit as the generated Fn-value enum type. \
+         Whitespace-insensitive. Got signature fragment: `{sig}`"
+    );
+}
+
+#[test]
+fn fn_value_let_local_emits_enum() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let fn_ty = types.intern(&Type::Fn {
+        params: vec![],
+        ret: i64_ty,
+        err: None,
+    });
+    let mut clos = empty_func("__ts_aot_closure_0");
+    clos.id = FunctionId::from_raw(1);
+    clos.ret = i64_ty;
+    let mut run = empty_func("run");
+    run.ret = i64_ty;
+    run.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(0),
+            name: Atom::from("g"),
+            ty: fn_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Let {
+                    local: LocalId::from_raw(0),
+                    ty: fn_ty,
+                    init: Some(MirExpr::Global(Atom::from("__ts_aot_closure_0"))),
+                    mutable: false,
+                },
+                MirStmt::Return(Some(MirExpr::IndirectCall {
+                    callee: Box::new(MirExpr::Local(LocalId::from_raw(0))),
+                    args: vec![],
+                    ty: i64_ty,
+                })),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(clos));
+    prog.push_decl(MirDecl::Function(run));
+    let tokens = emit_decls(&prog, &types).expect("emit");
+    let s = tokens.to_string();
+    println!("OUT: {s}");
+    assert!(s.contains("__TsFnValue0"), "got: {s}");
+}
+
+#[test]
+fn fn_value_enum_and_call_helper_are_emitted() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let fn_ty = types.intern(&Type::Fn {
+        params: vec![i64_ty],
+        ret: i64_ty,
+        err: None,
+    });
+
+    let mut callee = empty_func("add_one");
+    callee.id = FunctionId::from_raw(0);
+    callee.ret = i64_ty;
+    callee.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: i64_ty,
+    }];
+
+    let mut invoker = empty_func("call_it");
+    invoker.id = FunctionId::from_raw(1);
+    invoker.ret = i64_ty;
+    invoker.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("cb"),
+        ty: fn_ty,
+    }];
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(callee));
+    prog.push_decl(MirDecl::Function(invoker));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+
+    assert!(
+        s.contains("enum __TsFnValue0"),
+        "a fn-value enum must be emitted for a used function signature, got: {s}"
+    );
+    assert!(
+        s.contains("AddOne"),
+        "the enum must carry a variant for every same-signature function, got: {s}"
+    );
+    assert!(
+        s.contains("fn __ts_fn_call_0"),
+        "a static-dispatch call helper must be emitted, got: {s}"
     );
 }
 
@@ -4544,6 +4640,7 @@ fn closure_param_for_of_generator_iterable_emits_mut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: vec![MirParam {
                     id: closure_param,
                     name: Atom::from("g"),
@@ -4600,6 +4697,7 @@ fn closure_param_assigned_in_if_body_emits_mut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: vec![MirParam {
                     id: param_id,
                     name: Atom::from("x"),
@@ -4649,6 +4747,7 @@ fn closure_param_unused_emits_immut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: vec![MirParam {
                     id: param_id,
                     name: Atom::from("x"),
@@ -4689,6 +4788,7 @@ fn closure_param_passed_to_array_push_emits_mut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: vec![MirParam {
                     id: param_id,
                     name: Atom::from("arr"),
@@ -4745,6 +4845,7 @@ fn closure_param_assigned_via_optional_chain_place_emits_mut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: vec![MirParam {
                     id: param_id,
                     name: Atom::from("obj"),
@@ -4818,6 +4919,7 @@ fn closure_local_array_assigned_via_array_set_emits_mut() {
         locals: Vec::new(),
         block: MirBlock {
             stmts: vec![MirStmt::Return(Some(MirExpr::Closure {
+                id: 0,
                 params: Vec::new(),
                 captures: Vec::new(),
                 locals: vec![MirLocalDecl {

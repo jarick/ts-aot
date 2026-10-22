@@ -11,6 +11,7 @@ pub fn substitute_param(
     result: &mut TypeSubstitutionResult,
 ) -> HirParam {
     HirParam {
+        id: param.id,
         name: param.name.clone(),
         ty: substitute_type(param.ty, mapping, types, result),
     }

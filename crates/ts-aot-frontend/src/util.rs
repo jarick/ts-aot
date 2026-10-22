@@ -34,18 +34,20 @@ impl SkeletonBuilder {
                     core_span_from_oxc(param.span),
                 ));
             }
+            let index = first_param_index.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
             if let Some(name) = binding_pattern_name(&param.pattern) {
                 params.push(HirParam {
+                    id: LocalId::from_raw(index),
                     name: Atom::from(name),
                     ty,
                 });
             } else {
                 params.push(HirParam {
+                    id: LocalId::from_raw(index),
                     name: Atom::from("_"),
                     ty,
                 });
                 let span = core_span_from_oxc(param.span);
-                let index = first_param_index + u32::try_from(offset).unwrap_or(u32::MAX);
                 let base = HirExpr::Local {
                     id: LocalId::from_raw(index),
                     ty,

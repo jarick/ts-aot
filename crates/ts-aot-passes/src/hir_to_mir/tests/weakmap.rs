@@ -101,7 +101,7 @@ fn weakmap_set_with_struct_key_and_i64_value_dispatches_runtime_call() {
     );
 
     assert!(
-        !cx.has_errors(),
+        !!cx.diagnostics().is_empty(),
         "WeakMap<Struct, i64>.set with concrete struct key and i64 value must lower without errors, got: {:?}",
         cx.diagnostics()
     );
@@ -162,7 +162,7 @@ fn weakmap_set_with_struct_literal_key_is_rejected_with_e0406() {
     );
 
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "WeakMap.set with a struct-literal key must produce an E0406 diagnostic; got: {:?}",
         cx.diagnostics()
     );
@@ -234,7 +234,7 @@ fn weakmap_set_with_field_access_key_is_rejected_with_e0406() {
     );
 
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "WeakMap.set with a field-access key (a.b) must produce an E0406 diagnostic; got: {:?}",
         cx.diagnostics()
     );
@@ -304,7 +304,7 @@ fn weakmap_set_with_index_access_key_is_rejected_with_e0406() {
     );
 
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "WeakMap.set with an index-access key (a[i]) must produce an E0406 diagnostic; got: {:?}",
         cx.diagnostics()
     );
@@ -363,7 +363,7 @@ fn weakmap_with_string_value_rejected_with_e0406_and_no_runtime_op() {
     );
 
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "WeakMap<Struct, String>.set must produce an E0406 diagnostic for unsupported value type; got: {:?}",
         cx.diagnostics()
     );

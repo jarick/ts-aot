@@ -263,7 +263,7 @@ impl ExprConverter {
             });
             return MirExpr::Local(dest);
         }
-        ctx.error(
+        ctx.warning(
             "E0406",
             format!(
                 "new Date(year, month, ...rest) constructor with {} positional args is not yet \
@@ -338,12 +338,12 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> MirExpr {
         let HirExpr::Closure {
-            id: _id,
+            id: closure_id,
             params,
             captures,
             body,
             ty: closure_ty,
-            span,
+            ..
         } = hir
         else {
             ctx.error(
@@ -353,15 +353,19 @@ impl ExprConverter {
             );
             return MirExpr::Unit;
         };
-        if !captures.is_empty() {
-            ctx.error(
-                "P0005",
-                "capturing closures are not supported in this AOT target; \
-                 only no-capture closures are accepted",
-                *span,
-            );
-            return MirExpr::Unit;
-        }
+        let capture_ids: Vec<LocalId> = captures
+            .iter()
+            .filter_map(|c| match c {
+                HirExpr::Local { id, .. } => Some(self.map_local_id(*id)),
+                HirExpr::Global { name, .. } => self
+                    .local_names
+                    .iter()
+                    .filter(|(_, n)| n.as_str() == name.as_str())
+                    .map(|(id, _)| *id)
+                    .max_by_key(|id| id.raw()),
+                _ => None,
+            })
+            .collect();
         let ret_ty = types
             .resolve(*closure_ty)
             .and_then(|t| match t {
@@ -395,8 +399,9 @@ impl ExprConverter {
         self.local_map = snapshot;
         self.temp_locals = temp_locals_snapshot;
         let closure_expr = MirExpr::Closure {
+            id: closure_id.raw(),
             params: mir_params,
-            captures: Vec::new(),
+            captures: capture_ids,
             locals: body_locals,
             body: mir_body,
             ret_ty,

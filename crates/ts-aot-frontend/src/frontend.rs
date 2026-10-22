@@ -75,6 +75,7 @@ impl FrontendPass {
             diagnostics: &mut diagnostics,
             program: &mut program,
             next_destructured_id: Cell::new(0),
+            capture_types: Vec::new(),
         };
         let source_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
         SkeletonBuilder::new(source_len, module).build(&mut senv, oxc_program);

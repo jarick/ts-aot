@@ -33,7 +33,11 @@ fn with_function_remap_and_offset_starts_past_offset() {
 #[test]
 fn seed_params_advances_next_local_past_param_count() {
     let mut c = ExprConverter::with_function_remap_and_offset(HashMap::new(), 0);
-    c.seed_params(3);
+    c.seed_params(&[
+        LocalId::from_raw(0),
+        LocalId::from_raw(1),
+        LocalId::from_raw(2),
+    ]);
     assert_eq!(c.peek_next_local(), 3);
     let fresh = c.map_local_id(LocalId::from_raw(99));
     assert_eq!(fresh, LocalId::from_raw(3));

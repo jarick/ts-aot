@@ -388,10 +388,12 @@ fn infer_type_args_with_multiple_type_params() {
         "f",
         vec![
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("a"),
                 ty: types.intern(&Type::GenericParam { id: gp0 }),
             },
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::from("b"),
                 ty: types.intern(&Type::GenericParam { id: gp1 }),
             },
@@ -465,10 +467,12 @@ fn infer_type_args_conflict_blocks_single_param_arg_fallback() {
         "f",
         vec![
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("a"),
                 ty: types.intern(&Type::GenericParam { id: gp }),
             },
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::from("b"),
                 ty: types.intern(&Type::GenericParam { id: gp }),
             },

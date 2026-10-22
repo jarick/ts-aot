@@ -29,7 +29,7 @@ impl ExprConverter {
             return None;
         }
         if args.len() != 1 {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 format!(
                     "BigInt(x) constructor takes exactly one argument, got {}",
@@ -41,7 +41,7 @@ impl ExprConverter {
         }
         let arg_ty = args[0].ty();
         if !matches!(types.resolve(arg_ty), Some(Type::String)) {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 format!(
                     "BigInt(x) currently only supports string arguments; got {:?}. \
@@ -103,7 +103,7 @@ impl ExprConverter {
             return None;
         }
         if args.len() > 1 {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 format!(
                     "BigInt.prototype.toString() takes at most one argument, got {}",

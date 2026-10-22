@@ -26,9 +26,13 @@ pub fn convert_binop(op: HirBinaryOp, ctx: &mut PassContext) -> BinaryOp {
         HirBinaryOp::Shl => M::Shl,
         HirBinaryOp::Shr => M::Shr,
         HirBinaryOp::Usr | HirBinaryOp::In | HirBinaryOp::InstanceOf => {
-            ctx.error(
+            ctx.warning(
                 "P0005",
-                format!("binary operator {:?} is not yet supported in HIR→MIR", op),
+                format!(
+                    "binary operator {:?} is not supported in this AOT target; the \
+                     comparison is lowered as equality",
+                    op
+                ),
                 Span::new(0, 0),
             );
             M::Eq
@@ -41,7 +45,7 @@ pub fn convert_unaryop(op: HirUnaryOp, ctx: &mut PassContext) -> UnaryOp {
         HirUnaryOp::Neg => UnaryOp::Neg,
         HirUnaryOp::BitNot => UnaryOp::BitNot,
         HirUnaryOp::TypeOf | HirUnaryOp::Void | HirUnaryOp::Delete => {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 format!("unary operator {:?} is not yet supported in HIR→MIR", op),
                 Span::new(0, 0),

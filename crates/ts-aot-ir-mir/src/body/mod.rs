@@ -304,6 +304,7 @@ pub enum MirExpr {
         ty: TypeId,
     },
     Closure {
+        id: u32,
         params: Vec<MirParam>,
         captures: Vec<LocalId>,
         locals: Vec<MirLocalDecl>,

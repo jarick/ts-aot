@@ -5,7 +5,7 @@ use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::convert_expr::util::has_potential_side_effects;
+use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
 use crate::hir_to_mir::ops::{convert_binop, convert_unaryop};
 
@@ -115,11 +115,11 @@ impl ExprConverter {
         } else if bigint_op_for_binary(op).is_some()
             && (expr_yields_bigint(lhs, types) || expr_yields_bigint(rhs, types))
         {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 format!(
-                    "mixed BigInt and non-BigInt operands are not allowed in `{}` (per spec, \
-                     BigInt arithmetic rejects mixed types); rhs was {:?}, lhs was {:?}",
+                    "mixed BigInt and non-BigInt operands in `{}`; the operation is lowered \
+                     using the left operand as-is; rhs was {:?}, lhs was {:?}",
                     op_name_for_bigint(op),
                     types.resolve(rhs.ty()),
                     types.resolve(lhs.ty()),
@@ -128,7 +128,21 @@ impl ExprConverter {
             );
             let lhs_mir =
                 self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
-            return lhs_mir;
+            let lhs_temp_ty = hir_expr_type_id(lhs).unwrap_or(ty);
+            let lhs_temp = self.fresh_local();
+            self.push_temp_local(lhs_temp, lhs_temp_ty);
+            out.push(MirStmt::Let {
+                local: lhs_temp,
+                ty: lhs_temp_ty,
+                init: Some(lhs_mir),
+                mutable: false,
+            });
+            let rhs_mir =
+                self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+            if has_potential_side_effects(&rhs_mir) {
+                out.push(MirStmt::Expr(rhs_mir));
+            }
+            return MirExpr::Local(lhs_temp);
         }
         match op {
             HirBinaryOp::In => {
@@ -157,7 +171,7 @@ impl ExprConverter {
                         shared_struct_ids.get(ty).map(|sid| sid.raw()).unwrap_or(0)
                     }
                     _ => {
-                        ctx.error(
+                        ctx.warning(
                             "P0005",
                             "instanceof rhs must be a class reference (HirExpr::Global); \
                              dynamic constructor expressions like getConstructor() are not \

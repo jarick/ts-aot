@@ -566,6 +566,7 @@ mod tests {
         HirExpr::Closure {
             id: LocalId::from_raw(0),
             params: vec![HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: ts_aot_core::Atom::from("__closure_param__"),
                 ty: ts_aot_core::TypeId::from_raw(0),
             }],

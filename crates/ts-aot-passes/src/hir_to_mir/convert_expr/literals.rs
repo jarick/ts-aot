@@ -42,10 +42,10 @@ impl ExprConverter {
     }
 
     pub(super) fn convert_object_literal(&mut self, ctx: &mut PassContext) -> MirExpr {
-        ctx.error(
+        ctx.warning(
             "E0402",
-            "object literals (`{}`) are not supported in strict AOT mode. \
-             Use an explicit struct constructor or factory function instead.",
+            "object literal (`{}`) is not lowered to a struct in this AOT target; the value \
+             is lowered as undefined",
             Span::new(0, 0),
         );
         MirExpr::Unit

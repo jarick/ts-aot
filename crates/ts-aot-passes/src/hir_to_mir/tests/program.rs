@@ -202,10 +202,12 @@ fn convert_program_class_methods_use_method_function_kind() {
             name: Atom::new_inline("100"),
             params: vec![
                 HirParam {
+                    id: ts_aot_core::LocalId::from_raw(0),
                     name: Atom::new_inline("this"),
                     ty: unit_ty(),
                 },
                 HirParam {
+                    id: ts_aot_core::LocalId::from_raw(1),
                     name: Atom::new_inline("200"),
                     ty: unit_ty(),
                 },
@@ -255,6 +257,7 @@ fn convert_program_overloaded_constructors_do_not_collide() {
             HirFunction {
                 name: Atom::new_inline("constructor"),
                 params: vec![HirParam {
+                    id: ts_aot_core::LocalId::from_raw(0),
                     name: Atom::new_inline("this"),
                     ty: unit_ty(),
                 }],
@@ -271,10 +274,12 @@ fn convert_program_overloaded_constructors_do_not_collide() {
                 name: Atom::new_inline("constructor"),
                 params: vec![
                     HirParam {
+                        id: ts_aot_core::LocalId::from_raw(1),
                         name: Atom::new_inline("this"),
                         ty: unit_ty(),
                     },
                     HirParam {
+                        id: ts_aot_core::LocalId::from_raw(2),
                         name: Atom::new_inline("v"),
                         ty: unit_ty(),
                     },
@@ -598,6 +603,7 @@ fn convert_program_resolves_field_id_for_non_first_field() {
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getB"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("o"),
             ty: class_ty,
         }],
@@ -676,6 +682,7 @@ fn convert_program_resolves_field_id_after_lower_classes_flatten() {
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getC"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("o"),
             ty: child_ty,
         }],
@@ -742,6 +749,7 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("getMissing"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("o"),
             ty: class_ty,
         }],
@@ -1232,6 +1240,7 @@ fn convert_program_methods_of_different_classes_do_not_collide() {
                 methods: vec![HirFunction {
                     name: Atom::new_inline("foo"),
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(0),
                         name: Atom::new_inline("self"),
                         ty: class_a_ty,
                     }],
@@ -1255,6 +1264,7 @@ fn convert_program_methods_of_different_classes_do_not_collide() {
                 methods: vec![HirFunction {
                     name: Atom::new_inline("foo"),
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(1),
                         name: Atom::new_inline("self"),
                         ty: class_b_ty,
                     }],
@@ -1478,6 +1488,7 @@ fn convert_program_duplicate_class_consumes_method_function_ids_for_alignment() 
         methods: vec![HirFunction {
             name: Atom::new_inline("m"),
             params: vec![HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
             }],
@@ -1501,6 +1512,7 @@ fn convert_program_duplicate_class_consumes_method_function_ids_for_alignment() 
         methods: vec![HirFunction {
             name: Atom::new_inline("m"),
             params: vec![HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
             }],

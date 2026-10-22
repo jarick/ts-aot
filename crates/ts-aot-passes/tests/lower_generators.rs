@@ -716,6 +716,7 @@ fn lower_generators_supports_params() {
     let f = HirFunction {
         name: Atom::from("gen"),
         params: vec![ts_aot_ir_hir::HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("n"),
             ty: i64_ty,
         }],
@@ -756,6 +757,7 @@ fn lower_generators_accepts_throw_inside_nested_closure() {
     let throwing_closure = HirExpr::Closure {
         id: ts_aot_core::LocalId::from_raw(99),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("__p"),
             ty: i64_ty,
         }],

@@ -212,20 +212,24 @@ impl ExprConverter {
         name
     }
 
-    pub fn seed_params(&mut self, count: u32) {
-        for i in 0..count {
-            self.local_map
-                .insert(LocalId::from_raw(i), LocalId::from_raw(i));
+    pub fn seed_params(&mut self, param_ids: &[LocalId]) {
+        for &id in param_ids {
+            self.local_map.insert(id, id);
         }
-        if count > self.next_local {
-            self.next_local = count;
+        let next = param_ids
+            .iter()
+            .map(|id| id.raw())
+            .max()
+            .map_or(0, |m| m.saturating_add(1));
+        if next > self.next_local {
+            self.next_local = next;
         }
     }
 
     pub(crate) fn reset_for_function(
         &mut self,
         function_remap: HashMap<FunctionId, FunctionId>,
-        param_count: u32,
+        param_ids: &[LocalId],
         namespace_path: &[String],
     ) {
         self.local_map.clear();
@@ -233,11 +237,15 @@ impl ExprConverter {
         self.function_remap = function_remap;
         self.namespace_path.clear();
         self.namespace_path.extend_from_slice(namespace_path);
-        self.next_local = param_count;
+        self.next_local = param_ids
+            .iter()
+            .map(|id| id.raw())
+            .max()
+            .map_or(0, |m| m.saturating_add(1));
         self.temp_locals.clear();
         self.struct_ids.clear();
         self.current_call_type_args.clear();
-        self.seed_params(param_count);
+        self.seed_params(param_ids);
     }
 
     pub(super) fn resolve_callee(
@@ -394,10 +402,11 @@ impl ExprConverter {
                 );
                 return placeholder;
             }
-            ctx.error(
+            ctx.warning(
                 "P0011",
                 format!(
-                    "owner expression has no static type for field access `{}`",
+                    "owner expression has no static type for field access `{}`; the access \
+                     is lowered with a placeholder field",
                     field_name.as_str()
                 ),
                 Span::new(0, 0),
@@ -417,10 +426,11 @@ impl ExprConverter {
             return placeholder;
         }
         let Some(&sid) = self.struct_ids.get(&ty).or_else(|| shared_ids.get(&ty)) else {
-            ctx.error(
+            ctx.warning(
                 "P0012",
                 format!(
-                    "owner type {:?} has no registered struct id; the class must be lowered before field access on it",
+                    "owner type {:?} has no struct representation for field access; the \
+                     access is lowered with a placeholder field",
                     ty
                 ),
                 Span::new(0, 0),
@@ -442,10 +452,11 @@ impl ExprConverter {
                 placeholder
             }
             None => {
-                ctx.error(
+                ctx.warning(
                     "P0010",
                     format!(
-                        "field `{}` is not declared on the static type of the owner",
+                        "field `{}` is not declared on the static type of the owner; the \
+                         access is lowered with a placeholder field",
                         field_name.as_str()
                     ),
                     Span::new(0, 0),

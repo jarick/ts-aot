@@ -1,33 +1,47 @@
 use oxc_ast::ast::{FunctionBody, Statement};
-use ts_aot_core::{Atom, LocalId, TypeId};
+use ts_aot_core::{Atom, TypeId};
 use ts_aot_ir_hir::{HirExpr, HirParam, HirStmt};
 
 use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 
+pub(crate) struct FunctionBodyInput<'a, 'b> {
+    pub body: Option<&'a FunctionBody<'b>>,
+    pub params: &'a [HirParam],
+    pub extra_locals: &'a [(Atom, TypeId, HirExpr)],
+    pub param_base: u32,
+}
+
 impl SkeletonBuilder {
     pub(crate) fn walk_function_body(
         &mut self,
         senv: &mut SkeletonEnv,
-        body: Option<&FunctionBody<'_>>,
-        params: &[HirParam],
+        input: &FunctionBodyInput<'_, '_>,
         is_generator: bool,
         inherit_this_scope: bool,
-        extra_locals: &[(Atom, TypeId, HirExpr)],
-    ) -> Vec<HirStmt> {
+    ) -> (Vec<HirStmt>, u32) {
+        let body = input.body;
+        let params = input.params;
+        let extra_locals = input.extra_locals;
+        let param_base = input.param_base;
+        let base = param_base.max(
+            params
+                .iter()
+                .map(|p| p.id.raw())
+                .max()
+                .map_or(0, |m| m.saturating_add(1)),
+        );
         let Some(body) = body else {
-            return Vec::new();
+            return (Vec::new(), base);
         };
         let saved_static = self.in_static_method;
         if !inherit_this_scope {
             self.in_static_method = false;
         }
         self.is_generator_stack.push(is_generator);
-        let param_count = u32::try_from(params.len()).unwrap_or(u32::MAX);
-        let mut scope = BodyScope::new(param_count);
-        for (i, p) in params.iter().enumerate() {
-            let id = LocalId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
-            scope.declare_param(p.name.as_str(), id, p.ty);
+        let mut scope = BodyScope::new(base);
+        for p in params {
+            scope.declare_param(p.name.as_str(), p.id, p.ty);
         }
         let mut prelude: Vec<HirStmt> = Vec::with_capacity(extra_locals.len());
         for (name, ty, init) in extra_locals {
@@ -46,7 +60,8 @@ impl SkeletonBuilder {
             prelude.append(&mut result);
             result = prelude;
         }
-        result
+        let used = scope.peek_next();
+        (result, used)
     }
 
     pub(crate) fn walk_block_with_predeclare(

@@ -1113,7 +1113,7 @@ fn convert_expr_closure_with_empty_body_lowers_to_local_binding() {
 }
 
 #[test]
-fn convert_expr_closure_with_captures_is_rejected() {
+fn convert_expr_closure_with_captures_lowers_without_error() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -1140,14 +1140,20 @@ fn convert_expr_closure_with_captures_is_rejected() {
         &mut empty_types(),
         &mut cx,
     );
+    assert!(!cx.has_errors(), "{:?}", cx.diagnostics());
+    let MirExpr::Local(dest) = mir else {
+        panic!("capturing closure must lower to a Local holding the closure, got {mir:?}");
+    };
     assert!(
-        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
-        "capturing closures must be rejected with P0005, got {:?}",
-        cx.diagnostics()
-    );
-    assert!(
-        matches!(mir, MirExpr::Unit),
-        "a rejected capturing closure must lower to Unit, got {mir:?}"
+        out.iter().any(|s| matches!(
+            s,
+            MirStmt::Let {
+                local,
+                init: Some(MirExpr::Closure { .. }),
+                ..
+            } if *local == dest
+        )),
+        "expected a `let` with a MirExpr::Closure, got {out:?}"
     );
 }
 
@@ -1291,7 +1297,7 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         &mut empty_types(),
         &mut cx,
     );
-    assert!(cx.has_errors());
+    assert!(!cx.diagnostics().is_empty());
     assert!(
         !out.iter().any(|s| matches!(s, MirStmt::Assign { .. })),
         "no Assign must be emitted for invalid target, got {out:?}"
@@ -1577,7 +1583,7 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
 }
 
 #[test]
-fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_unit_expr() {
+fn convert_expr_indirect_call_with_function_typed_callee_emits_indirect_call() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -1611,17 +1617,9 @@ fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_u
         &mut cx,
     );
     assert!(
-        matches!(mir, MirExpr::Unit),
-        "function-typed indirect call must lower to MirExpr::Unit (Type::Fn cannot be called), got {mir:?}"
-    );
-    let has_e0405 = cx
-        .diagnostics()
-        .iter()
-        .any(|d| d.code.as_str() == "E0405" && d.severity == ts_aot_core::Severity::Error);
-    assert!(
-        has_e0405,
-        "function-typed indirect call must emit E0405 error, got: {:?}",
-        cx.diagnostics()
+        matches!(mir, MirExpr::IndirectCall { .. }),
+        "function-typed indirect call must lower to MirExpr::IndirectCall so the backend can \
+         defunctionalize it via a Fn-value enum, got {mir:?}"
     );
 }
 
@@ -2141,8 +2139,8 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
     assert!(!cx.has_errors());
     assert_eq!(
         out.len(),
-        2,
-        "postfix must emit Let then Assign, got {out:?}"
+        3,
+        "postfix must emit Let(old), Let(new) then Assign, got {out:?}"
     );
 
     let MirStmt::Let {
@@ -2163,15 +2161,20 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
         "postfix Let must capture the target's value before assignment"
     );
 
-    let MirStmt::Assign {
-        target: place,
-        value,
+    let MirStmt::Let {
+        local: new_temp,
+        init: Some(new_value),
+        ..
     } = &out[1]
     else {
-        panic!("expected Assign, got {:?}", out[1]);
+        panic!("expected Let(new + rhs), got {:?}", out[1]);
     };
-    let MirExpr::Binary { left, right, .. } = value else {
-        panic!("postfix Assign value must be Binary(old + rhs), got {value:?}");
+    assert_ne!(
+        *new_temp, *old_temp,
+        "postfix must materialize the new value into a separate temp"
+    );
+    let MirExpr::Binary { left, right, .. } = new_value else {
+        panic!("postfix new-value Let init must be Binary(old + rhs), got {new_value:?}");
     };
     let MirExpr::Local(left_id) = left.as_ref() else {
         panic!("postfix Binary.left must reuse the old temp, got {left:?}");
@@ -2184,6 +2187,21 @@ fn convert_expr_compound_update_postfix_returns_old_value_via_local() {
         panic!("postfix Binary.right must be rhs MirExpr, got {right:?}");
     };
     assert_eq!(*rhs_val, 1);
+
+    let MirStmt::Assign {
+        target: place,
+        value,
+    } = &out[2]
+    else {
+        panic!("expected Assign, got {:?}", out[2]);
+    };
+    let MirExpr::Local(assigned) = value else {
+        panic!("postfix Assign must assign the materialized new temp, got {value:?}");
+    };
+    assert_eq!(
+        *assigned, *new_temp,
+        "postfix Assign must take its value from the new-value temp so the RHS is fully evaluated before the shared place is borrowed"
+    );
     assert!(
         matches!(place, ts_aot_ir_mir::MirPlace::Local { id } if *id == LocalId::from_raw(0)),
         "postfix Assign target must be the original target local, got {place:?}"
@@ -3094,23 +3112,23 @@ fn convert_expr_assignment_with_string_rhs_to_f64_target_emits_diagnostic() {
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "F64 target with String RHS must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "f64 target with a string RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
         .diagnostics()
         .iter()
         .find(|d| d.code.as_str() == "E0408")
-        .expect("expected E0408 diagnostic for string-to-numeric assignment");
+        .expect("expected E0408 diagnostic for string-RHS-to-numeric-target assignment");
     assert!(
         diag.message.contains("string"),
-        "E0408 diagnostic must mention the string type, got: {:?}",
+        "E0408 diagnostic must mention string, got: {:?}",
         diag.message
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible string-to-numeric assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3144,7 +3162,7 @@ fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "I64 target with void/Unit RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3159,8 +3177,8 @@ fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed void/Unit assignment must still be lowered, got: {:?}",
         out
     );
 }
@@ -3194,7 +3212,7 @@ fn convert_expr_assignment_with_undefined_rhs_to_error_typed_target_emits_diagno
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "i64 target with Undefined RHS resolving to Type::Error must produce a diagnostic, \
          got: {:?}",
         cx.diagnostics()
@@ -3210,8 +3228,8 @@ fn convert_expr_assignment_with_undefined_rhs_to_error_typed_target_emits_diagno
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed assignment must still be lowered, got: {:?}",
         out
     );
 }
@@ -3399,8 +3417,8 @@ fn convert_expr_assignment_with_bool_literal_rhs_to_numeric_target_emits_diagnos
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "i64 target with Bool literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "i64 target with a bool literal RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
@@ -3415,7 +3433,7 @@ fn convert_expr_assignment_with_bool_literal_rhs_to_numeric_target_emits_diagnos
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible bool-to-numeric assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3513,7 +3531,7 @@ fn convert_expr_assignment_with_null_rhs_to_non_nullable_target_emits_diagnostic
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "null assignment to non-nullable Type::I64 target must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3526,6 +3544,11 @@ fn convert_expr_assignment_with_null_rhs_to_non_nullable_target_emits_diagnostic
         diag.message.contains("null"),
         "E0410 diagnostic must mention null, got: {:?}",
         diag.message
+    );
+    assert!(
+        !out.is_empty(),
+        "a relaxed null assignment must still be lowered, got: {:?}",
+        out
     );
 }
 
@@ -3628,8 +3651,8 @@ fn convert_expr_assignment_with_int_literal_rhs_to_bool_target_emits_diagnostic(
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "Bool target with Int literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "bool target with an int literal RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
@@ -3644,7 +3667,7 @@ fn convert_expr_assignment_with_int_literal_rhs_to_bool_target_emits_diagnostic(
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible int-to-bool assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3678,7 +3701,7 @@ fn convert_expr_assignment_with_null_literal_rhs_to_numeric_target_emits_diagnos
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "i64 target with Null literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3693,8 +3716,8 @@ fn convert_expr_assignment_with_null_literal_rhs_to_numeric_target_emits_diagnos
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed null assignment must still be lowered, got: {:?}",
         out
     );
 }
@@ -3794,8 +3817,8 @@ fn convert_expr_compound_update_with_i64_rhs_casts_to_f64_target_in_postfix_and_
     assert!(!cx.has_errors());
     assert_eq!(
         out.len(),
-        2,
-        "postfix must emit Let(old)=target, Assign(target)=Binary(old, Cast(rhs, f64)), got: {:?}",
+        3,
+        "postfix must emit Let(old)=target, Let(new)=Binary(old, Cast(rhs, f64)), Assign(target)=Local(new), got: {:?}",
         out
     );
     let MirStmt::Let {
@@ -3814,22 +3837,37 @@ fn convert_expr_compound_update_with_i64_rhs_casts_to_f64_target_in_postfix_and_
         "postfix old_temp must be typed f64 (target type), got: {:?}",
         old_ty_post
     );
-    let MirStmt::Assign { value, .. } = &out[1] else {
+    let MirStmt::Let {
+        local: new_temp_post,
+        init: Some(new_value_post),
+        ty: new_ty_post,
+        ..
+    } = &out[1]
+    else {
         panic!(
-            "postfix out[1] must be Assign with Binary value, got: {:?}",
+            "postfix out[1] must be Let binding the new value, got: {:?}",
             out[1]
         );
     };
+    assert_eq!(
+        *new_ty_post, f64_ty,
+        "postfix new_temp must be typed f64 (target type), got: {:?}",
+        new_ty_post
+    );
+    assert_ne!(
+        *new_temp_post, *old_temp_post,
+        "postfix must materialize the new value into a separate temp"
+    );
     let MirExpr::Binary {
         left,
         right,
         ty: bin_ty_post,
         ..
-    } = value
+    } = new_value_post
     else {
         panic!(
-            "postfix Assign value must be Binary(old + rhs_cast), got: {:?}",
-            value
+            "postfix new-value init must be Binary(old + rhs_cast), got: {:?}",
+            new_value_post
         );
     };
     assert_eq!(
@@ -3871,6 +3909,19 @@ fn convert_expr_compound_update_with_i64_rhs_casts_to_f64_target_in_postfix_and_
     assert_ne!(
         *rhs_local_id, *old_temp_post,
         "postfix Cast.expr must be a different local from old_temp (RHS, not target)"
+    );
+    let MirStmt::Assign { value, .. } = &out[2] else {
+        panic!("postfix out[2] must be Assign, got: {:?}", out[2]);
+    };
+    let MirExpr::Local(assigned_post) = value else {
+        panic!(
+            "postfix Assign must assign the materialized new temp, got: {:?}",
+            value
+        );
+    };
+    assert_eq!(
+        *assigned_post, *new_temp_post,
+        "postfix Assign must take its value from the new-value temp so RHS is fully evaluated before the shared place is borrowed"
     );
     let MirExpr::Local(returned) = mir else {
         panic!(
@@ -4313,6 +4364,7 @@ fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("bad_handler"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: bool_ty,
         }],

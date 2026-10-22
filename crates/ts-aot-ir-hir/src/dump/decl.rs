@@ -170,6 +170,7 @@ mod tests {
     fn dump_function_with_params() {
         let mut f = empty_func("sum");
         f.params = vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("a"),
             ty: TypeId::from_raw(1),
         }];
@@ -207,6 +208,7 @@ mod tests {
     fn dump_class_with_extends_and_methods() {
         let mut method = empty_func("m");
         method.params = vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("p"),
             ty: TypeId::from_raw(9),
         }];
@@ -420,6 +422,7 @@ mod tests {
     #[test]
     fn function_param_to_string_contains_name_and_type() {
         let p = HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("a"),
             ty: TypeId::from_raw(2),
         };

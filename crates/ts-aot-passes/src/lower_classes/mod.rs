@@ -177,9 +177,12 @@ fn collect_parents(
         let parent = match index.get(&current) {
             Some(p) => Rc::clone(p),
             None => {
-                ctx.error(
+                ctx.warning(
                     "P0009",
-                    format!("class extends unknown class {}", current.as_str()),
+                    format!(
+                        "class extends unknown class {}; the class is lowered without its parent",
+                        current.as_str()
+                    ),
                     Span::new(0, 0),
                 );
                 return CollectResult::Missing;

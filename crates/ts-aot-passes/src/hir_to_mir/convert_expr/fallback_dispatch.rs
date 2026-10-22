@@ -31,19 +31,6 @@ impl ExprConverter {
         let HirCallee::Indirect(inner) = callee else {
             return None;
         };
-        if !matches!(inner.as_ref(), HirExpr::OptionalChain { .. })
-            && let Some(callee_ty) = hir_expr_type_id(inner.as_ref())
-            && let Some(Type::Fn { .. }) = types.resolve(callee_ty)
-        {
-            ctx.error(
-                "E0405",
-                "function-typed value cannot be called in Phase 4 — \
-                 Type::Fn lowers to `()` and `()` is not callable. \
-                 Use a named function declaration or call through a known callee instead.",
-                Span::new(0, 0),
-            );
-            return Some(MirExpr::Unit);
-        }
         if let HirExpr::Field {
             owner, field_name, ..
         } = inner.as_ref()
@@ -55,7 +42,7 @@ impl ExprConverter {
         {
             if field_name.as_str() == "setPrototypeOf" {
                 if mir_args.is_empty() {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         "Object.setPrototypeOf requires at least the receiver arg; got empty arg list",
                         Span::new(0, 0),
@@ -100,7 +87,7 @@ impl ExprConverter {
                 return Some(MirExpr::Unit);
             }
             if mir_args.len() != 1 {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
                         "Object.{} requires exactly 1 argument; got {}",
@@ -131,7 +118,7 @@ impl ExprConverter {
             && array_field.as_str() == "isArray"
         {
             if mir_args.len() != 1 {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
                         "Array.isArray requires exactly 1 argument; got {}",
@@ -166,7 +153,7 @@ impl ExprConverter {
             && array_from_field.as_str() == "from"
         {
             if mir_args.is_empty() || mir_args.len() > 3 {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
                         "Array.from in AOT supports 1 (source), 2 (source, mapFn) or \
@@ -190,7 +177,7 @@ impl ExprConverter {
                 return Some(MirExpr::Local(dest));
             }
             if mir_args.len() >= 2 && !matches!(&args[1], HirExpr::Global { .. }) {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     "Array.from(arr, mapFn[, thisArg]) in AOT requires mapFn to be a known global function reference \
                      (a top-level fn or a non-capturing closure lifted by `lower_closures`); \
@@ -200,7 +187,7 @@ impl ExprConverter {
                 return Some(MirExpr::Unit);
             }
             if mir_args.len() == 3 {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     "Array.from(arr, mapFn, thisArg) does not support thisArg in AOT \
                      (AOT closures have no `this` binding); use the 2-arg form Array.from(arr, mapFn)",
@@ -292,7 +279,7 @@ impl ExprConverter {
                     None => true,
                 };
                 if !arity_ok {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         format!(
                             "Math.{} requires exactly {} argument(s); got {}",
@@ -361,7 +348,7 @@ impl ExprConverter {
                     self.field_id_lookup.contains_key(&(sid, key)),
                 ));
             }
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 "obj.hasOwnProperty() in AOT requires a literal string key when receiver is a struct; \
                  dynamic keys on struct receivers are not supported",
@@ -400,7 +387,7 @@ impl ExprConverter {
         match field_name.as_str() {
             "next" => {
                 if !args.is_empty() {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         format!(
                             "Generator.prototype.next() takes no arguments; got {}",
@@ -443,7 +430,7 @@ impl ExprConverter {
                 Some(MirExpr::Unit)
             }
             _ => {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
                         "method `{}` is not recognized on `Generator<{}>`; \
