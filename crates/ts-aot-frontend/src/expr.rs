@@ -1,8 +1,7 @@
 use oxc_ast::ast::{
-    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression,
-    ChainElement, ChainExpression, Expression, LogicalExpression, SequenceExpression,
-    SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral, UnaryExpression,
-    UpdateExpression, match_assignment_target, match_assignment_target_pattern, match_expression,
+    Argument, AssignmentExpression, BinaryExpression, CallExpression, ChainElement,
+    ChainExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
+    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression, match_expression,
     match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
@@ -26,7 +25,7 @@ impl SkeletonEnv<'_> {
         if let Some((id, ty)) = scope.lookup(name) {
             HirExpr::Local { id, ty, span }
         } else {
-            let ty = self.error_ty();
+            let ty = self.capture_type(name).unwrap_or_else(|| self.error_ty());
             HirExpr::Global {
                 name: Atom::from(name),
                 ty,
@@ -307,13 +306,11 @@ impl SkeletonBuilder {
             return HirExpr::Unit(core_span_from_oxc(arrow.span));
         }
         if arrow.params.rest.is_some() {
-            senv.diagnostics.push(Diagnostic::error(
-                "E0502",
-                "rest parameters (...args) are not supported in arrow functions in this PR; \
-                 use plain identifier parameters with explicit type annotations instead",
-                core_span_from_oxc(arrow.span),
-            ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+            senv.report_unwalked(
+                "rest parameters (...args) are not supported in this AOT target; the rest \
+                 binding is ignored",
+                arrow.span,
+            );
         }
         let merged = self.merged_type_params();
         let (params, extra_locals) =
@@ -330,6 +327,7 @@ impl SkeletonBuilder {
             None => senv.error_ty(),
         };
         let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
+        senv.capture_types.push(capture_type_map(scope));
         let body: Vec<HirStmt> = if arrow.expression {
             let mut inner_scope = BodyScope::new(u32::try_from(params.len()).unwrap_or(u32::MAX));
             for (idx, (name, ty)) in param_locals.iter().enumerate() {
@@ -355,15 +353,8 @@ impl SkeletonBuilder {
         } else {
             self.walk_function_body(senv, Some(&arrow.body), &params, false, true, &extra_locals)
         };
-        if has_captures(&body, &outer_locals) {
-            senv.diagnostics.push(Diagnostic::error(
-                "P0005",
-                "capturing closures are not supported in this AOT target; \
-                 only no-capture closures are accepted",
-                core_span_from_oxc(arrow.span),
-            ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
-        }
+        senv.capture_types.pop();
+        let captures = collect_capture_refs(&body, &outer_locals);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
             params: param_types,
@@ -375,7 +366,7 @@ impl SkeletonBuilder {
         HirExpr::Closure {
             id,
             params,
-            captures: Vec::new(),
+            captures,
             body,
             ty: fn_ty,
             span: core_span_from_oxc(arrow.span),
@@ -389,16 +380,20 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let span = core_span_from_oxc(func.span);
-        let unsupported = func.r#async
-            || func.generator
-            || func.type_parameters.is_some()
-            || func.params.rest.is_some();
+        let unsupported = func.r#async || func.generator || func.type_parameters.is_some();
         if unsupported {
             senv.report_unwalked(
                 "function expression form is not supported by the body walker",
                 func.span,
             );
             return HirExpr::Unit(span);
+        }
+        if func.params.rest.is_some() {
+            senv.report_unwalked(
+                "rest parameters (...args) are not supported in this AOT target; the rest \
+                 binding is ignored",
+                func.span,
+            );
         }
         let merged = self.merged_type_params();
         let (params, extra_locals) =
@@ -413,6 +408,7 @@ impl SkeletonBuilder {
             None => senv.error_ty(),
         };
         let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
+        senv.capture_types.push(capture_type_map(scope));
         let body = self.walk_function_body(
             senv,
             func.body.as_deref(),
@@ -421,15 +417,8 @@ impl SkeletonBuilder {
             false,
             &extra_locals,
         );
-        if has_captures(&body, &outer_locals) {
-            senv.diagnostics.push(Diagnostic::error(
-                "P0005",
-                "capturing closures are not supported in this AOT target; \
-                 only no-capture closures are accepted",
-                span,
-            ));
-            return HirExpr::Unit(span);
-        }
+        senv.capture_types.pop();
+        let captures = collect_capture_refs(&body, &outer_locals);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
             params: param_types,
@@ -441,7 +430,7 @@ impl SkeletonBuilder {
         HirExpr::Closure {
             id,
             params,
-            captures: Vec::new(),
+            captures,
             body,
             ty: fn_ty,
             span,
@@ -989,8 +978,34 @@ impl SkeletonBuilder {
         a: &AssignmentExpression<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
-        let target = self.walk_assign_target(senv, &a.left, scope);
+        let Some(simple_target) = a.left.as_simple_assignment_target() else {
+            senv.report_unwalked(
+                "destructuring assignment target is not supported; the assignment is skipped \
+                 and the right-hand side is evaluated for its effects",
+                a.span,
+            );
+            return self.walk_expr(senv, &a.right, scope);
+        };
+        let target = self.walk_simple_target(senv, simple_target, scope);
         let rhs = self.walk_expr(senv, &a.right, scope);
+        if !matches!(
+            &target,
+            HirExpr::Local { .. }
+                | HirExpr::Global { .. }
+                | HirExpr::Field { .. }
+                | HirExpr::Index { .. }
+        ) {
+            senv.report_unwalked(
+                "assignment target is not supported; the assignment is skipped and the \
+                 right-hand side is evaluated for its effects",
+                a.span,
+            );
+            return HirExpr::Sequence {
+                exprs: vec![target, rhs],
+                ty: senv.error_ty(),
+                span: core_span_from_oxc(a.span),
+            };
+        }
         let ty = senv.error_ty();
         match compound_op(a.operator) {
             CompoundOp::Assign => HirExpr::Assignment {
@@ -1010,23 +1025,6 @@ impl SkeletonBuilder {
             CompoundOp::Unsupported => {
                 senv.report_unwalked("assignment operator is not supported", a.span);
                 HirExpr::Unit(core_span_from_oxc(a.span))
-            }
-        }
-    }
-
-    fn walk_assign_target(
-        &mut self,
-        senv: &mut SkeletonEnv,
-        t: &oxc_ast::ast::AssignmentTarget<'_>,
-        scope: &mut BodyScope,
-    ) -> HirExpr {
-        match t {
-            t @ match_assignment_target!(AssignmentTarget) => {
-                self.walk_simple_target(senv, t.to_simple_assignment_target(), scope)
-            }
-            t @ match_assignment_target_pattern!(AssignmentTarget) => {
-                senv.report_unwalked("destructuring assignment target is not supported", t.span());
-                HirExpr::Unit(core_span_from_oxc(t.span()))
             }
         }
     }
@@ -1053,35 +1051,44 @@ impl SkeletonBuilder {
     }
 }
 
-fn has_captures(stmts: &[HirStmt], outer_locals: &std::collections::HashSet<String>) -> bool {
+fn capture_type_map(scope: &BodyScope) -> std::collections::HashMap<String, TypeId> {
+    let mut map = std::collections::HashMap::new();
+    for name in scope.names() {
+        if let Some((_, ty)) = scope.lookup(&name) {
+            map.insert(name, ty);
+        }
+    }
+    map
+}
+
+fn collect_capture_refs(
+    stmts: &[HirStmt],
+    outer_locals: &std::collections::HashSet<String>,
+) -> Vec<HirExpr> {
     use ts_aot_ir_hir::{Visitor, walk_expr};
     struct CaptureSearch<'a> {
         outer_locals: &'a std::collections::HashSet<String>,
-        found: bool,
+        seen: std::collections::HashSet<Atom>,
+        captures: Vec<HirExpr>,
     }
     impl Visitor for CaptureSearch<'_> {
         fn visit_expr(&mut self, expr: &HirExpr) {
-            if self.found {
-                return;
-            }
             if let HirExpr::Global { name, .. } = expr
                 && self.outer_locals.contains(name.as_str())
+                && self.seen.insert(name.clone())
             {
-                self.found = true;
-                return;
+                self.captures.push(expr.clone());
             }
             walk_expr(self, expr);
         }
     }
     let mut search = CaptureSearch {
         outer_locals,
-        found: false,
+        seen: std::collections::HashSet::new(),
+        captures: Vec::new(),
     };
     for stmt in stmts {
         search.visit_stmt(stmt);
-        if search.found {
-            return true;
-        }
     }
-    search.found
+    search.captures
 }

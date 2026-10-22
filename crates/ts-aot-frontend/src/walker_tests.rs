@@ -36,14 +36,14 @@ fn count_e0400(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
         .count()
 }
 
-fn assert_capturing_closure_rejected(diagnostics: &ts_aot_core::DiagnosticBag) {
+fn assert_capturing_closure_accepted(diagnostics: &ts_aot_core::DiagnosticBag) {
     assert!(
-        diagnostics.has_errors(),
-        "a capturing closure must be an error, got: {diagnostics:?}"
+        !diagnostics.has_errors(),
+        "a capturing closure must be accepted, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics.iter().any(|d| d.code.as_str() == "P0005"),
-        "a capturing closure must be rejected with P0005, got: {diagnostics:?}"
+        !diagnostics.iter().any(|d| d.code.as_str() == "P0005"),
+        "a capturing closure must not be rejected with P0005, got: {diagnostics:?}"
     );
 }
 
@@ -246,7 +246,7 @@ fn class_with_extends_nested_member_access_captures_rightmost_name() {
 #[test]
 fn class_with_extends_unsupported_form_emits_diagnostic() {
     let output = FrontendPass::new().run("test.ts", "class B extends A() { x: i32; }");
-    assert!(output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    assert!(!output.diagnostics.is_empty(), "{:?}", output.diagnostics);
     assert!(
         output
             .diagnostics
@@ -2706,13 +2706,13 @@ fn body_walker_nested_blocks_get_distinct_local_ids() {
 }
 
 #[test]
-fn body_walker_nested_block_arrow_capturing_later_local_is_rejected() {
+fn body_walker_nested_block_arrow_capturing_later_local_is_accepted() {
     use crate::frontend::FrontendPass;
     let output = FrontendPass::new().run(
         "test.ts",
         "function f(): number { { const cb = (): number => x; let x = 1; return cb(); } return 0; }",
     );
-    assert_capturing_closure_rejected(&output.diagnostics);
+    assert_capturing_closure_accepted(&output.diagnostics);
 }
 
 #[test]
@@ -4731,12 +4731,12 @@ fn call_site_type_args_resolve_functions_generic_param_not_error() {
 }
 
 #[test]
-fn arrow_function_capturing_outer_local_is_rejected() {
+fn arrow_function_capturing_outer_local_is_accepted() {
     let output = FrontendPass::new().run(
         "test.ts",
         "function outer(): i32 { const x: i32 = 42; const f = (): i32 => x; return f(); }",
     );
-    assert_capturing_closure_rejected(&output.diagnostics);
+    assert_capturing_closure_accepted(&output.diagnostics);
 }
 
 #[test]

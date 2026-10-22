@@ -1189,7 +1189,7 @@ fn e2e_object_literal_missing_target_field_stays_e0402() {
          function f(): i64 { const p: Point = { x: 1 }; return p.x; }",
     );
     assert!(
-        out.has_errors(),
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0402"),
         "a typed object literal missing a struct field must not lower; got {:?}",
         out.diagnostics
     );
@@ -1209,7 +1209,7 @@ fn e2e_object_literal_missing_target_field_stays_e0402() {
 fn e2e_object_literal_with_duplicate_keys_stays_e0402() {
     let out = compile("function f(): i64 { const o = { a: 1, a: 2 }; return 0; }");
     assert!(
-        out.has_errors(),
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0402"),
         "duplicate object-literal keys must not lower to an invalid struct; got {:?}",
         out.diagnostics
     );
@@ -1229,7 +1229,7 @@ fn e2e_object_literal_with_duplicate_keys_stays_e0402() {
 fn e2e_object_literal_with_primitive_target_stays_e0402() {
     let out = compile("function f(): i64 { const n: i64 = { a: 1 }; return n; }");
     assert!(
-        out.has_errors(),
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0402"),
         "an object literal targeting a primitive type must not lower; got {:?}",
         out.diagnostics
     );

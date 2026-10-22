@@ -41,7 +41,9 @@ impl ExprConverter {
                 }
             }
         }
-        let (key_ty, value_ty) = weakmap_key_value_types(ty, types, ctx);
+        let Some((key_ty, value_ty)) = weakmap_key_value_types(ty, types, ctx) else {
+            return Some(MirExpr::Unit);
+        };
         let resolved_key = if key_ty.raw() == 0 {
             types.intern(&Type::Struct {
                 id: StructId::from_raw(0),
@@ -55,7 +57,7 @@ impl ExprConverter {
             value_ty
         };
         if !is_supported_weakmap_key(resolved_key, types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap constructor key must be an object; runtime tracks key liveness via Weak<()> bindings. Got key type {:?}",
@@ -66,7 +68,7 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         if !is_supported_weakmap_value(resolved_value, types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap constructor value must be a resolved Type::I64; runtime helpers take i64 by value. Got value type {:?}",
@@ -125,7 +127,7 @@ impl ExprConverter {
         let owner_key = *owner_key;
         let owner_value = *owner_value;
         if !is_supported_weakmap_key(owner_key, types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap keys must be objects; runtime tracks key liveness via Weak<()> bindings. Got key type {:?}",
@@ -141,7 +143,7 @@ impl ExprConverter {
             } else {
                 format!("{:?}", types.resolve(owner_value))
             };
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap value must be a resolved Type::I64; runtime helpers take i64 by value, so __ts_aot_weak_map_set rejects any value not proven to be i64. Got value {detail}."
@@ -158,7 +160,7 @@ impl ExprConverter {
             _ => return None,
         };
         if args.len() != expected_arity {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap.prototype.{} requires exactly {} argument(s); got {}",
@@ -171,7 +173,7 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         if hir_root_local_id_of(&args[0]).is_none() {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 "WeakMap keys must be local variables; field access (a.b) and index access (a[i]) expressions are not supported as WeakMap keys because the runtime tracks key identity via a per-key Weak<()> binding allocated at the call site, which requires a local root. Struct literals, object literals, calls, and other non-local expressions are also not supported as WeakMap keys.".to_string(),
                 args[0].span(),
@@ -181,7 +183,7 @@ impl ExprConverter {
         if let Some(arg_ty) = hir_expr_type_id(&args[0])
             && arg_ty != owner_key
         {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap key type mismatch; WeakMap key type is {:?}, got {:?}",
@@ -196,7 +198,7 @@ impl ExprConverter {
             && let Some(val_ty) = hir_expr_type_id(&args[1])
             && val_ty != owner_value
         {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap.set value type mismatch; WeakMap value type is {:?}, got {:?}",
@@ -260,10 +262,10 @@ fn weakmap_key_value_types(
     ty: TypeId,
     types: &TypeTable,
     ctx: &mut PassContext,
-) -> (TypeId, TypeId) {
+) -> Option<(TypeId, TypeId)> {
     if let Some(Type::WeakMap { key, value }) = types.resolve(ty) {
         if !is_supported_weakmap_key(*key, types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap key must be an object (struct); runtime tracks key liveness via Weak<()> bindings. Got key type {:?}.",
@@ -271,10 +273,10 @@ fn weakmap_key_value_types(
                 ),
                 Span::new(0, 0),
             );
-            return (TypeId::from_raw(0), TypeId::from_raw(0));
+            return None;
         }
         if !is_supported_weakmap_value_for_defaulting(*value, types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "WeakMap<K, V> value must be i64; runtime helpers in ts_aot_runtime::weakmap (e.g. __ts_aot_weak_map_set) take `value: i64` directly, so non-i64 types like string or bool cannot be lowered. Got value type {:?}.",
@@ -282,11 +284,11 @@ fn weakmap_key_value_types(
                 ),
                 Span::new(0, 0),
             );
-            return (TypeId::from_raw(0), TypeId::from_raw(0));
+            return None;
         }
-        return (*key, *value);
+        return Some((*key, *value));
     }
-    (TypeId::from_raw(0), TypeId::from_raw(0))
+    Some((TypeId::from_raw(0), TypeId::from_raw(0)))
 }
 
 pub(crate) fn is_supported_weakmap_key(key: TypeId, types: &TypeTable) -> bool {

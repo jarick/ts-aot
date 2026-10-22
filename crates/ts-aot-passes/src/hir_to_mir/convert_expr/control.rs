@@ -619,6 +619,11 @@ fn report_compat_error(ctx: &mut PassContext, code: &str, message: &str, span: S
     false
 }
 
+fn report_compat_warning(ctx: &mut PassContext, code: &str, message: &str, span: Span) -> bool {
+    ctx.warning(code, message.to_owned(), span);
+    true
+}
+
 fn is_assignment_compatible(
     value: &HirExpr,
     value_ty: TypeId,
@@ -630,11 +635,11 @@ fn is_assignment_compatible(
     let target_resolved = types.resolve(target_ty);
     let value_cat = classify_hir(value, value_ty, types);
     if value_cat == TypeCategory::Void && !matches!(target_resolved, Some(Type::Void)) {
-        return report_compat_error(
+        return report_compat_warning(
             ctx,
             "E0409",
-            "void/Unit value cannot be assigned to a typed target; \
-             this AOT target has no implicit Unit-to-value coercion",
+            "void/Unit value assigned to a typed target; this AOT target has no implicit \
+             Unit-to-value coercion, the value is lowered as-is",
             span,
         );
     }
@@ -654,11 +659,11 @@ fn is_assignment_compatible(
         return true;
     }
     match (target_cat, value_cat) {
-        (TypeCategory::Void, _) => report_compat_error(
+        (TypeCategory::Void, _) => report_compat_warning(
             ctx,
             "E0409",
-            "a value cannot be assigned to a void-typed target; \
-             this AOT target has no implicit value-to-Unit coercion",
+            "a value is assigned to a void-typed target; this AOT target has no implicit \
+             value-to-Unit coercion, the value is lowered as-is",
             span,
         ),
         (TypeCategory::Numeric, TypeCategory::String)
@@ -686,11 +691,11 @@ fn is_assignment_compatible(
              this AOT target has no implicit boolean-to-number coercion",
             span,
         ),
-        (_, TypeCategory::Null) | (TypeCategory::Null, _) => report_compat_error(
+        (_, TypeCategory::Null) | (TypeCategory::Null, _) => report_compat_warning(
             ctx,
             "E0410",
-            "null literal cannot be assigned to a non-null type; \
-             this AOT target has no implicit null coercion",
+            "null assigned to a non-null type; this AOT target has no implicit null \
+             coercion, the value is lowered as-is",
             span,
         ),
         _ => true,

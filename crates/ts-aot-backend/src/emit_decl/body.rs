@@ -1,13 +1,16 @@
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::{LocalId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, LocalId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt,
-    RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam, MirPlace,
+    MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
-use super::ctx::{BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, place_root_global_name};
+use super::ctx::{
+    BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedStorage, place_root_global_name,
+    shared_write_tokens,
+};
 use super::ident::ident_from;
 use super::literals::emit_whole_number_literal;
 use super::runtime_op::runtime_op_ident;
@@ -24,6 +27,9 @@ pub(super) fn emit_body(
         return Ok(quote!({ unimplemented!() }));
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    if let Some(prelude) = emit_env_prelude(body_ctx, emit_env, ctx) {
+        stmts.insert(0, prelude);
+    }
     if body_ctx.has_weakmap_liveness() {
         let cache = body_ctx.weakmap_liveness_per_key.borrow();
         let mut prelude: Vec<TokenStream> =
@@ -180,6 +186,14 @@ fn emit_stmt(
             init,
             mutable,
         } => {
+            if let Some(acc) = body_ctx.shared_access_for_local(*local) {
+                let init = if let Some(init) = init {
+                    emit_expr(init, ctx, emit_env, body_ctx)?
+                } else {
+                    quote!(Default::default())
+                };
+                return Ok(shared_write_tokens(&acc, &init));
+            }
             let name = body_ctx.local_ident(*local);
             let ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
             let mutability = if *mutable || body_ctx.local_mut(*local) {
@@ -195,6 +209,18 @@ fn emit_stmt(
             }
         }
         MirStmt::Assign { target, value } => {
+            if let MirPlace::Local { id } = target
+                && let Some(acc) = body_ctx.shared_access_for_local(*id)
+            {
+                let value_tokens = emit_expr(value, ctx, emit_env, body_ctx)?;
+                return Ok(shared_write_tokens(&acc, &value_tokens));
+            }
+            if let MirPlace::Global(name) = target
+                && let Some(acc) = body_ctx.shared_access_for_name(name)
+            {
+                let value_tokens = emit_expr(value, ctx, emit_env, body_ctx)?;
+                return Ok(shared_write_tokens(&acc, &value_tokens));
+            }
             if let Some(chain_assign) =
                 emit_optional_chain_assign(target, value, ctx, emit_env, body_ctx)?
             {
@@ -375,8 +401,11 @@ fn emit_place_base(
 ) -> Result<TokenStream, BackendError> {
     let EmitEnv { types, .. } = emit_env;
     match base {
-        MirPlaceBase::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
         MirPlaceBase::Global(name) => {
+            if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
+                return Ok(tokens);
+            }
             let name = ident_from(name);
             Ok(quote!(#name))
         }
@@ -410,6 +439,24 @@ fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
         MirExpr::Local(id) => body_ctx.local_ty(*id),
         other => other.ty(),
     }
+}
+
+fn indirect_callee_fn_kind(
+    callee: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<usize> {
+    let EmitEnv { types, .. } = emit_env;
+    let fn_ty = match callee {
+        MirExpr::Local(id) => body_ctx.local_ty(*id)?,
+        MirExpr::Global(name) => return ctx.fn_value_for_name(name).map(|(k, _)| k),
+        other => other.ty()?,
+    };
+    if !matches!(types.resolve(fn_ty), Some(Type::Fn { .. })) {
+        return None;
+    }
+    ctx.fn_value_kind(fn_ty)
 }
 
 fn is_display_supported_reason(reason_ty: Option<&Type>) -> bool {
@@ -527,8 +574,15 @@ fn emit_expr(
             let literal = Literal::string(id.as_str());
             Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
-        MirExpr::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirExpr::Local(id) => Ok(body_ctx.local_read(*id)),
         MirExpr::Global(name) => {
+            if let Some(read) = body_ctx.shared_read_for_name(name) {
+                return Ok(read);
+            }
+            if let Some((k, variant)) = ctx.fn_value_for_name(name) {
+                let enum_name = EmitCtx::fn_value_ident(k);
+                return Ok(quote!(#enum_name::#variant));
+            }
             let ident = ident_from(name);
             if ctx.is_mutable_global(name) {
                 Ok(quote!(unsafe { #ident }))
@@ -573,6 +627,12 @@ fn emit_expr(
         MirExpr::IndirectCall { callee, args, .. } => {
             if let Some(map) = optional_call_map_arm(callee, args, ctx, emit_env, body_ctx)? {
                 return Ok(map);
+            }
+            if let Some(k) = indirect_callee_fn_kind(callee, ctx, emit_env, body_ctx) {
+                let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
+                let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
+                let helper = EmitCtx::fn_call_ident(k);
+                return Ok(quote!(#helper(&#callee, #(#args),*)));
             }
             let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
             let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
@@ -677,17 +737,20 @@ fn emit_expr(
             Ok(quote!(#co.yield_(#value).await))
         }
         MirExpr::Closure {
+            id,
             params,
             captures,
             locals,
             body,
             ret_ty,
-            ..
+            fn_ty,
         } => {
-            if !captures.is_empty() {
-                return Err(BackendError::NotImplemented);
+            if let Some(sig) = ctx.fn_value_kind(*fn_ty) {
+                return emit_closure_value(
+                    *id, sig, params, captures, locals, body, *ret_ty, ctx, emit_env, body_ctx,
+                );
             }
-            let mut child_ctx = BodyCtx::for_closure(*ret_ty);
+            let mut child_ctx = BodyCtx::for_closure(*ret_ty, body_ctx.shared_map());
             let mut candidates: std::collections::HashSet<LocalId> =
                 params.iter().map(|p| p.id).collect();
             for l in locals {
@@ -729,6 +792,281 @@ fn emit_expr(
             };
             Ok(quote!(move |#(#param_tokens),*| -> #ret_ty_tokens { #(#stmts)* }))
         }
+    }
+}
+
+fn collect_global_names(block: &MirBlock, out: &mut Vec<Atom>) {
+    for stmt in &block.stmts {
+        collect_global_names_stmt(stmt, out);
+    }
+}
+
+fn collect_global_names_stmt(stmt: &MirStmt, out: &mut Vec<Atom>) {
+    match stmt {
+        MirStmt::Let { init: Some(e), .. } | MirStmt::Expr(e) | MirStmt::Return(Some(e)) => {
+            collect_global_names_expr(e, out);
+        }
+        MirStmt::Let { init: None, .. }
+        | MirStmt::Return(None)
+        | MirStmt::Break
+        | MirStmt::Continue => {}
+        MirStmt::Assign { target, value } => {
+            collect_global_names_place(target, out);
+            collect_global_names_expr(value, out);
+        }
+        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+            collect_global_names_expr(error, out);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_global_names_expr(cond, out);
+            collect_global_names(then_block, out);
+            if let Some(b) = else_block {
+                collect_global_names(b, out);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            collect_global_names_expr(cond, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
+            collect_global_names_expr(iterable, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            collect_global_names_expr(object, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::Runtime { args, .. } => {
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            collect_global_names_expr(disc, out);
+            for c in cases {
+                collect_global_names(&c.body, out);
+            }
+            if let Some(b) = default {
+                collect_global_names(b, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            collect_global_names(body, out);
+            if let Some(b) = catch {
+                collect_global_names(b, out);
+            }
+            if let Some(b) = finally {
+                collect_global_names(b, out);
+            }
+        }
+    }
+}
+
+fn collect_global_names_place(place: &MirPlace, out: &mut Vec<Atom>) {
+    match place {
+        MirPlace::Local { .. } => {}
+        MirPlace::Global(name) => out.push(name.clone()),
+        MirPlace::Field { base, .. } => collect_global_names_place_base(base, out),
+        MirPlace::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+    }
+}
+
+fn collect_global_names_place_base(base: &MirPlaceBase, out: &mut Vec<Atom>) {
+    match base {
+        MirPlaceBase::Local(_) => {}
+        MirPlaceBase::Global(name) => out.push(name.clone()),
+        MirPlaceBase::Field { base, .. } => collect_global_names_place_base(base, out),
+        MirPlaceBase::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+        MirPlaceBase::Chain { base, .. } => collect_global_names_expr(base, out),
+    }
+}
+
+fn collect_global_names_expr(expr: &MirExpr, out: &mut Vec<Atom>) {
+    match expr {
+        MirExpr::Global(name) => out.push(name.clone()),
+        MirExpr::Closure { body, .. } => collect_global_names(body, out),
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. }
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Unary { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::TypeOf { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::Import { source: base, .. } => collect_global_names_expr(base, out),
+        MirExpr::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_global_names_expr(left, out);
+            collect_global_names_expr(right, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } => collect_global_names_expr(e, out),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_global_names_expr(callee, out);
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                collect_global_names_expr(v, out);
+            }
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
+    }
+}
+
+fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Option<TokenStream> {
+    let env = body_ctx.own_env()?;
+    let fields: Vec<TokenStream> = env
+        .fields
+        .iter()
+        .map(|(field, ty, storage)| {
+            let t = emit_type_id_with_ctx(*ty, emit_env, ctx);
+            match storage {
+                SharedStorage::Cell => quote!(#field: std::cell::Cell<Option<#t>>),
+                SharedStorage::RefCell => quote!(#field: std::cell::RefCell<Option<#t>>),
+            }
+        })
+        .collect();
+    let inits: Vec<TokenStream> = env
+        .fields
+        .iter()
+        .map(|(field, _, storage)| match storage {
+            SharedStorage::Cell => quote!(#field: std::cell::Cell::new(None)),
+            SharedStorage::RefCell => quote!(#field: std::cell::RefCell::new(None)),
+        })
+        .collect();
+    let env_type = &env.env_type;
+    let env_ident = &env.env_ident;
+    ctx.push_env_struct(quote! {
+        #[allow(non_camel_case_types)]
+        struct #env_type { #(#fields,)* }
+    });
+    Some(
+        quote!(let #env_ident: std::rc::Rc<#env_type> = std::rc::Rc::new(#env_type { #(#inits,)* });),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_closure_value(
+    id: u32,
+    sig: usize,
+    params: &[MirParam],
+    _captures: &[LocalId],
+    locals: &[MirLocalDecl],
+    body: &MirBlock,
+    ret_ty: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
+
+    let mut envs: Vec<(Ident, Ident)> = Vec::new();
+    let mut names: Vec<ts_aot_core::Atom> = Vec::new();
+    collect_global_names(body, &mut names);
+    for name in &names {
+        if let Some(acc) = body_ctx.shared_access_for_name(name)
+            && !envs.iter().any(|(env, _)| *env == acc.env_ident)
+        {
+            envs.push((acc.env_ident.clone(), acc.env_type.clone()));
+        }
+    }
+    let capture_tys: Vec<TokenStream> = envs
+        .iter()
+        .map(|(_, env_type)| quote!(std::rc::Rc<#env_type>))
+        .collect();
+    let variant = ctx.register_closure(id, sig, capture_tys.clone());
+
+    let mut child = BodyCtx::for_closure(ret_ty, body_ctx.shared_map());
+    let mut candidates: std::collections::HashSet<LocalId> = params.iter().map(|p| p.id).collect();
+    for l in locals {
+        candidates.insert(l.id);
+    }
+    let assigned = collect_assigned_locals(&body.stmts, types, &candidates);
+    for l in locals {
+        let mutable = l.mutable || assigned.contains(&l.id);
+        child.register_local(l.id, ident_from(&l.name), l.ty, mutable);
+    }
+    for p in params {
+        let mutable = assigned.contains(&p.id);
+        child.register_local(p.id, ident_from(&p.name), p.ty, mutable);
+    }
+    child.detect_own_env(&id.to_string(), body, locals, types);
+
+    let mut param_tokens: Vec<TokenStream> = Vec::new();
+    for ((env_ident, _), ty) in envs.iter().zip(capture_tys.iter()) {
+        param_tokens.push(quote!(#env_ident: #ty));
+    }
+    for p in params {
+        let name = child.local_ident(p.id);
+        let ty = emit_type_id_with_ctx(p.ty, emit_env, ctx);
+        if assigned.contains(&p.id) {
+            param_tokens.push(quote!(mut #name: #ty));
+        } else {
+            param_tokens.push(quote!(#name: #ty));
+        }
+    }
+    let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child)?;
+    if let Some(prelude) = emit_env_prelude(&child, emit_env, ctx) {
+        inner_stmts.insert(0, prelude);
+    }
+    let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
+    let fn_ident = format_ident!("__ts_closure_{}", id);
+    ctx.push_closure_fn(
+        quote!(fn #fn_ident(#(#param_tokens),*) -> #ret_tokens { #(#inner_stmts)* }),
+    );
+
+    let enum_name = EmitCtx::fn_value_ident(sig);
+    if envs.is_empty() {
+        Ok(quote!(#enum_name::#variant))
+    } else {
+        let fields: Vec<TokenStream> = envs
+            .iter()
+            .enumerate()
+            .map(|(i, (env_ident, _))| {
+                let field = format_ident!("c{}", i);
+                quote!(#field: #env_ident.clone())
+            })
+            .collect();
+        Ok(quote!(#enum_name::#variant { #(#fields),* }))
     }
 }
 
@@ -1288,7 +1626,7 @@ fn emit_js_string_expr(
             let lit = Literal::string(id.as_str());
             quote!(ts_aot_runtime::JsString::from(#lit))
         }
-        MirExpr::Local(id) => body_ctx.local_ref(*id),
+        MirExpr::Local(id) => body_ctx.local_read(*id),
         _ => emit_expr(arg, ctx, emit_env, body_ctx)?,
     };
     Ok(match ownership {

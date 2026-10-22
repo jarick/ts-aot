@@ -5,7 +5,7 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::convert_expr::util::hir_expr_type_id;
+use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
 
 use super::globals::{
@@ -45,7 +45,7 @@ impl ExprConverter {
         };
         let op_name = op_kind.name();
         if args.len() != 1 {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "JSON.{op_name} requires exactly 1 argument; got {}",
@@ -56,14 +56,24 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         if op_kind == JsonOpKind::Parse && !is_string_typed_source(&args[0], types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
-                "JSON.parse() argument must be a string (per ECMAScript spec); got non-string \
-                 expression. Coerce the argument to a string (e.g. String(n)) before calling \
-                 JSON.parse()."
+                "JSON.parse() got a non-string argument (per ECMAScript spec it must be a \
+                 string); the call is lowered as undefined"
                     .to_string(),
                 Span::new(0, 0),
             );
+            let arg_mir = self.convert_expr(
+                &args[0],
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            if has_potential_side_effects(&arg_mir) {
+                out.push(MirStmt::Expr(arg_mir));
+            }
             return Some(MirExpr::Unit);
         }
         let target_ty_result: Result<TypeId, &'static str> = match op_kind {
@@ -98,7 +108,7 @@ impl ExprConverter {
                          #[derive(Serialize)] on the user type)."
                     }
                 };
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!("JSON.{op_name} {reason}: {hint}"),
                     Span::new(0, 0),
@@ -122,7 +132,7 @@ impl ExprConverter {
                      type)."
                 }
             };
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!("JSON.{op_name} target type `{ty_desc}` is not supported: {hint}"),
                 Span::new(0, 0),

@@ -84,7 +84,7 @@ impl ExprConverter {
             _ => unreachable!("string method arity"),
         };
         if args.len() < min_arity || args.len() > max_arity {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "String.prototype.{} requires {}..={} argument(s); got {}",

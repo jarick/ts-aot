@@ -25,7 +25,7 @@ use self::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
 
 pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream, BackendError> {
-    let ctx = EmitCtx::build(program);
+    let ctx = EmitCtx::build(program, types);
     let emit_env = EmitEnv { types, program };
     let mut tokens = TokenStream::new();
     let mut dispatch_entries: Vec<TokenStream> = Vec::new();
@@ -46,7 +46,104 @@ pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream
             ];
         });
     }
+    tokens.extend(emit_fn_values(&ctx, &emit_env));
     Ok(tokens)
+}
+
+fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
+    let mut tokens = TokenStream::new();
+    for k in 0..ctx.fn_value_count() {
+        let enum_name = EmitCtx::fn_value_ident(k);
+        let helper = EmitCtx::fn_call_ident(k);
+        let sig = ctx.fn_value_sig(k);
+        let variants = ctx.fn_value_variants(k);
+        let closure_variants = ctx.closure_variants_for(k);
+        let param_tys: Vec<TokenStream> = sig
+            .params
+            .iter()
+            .map(|t| emit_type_id_with_ctx(*t, emit_env, ctx))
+            .collect();
+        let ret = emit_type_id_with_ctx(sig.ret, emit_env, ctx);
+        let arg_names: Vec<Ident> = (0..sig.params.len())
+            .map(|i| format_ident!("__a{}", i))
+            .collect();
+
+        let mut enum_variants: Vec<TokenStream> =
+            variants.iter().map(|(_, v)| quote!(#v)).collect();
+        let mut arms: Vec<TokenStream> = Vec::new();
+        for (fname, variant) in variants {
+            let fident = ident_from(fname);
+            arms.push(quote!(#enum_name::#variant => #fident(#(#arg_names),*),));
+        }
+        for (id, variant, capture_types) in &closure_variants {
+            let fields: Vec<TokenStream> = capture_types
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| {
+                    let field = format_ident!("c{}", i);
+                    quote!(#field: #ty)
+                })
+                .collect();
+            let fn_ident = format_ident!("__ts_closure_{}", id);
+            if capture_types.is_empty() {
+                enum_variants.push(quote!(#variant));
+                arms.push(quote!(#enum_name::#variant => #fn_ident(#(#arg_names),*),));
+            } else {
+                enum_variants.push(quote!(#variant { #(#fields),* }));
+                let cap_bindings: Vec<TokenStream> = capture_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        let field = format_ident!("c{}", i);
+                        let bind = format_ident!("__c{}", i);
+                        quote!(#field: #bind)
+                    })
+                    .collect();
+                let cap_names: Vec<Ident> = (0..capture_types.len())
+                    .map(|i| format_ident!("__c{}", i))
+                    .collect();
+                arms.push(quote! {
+                    #enum_name::#variant { #(#cap_bindings),* } => {
+                        #fn_ident(#(#cap_names.clone(),)* #(#arg_names),*)
+                    },
+                });
+            }
+        }
+
+        if enum_variants.is_empty() {
+            let placeholder = format_ident!("__Uninhabited");
+            tokens.extend(quote! {
+                #[derive(Clone)]
+                #[allow(non_camel_case_types)]
+                pub enum #enum_name { #placeholder }
+                pub fn #helper(
+                    __f: &#enum_name,
+                    #(#arg_names: #param_tys),*
+                ) -> #ret {
+                    match __f {
+                        #enum_name::#placeholder => unreachable!(),
+                    }
+                }
+            });
+            continue;
+        }
+        tokens.extend(quote! {
+            #[derive(Clone)]
+            #[allow(non_camel_case_types)]
+            pub enum #enum_name { #(#enum_variants,)* }
+            pub fn #helper(
+                __f: &#enum_name,
+                #(#arg_names: #param_tys),*
+            ) -> #ret {
+                match __f {
+                    #(#arms)*
+                }
+            }
+        });
+    }
+    tokens.extend(ctx.take_env_structs());
+    tokens.extend(ctx.take_closure_fns());
+    tokens
 }
 
 fn is_generated_tla_main(f: &MirFunctionDecl, program: &MirProgram) -> bool {
@@ -110,7 +207,7 @@ use ts_aot_core::ModuleId;
 #[cfg(test)]
 fn emit_function(f: &MirFunctionDecl, types: &TypeTable) -> Result<TokenStream, BackendError> {
     let empty_program = MirProgram::new(ModuleId::from_raw(0));
-    let ctx = EmitCtx::build(&empty_program);
+    let ctx = EmitCtx::build(&empty_program, types);
     let emit_env = EmitEnv {
         types,
         program: &empty_program,
@@ -387,7 +484,7 @@ fn emit_field(field: &MirFieldDecl, ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenS
 #[cfg(test)]
 fn emit_global(g: &MirGlobalDecl, types: &TypeTable) -> Result<TokenStream, BackendError> {
     let empty_program = MirProgram::new(ModuleId::from_raw(0));
-    let ctx = EmitCtx::build(&empty_program);
+    let ctx = EmitCtx::build(&empty_program, types);
     let emit_env = EmitEnv {
         types,
         program: &empty_program,

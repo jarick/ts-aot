@@ -97,7 +97,7 @@ impl ExprConverter {
         }
         let is_optional = array_receiver_is_optional(receiver, types)?;
         if !args.is_empty() {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Array.{}() requires no arguments; got {}",

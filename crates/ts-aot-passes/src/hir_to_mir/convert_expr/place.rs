@@ -53,7 +53,7 @@ where
         }
         MirExpr::Index { base, index, ty } => Some(MirPlace::Index { base, index, ty }),
         _ => {
-            ctx.error(
+            ctx.warning(
                 "P0006",
                 "expression is not a valid assignment target",
                 Span::new(0, 0),

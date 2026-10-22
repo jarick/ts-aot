@@ -27,6 +27,16 @@ impl SkeletonEnv<'_> {
             .push(Diagnostic::error(code, message, core_span_from_oxc(span)));
     }
 
+    pub(crate) fn report_unsupported_warning(
+        &mut self,
+        code: &'static str,
+        message: &str,
+        span: oxc_span::Span,
+    ) {
+        self.diagnostics
+            .push(Diagnostic::warning(code, message, core_span_from_oxc(span)));
+    }
+
     pub(crate) fn resolve_superclass_name(&mut self, expr: &Expression<'_>) -> Option<Atom> {
         match expr {
             Expression::Identifier(id) => Some(Atom::from(id.name.as_str())),
@@ -37,18 +47,20 @@ impl SkeletonEnv<'_> {
                 }) {
                     Some(Atom::from(s.property.name.as_str()))
                 } else {
-                    self.report_unsupported(
+                    self.report_unsupported_warning(
                         UNSUPPORTED_DECL_CODE,
-                        "extends must be an identifier or member access expression",
+                        "extends must be an identifier or static member access expression; \
+                         the class is lowered without its parent",
                         expr.span(),
                     );
                     None
                 }
             }
             other => {
-                self.report_unsupported(
+                self.report_unsupported_warning(
                     UNSUPPORTED_DECL_CODE,
-                    "extends must be an identifier or member access expression",
+                    "extends must be an identifier or static member access expression; \
+                     the class is lowered without its parent",
                     other.span(),
                 );
                 None

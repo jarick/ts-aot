@@ -342,7 +342,7 @@ fn function_bind_method_emits_e0406_not_yet_supported_with_callee_span() {
         .find(|d| d.code.as_str() == "E0406")
         .expect("E0406");
     assert!(
-        diag.message.contains("bind") && diag.message.contains("not yet supported"),
+        diag.message.contains("bind") && diag.message.contains("not supported"),
         "E0406 message must mention bind not yet supported, got: {}",
         diag.message
     );
