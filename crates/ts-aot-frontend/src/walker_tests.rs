@@ -36,6 +36,17 @@ fn count_e0400(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
         .count()
 }
 
+fn assert_capturing_closure_rejected(diagnostics: &ts_aot_core::DiagnosticBag) {
+    assert!(
+        diagnostics.has_errors(),
+        "a capturing closure must be an error, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|d| d.code.as_str() == "P0005"),
+        "a capturing closure must be rejected with P0005, got: {diagnostics:?}"
+    );
+}
+
 #[test]
 fn empty_source_yields_empty_program_without_errors() {
     let output = FrontendPass::new().run("test.ts", "");
@@ -306,6 +317,76 @@ fn array_destructurings_in_same_function_get_unique_temp_names() {
         unique.len(),
         destructured_let_names.len(),
         "destructured temps must have unique names across multiple destructurings; got {destructured_let_names:?}"
+    );
+}
+
+#[test]
+fn destructured_param_rest_binding_is_declared_in_body() {
+    let f = sole_function("function f({a, ...rest}: { a: i32; b: i32 }): i32 { return a; }");
+    let has_rest = f
+        .body
+        .iter()
+        .any(|stmt| matches!(stmt, HirStmt::Let { name, .. } if name.as_str() == "rest"));
+    assert!(
+        has_rest,
+        "a rest element in a destructured parameter must declare the rest binding \
+         instead of leaving a dangling reference; got body {:?}",
+        f.body
+    );
+}
+
+#[test]
+fn function_expression_destructured_param_lowers_via_destructure() {
+    let f = sole_function(
+        "function outer(): i32 { const g = function ({a}: { a: i32 }): i32 { return a; }; return 0; }",
+    );
+    let (params, body) = f
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let {
+                name,
+                init: Some(HirExpr::Closure { params, body, .. }),
+                ..
+            } if name.as_str() == "g" => Some((params, body)),
+            _ => None,
+        })
+        .expect("expected a closure bound to `g` in the outer body");
+    assert_eq!(params.len(), 1, "expected a single param, got {params:?}");
+    assert_eq!(
+        params[0].name,
+        Atom::from("_"),
+        "a destructured param on a function expression must use the '_' fallback"
+    );
+    assert!(
+        body.iter()
+            .any(|s| matches!(s, HirStmt::Let { name, .. } if name.as_str() == "a")),
+        "the destructured binding `a` must be declared as a body local, got {body:?}"
+    );
+}
+
+#[test]
+fn function_expression_default_param_keeps_its_identifier_name() {
+    let f = sole_function(
+        "function outer(): i32 { const g = function (x = 1): i32 { return x; }; return 0; }",
+    );
+    let params = f
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let {
+                name,
+                init: Some(HirExpr::Closure { params, .. }),
+                ..
+            } if name.as_str() == "g" => Some(params),
+            _ => None,
+        })
+        .expect("expected a closure bound to `g` in the outer body");
+    assert_eq!(params.len(), 1, "expected a single param, got {params:?}");
+    assert_eq!(
+        params[0].name,
+        Atom::from("x"),
+        "a default-valued param keeps its identifier name; only the default is dropped"
     );
 }
 
@@ -2625,18 +2706,13 @@ fn body_walker_nested_blocks_get_distinct_local_ids() {
 }
 
 #[test]
-fn body_walker_nested_block_arrow_captures_later_local_emits_p0005_not_global() {
+fn body_walker_nested_block_arrow_capturing_later_local_is_rejected() {
     use crate::frontend::FrontendPass;
     let output = FrontendPass::new().run(
         "test.ts",
         "function f(): number { { const cb = (): number => x; let x = 1; return cb(); } return 0; }",
     );
-    let diag = output
-        .diagnostics
-        .iter()
-        .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 diagnostic when arrow in nested block captures a later local");
-    assert!(diag.message.contains("captur"));
+    assert_capturing_closure_rejected(&output.diagnostics);
 }
 
 #[test]
@@ -4115,7 +4191,7 @@ fn body_walker_bare_yield_in_generator_produces_hir_yield_with_none() {
 }
 
 #[test]
-fn body_walker_delegating_yield_rejects_with_e0501() {
+fn body_walker_delegating_yield_warns_with_e0501() {
     let output = FrontendPass::new().run(
         "test.ts",
         "function* gen(): i64 { yield* other(); return 0; }",
@@ -4128,7 +4204,7 @@ fn body_walker_delegating_yield_rejects_with_e0501() {
     assert_eq!(
         e0501.len(),
         1,
-        "yield* must be rejected with exactly one E0501, got {:?}",
+        "yield* must emit exactly one E0501 diagnostic, got {:?}",
         output.diagnostics
     );
     assert!(
@@ -4138,9 +4214,29 @@ fn body_walker_delegating_yield_rejects_with_e0501() {
     );
     assert_eq!(
         e0501[0].severity,
-        ts_aot_core::Severity::Error,
-        "E0501 must be reported as Severity::Error, got: {:?}",
+        ts_aot_core::Severity::Warning,
+        "yield* must be reported as Severity::Warning, got: {:?}",
         e0501[0].severity
+    );
+    let function = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            HirDecl::Function(f) => Some(f),
+            _ => None,
+        })
+        .expect("expected the generator function declaration");
+    assert!(
+        matches!(
+            &function.body[0],
+            HirStmt::Expr {
+                expr: HirExpr::Call { .. }
+            }
+        ),
+        "yield* must lower to the delegated `other()` call (retained, not discarded) so its \
+         side effects are evaluated, got {:?}",
+        function.body
     );
 }
 
@@ -4635,22 +4731,12 @@ fn call_site_type_args_resolve_functions_generic_param_not_error() {
 }
 
 #[test]
-fn arrow_function_capturing_outer_local_emits_p0005_diagnostic() {
+fn arrow_function_capturing_outer_local_is_rejected() {
     let output = FrontendPass::new().run(
         "test.ts",
         "function outer(): i32 { const x: i32 = 42; const f = (): i32 => x; return f(); }",
     );
-    assert!(
-        output.diagnostics.has_errors(),
-        "capturing arrow function must produce a diagnostic; got: {:?}",
-        output.diagnostics
-    );
-    let diag = output
-        .diagnostics
-        .iter()
-        .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 diagnostic for capturing closure");
-    assert!(diag.message.contains("captur"));
+    assert_capturing_closure_rejected(&output.diagnostics);
 }
 
 #[test]

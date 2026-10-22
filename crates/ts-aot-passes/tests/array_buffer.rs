@@ -64,6 +64,21 @@ fn new_array_buffer_with_wrong_arity_emits_e0406() {
         1,
         "new ArrayBuffer() with 0 args must emit exactly one E0406 about arity; got {arity_e0406:?}"
     );
+    assert!(
+        arity_e0406[0].contains("defaults to 0"),
+        "a missing ArrayBuffer length must report the zero default; got {arity_e0406:?}"
+    );
+}
+
+#[test]
+fn new_array_buffer_with_extra_args_ignores_them() {
+    let (_, diags) = convert("function f(): ArrayBuffer { return new ArrayBuffer(16, 32); }");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.contains("E0406") && d.contains("extra arguments are ignored")),
+        "extra ArrayBuffer arguments must report that they are ignored; got {diags:?}"
+    );
 }
 
 #[test]
@@ -78,6 +93,40 @@ fn new_array_buffer_with_non_numeric_arg_emits_e0406() {
         e0406.len(),
         1,
         "new ArrayBuffer(string) must emit exactly one E0406 mentioning ArrayBuffer(byteLength); got {e0406:?}"
+    );
+}
+
+#[test]
+fn new_array_buffer_non_numeric_arg_is_still_evaluated() {
+    let (mir, _diags) = convert(
+        "function side(): string { return \"x\"; } \
+         function f(): ArrayBuffer { return new ArrayBuffer(side()); }",
+    );
+    assert!(
+        mir.contains("call fn(0)()"),
+        "a non-numeric ArrayBuffer length argument must still be evaluated for side effects; \
+         got:\n{mir}"
+    );
+    assert!(
+        mir.contains("array_buffer_new(0"),
+        "the byte length must fall back to 0 after evaluating the argument; got:\n{mir}"
+    );
+}
+
+#[test]
+fn new_array_buffer_extra_args_are_still_evaluated() {
+    let (mir, _diags) = convert(
+        "function side(): i64 { return 1; } \
+         function f(): ArrayBuffer { return new ArrayBuffer(16, side()); }",
+    );
+    assert!(
+        mir.contains("call fn(0)()"),
+        "extra ArrayBuffer constructor arguments must still be evaluated for side effects; \
+         got:\n{mir}"
+    );
+    assert!(
+        mir.contains("array_buffer_new(16"),
+        "the numeric byte length must be preserved; got:\n{mir}"
     );
 }
 

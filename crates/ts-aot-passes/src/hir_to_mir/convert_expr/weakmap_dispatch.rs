@@ -5,7 +5,7 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::convert_expr::util::hir_expr_type_id;
+use crate::hir_to_mir::convert_expr::util::{has_potential_side_effects, hir_expr_type_id};
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
@@ -15,8 +15,8 @@ impl ExprConverter {
         args: &[HirExpr],
         ty: TypeId,
         out: &mut Vec<MirStmt>,
-        _shared_struct_ids: &mut HashMap<TypeId, StructId>,
-        _shared_next_struct: &mut u32,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> Option<MirExpr> {
@@ -24,15 +24,22 @@ impl ExprConverter {
             return None;
         }
         if !args.is_empty() {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
-                    "WeakMap constructor takes 0 arguments in the current backend (iterable initializer not yet lowered to MIR); got {}",
+                    "WeakMap constructor iterable initializer is not lowered to MIR yet; \
+                     the initializer is ignored and an empty WeakMap is created (got {} argument(s))",
                     args.len()
                 ),
                 Span::new(0, 0),
             );
-            return Some(MirExpr::Unit);
+            for arg in args {
+                let mir =
+                    self.convert_expr(arg, out, shared_struct_ids, shared_next_struct, types, ctx);
+                if has_potential_side_effects(&mir) {
+                    out.push(MirStmt::Expr(mir));
+                }
+            }
         }
         let (key_ty, value_ty) = weakmap_key_value_types(ty, types, ctx);
         let resolved_key = if key_ty.raw() == 0 {

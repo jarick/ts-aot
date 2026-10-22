@@ -84,14 +84,19 @@ impl ExprConverter {
                 return Some(MirExpr::Local(dest));
             }
             if field_name.as_str() == "getPrototypeOf" {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     "Object.getPrototypeOf is not supported in this AOT target; \
                      prototype chain resolution requires type-tracked receivers and is \
-                     tracked as a separate architectural change. Use Object.keys() for \
-                     enumerable-property iteration, or drop the call.",
+                     tracked as a separate architectural change. The call is lowered to \
+                     `undefined`.",
                     Span::new(0, 0),
                 );
+                for arg in mir_args {
+                    if has_potential_side_effects(&arg) {
+                        out.push(MirStmt::Expr(arg));
+                    }
+                }
                 return Some(MirExpr::Unit);
             }
             if mir_args.len() != 1 {

@@ -1,8 +1,13 @@
-use ts_aot_core::{Type, TypeId, TypeTable};
-use ts_aot_ir_hir::HirExpr;
-use ts_aot_ir_mir::MirExpr;
+use std::collections::HashMap;
 
-fn is_effect_free_leaf(e: &MirExpr) -> bool {
+use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_ir_hir::HirExpr;
+use ts_aot_ir_mir::{MirExpr, MirStmt};
+
+use crate::PassContext;
+use crate::hir_to_mir::converter::ExprConverter;
+
+fn is_constant_literal(e: &MirExpr) -> bool {
     matches!(
         e,
         MirExpr::Unit
@@ -11,9 +16,11 @@ fn is_effect_free_leaf(e: &MirExpr) -> bool {
             | MirExpr::Float { .. }
             | MirExpr::String { .. }
             | MirExpr::Null { .. }
-            | MirExpr::Local(_)
-            | MirExpr::Global(_)
     )
+}
+
+fn is_effect_free_leaf(e: &MirExpr) -> bool {
+    is_constant_literal(e) || matches!(e, MirExpr::Local(_) | MirExpr::Global(_))
 }
 
 pub(super) fn has_potential_side_effects(e: &MirExpr) -> bool {
@@ -119,5 +126,100 @@ pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::Null(_)
         | HirExpr::Unit(_)
         | HirExpr::Undefined(_) => None,
+    }
+}
+
+impl ExprConverter {
+    pub(super) fn convert_length_argument(
+        &mut self,
+        args: &[HirExpr],
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+        noun: &str,
+        note: &str,
+    ) -> MirExpr {
+        if args.is_empty() {
+            ctx.warning(
+                "E0406",
+                format!("{noun} requires exactly 1 argument; got 0 — the length defaults to 0"),
+                Span::new(0, 0),
+            );
+        } else if args.len() > 1 {
+            ctx.warning(
+                "E0406",
+                format!(
+                    "{noun} requires exactly 1 argument; got {} — extra arguments are ignored",
+                    args.len()
+                ),
+                Span::new(0, 0),
+            );
+        }
+        let length_mir = if let Some(first) = args.first() {
+            let converted = self.convert_expr(
+                first,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            if is_numeric_type_for_array_len(first, types) {
+                if is_constant_literal(&converted) {
+                    converted
+                } else {
+                    let ty = match mir_expr_ty(&converted) {
+                        t if t.raw() != 0 => t,
+                        _ => hir_expr_type_id(first).unwrap_or_else(|| types.intern(&Type::I64)),
+                    };
+                    let dest = self.fresh_local();
+                    self.push_temp_local(dest, ty);
+                    out.push(MirStmt::Let {
+                        local: dest,
+                        ty,
+                        init: Some(converted),
+                        mutable: false,
+                    });
+                    MirExpr::Local(dest)
+                }
+            } else {
+                ctx.warning(
+                    "E0406",
+                    format!(
+                        "{noun} length argument must be a number; got a non-numeric \
+                         expression — the length defaults to 0{note}"
+                    ),
+                    Span::new(0, 0),
+                );
+                if has_potential_side_effects(&converted) {
+                    out.push(MirStmt::Expr(converted));
+                }
+                MirExpr::Int {
+                    value: 0,
+                    ty: types.intern(&Type::I64),
+                }
+            }
+        } else {
+            MirExpr::Int {
+                value: 0,
+                ty: types.intern(&Type::I64),
+            }
+        };
+        for extra_hir in args.iter().skip(1) {
+            let extra = self.convert_expr(
+                extra_hir,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            if has_potential_side_effects(&extra) {
+                out.push(MirStmt::Expr(extra));
+            }
+        }
+        length_mir
     }
 }

@@ -19,7 +19,7 @@ pub(super) fn propagate_generator_types(
     non_generator_names: &HashSet<Atom>,
 ) {
     const MAX_PROPAGATION_PASSES: usize = 16;
-    let name_to_gen_ty = collect_generator_name_types(program, generator_fn_names);
+    let gen_types = collect_generator_name_types(program, generator_fn_names);
 
     let mut functions: Vec<(&mut HirFunction, Vec<String>)> = Vec::new();
     for decl in &mut program.declarations {
@@ -35,7 +35,8 @@ pub(super) fn propagate_generator_types(
             let mut walker = GenTypeWalker {
                 generator_fn_names,
                 non_generator_names,
-                name_to_gen_ty: &name_to_gen_ty,
+                name_to_gen_ty: &gen_types.by_name,
+                method_to_gen_ty: &gen_types.by_method,
                 namespace_path: &namespace_path,
                 generator_locals: std::mem::take(&mut generator_locals),
                 reported_generator_value_uses: std::mem::take(&mut reported_generator_value_uses),
@@ -92,28 +93,48 @@ fn collect_functions_with_path_mut<'a>(
     }
 }
 
+#[derive(Default)]
+struct GenTypeMaps {
+    by_name: HashMap<Atom, TypeId>,
+    by_method: HashMap<TypeId, HashMap<Atom, TypeId>>,
+}
+
 fn collect_generator_name_types(
     program: &HirProgram,
     generator_fn_names: &HashSet<Atom>,
-) -> HashMap<Atom, TypeId> {
-    let mut name_to_gen_ty: HashMap<Atom, TypeId> = HashMap::new();
+) -> GenTypeMaps {
+    let mut maps = GenTypeMaps::default();
     for decl in &program.declarations {
-        collect_generator_name_types_in(decl, generator_fn_names, &[], &mut name_to_gen_ty);
+        collect_generator_name_types_in(decl, generator_fn_names, &[], &mut maps);
     }
-    name_to_gen_ty
+    maps
 }
 
 fn collect_generator_name_types_in(
     decl: &HirDecl,
     generator_fn_names: &HashSet<Atom>,
     namespace_path: &[String],
-    out: &mut HashMap<Atom, TypeId>,
+    out: &mut GenTypeMaps,
 ) {
     match decl {
         HirDecl::Function(f) => {
             let qualified = qualified_name(namespace_path, f.name.as_str());
             if generator_fn_names.contains(&qualified) {
-                out.insert(qualified, f.ret);
+                out.by_name.insert(qualified, f.ret);
+            }
+        }
+        HirDecl::Class(c) => {
+            let mut class_path: Vec<String> = namespace_path.to_vec();
+            class_path.push(c.name.as_str().to_owned());
+            for m in &c.methods {
+                let qualified = qualified_name(&class_path, m.name.as_str());
+                if generator_fn_names.contains(&qualified) {
+                    out.by_name.insert(qualified, m.ret);
+                    out.by_method
+                        .entry(c.ty)
+                        .or_default()
+                        .insert(m.name.clone(), m.ret);
+                }
             }
         }
         HirDecl::Namespace { name, members } => {
@@ -131,6 +152,7 @@ struct GenTypeWalker<'a> {
     generator_fn_names: &'a HashSet<Atom>,
     non_generator_names: &'a HashSet<Atom>,
     name_to_gen_ty: &'a HashMap<Atom, TypeId>,
+    method_to_gen_ty: &'a HashMap<TypeId, HashMap<Atom, TypeId>>,
     namespace_path: &'a [String],
     generator_locals: HashMap<LocalId, TypeId>,
     reported_generator_value_uses: HashSet<(Atom, Span)>,
@@ -145,16 +167,18 @@ impl<'a> GenTypeWalker<'a> {
         }
     }
 
+    fn qualified_candidates(&self, base: &str) -> Vec<Atom> {
+        (0..=self.namespace_path.len())
+            .rev()
+            .map(|depth| qualified_name(&self.namespace_path[..depth], base))
+            .collect()
+    }
+
     fn lookup_generator_name(&self, name: &Atom) -> Option<Atom> {
-        let name_str = name.as_str();
-        if name_str.contains("::") {
-            if self.generator_fn_names.contains(name) {
-                return Some(name.clone());
-            }
-            return None;
+        if name.as_str().contains("::") {
+            return self.generator_fn_names.contains(name).then(|| name.clone());
         }
-        for depth in (1..=self.namespace_path.len()).rev() {
-            let candidate = qualified_name(&self.namespace_path[..depth], name_str);
+        for candidate in self.qualified_candidates(name.as_str()) {
             if self.generator_fn_names.contains(&candidate) {
                 return Some(candidate);
             }
@@ -162,11 +186,28 @@ impl<'a> GenTypeWalker<'a> {
                 return None;
             }
         }
-        if self.generator_fn_names.contains(name) {
-            Some(name.clone())
-        } else {
-            None
+        None
+    }
+
+    fn lookup_generator_method(&self, class_name: &Atom, method: &str) -> Option<Atom> {
+        let base = class_name.as_str();
+        if base.contains("::") {
+            let candidate = Atom::from(format!("{base}::{method}"));
+            return self
+                .name_to_gen_ty
+                .contains_key(&candidate)
+                .then_some(candidate);
         }
+        for class_qualified in self.qualified_candidates(base) {
+            let candidate = Atom::from(format!("{}::{method}", class_qualified.as_str()));
+            if self.name_to_gen_ty.contains_key(&candidate) {
+                return Some(candidate);
+            }
+            if self.non_generator_names.contains(&class_qualified) {
+                return None;
+            }
+        }
+        None
     }
 }
 
@@ -214,6 +255,24 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
                                 *ty = self
                                     .types
                                     .intern(&Type::GeneratorResult { inner: inner_ty });
+                            } else {
+                                let recv_ty = match self.types.resolve(owner.ty()) {
+                                    Some(Type::Optional { inner }) => *inner,
+                                    _ => owner.ty(),
+                                };
+                                if let Some(gen_ty) = self
+                                    .method_to_gen_ty
+                                    .get(&recv_ty)
+                                    .and_then(|methods| methods.get(&*field_name))
+                                {
+                                    *ty = *gen_ty;
+                                } else if let HirExpr::Global { name, .. } = owner.as_ref()
+                                    && let Some(lookup) =
+                                        self.lookup_generator_method(name, field_name.as_str())
+                                    && let Some(gen_ty) = self.name_to_gen_ty.get(&lookup)
+                                {
+                                    *ty = *gen_ty;
+                                }
                             }
                         }
                         other => {

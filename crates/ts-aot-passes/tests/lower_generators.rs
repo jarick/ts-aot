@@ -843,7 +843,7 @@ fn lower_generators_rejects_void_return_with_valued_yield() {
 }
 
 #[test]
-fn lower_generators_rejects_generator_method_inside_class() {
+fn lower_generators_transforms_generator_method_inside_class() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
@@ -871,24 +871,17 @@ fn lower_generators_rejects_generator_method_inside_class() {
     }));
     let stats = lower_generators(&mut hir, &mut types, &mut ctx);
     assert_eq!(
-        stats.generators_transformed, 0,
-        "class generator method must not be transformed"
+        stats.generators_transformed, 1,
+        "class generator method must be transformed"
     );
     assert_eq!(
-        stats.generators_rejected, 1,
-        "class generator method must be rejected"
+        stats.generators_rejected, 0,
+        "class generator method must not be rejected"
     );
-    assert!(ctx.has_errors(), "E0501 diagnostic must be emitted");
-    let diag = ctx
-        .diagnostics()
-        .iter()
-        .find(|d| d.code.as_str() == "E0501")
-        .expect("E0501 diagnostic must be present for class generator method");
-    assert_eq!(diag.severity, Severity::Error);
     assert!(
-        diag.message.contains("iter()"),
-        "message must name the rejected method, got: {:?}",
-        diag.message
+        !ctx.has_errors(),
+        "class generator method must not emit E0501, got: {:?}",
+        ctx.diagnostics()
     );
 }
 

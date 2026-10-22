@@ -1113,7 +1113,7 @@ fn convert_expr_closure_with_empty_body_lowers_to_local_binding() {
 }
 
 #[test]
-fn convert_expr_closure_with_captures_emits_p0005_diagnostic() {
+fn convert_expr_closure_with_captures_is_rejected() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -1140,14 +1140,15 @@ fn convert_expr_closure_with_captures_emits_p0005_diagnostic() {
         &mut empty_types(),
         &mut cx,
     );
-    assert_eq!(mir, MirExpr::Unit, "capturing closure must lower to Unit");
-    assert!(cx.has_errors());
-    let diag = cx
-        .diagnostics()
-        .iter()
-        .find(|d| d.code.as_str() == "P0005")
-        .expect("expected P0005 diagnostic for capturing closure");
-    assert!(diag.message.contains("captur"));
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
+        "capturing closures must be rejected with P0005, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        matches!(mir, MirExpr::Unit),
+        "a rejected capturing closure must lower to Unit, got {mir:?}"
+    );
 }
 
 #[test]

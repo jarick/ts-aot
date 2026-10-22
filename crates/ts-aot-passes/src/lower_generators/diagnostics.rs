@@ -2,6 +2,7 @@ use ts_aot_core::Span;
 use ts_aot_ir_hir::{HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
 
 pub(crate) const GENERATOR_DIAG_UNSUPPORTED_YIELD: &str = "E0501";
+pub(crate) const GENERATOR_DIAG_UNRESOLVED_YIELD_TYPE: &str = "E0505";
 pub const GENERATOR_DIAG_DEFERRED_METHOD: &str = "E0502";
 
 #[derive(Debug, Default, Clone, Copy)]

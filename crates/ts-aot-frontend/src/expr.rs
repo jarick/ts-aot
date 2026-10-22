@@ -1,22 +1,22 @@
 use oxc_ast::ast::{
-    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, BindingPattern,
-    CallExpression, ChainElement, ChainExpression, Expression, LogicalExpression,
-    SequenceExpression, SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral,
-    UnaryExpression, UpdateExpression, match_assignment_target, match_assignment_target_pattern,
-    match_expression, match_member_expression,
+    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression,
+    ChainElement, ChainExpression, Expression, LogicalExpression, SequenceExpression,
+    SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral, UnaryExpression,
+    UpdateExpression, match_assignment_target, match_assignment_target_pattern, match_expression,
+    match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
 use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirParam, HirStmt};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt};
 
 use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
 use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
-use crate::util::{binding_pattern_name, core_span_from_oxc};
+use crate::util::core_span_from_oxc;
 
 impl SkeletonEnv<'_> {
     pub(crate) fn ident_to_expr(&mut self, name: &str, scope: &BodyScope, span: Span) -> HirExpr {
@@ -184,6 +184,9 @@ impl SkeletonBuilder {
                 }
             }
             Expression::ArrowFunctionExpression(arrow) => self.walk_arrow(senv, arrow, scope),
+            Expression::FunctionExpression(func) => {
+                self.walk_function_expression(senv, func, scope)
+            }
             Expression::TSAsExpression(as_expr) => {
                 let expr = self.walk_expr(senv, &as_expr.expression, scope);
                 let merged = self.merged_type_params();
@@ -288,13 +291,12 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         if arrow.r#async {
-            senv.diagnostics.push(Diagnostic::error(
+            senv.diagnostics.push(Diagnostic::warning(
                 "E0502",
-                "async arrow functions are not supported in this PR; \
-                 only synchronous no-capture arrow functions are accepted",
+                "async arrow functions are lowered as synchronous closures in this AOT \
+                 target; `await` results are not resolved before yielding",
                 core_span_from_oxc(arrow.span),
             ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
         }
         if arrow.type_parameters.is_some() {
             senv.diagnostics.push(Diagnostic::error(
@@ -313,66 +315,51 @@ impl SkeletonBuilder {
             ));
             return HirExpr::Unit(core_span_from_oxc(arrow.span));
         }
-        let mut params: Vec<HirParam> = Vec::with_capacity(arrow.params.items.len());
-        let mut param_locals: Vec<(Atom, TypeId)> = Vec::with_capacity(arrow.params.items.len());
-        for param in &arrow.params.items {
-            if matches!(param.pattern, BindingPattern::AssignmentPattern(_)) {
-                senv.diagnostics.push(Diagnostic::error(
-                    "E0502",
-                    "default-value arrow parameters (e.g. (x = 1) => ...) are not supported \
-                     in this PR; use a plain identifier parameter with an explicit type \
-                     annotation instead",
-                    core_span_from_oxc(param.pattern.span()),
-                ));
-                return HirExpr::Unit(core_span_from_oxc(arrow.span));
-            }
-            let Some(name) = binding_pattern_name(&param.pattern) else {
-                senv.diagnostics.push(Diagnostic::error(
-                    "E0502",
-                    "destructuring arrow parameters (e.g. ({x}) => ..., ([x]) => ...) are not \
-                     supported in this PR; use a plain identifier parameter with an explicit \
-                     type annotation instead",
-                    core_span_from_oxc(param.pattern.span()),
-                ));
-                return HirExpr::Unit(core_span_from_oxc(arrow.span));
-            };
-            let name = Atom::from(name);
-            let ty = match param.type_annotation.as_deref() {
-                Some(ann) => self.resolve_ts_type_from_annotation(senv, Some(ann)),
-                None => senv.error_ty(),
-            };
-            params.push(HirParam {
-                name: name.clone(),
-                ty,
-            });
-            param_locals.push((name, ty));
-        }
+        let merged = self.merged_type_params();
+        let (params, extra_locals) =
+            self.build_params_and_locals(senv, &arrow.params.items, 0, merged.as_ref());
+        let param_locals: Vec<(Atom, TypeId)> =
+            params.iter().map(|p| (p.name.clone(), p.ty)).collect();
         let ret_ty = match arrow.return_type.as_deref() {
-            Some(ann) => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+            Some(ann) => match merged.as_ref() {
+                Some(map) => {
+                    self.resolve_ts_type_from_annotation_with_params(senv, Some(ann), Some(map))
+                }
+                None => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+            },
             None => senv.error_ty(),
         };
-        let mut outer_locals: std::collections::HashSet<String> =
-            scope.names().into_iter().collect();
-        outer_locals.insert("this".to_owned());
+        let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
         let body: Vec<HirStmt> = if arrow.expression {
             let mut inner_scope = BodyScope::new(u32::try_from(params.len()).unwrap_or(u32::MAX));
             for (idx, (name, ty)) in param_locals.iter().enumerate() {
                 let id = LocalId::from_raw(u32::try_from(idx).unwrap_or(u32::MAX));
                 inner_scope.declare_param(name.as_str(), id, *ty);
             }
+            let mut prelude: Vec<HirStmt> = Vec::new();
+            for (name, ty, init) in &extra_locals {
+                let id = inner_scope.declare(name.as_str(), *ty);
+                prelude.push(HirStmt::Let {
+                    id,
+                    name: name.clone(),
+                    ty: *ty,
+                    init: Some(init.clone()),
+                });
+            }
             let mut stmts = self.walk_stmts(senv, &arrow.body.statements, &mut inner_scope);
             if let Some(HirStmt::Expr { expr }) = stmts.first().cloned() {
                 stmts[0] = HirStmt::Return { value: Some(expr) };
             }
-            stmts
+            prelude.extend(stmts);
+            prelude
         } else {
-            self.walk_function_body(senv, Some(&arrow.body), &params, false, true)
+            self.walk_function_body(senv, Some(&arrow.body), &params, false, true, &extra_locals)
         };
-        if exprs_reference_outer_local(&body, &outer_locals) {
+        if has_captures(&body, &outer_locals) {
             senv.diagnostics.push(Diagnostic::error(
                 "P0005",
-                "capturing closures are not supported in this PR; \
-                 only no-capture arrow functions are accepted (outer local referenced from arrow body)",
+                "capturing closures are not supported in this AOT target; \
+                 only no-capture closures are accepted",
                 core_span_from_oxc(arrow.span),
             ));
             return HirExpr::Unit(core_span_from_oxc(arrow.span));
@@ -395,6 +382,72 @@ impl SkeletonBuilder {
         }
     }
 
+    fn walk_function_expression(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        func: &oxc_ast::ast::Function<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let span = core_span_from_oxc(func.span);
+        let unsupported = func.r#async
+            || func.generator
+            || func.type_parameters.is_some()
+            || func.params.rest.is_some();
+        if unsupported {
+            senv.report_unwalked(
+                "function expression form is not supported by the body walker",
+                func.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let merged = self.merged_type_params();
+        let (params, extra_locals) =
+            self.build_params_and_locals(senv, &func.params.items, 0, merged.as_ref());
+        let ret_ty = match func.return_type.as_deref() {
+            Some(ann) => match merged.as_ref() {
+                Some(map) => {
+                    self.resolve_ts_type_from_annotation_with_params(senv, Some(ann), Some(map))
+                }
+                None => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+            },
+            None => senv.error_ty(),
+        };
+        let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
+        let body = self.walk_function_body(
+            senv,
+            func.body.as_deref(),
+            &params,
+            false,
+            false,
+            &extra_locals,
+        );
+        if has_captures(&body, &outer_locals) {
+            senv.diagnostics.push(Diagnostic::error(
+                "P0005",
+                "capturing closures are not supported in this AOT target; \
+                 only no-capture closures are accepted",
+                span,
+            ));
+            return HirExpr::Unit(span);
+        }
+        let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
+        let fn_ty = senv.types.intern(&Type::Fn {
+            params: param_types,
+            ret: ret_ty,
+            err: None,
+        });
+        let id = LocalId::from_raw(self.next_closure_id);
+        self.next_closure_id += 1;
+        HirExpr::Closure {
+            id,
+            params,
+            captures: Vec::new(),
+            body,
+            ty: fn_ty,
+            span,
+        }
+    }
+
     fn walk_yield_expression(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -411,15 +464,16 @@ impl SkeletonBuilder {
             return HirExpr::Unit(core_span_from_oxc(y.span));
         }
         if y.delegate {
-            senv.diagnostics.push(Diagnostic::error(
+            senv.diagnostics.push(Diagnostic::warning(
                 "E0501",
-                "`yield*` (delegating yield) is not supported yet — yield values directly instead",
+                "`yield*` (delegating yield) is not supported in this AOT target; \
+                 the delegated iterable is evaluated but its values are not forwarded",
                 core_span_from_oxc(y.span),
             ));
-            if let Some(a) = y.argument.as_ref() {
-                self.walk_expr(senv, a, scope);
-            }
-            return HirExpr::Unit(core_span_from_oxc(y.span));
+            return match y.argument.as_ref() {
+                Some(argument) => self.walk_expr(senv, argument, scope),
+                None => HirExpr::Unit(core_span_from_oxc(y.span)),
+            };
         }
         let inner = y.argument.as_ref().map(|a| self.walk_expr(senv, a, scope));
         let ty = senv.error_ty();
@@ -999,10 +1053,7 @@ impl SkeletonBuilder {
     }
 }
 
-fn exprs_reference_outer_local(
-    stmts: &[HirStmt],
-    outer_locals: &std::collections::HashSet<String>,
-) -> bool {
+fn has_captures(stmts: &[HirStmt], outer_locals: &std::collections::HashSet<String>) -> bool {
     use ts_aot_ir_hir::{Visitor, walk_expr};
     struct CaptureSearch<'a> {
         outer_locals: &'a std::collections::HashSet<String>,
@@ -1032,5 +1083,5 @@ fn exprs_reference_outer_local(
             return true;
         }
     }
-    false
+    search.found
 }

@@ -1625,19 +1625,26 @@ fn convert_block_forof_unsupported_generic_type_emits_e0406() {
 }
 
 #[test]
-fn convert_block_forof_unresolved_iter_type_emits_e0406() {
-    let iter_span = Span::new(10, 20);
-    let (locals, e0406_span, error_ty) = assert_forof_e0406(
-        |_| TypeId::from_raw(99),
-        iter_span,
-        &["could not be resolved"],
-        "unresolved TypeId",
-    );
-    assert_eq!(
-        e0406_span, iter_span,
-        "E0406 for an unresolved for-of iter type must carry the iter expression's source span, \
-         got span {:?}",
-        e0406_span
+fn convert_block_forof_unresolved_iter_type_does_not_cascade() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let mut types = empty_types();
+    let iter = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: TypeId::from_raw(99),
+        span: Span::new(10, 20),
+    };
+    let block = HirBlock(vec![HirStmt::ForOf {
+        binding: LocalId::from_raw(0),
+        iter,
+        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
+    }]);
+    let (_mir_block, locals) = c.convert_block(&block, &mut types, &mut cx);
+    assert!(
+        !cx.has_errors(),
+        "an unresolved for-of iterable type must not produce a hard error (the iterable type is \
+         already unresolved upstream); got {:?}",
+        cx.diagnostics()
     );
     let decl = locals
         .iter()
@@ -1645,12 +1652,10 @@ fn convert_block_forof_unresolved_iter_type_emits_e0406() {
         .expect(
             "for-of binding local must still be emitted so the rest of the pipeline does not crash",
         );
-    assert_eq!(
-        decl.ty,
-        error_ty,
-        "for-of binding local must fall back to the interned `Type::Error` TypeId after the E0406 \
-         error so downstream passes see a coherent error type rather than a misleading concrete \
-         iterable type (got {})",
+    assert!(
+        matches!(types.resolve(decl.ty), Some(Type::Error)),
+        "for-of binding local must fall back to `Type::Error` for an unresolved iterable type, \
+         got {}",
         decl.ty.raw()
     );
 }
