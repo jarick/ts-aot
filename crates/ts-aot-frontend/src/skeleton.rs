@@ -98,6 +98,16 @@ pub(crate) struct SkeletonEnv<'b> {
     pub(crate) diagnostics: &'b mut DiagnosticBag,
     pub(crate) program: &'b mut HirProgram,
     pub(crate) next_destructured_id: Cell<u32>,
+    pub(crate) capture_types: Vec<HashMap<String, TypeId>>,
+}
+
+impl SkeletonEnv<'_> {
+    pub(crate) fn capture_type(&self, name: &str) -> Option<TypeId> {
+        self.capture_types
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).copied())
+    }
 }
 
 impl SkeletonEnv<'_> {

@@ -42,7 +42,7 @@ impl ExprConverter {
             _ => return None,
         };
         if args.len() != expected_arity {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Date.{} requires exactly {} argument(s); got {}",
@@ -55,11 +55,10 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         if date_field.as_str() == "parse" && !is_string_typed_source(&args[0], types) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
-                "Date.parse() argument must be a string (per ECMAScript spec); got non-string \
-                 expression. The runtime call __ts_aot_date_parse was not emitted. Coerce the \
-                 argument to a string (e.g. String(n)) before calling Date.parse()."
+                "Date.parse() got a non-string argument (per ECMAScript spec it must be a \
+                 string); the call is lowered as undefined"
                     .to_string(),
                 Span::new(0, 0),
             );
@@ -121,7 +120,7 @@ impl ExprConverter {
             _ => None,
         }?;
         if !args.is_empty() {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Date.prototype.{} requires 0 explicit arguments (the receiver is the sole \

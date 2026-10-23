@@ -37,7 +37,7 @@ impl ExprConverter {
             return None;
         }
         if args.len() > 1 {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Symbol() takes 0 or 1 argument (description); got {}",
@@ -54,12 +54,10 @@ impl ExprConverter {
                 HirExpr::Unit(_) | HirExpr::Null(_) | HirExpr::Undefined(_)
             )
         {
-            ctx.error(
+            ctx.warning(
                 "E0406",
-                "Symbol(description) argument must be a string, undefined, or null \
-                 (per ECMAScript spec); got non-string expression. The runtime call \
-                 __ts_aot_symbol_new was not emitted. Coerce the description to a string \
-                 (e.g. String(v)) before calling Symbol(v)."
+                "Symbol(description) got a non-string/undefined/null argument (per ECMAScript \
+                 spec it must be one of those); the call is lowered as undefined"
                     .to_string(),
                 Span::new(0, 0),
             );
@@ -112,7 +110,7 @@ impl ExprConverter {
             _ => return None,
         };
         if args.len() != expected_arity {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Symbol.{} requires exactly {} argument(s); got {}",
@@ -127,11 +125,10 @@ impl ExprConverter {
         match arg_kind {
             SymbolArgKind::String => {
                 if !is_string_typed_source(&args[0], types) {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
-                        "Symbol.for() argument must be a string (per ECMAScript spec); got \
-                         non-string expression. Coerce the key to a string (e.g. String(k)) \
-                         before calling Symbol.for(k)."
+                        "Symbol.for() got a non-string argument (per ECMAScript spec it must \
+                         be a string); the call is lowered as undefined"
                             .to_string(),
                         Span::new(0, 0),
                     );
@@ -140,7 +137,7 @@ impl ExprConverter {
             }
             SymbolArgKind::Symbol => {
                 let Some(arg_ty) = hir_expr_type_id(&args[0]) else {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         "Symbol.keyFor() argument must be a Symbol (per ECMAScript spec); \
                          got expression with unresolvable type. The runtime call was not emitted."
@@ -150,7 +147,7 @@ impl ExprConverter {
                     return Some(MirExpr::Unit);
                 };
                 if !matches!(types.resolve(arg_ty), Some(Type::Symbol)) {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         format!(
                             "Symbol.keyFor() argument must be a Symbol (per ECMAScript spec); \

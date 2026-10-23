@@ -18,8 +18,8 @@ impl ClosureLowerer<'_> {
             if !captures.is_empty() {
                 self.ctx.warning(
                     "P0007",
-                    "capturing closures are not yet supported by lower_closures; \
-                     closure is left intact and will fail downstream in HIR→MIR",
+                    "capturing closures are not lifted by lower_closures; the closure is \
+                     lowered in HIR→MIR with name-based captures",
                     Span::new(0, 0),
                 );
                 self.stats.deferred_capturing += 1;

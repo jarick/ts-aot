@@ -139,7 +139,7 @@ fn bigint_constructor_from_string_emits_bigint_new_runtime() {
 fn bigint_constructor_from_int_emits_p0005_diagnostic() {
     let out = compile_mir("function f(n: i64): bigint { return BigInt(n); }");
     assert!(
-        out.has_errors(),
+        out.diagnostics.iter().any(|d| d.code.as_str() == "P0005"),
         "BigInt(i64) must emit a P0005 diagnostic (number arg currently unsupported); \
          got: {:?}",
         out.diagnostics

@@ -158,7 +158,7 @@ impl ExprConverter {
             let length = info.length;
             let indexed = info.indexed;
             if length < 0 || length > i128::from(MAX_DENSE_ARRAY_LEN) {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
                         "Array.from({{length: N}}) requires 0 <= N < {} (AOT dense-Vec cap); got {}",
@@ -169,16 +169,17 @@ impl ExprConverter {
                 return MirExpr::Unit;
             }
             if args.len() > 1 && !indexed.is_empty() {
-                ctx.error(
+                ctx.warning(
                     "E0406",
-                    "Array.from({length: N, 0: x, ...}, mapFn) (mixing indexed values with mapFn) \
-                     is not supported in this PR; either drop the indexed values or drop the mapFn",
+                    "Array.from({length: N, 0: x, ...}, mapFn) (mixing indexed values with \
+                     mapFn) is not supported in this AOT target; the call is lowered as \
+                     undefined",
                     Span::new(0, 0),
                 );
                 return MirExpr::Unit;
             }
             if args.len() > 1 && !matches!(&args[1], HirExpr::Global { .. }) {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     "Array.from({length: N}, mapFn[, thisArg]) in AOT requires mapFn to be a known global function reference \
                      (a top-level fn or a non-capturing closure lifted by `lower_closures`); \
@@ -188,7 +189,7 @@ impl ExprConverter {
                 return MirExpr::Unit;
             }
             if args.len() == 3 {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     "Array.from({length: N}, mapFn, thisArg) does not support thisArg in AOT \
                      (AOT closures have no `this` binding); use the 2-arg form Array.from({length: N}, mapFn)",
@@ -495,7 +496,7 @@ impl ExprConverter {
             _ => None,
         });
         if args.len() != 1 {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Promise.prototype.{method} requires exactly 1 argument (the handler); got {}",
@@ -716,7 +717,7 @@ impl ExprConverter {
         };
         let expected_arity = 1usize;
         if args.len() != expected_arity {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Promise.{method} requires exactly {expected_arity} argument(s); got {}",

@@ -1113,7 +1113,7 @@ fn convert_expr_closure_with_empty_body_lowers_to_local_binding() {
 }
 
 #[test]
-fn convert_expr_closure_with_captures_is_rejected() {
+fn convert_expr_closure_with_captures_lowers_without_error() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -1140,14 +1140,20 @@ fn convert_expr_closure_with_captures_is_rejected() {
         &mut empty_types(),
         &mut cx,
     );
+    assert!(!cx.has_errors(), "{:?}", cx.diagnostics());
+    let MirExpr::Local(dest) = mir else {
+        panic!("capturing closure must lower to a Local holding the closure, got {mir:?}");
+    };
     assert!(
-        cx.diagnostics().iter().any(|d| d.code.as_str() == "P0005"),
-        "capturing closures must be rejected with P0005, got {:?}",
-        cx.diagnostics()
-    );
-    assert!(
-        matches!(mir, MirExpr::Unit),
-        "a rejected capturing closure must lower to Unit, got {mir:?}"
+        out.iter().any(|s| matches!(
+            s,
+            MirStmt::Let {
+                local,
+                init: Some(MirExpr::Closure { .. }),
+                ..
+            } if *local == dest
+        )),
+        "expected a `let` with a MirExpr::Closure, got {out:?}"
     );
 }
 
@@ -1291,7 +1297,7 @@ fn convert_expr_assignment_to_invalid_target_emits_diagnostic() {
         &mut empty_types(),
         &mut cx,
     );
-    assert!(cx.has_errors());
+    assert!(!cx.diagnostics().is_empty());
     assert!(
         !out.iter().any(|s| matches!(s, MirStmt::Assign { .. })),
         "no Assign must be emitted for invalid target, got {out:?}"
@@ -1577,7 +1583,7 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
 }
 
 #[test]
-fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_unit_expr() {
+fn convert_expr_indirect_call_with_function_typed_callee_emits_indirect_call() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();
     let mut cx = ctx();
@@ -1611,17 +1617,9 @@ fn convert_expr_indirect_call_with_function_typed_callee_emits_e0405_error_and_u
         &mut cx,
     );
     assert!(
-        matches!(mir, MirExpr::Unit),
-        "function-typed indirect call must lower to MirExpr::Unit (Type::Fn cannot be called), got {mir:?}"
-    );
-    let has_e0405 = cx
-        .diagnostics()
-        .iter()
-        .any(|d| d.code.as_str() == "E0405" && d.severity == ts_aot_core::Severity::Error);
-    assert!(
-        has_e0405,
-        "function-typed indirect call must emit E0405 error, got: {:?}",
-        cx.diagnostics()
+        matches!(mir, MirExpr::IndirectCall { .. }),
+        "function-typed indirect call must lower to MirExpr::IndirectCall so the backend can \
+         defunctionalize it via a Fn-value enum, got {mir:?}"
     );
 }
 
@@ -3094,23 +3092,23 @@ fn convert_expr_assignment_with_string_rhs_to_f64_target_emits_diagnostic() {
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "F64 target with String RHS must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "f64 target with a string RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
         .diagnostics()
         .iter()
         .find(|d| d.code.as_str() == "E0408")
-        .expect("expected E0408 diagnostic for string-to-numeric assignment");
+        .expect("expected E0408 diagnostic for string-RHS-to-numeric-target assignment");
     assert!(
         diag.message.contains("string"),
-        "E0408 diagnostic must mention the string type, got: {:?}",
+        "E0408 diagnostic must mention string, got: {:?}",
         diag.message
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible string-to-numeric assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3144,7 +3142,7 @@ fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "I64 target with void/Unit RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3159,8 +3157,8 @@ fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed void/Unit assignment must still be lowered, got: {:?}",
         out
     );
 }
@@ -3194,7 +3192,7 @@ fn convert_expr_assignment_with_undefined_rhs_to_error_typed_target_emits_diagno
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "i64 target with Undefined RHS resolving to Type::Error must produce a diagnostic, \
          got: {:?}",
         cx.diagnostics()
@@ -3210,8 +3208,8 @@ fn convert_expr_assignment_with_undefined_rhs_to_error_typed_target_emits_diagno
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed assignment must still be lowered, got: {:?}",
         out
     );
 }
@@ -3399,8 +3397,8 @@ fn convert_expr_assignment_with_bool_literal_rhs_to_numeric_target_emits_diagnos
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "i64 target with Bool literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "i64 target with a bool literal RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
@@ -3415,7 +3413,7 @@ fn convert_expr_assignment_with_bool_literal_rhs_to_numeric_target_emits_diagnos
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible bool-to-numeric assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3513,7 +3511,7 @@ fn convert_expr_assignment_with_null_rhs_to_non_nullable_target_emits_diagnostic
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "null assignment to non-nullable Type::I64 target must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3526,6 +3524,11 @@ fn convert_expr_assignment_with_null_rhs_to_non_nullable_target_emits_diagnostic
         diag.message.contains("null"),
         "E0410 diagnostic must mention null, got: {:?}",
         diag.message
+    );
+    assert!(
+        !out.is_empty(),
+        "a relaxed null assignment must still be lowered, got: {:?}",
+        out
     );
 }
 
@@ -3628,8 +3631,8 @@ fn convert_expr_assignment_with_int_literal_rhs_to_bool_target_emits_diagnostic(
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
-        "Bool target with Int literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
+        !cx.diagnostics().is_empty(),
+        "bool target with an int literal RHS must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
     let diag = cx
@@ -3644,7 +3647,7 @@ fn convert_expr_assignment_with_int_literal_rhs_to_bool_target_emits_diagnostic(
     );
     assert!(
         out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        "an incompatible int-to-bool assignment must not be lowered, got: {:?}",
         out
     );
 }
@@ -3678,7 +3681,7 @@ fn convert_expr_assignment_with_null_literal_rhs_to_numeric_target_emits_diagnos
         &mut cx,
     );
     assert!(
-        cx.has_errors(),
+        !cx.diagnostics().is_empty(),
         "i64 target with Null literal RHS (Error-typed) must produce a diagnostic, got: {:?}",
         cx.diagnostics()
     );
@@ -3693,8 +3696,8 @@ fn convert_expr_assignment_with_null_literal_rhs_to_numeric_target_emits_diagnos
         diag.message
     );
     assert!(
-        out.is_empty(),
-        "rejected assignment must not emit Let/Assign stmts, got: {:?}",
+        !out.is_empty(),
+        "a relaxed null assignment must still be lowered, got: {:?}",
         out
     );
 }

@@ -190,7 +190,7 @@ fn process_generator_function(
             GENERATOR_DIAG_UNSUPPORTED_YIELD,
             "await inside a generator is not supported yet \
              (the generator body is wrapped in `async move` but `Generator::next` \
-              polls the future synchronously — yielding through `Poll::Pending` \
+              polls the future synchronously - yielding through `Poll::Pending` \
               would panic at runtime; resolve the awaited value before yielding instead)",
             span,
         );

@@ -40,7 +40,7 @@ impl ExprConverter {
             _ => return None,
         };
         if args.len() > 2 {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "ArrayBuffer.prototype.{} requires at most 2 arguments (begin, end); got {}",
@@ -53,12 +53,12 @@ impl ExprConverter {
         }
         for (idx, arg) in args.iter().enumerate() {
             if !is_numeric_type_for_array_len(arg, types) {
-                ctx.error(
+                ctx.warning(
                     "E0406",
                     format!(
-                        "ArrayBuffer.prototype.{} argument #{} ({} or end) must be a number (per \
-                         ECMAScript spec); got non-numeric expression. Coerce to a number before \
-                         calling buf.slice(...).",
+                        "ArrayBuffer.prototype.{} got a non-numeric argument #{} ({} or end) \
+                         (per ECMAScript spec it must be a number); the call is lowered as \
+                         undefined",
                         buf_method_field.as_str(),
                         idx,
                         if idx == 0 { "begin" } else { "end" }
