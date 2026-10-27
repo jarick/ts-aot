@@ -22,6 +22,7 @@ fn end_to_end_optional_chain_field_emit_uses_as_ref_map() {
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("obj"),
             ty: opt_point,
         }],

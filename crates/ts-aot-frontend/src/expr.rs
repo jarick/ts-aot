@@ -1,8 +1,7 @@
 use oxc_ast::ast::{
-    Argument, AssignmentExpression, AssignmentTarget, BinaryExpression, CallExpression,
-    ChainElement, ChainExpression, Expression, LogicalExpression, SequenceExpression,
-    SimpleAssignmentTarget, TaggedTemplateExpression, TemplateLiteral, UnaryExpression,
-    UpdateExpression, match_assignment_target, match_assignment_target_pattern, match_expression,
+    Argument, AssignmentExpression, BinaryExpression, CallExpression, ChainElement,
+    ChainExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
+    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression, match_expression,
     match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
@@ -11,6 +10,7 @@ use oxc_syntax::operator::UpdateOperator;
 use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt};
 
+use crate::body::FunctionBodyInput;
 use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
@@ -26,7 +26,7 @@ impl SkeletonEnv<'_> {
         if let Some((id, ty)) = scope.lookup(name) {
             HirExpr::Local { id, ty, span }
         } else {
-            let ty = self.error_ty();
+            let ty = self.capture_type(name).unwrap_or_else(|| self.error_ty());
             HirExpr::Global {
                 name: Atom::from(name),
                 ty,
@@ -307,19 +307,16 @@ impl SkeletonBuilder {
             return HirExpr::Unit(core_span_from_oxc(arrow.span));
         }
         if arrow.params.rest.is_some() {
-            senv.diagnostics.push(Diagnostic::error(
-                "E0502",
-                "rest parameters (...args) are not supported in arrow functions in this PR; \
-                 use plain identifier parameters with explicit type annotations instead",
-                core_span_from_oxc(arrow.span),
-            ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
+            senv.report_unwalked(
+                "rest parameters (...args) are not supported in this AOT target; the rest \
+                 binding is ignored",
+                arrow.span,
+            );
         }
         let merged = self.merged_type_params();
+        let param_base = scope.peek_next();
         let (params, extra_locals) =
-            self.build_params_and_locals(senv, &arrow.params.items, 0, merged.as_ref());
-        let param_locals: Vec<(Atom, TypeId)> =
-            params.iter().map(|p| (p.name.clone(), p.ty)).collect();
+            self.build_params_and_locals(senv, &arrow.params.items, param_base, merged.as_ref());
         let ret_ty = match arrow.return_type.as_deref() {
             Some(ann) => match merged.as_ref() {
                 Some(map) => {
@@ -329,12 +326,16 @@ impl SkeletonBuilder {
             },
             None => senv.error_ty(),
         };
-        let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
-        let body: Vec<HirStmt> = if arrow.expression {
-            let mut inner_scope = BodyScope::new(u32::try_from(params.len()).unwrap_or(u32::MAX));
-            for (idx, (name, ty)) in param_locals.iter().enumerate() {
-                let id = LocalId::from_raw(u32::try_from(idx).unwrap_or(u32::MAX));
-                inner_scope.declare_param(name.as_str(), id, *ty);
+        senv.capture_types.push(capture_type_map(scope));
+        let mut body: Vec<HirStmt> = if arrow.expression {
+            let inner_base = params
+                .iter()
+                .map(|p| p.id.raw())
+                .max()
+                .map_or(param_base, |m| m.saturating_add(1));
+            let mut inner_scope = BodyScope::new(inner_base);
+            for p in &params {
+                inner_scope.declare_param(p.name.as_str(), p.id, p.ty);
             }
             let mut prelude: Vec<HirStmt> = Vec::new();
             for (name, ty, init) in &extra_locals {
@@ -350,20 +351,26 @@ impl SkeletonBuilder {
             if let Some(HirStmt::Expr { expr }) = stmts.first().cloned() {
                 stmts[0] = HirStmt::Return { value: Some(expr) };
             }
+            scope.set_next(inner_scope.peek_next());
             prelude.extend(stmts);
             prelude
         } else {
-            self.walk_function_body(senv, Some(&arrow.body), &params, false, true, &extra_locals)
+            let (b, used) = self.walk_function_body(
+                senv,
+                &FunctionBodyInput {
+                    body: Some(&arrow.body),
+                    params: &params,
+                    extra_locals: &extra_locals,
+                    param_base,
+                },
+                false,
+                true,
+            );
+            scope.set_next(used);
+            b
         };
-        if has_captures(&body, &outer_locals) {
-            senv.diagnostics.push(Diagnostic::error(
-                "P0005",
-                "capturing closures are not supported in this AOT target; \
-                 only no-capture closures are accepted",
-                core_span_from_oxc(arrow.span),
-            ));
-            return HirExpr::Unit(core_span_from_oxc(arrow.span));
-        }
+        senv.capture_types.pop();
+        let captures = collect_capture_refs(&mut body, scope);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
             params: param_types,
@@ -375,7 +382,7 @@ impl SkeletonBuilder {
         HirExpr::Closure {
             id,
             params,
-            captures: Vec::new(),
+            captures,
             body,
             ty: fn_ty,
             span: core_span_from_oxc(arrow.span),
@@ -389,10 +396,7 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let span = core_span_from_oxc(func.span);
-        let unsupported = func.r#async
-            || func.generator
-            || func.type_parameters.is_some()
-            || func.params.rest.is_some();
+        let unsupported = func.r#async || func.generator || func.type_parameters.is_some();
         if unsupported {
             senv.report_unwalked(
                 "function expression form is not supported by the body walker",
@@ -400,9 +404,17 @@ impl SkeletonBuilder {
             );
             return HirExpr::Unit(span);
         }
+        if func.params.rest.is_some() {
+            senv.report_unwalked(
+                "rest parameters (...args) are not supported in this AOT target; the rest \
+                 binding is ignored",
+                func.span,
+            );
+        }
         let merged = self.merged_type_params();
+        let param_base = scope.peek_next();
         let (params, extra_locals) =
-            self.build_params_and_locals(senv, &func.params.items, 0, merged.as_ref());
+            self.build_params_and_locals(senv, &func.params.items, param_base, merged.as_ref());
         let ret_ty = match func.return_type.as_deref() {
             Some(ann) => match merged.as_ref() {
                 Some(map) => {
@@ -412,24 +424,21 @@ impl SkeletonBuilder {
             },
             None => senv.error_ty(),
         };
-        let outer_locals: std::collections::HashSet<String> = scope.names().into_iter().collect();
-        let body = self.walk_function_body(
+        senv.capture_types.push(capture_type_map(scope));
+        let (mut body, used) = self.walk_function_body(
             senv,
-            func.body.as_deref(),
-            &params,
+            &FunctionBodyInput {
+                body: func.body.as_deref(),
+                params: &params,
+                extra_locals: &extra_locals,
+                param_base,
+            },
             false,
             false,
-            &extra_locals,
         );
-        if has_captures(&body, &outer_locals) {
-            senv.diagnostics.push(Diagnostic::error(
-                "P0005",
-                "capturing closures are not supported in this AOT target; \
-                 only no-capture closures are accepted",
-                span,
-            ));
-            return HirExpr::Unit(span);
-        }
+        scope.set_next(used);
+        senv.capture_types.pop();
+        let captures = collect_capture_refs(&mut body, scope);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
             params: param_types,
@@ -441,7 +450,7 @@ impl SkeletonBuilder {
         HirExpr::Closure {
             id,
             params,
-            captures: Vec::new(),
+            captures,
             body,
             ty: fn_ty,
             span,
@@ -989,8 +998,34 @@ impl SkeletonBuilder {
         a: &AssignmentExpression<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
-        let target = self.walk_assign_target(senv, &a.left, scope);
+        let Some(simple_target) = a.left.as_simple_assignment_target() else {
+            senv.report_unwalked(
+                "destructuring assignment target is not supported; the assignment is skipped \
+                 and the right-hand side is evaluated for its effects",
+                a.span,
+            );
+            return self.walk_expr(senv, &a.right, scope);
+        };
+        let target = self.walk_simple_target(senv, simple_target, scope);
         let rhs = self.walk_expr(senv, &a.right, scope);
+        if !matches!(
+            &target,
+            HirExpr::Local { .. }
+                | HirExpr::Global { .. }
+                | HirExpr::Field { .. }
+                | HirExpr::Index { .. }
+        ) {
+            senv.report_unwalked(
+                "assignment target is not supported; the assignment is skipped and the \
+                 right-hand side is evaluated for its effects",
+                a.span,
+            );
+            return HirExpr::Sequence {
+                exprs: vec![target, rhs],
+                ty: senv.error_ty(),
+                span: core_span_from_oxc(a.span),
+            };
+        }
         let ty = senv.error_ty();
         match compound_op(a.operator) {
             CompoundOp::Assign => HirExpr::Assignment {
@@ -1010,23 +1045,6 @@ impl SkeletonBuilder {
             CompoundOp::Unsupported => {
                 senv.report_unwalked("assignment operator is not supported", a.span);
                 HirExpr::Unit(core_span_from_oxc(a.span))
-            }
-        }
-    }
-
-    fn walk_assign_target(
-        &mut self,
-        senv: &mut SkeletonEnv,
-        t: &oxc_ast::ast::AssignmentTarget<'_>,
-        scope: &mut BodyScope,
-    ) -> HirExpr {
-        match t {
-            t @ match_assignment_target!(AssignmentTarget) => {
-                self.walk_simple_target(senv, t.to_simple_assignment_target(), scope)
-            }
-            t @ match_assignment_target_pattern!(AssignmentTarget) => {
-                senv.report_unwalked("destructuring assignment target is not supported", t.span());
-                HirExpr::Unit(core_span_from_oxc(t.span()))
             }
         }
     }
@@ -1053,35 +1071,87 @@ impl SkeletonBuilder {
     }
 }
 
-fn has_captures(stmts: &[HirStmt], outer_locals: &std::collections::HashSet<String>) -> bool {
-    use ts_aot_ir_hir::{Visitor, walk_expr};
+fn capture_type_map(scope: &BodyScope) -> std::collections::HashMap<String, TypeId> {
+    let mut map = std::collections::HashMap::new();
+    for name in scope.names() {
+        if let Some(ty) = scope.type_of_visible(&name) {
+            map.insert(name, ty);
+        }
+    }
+    map
+}
+
+fn collect_capture_refs(stmts: &mut [HirStmt], scope: &BodyScope) -> Vec<HirExpr> {
+    use ts_aot_ir_hir::{Visitor, VisitorMut, walk_expr, walk_expr_mut};
     struct CaptureSearch<'a> {
-        outer_locals: &'a std::collections::HashSet<String>,
-        found: bool,
+        scope: &'a BodyScope,
+        seen: std::collections::HashSet<Atom>,
+        ordered: Vec<(Atom, Span)>,
     }
     impl Visitor for CaptureSearch<'_> {
         fn visit_expr(&mut self, expr: &HirExpr) {
-            if self.found {
-                return;
-            }
-            if let HirExpr::Global { name, .. } = expr
-                && self.outer_locals.contains(name.as_str())
+            if let HirExpr::Global { name, span, .. } = expr
+                && self.scope.type_of_visible(name.as_str()).is_some()
+                && self.seen.insert(name.clone())
             {
-                self.found = true;
+                self.ordered.push((name.clone(), *span));
+            }
+            if matches!(expr, HirExpr::Closure { .. }) {
                 return;
             }
             walk_expr(self, expr);
         }
     }
-    let mut search = CaptureSearch {
-        outer_locals,
-        found: false,
-    };
-    for stmt in stmts {
-        search.visit_stmt(stmt);
-        if search.found {
-            return true;
+    struct CaptureRewrite {
+        bindings: std::collections::HashMap<String, (LocalId, TypeId)>,
+    }
+    impl VisitorMut for CaptureRewrite {
+        fn visit_expr_mut(&mut self, expr: &mut HirExpr) {
+            if let HirExpr::Global { name, span, .. } = expr
+                && let Some((id, ty)) = self.bindings.get(name.as_str()).copied()
+            {
+                *expr = HirExpr::Local {
+                    id,
+                    ty,
+                    span: *span,
+                };
+            }
+            if matches!(expr, HirExpr::Closure { .. }) {
+                return;
+            }
+            walk_expr_mut(self, expr);
         }
     }
-    search.found
+
+    let mut search = CaptureSearch {
+        scope,
+        seen: std::collections::HashSet::new(),
+        ordered: Vec::new(),
+    };
+    for stmt in stmts.iter() {
+        search.visit_stmt(stmt);
+    }
+
+    let mut bindings: std::collections::HashMap<String, (LocalId, TypeId)> =
+        std::collections::HashMap::new();
+    for (name, _) in &search.ordered {
+        if let Some(binding) = scope.lookup(name.as_str()) {
+            bindings.insert(name.as_str().to_owned(), binding);
+        }
+    }
+
+    let mut rewriter = CaptureRewrite { bindings };
+    rewriter.visit_block_mut(stmts);
+
+    search
+        .ordered
+        .iter()
+        .filter_map(|(name, span)| {
+            scope.lookup(name.as_str()).map(|(id, ty)| HirExpr::Local {
+                id,
+                ty,
+                span: *span,
+            })
+        })
+        .collect()
 }

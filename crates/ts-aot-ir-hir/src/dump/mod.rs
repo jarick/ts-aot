@@ -354,6 +354,7 @@ mod tests {
         let mut f = HirFunction {
             name: Atom::new_inline("render"),
             params: vec![HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::new_inline("name"),
                 ty: TypeId::from_raw(1),
             }],

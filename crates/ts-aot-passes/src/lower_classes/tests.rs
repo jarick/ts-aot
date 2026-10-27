@@ -33,6 +33,7 @@ fn class_with_fields_and_methods(
             .map(|(n, p)| HirFunction {
                 name: Atom::new_inline(n),
                 params: vec![HirParam {
+                    id: ts_aot_core::LocalId::from_raw(0),
                     name: Atom::new_inline("self"),
                     ty: TypeId::from_raw(p),
                 }],

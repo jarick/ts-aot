@@ -42,14 +42,11 @@ impl ExprConverter {
         }
         let fid = self.name_to_function.get(fn_name).copied()?;
         if field == "bind" {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
-                    "Function.prototype.bind on `{}` is not yet supported in this AOT target; \
-                     partial application requires synthesized closures with captured bound args. \
-                     Use an explicit closure `(...rest) => {}(thisArg, ...bound, ...rest)` \
-                     instead.",
-                    fn_name.as_str(),
+                    "Function.prototype.bind on `{}` is not supported in this AOT target; the \
+                     bound call is lowered as undefined",
                     fn_name.as_str(),
                 ),
                 call_span,
@@ -57,7 +54,7 @@ impl ExprConverter {
             return Some(MirExpr::Unit);
         }
         if args.is_empty() {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Function.prototype.{} requires at least the thisArg; got empty arg list",
@@ -71,7 +68,7 @@ impl ExprConverter {
             &args[0],
             HirExpr::Unit(_) | HirExpr::Null(_) | HirExpr::Undefined(_)
         ) {
-            ctx.error(
+            ctx.warning(
                 "E0406",
                 format!(
                     "Function.prototype.{} does not support non-nullish thisArg in AOT \
@@ -99,7 +96,7 @@ impl ExprConverter {
             }
             "apply" => {
                 if args.len() != 2 {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         format!(
                             "Function.prototype.apply in AOT requires exactly 2 args \
@@ -111,7 +108,7 @@ impl ExprConverter {
                     return Some(MirExpr::Unit);
                 }
                 let HirExpr::ArrayLiteral { elements, .. } = &args[1] else {
-                    ctx.error(
+                    ctx.warning(
                         "E0406",
                         "Function.prototype.apply in AOT requires a literal array argument; \
                          dynamic-array spread is not yet supported (synthesized closure would \

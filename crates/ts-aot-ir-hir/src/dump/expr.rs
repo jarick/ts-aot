@@ -1058,6 +1058,7 @@ mod tests {
             &HirExpr::Closure {
                 id: LocalId::from_raw(0),
                 params: vec![crate::decl::HirParam {
+                    id: ts_aot_core::LocalId::from_raw(0),
                     name: Atom::new_inline("a"),
                     ty: TypeId::from_raw(1),
                 }],

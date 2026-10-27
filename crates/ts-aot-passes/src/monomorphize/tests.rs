@@ -341,6 +341,7 @@ fn generic_class_method_with_call_is_monomorphized() {
     let method = ts_aot_ir_hir::HirFunction {
         name: Atom::from("wrap"),
         params: vec![ts_aot_ir_hir::HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -437,6 +438,7 @@ fn monomorphize_class_method_with_call_e2e_keeps_function_ids_aligned() {
     let method = ts_aot_ir_hir::HirFunction {
         name: Atom::from("wrap"),
         params: vec![ts_aot_ir_hir::HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -678,10 +680,12 @@ fn inference_with_concrete_param_before_generic_binds_to_generic() {
         name: Atom::from("f"),
         params: vec![
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("prefix"),
                 ty: i64_ty,
             },
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::from("value"),
                 ty: t_ty,
             },
@@ -741,6 +745,7 @@ fn inference_with_array_param_binds_to_element_not_whole_array() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("f"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("arr"),
             ty: array_t,
         }],
@@ -804,6 +809,7 @@ fn fallback_does_not_bind_unrelated_concrete_param_to_generic() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("f"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: i64_ty,
         }],
@@ -855,6 +861,7 @@ fn composite_type_with_generic_param_inside_is_not_resolved() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("B"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -871,6 +878,7 @@ fn composite_type_with_generic_param_inside_is_not_resolved() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("A"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("arr"),
             ty: array_t,
         }],
@@ -943,6 +951,7 @@ fn worklist_creates_transitive_specialization_for_generic_calling_generic() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("A"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -959,6 +968,7 @@ fn worklist_creates_transitive_specialization_for_generic_calling_generic() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("B"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -1043,6 +1053,7 @@ fn indirect_callee_with_nested_generic_call_is_monomorphized() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("g"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -1099,6 +1110,7 @@ fn closure_params_in_mono_copy_are_type_substituted() {
     let closure = HirExpr::Closure {
         id: LocalId::from_raw(1),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("y"),
             ty: t_ty,
         }],
@@ -1112,6 +1124,7 @@ fn closure_params_in_mono_copy_are_type_substituted() {
     program.push_decl(HirDecl::Function(HirFunction {
         name: Atom::from("wrap"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -1288,6 +1301,7 @@ fn class_method_body_types_are_substituted_in_mono_copy() {
     let method = HirFunction {
         name: Atom::from("wrap"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: t_ty,
         }],
@@ -1431,6 +1445,7 @@ fn explicit_type_args_create_mono_copy_without_inference() {
     let generic: HirFunction = HirFunction {
         name: Atom::from("wrap"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: types.intern(&Type::I32),
         }],

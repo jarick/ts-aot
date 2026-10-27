@@ -97,6 +97,7 @@ fn indirect_call_to_resolved_global_uses_direct_call_not_runtime_fallback() {
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: resolved_name,
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: i64_ty,
         }],

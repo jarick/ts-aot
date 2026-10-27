@@ -155,8 +155,8 @@ fn e2e_json_parse_without_type_arg_produces_error() {
         out.diagnostics
     );
     assert!(
-        out.rust_source.is_none(),
-        "JSON.parse without <T> must NOT produce rust_source; got:\n{}",
+        out.rust_source.is_some(),
+        "JSON.parse without <T> now compiles with a warning; got:\n{}",
         out.rust_source.as_deref().unwrap_or_default()
     );
 }

@@ -82,8 +82,11 @@ pub(crate) fn convert_function(
     ctx: &mut PassContext,
     namespace_path: &[String],
 ) -> MirFunctionDecl {
-    let param_count = f.params.len();
-    converter.reset_for_function(function_remap, param_count as u32, namespace_path);
+    let param_ids: Vec<LocalId> = f.params.iter().map(|p| p.id).collect();
+    converter.reset_for_function(function_remap, &param_ids, namespace_path);
+    for p in &f.params {
+        converter.register_local_name(p.id, p.name.clone());
+    }
     let (block, locals) = converter.convert_block_with_shared_struct_ids(
         &f.body,
         struct_id_map,
@@ -129,9 +132,8 @@ fn extend_qualified(base: &Atom, leaf: &str) -> Atom {
 fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
     params
         .iter()
-        .enumerate()
-        .map(|(i, p)| MirParam {
-            id: LocalId::from_raw(i as u32),
+        .map(|p| MirParam {
+            id: p.id,
             name: p.name.clone(),
             ty: p.ty,
         })

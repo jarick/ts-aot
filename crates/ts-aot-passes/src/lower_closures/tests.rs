@@ -14,6 +14,7 @@ fn int_ty() -> TypeId {
 
 fn param(name: &str, ty: TypeId) -> HirParam {
     HirParam {
+        id: ts_aot_core::LocalId::from_raw(0),
         name: Atom::from(name),
         ty,
     }
@@ -586,6 +587,7 @@ fn generated_name_skips_names_taken_by_class_methods() {
             HirFunction {
                 name: Atom::new_inline("__ts_aot_closure_0"),
                 params: vec![HirParam {
+                    id: ts_aot_core::LocalId::from_raw(0),
                     name: Atom::from("self"),
                     ty: unit_ty(),
                 }],
@@ -601,6 +603,7 @@ fn generated_name_skips_names_taken_by_class_methods() {
             HirFunction {
                 name: Atom::new_inline("__ts_aot_closure_1"),
                 params: vec![HirParam {
+                    id: ts_aot_core::LocalId::from_raw(1),
                     name: Atom::from("self"),
                     ty: unit_ty(),
                 }],

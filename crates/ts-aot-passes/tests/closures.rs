@@ -26,6 +26,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                     span: closure_span,
                     id: cb_local,
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(0),
                         name: Atom::new_inline("x"),
                         ty: i64_ty,
                     }],
@@ -211,6 +212,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     span: Span::default(),
                     id: add_local,
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(0),
                         name: Atom::new_inline("x"),
                         ty: i64_ty,
                     }],
@@ -233,6 +235,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     span: Span::default(),
                     id: sub_local,
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(1),
                         name: Atom::new_inline("y"),
                         ty: i64_ty,
                     }],
@@ -388,6 +391,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
     let apply_fn = HirFunction {
         name: apply_name.clone(),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("f"),
             ty: i64_ty,
         }],
@@ -422,6 +426,7 @@ fn end_to_end_closure_passed_as_call_argument_is_lifted() {
                     span: Span::default(),
                     id: cb_local,
                     params: vec![HirParam {
+                        id: ts_aot_core::LocalId::from_raw(0),
                         name: Atom::new_inline("x"),
                         ty: i64_ty,
                     }],
@@ -516,6 +521,7 @@ fn end_to_end_closure_in_global_init_is_preserved_as_function_reference() {
             span: Span::default(),
             id: closure_local,
             params: vec![HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("x"),
                 ty: i64_ty,
             }],

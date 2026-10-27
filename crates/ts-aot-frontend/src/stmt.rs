@@ -312,6 +312,12 @@ impl SkeletonBuilder {
                 continue;
             };
             let ty = self.resolve_ts_type_from_annotation(senv, d.type_annotation.as_deref());
+            let mut init = init;
+            if let Some(HirExpr::ArrayLiteral { ty: arr_ty, .. }) = init.as_mut()
+                && matches!(senv.types.resolve(ty), Some(Type::Array { .. }))
+            {
+                *arr_ty = ty;
+            }
             let id = scope.declare(name.as_str(), ty);
             out.push(HirStmt::Let {
                 id,

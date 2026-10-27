@@ -1,6 +1,6 @@
 use crate::expr::HirExpr;
 use crate::stmt::HirStmt;
-use ts_aot_core::{Atom, GenericParamId, TypeId};
+use ts_aot_core::{Atom, GenericParamId, LocalId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HirAsyncInfo {
@@ -13,6 +13,7 @@ pub enum HirAsyncInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirParam {
+    pub id: LocalId,
     pub name: Atom,
     pub ty: TypeId,
 }

@@ -145,6 +145,9 @@ pub(crate) fn resolve_simple_type(
             &mut diagnostics,
         )),
         TSType::TSFunctionType(f) => function::resolve_function(f, types, lookup, &mut diagnostics),
+        TSType::TSParenthesizedType(p) => {
+            resolve_simple_type(Some(&p.type_annotation), types, lookup, diagnostics)
+        }
         TSType::TSMappedType(m) => Some(mapped::resolve_mapped(m, types, lookup, &mut diagnostics)),
         TSType::TSConditionalType(c) => Some(conditional::resolve_conditional(
             c,

@@ -6,11 +6,11 @@ use quote::{format_ident, quote};
 
 use ts_aot_core::{Atom, FieldId, FunctionId, LocalId, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_mir::{
-    FunctionKind, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirProgram,
-    MirStmt, RuntimeOp,
+    FunctionKind, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam, MirPlace,
+    MirPlaceBase, MirProgram, MirStmt, RuntimeOp,
 };
 
-use super::ident::ident_from;
+use super::ident::{ident_from, sanitize_ident};
 
 pub(super) struct RuntimeCallSpec<'a> {
     pub(super) op: RuntimeOp,
@@ -25,6 +25,23 @@ pub(super) struct EmitCtx {
     function_names: HashMap<FunctionId, Ident>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
     mutable_globals: HashSet<Atom>,
+    fn_value_index: HashMap<TypeId, usize>,
+    fn_value_sigs: Vec<FnValueSig>,
+    fn_value_variants: Vec<Vec<(Atom, Ident)>>,
+    fn_value_of_fn: HashMap<Atom, (usize, Ident)>,
+    closure_variants: RefCell<HashMap<usize, Vec<ClosureVariantInfo>>>,
+    closure_fns: RefCell<Vec<TokenStream>>,
+    env_structs: RefCell<Vec<TokenStream>>,
+    dispatch_names: RefCell<HashSet<String>>,
+    dispatch_sources: RefCell<HashSet<String>>,
+    next_closure_id: Cell<u32>,
+}
+
+pub(super) type ClosureVariantInfo = (u32, Ident, Vec<TokenStream>);
+
+pub(super) struct FnValueSig {
+    pub(super) params: Vec<TypeId>,
+    pub(super) ret: TypeId,
 }
 
 pub(super) struct EmitEnv<'a> {
@@ -33,7 +50,7 @@ pub(super) struct EmitEnv<'a> {
 }
 
 impl EmitCtx {
-    pub(super) fn build(program: &MirProgram) -> Self {
+    pub(super) fn build(program: &MirProgram, types: &TypeTable) -> Self {
         let mut struct_names = HashMap::new();
         let mut function_names = HashMap::new();
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
@@ -59,12 +76,116 @@ impl EmitCtx {
                 }
             }
         }
+        let (fn_value_index, fn_value_sigs, fn_value_variants, fn_value_of_fn) =
+            collect_fn_values(program, types);
         Self {
             struct_names,
             function_names,
             struct_fields,
             mutable_globals,
+            fn_value_index,
+            fn_value_sigs,
+            fn_value_variants,
+            fn_value_of_fn,
+            closure_variants: RefCell::new(HashMap::new()),
+            closure_fns: RefCell::new(Vec::new()),
+            env_structs: RefCell::new(Vec::new()),
+            dispatch_names: RefCell::new(HashSet::new()),
+            dispatch_sources: RefCell::new(HashSet::new()),
+            next_closure_id: Cell::new(0),
         }
+    }
+
+    pub(super) fn alloc_closure_id(&self) -> u32 {
+        let id = self.next_closure_id.get();
+        self.next_closure_id
+            .set(id.checked_add(1).expect("closure id space exhausted"));
+        id
+    }
+
+    pub(super) fn register_dispatch_source(&self, name: &str) -> bool {
+        self.dispatch_sources.borrow_mut().insert(name.to_owned())
+    }
+
+    pub(super) fn dispatch_wrapper_ident(&self, name: &Ident) -> Ident {
+        let composed = format!("__ts_aot_dispatch_{name}");
+        let base = normalize_dispatch_name(&composed);
+        let mut used = self.dispatch_names.borrow_mut();
+        let mut candidate = base.clone();
+        let mut suffix = 0u32;
+        while used.contains(&candidate) {
+            suffix = suffix.saturating_add(1);
+            candidate = format!("{base}_{suffix}");
+        }
+        used.insert(candidate.clone());
+        format_ident!("{candidate}")
+    }
+
+    pub(super) fn push_env_struct(&self, tokens: TokenStream) {
+        self.env_structs.borrow_mut().push(tokens);
+    }
+
+    pub(super) fn take_env_structs(&self) -> Vec<TokenStream> {
+        std::mem::take(&mut self.env_structs.borrow_mut())
+    }
+
+    pub(super) fn register_closure(
+        &self,
+        id: u32,
+        sig: usize,
+        capture_types: Vec<TokenStream>,
+    ) -> Ident {
+        let variant = format_ident!("C{}", id);
+        self.closure_variants
+            .borrow_mut()
+            .entry(sig)
+            .or_default()
+            .push((id, variant.clone(), capture_types));
+        variant
+    }
+
+    pub(super) fn closure_variants_for(&self, sig: usize) -> Vec<ClosureVariantInfo> {
+        self.closure_variants
+            .borrow()
+            .get(&sig)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn push_closure_fn(&self, tokens: TokenStream) {
+        self.closure_fns.borrow_mut().push(tokens);
+    }
+
+    pub(super) fn take_closure_fns(&self) -> Vec<TokenStream> {
+        std::mem::take(&mut self.closure_fns.borrow_mut())
+    }
+
+    pub(super) fn fn_value_ident(k: usize) -> Ident {
+        format_ident!("__TsFnValue{}", k)
+    }
+
+    pub(super) fn fn_call_ident(k: usize) -> Ident {
+        format_ident!("__ts_fn_call_{}", k)
+    }
+
+    pub(super) fn fn_value_kind(&self, ty: TypeId) -> Option<usize> {
+        self.fn_value_index.get(&ty).copied()
+    }
+
+    pub(super) fn fn_value_for_name(&self, name: &Atom) -> Option<(usize, Ident)> {
+        self.fn_value_of_fn.get(name).cloned()
+    }
+
+    pub(super) fn fn_value_count(&self) -> usize {
+        self.fn_value_sigs.len()
+    }
+
+    pub(super) fn fn_value_sig(&self, k: usize) -> &FnValueSig {
+        &self.fn_value_sigs[k]
+    }
+
+    pub(super) fn fn_value_variants(&self, k: usize) -> &[(Atom, Ident)] {
+        &self.fn_value_variants[k]
     }
 
     /// Whether the named global is emitted as a `static mut` (and therefore its
@@ -117,6 +238,125 @@ pub(super) struct BodyCtx {
     try_label: RefCell<Option<Ident>>,
     return_slot: RefCell<Option<Ident>>,
     next_try_id: Cell<u32>,
+    shared_by_id: HashMap<LocalId, SharedAccess>,
+    shared_by_name: HashMap<Ident, SharedAccess>,
+    own_env: Option<OwnEnv>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SharedStorage {
+    Cell,
+    RefCell,
+}
+
+#[derive(Clone)]
+pub(super) struct SharedAccess {
+    pub(super) env_ident: Ident,
+    pub(super) env_type: Ident,
+    pub(super) field: Ident,
+    pub(super) storage: SharedStorage,
+}
+
+#[derive(Clone)]
+pub(super) struct EnvField {
+    pub(super) field: Ident,
+    pub(super) ty: TypeId,
+    pub(super) storage: SharedStorage,
+    pub(super) param_init: Option<Ident>,
+}
+
+pub(super) struct OwnEnv {
+    pub(super) env_ident: Ident,
+    pub(super) env_type: Ident,
+    pub(super) fields: Vec<EnvField>,
+}
+
+fn shared_read_tokens(acc: &SharedAccess) -> TokenStream {
+    let env = &acc.env_ident;
+    let field = &acc.field;
+    match acc.storage {
+        SharedStorage::Cell => {
+            quote!(#env.#field.get().expect("shared variable read before initialization"))
+        }
+        SharedStorage::RefCell => quote!(
+            #env
+                .#field
+                .borrow()
+                .as_ref()
+                .expect("shared variable read before initialization")
+                .clone()
+        ),
+    }
+}
+
+fn shared_place_base_tokens(acc: &SharedAccess) -> Option<TokenStream> {
+    let env = &acc.env_ident;
+    let field = &acc.field;
+    match acc.storage {
+        SharedStorage::RefCell => Some(quote!((*#env.#field.borrow_mut()).as_mut().unwrap())),
+        SharedStorage::Cell => None,
+    }
+}
+
+pub(super) fn shared_write_tokens(acc: &SharedAccess, value: &TokenStream) -> TokenStream {
+    let env = &acc.env_ident;
+    let field = &acc.field;
+    let tmp = format_ident!("__ts_shared_write_{}", field);
+    match acc.storage {
+        SharedStorage::Cell => quote! {
+            let #tmp = #value;
+            #env.#field.set(Some(#tmp));
+        },
+        SharedStorage::RefCell => quote! {
+            let #tmp = #value;
+            *#env.#field.borrow_mut() = Some(#tmp);
+        },
+    }
+}
+
+pub(super) fn shared_borrow_tokens(acc: &SharedAccess) -> Option<TokenStream> {
+    let env = &acc.env_ident;
+    let field = &acc.field;
+    match acc.storage {
+        SharedStorage::RefCell => Some(quote!(
+            #env
+                .#field
+                .borrow()
+                .as_ref()
+                .expect("shared variable read before initialization")
+        )),
+        SharedStorage::Cell => None,
+    }
+}
+
+pub(super) fn shared_reset_tokens(acc: &SharedAccess) -> TokenStream {
+    let env = &acc.env_ident;
+    let field = &acc.field;
+    match acc.storage {
+        SharedStorage::Cell => quote!(#env.#field.set(None);),
+        SharedStorage::RefCell => quote!(*#env.#field.borrow_mut() = None;),
+    }
+}
+
+fn shared_storage_for(ty: Option<&Type>) -> SharedStorage {
+    match ty {
+        Some(
+            Type::Bool
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+            | Type::Date
+            | Type::Symbol,
+        ) => SharedStorage::Cell,
+        _ => SharedStorage::RefCell,
+    }
 }
 
 impl BodyCtx {
@@ -148,6 +388,59 @@ impl BodyCtx {
             locals_mut.insert(local.id, local.mutable || written.contains(&local.id));
         }
         let reserved_idents = locals.values().cloned().collect::<HashSet<_>>();
+        let param_ids: HashSet<LocalId> = f
+            .params
+            .iter()
+            .map(|p| p.id)
+            .filter(|id| Some(*id) != self_param)
+            .collect();
+        let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
+        for id in collect_captured_locals(&f.body.block) {
+            if Some(id) == self_param {
+                continue;
+            }
+            let (Some(name), Some(&ty)) = (locals.get(&id), locals_ty.get(&id)) else {
+                continue;
+            };
+            if fields.iter().any(|(fid, _, _)| *fid == id) {
+                continue;
+            }
+            let storage = shared_storage_for(types.resolve(ty));
+            let field = format_ident!("{}_{}", name, id.raw());
+            let param_init = param_ids.contains(&id).then(|| name.clone());
+            fields.push((
+                id,
+                name.clone(),
+                EnvField {
+                    field,
+                    ty,
+                    storage,
+                    param_init,
+                },
+            ));
+        }
+        let mut shared_by_id: HashMap<LocalId, SharedAccess> = HashMap::new();
+        let mut shared_by_name: HashMap<Ident, SharedAccess> = HashMap::new();
+        let mut own_env = None;
+        if !fields.is_empty() {
+            let env_ident = format_ident!("__env_{}", f.id.raw());
+            let env_type = format_ident!("__ScopeEnv{}", f.id.raw());
+            for (id, name, ef) in &fields {
+                let acc = SharedAccess {
+                    env_ident: env_ident.clone(),
+                    env_type: env_type.clone(),
+                    field: ef.field.clone(),
+                    storage: ef.storage,
+                };
+                shared_by_id.insert(*id, acc.clone());
+                shared_by_name.insert(name.clone(), acc);
+            }
+            own_env = Some(OwnEnv {
+                env_ident,
+                env_type,
+                fields: fields.iter().map(|(_, _, ef)| ef.clone()).collect(),
+            });
+        }
         Self {
             locals,
             locals_ty,
@@ -164,6 +457,9 @@ impl BodyCtx {
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
             next_try_id: Cell::new(0),
+            shared_by_id,
+            shared_by_name,
+            own_env,
         }
     }
 
@@ -173,7 +469,11 @@ impl BodyCtx {
         id
     }
 
-    pub(super) fn for_closure(ret: TypeId) -> Self {
+    pub(super) fn for_closure(
+        ret: TypeId,
+        inherited_names: HashMap<Ident, SharedAccess>,
+        inherited_ids: HashMap<LocalId, SharedAccess>,
+    ) -> Self {
         Self {
             locals: HashMap::new(),
             locals_ty: HashMap::new(),
@@ -190,7 +490,135 @@ impl BodyCtx {
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
             next_try_id: Cell::new(0),
+            shared_by_id: inherited_ids,
+            shared_by_name: inherited_names,
+            own_env: None,
         }
+    }
+
+    pub(super) fn shared_name_map(&self) -> HashMap<Ident, SharedAccess> {
+        self.shared_by_name.clone()
+    }
+
+    pub(super) fn shared_id_map(&self) -> HashMap<LocalId, SharedAccess> {
+        self.shared_by_id.clone()
+    }
+
+    pub(super) fn forget_inherited_name(&mut self, name: &Ident) {
+        self.shared_by_name.remove(name);
+    }
+
+    pub(super) fn own_env(&self) -> Option<&OwnEnv> {
+        self.own_env.as_ref()
+    }
+
+    /// A closure body gets its own scope env for locals of that closure which
+    /// are themselves captured by nested closures.
+    pub(super) fn detect_own_env(
+        &mut self,
+        key: &str,
+        block: &MirBlock,
+        params: &[MirParam],
+        locals: &[MirLocalDecl],
+        types: &TypeTable,
+    ) {
+        let mut by_id: HashMap<LocalId, (Ident, TypeId)> = HashMap::new();
+        for p in params {
+            by_id.insert(p.id, (ident_from(&p.name), p.ty));
+        }
+        for l in locals {
+            by_id.insert(l.id, (ident_from(&l.name), l.ty));
+        }
+        let param_ids: HashSet<LocalId> = params.iter().map(|p| p.id).collect();
+        let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
+        for id in collect_captured_locals(block) {
+            let Some((name, ty)) = by_id.get(&id).cloned() else {
+                continue;
+            };
+            if fields.iter().any(|(fid, _, _)| *fid == id) {
+                continue;
+            }
+            let storage = shared_storage_for(types.resolve(ty));
+            let field = format_ident!("{}_{}", name, id.raw());
+            let param_init = param_ids.contains(&id).then(|| name.clone());
+            fields.push((
+                id,
+                name,
+                EnvField {
+                    field,
+                    ty,
+                    storage,
+                    param_init,
+                },
+            ));
+        }
+        if fields.is_empty() {
+            return;
+        }
+        let env_ident = format_ident!("__env_c{}", key);
+        let env_type = format_ident!("__ScopeEnvC{}", key);
+        for (id, name, ef) in &fields {
+            let acc = SharedAccess {
+                env_ident: env_ident.clone(),
+                env_type: env_type.clone(),
+                field: ef.field.clone(),
+                storage: ef.storage,
+            };
+            self.shared_by_id.insert(*id, acc.clone());
+            self.shared_by_name.insert(name.clone(), acc);
+        }
+        self.own_env = Some(OwnEnv {
+            env_ident,
+            env_type,
+            fields: fields.iter().map(|(_, _, ef)| ef.clone()).collect(),
+        });
+    }
+
+    pub(super) fn shared_access_for_local(&self, id: LocalId) -> Option<SharedAccess> {
+        self.shared_by_id.get(&id).cloned()
+    }
+
+    pub(super) fn shared_access_for_name(&self, name: &Atom) -> Option<SharedAccess> {
+        self.shared_by_name.get(&ident_from(name)).cloned()
+    }
+
+    pub(super) fn local_read(&self, id: LocalId) -> TokenStream {
+        if Some(id) == self.self_param {
+            return quote!(self);
+        }
+        if let Some(acc) = self.shared_access_for_local(id) {
+            return shared_read_tokens(&acc);
+        }
+        let ident = self.local_ident(id);
+        quote!(#ident)
+    }
+
+    pub(super) fn shared_read_for_name(&self, name: &Atom) -> Option<TokenStream> {
+        self.shared_access_for_name(name)
+            .map(|acc| shared_read_tokens(&acc))
+    }
+
+    pub(super) fn local_place_base(&self, id: LocalId) -> TokenStream {
+        if Some(id) == self.self_param {
+            return quote!(self);
+        }
+        if let Some(acc) = self.shared_access_for_local(id) {
+            let base = shared_place_base_tokens(&acc);
+            debug_assert!(
+                base.is_some(),
+                "Cell-backed shared local cannot be used as a place base"
+            );
+            if let Some(tokens) = base {
+                return tokens;
+            }
+        }
+        let ident = self.local_ident(id);
+        quote!(#ident)
+    }
+
+    pub(super) fn shared_place_base_for_name(&self, name: &Atom) -> Option<TokenStream> {
+        self.shared_access_for_name(name)
+            .and_then(|acc| shared_place_base_tokens(&acc))
     }
 
     pub(super) fn register_local(&mut self, id: LocalId, name: Ident, ty: TypeId, mutable: bool) {
@@ -504,7 +932,624 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
         MirStmt::Throw { error, .. } | MirStmt::ReturnResultErr { error, .. } => {
             collect_from_expr(error, types, written);
         }
-        MirStmt::Let { .. } | MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::Let {
+            init: Some(init), ..
+        } => collect_from_expr(init, types, written),
+        MirStmt::Let { init: None, .. }
+        | MirStmt::Return(None)
+        | MirStmt::Break
+        | MirStmt::Continue => {}
+    }
+}
+
+type FnValueRegistry = (
+    HashMap<TypeId, usize>,
+    Vec<FnValueSig>,
+    Vec<Vec<(Atom, Ident)>>,
+    HashMap<Atom, (usize, Ident)>,
+);
+
+fn normalize_dispatch_name(composed: &str) -> String {
+    let mut out = String::with_capacity(composed.len());
+    let mut prev_underscore = false;
+    for (idx, ch) in composed.chars().enumerate() {
+        if ch == '_' {
+            if idx < 2 || !prev_underscore {
+                out.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            out.push(ch);
+            prev_underscore = false;
+        }
+    }
+    out
+}
+
+fn pascal_variant_ident(name: &str) -> Ident {
+    let mut out = String::with_capacity(name.len());
+    let mut upper = true;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if upper {
+                out.push(ch.to_ascii_uppercase());
+                upper = false;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            upper = true;
+        }
+    }
+    if out.is_empty() || out.as_bytes()[0].is_ascii_digit() {
+        out.insert(0, 'V');
+    }
+    format_ident!("{}", sanitize_ident(&out))
+}
+
+fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry {
+    let mut seen = HashSet::new();
+    let mut used = Vec::new();
+    for decl in &program.declarations {
+        match decl {
+            MirDecl::Function(f) => collect_fn_decl_tys(f, types, &mut seen, &mut used),
+            MirDecl::Struct(s) => {
+                for field in &s.fields {
+                    collect_type_ids(field.ty, types, &mut seen, &mut used);
+                }
+                for m in &s.methods {
+                    collect_fn_decl_tys(m, types, &mut seen, &mut used);
+                }
+            }
+            MirDecl::Global(g) => {
+                collect_type_ids(g.ty, types, &mut seen, &mut used);
+                if let Some(init) = &g.init {
+                    collect_expr_tys(init, types, &mut seen, &mut used);
+                }
+            }
+        }
+    }
+
+    let mut fn_value_index: HashMap<TypeId, usize> = HashMap::new();
+    let mut fn_value_sigs: Vec<FnValueSig> = Vec::new();
+    for id in used {
+        if let Some(Type::Fn { params, ret, .. }) = types.resolve(id) {
+            if fn_value_index.contains_key(&id) {
+                continue;
+            }
+            let k = fn_value_sigs.len();
+            fn_value_index.insert(id, k);
+            fn_value_sigs.push(FnValueSig {
+                params: params.clone(),
+                ret: *ret,
+            });
+        }
+    }
+
+    let mut fn_value_variants: Vec<Vec<(Atom, Ident)>> = vec![Vec::new(); fn_value_sigs.len()];
+    let mut fn_value_of_fn: HashMap<Atom, (usize, Ident)> = HashMap::new();
+    for decl in &program.declarations {
+        let funcs: Vec<&MirFunctionDecl> = match decl {
+            MirDecl::Function(f) => vec![f],
+            MirDecl::Struct(s) => s.methods.iter().collect(),
+            MirDecl::Global(_) => Vec::new(),
+        };
+        for f in funcs {
+            if !matches!(
+                f.kind,
+                FunctionKind::Plain | FunctionKind::Closure | FunctionKind::RuntimeShim
+            ) || f.effects.is_async
+            {
+                continue;
+            }
+            if program.tla_main_name.as_ref().is_some_and(|n| *n == f.name) {
+                continue;
+            }
+            let params: Vec<TypeId> = f.params.iter().map(|p| p.ty).collect();
+            let Some(k) = fn_value_sigs
+                .iter()
+                .position(|s| s.params == params && s.ret == f.ret)
+            else {
+                continue;
+            };
+            if fn_value_of_fn.contains_key(&f.name) {
+                continue;
+            }
+            let base = pascal_variant_ident(f.name.as_str());
+            let mut variant = base.clone();
+            let mut suffix = 0u32;
+            while fn_value_variants[k].iter().any(|(_, v)| *v == variant) {
+                suffix += 1;
+                variant = format_ident!("{}{}", base, suffix);
+            }
+            fn_value_variants[k].push((f.name.clone(), variant.clone()));
+            fn_value_of_fn.insert(f.name.clone(), (k, variant));
+        }
+    }
+
+    (
+        fn_value_index,
+        fn_value_sigs,
+        fn_value_variants,
+        fn_value_of_fn,
+    )
+}
+
+fn collect_fn_decl_tys(
+    f: &MirFunctionDecl,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    for p in &f.params {
+        collect_type_ids(p.ty, types, seen, out);
+    }
+    collect_type_ids(f.ret, types, seen, out);
+    if let Some(t) = f.throws {
+        collect_type_ids(t, types, seen, out);
+    }
+    for l in &f.body.locals {
+        collect_type_ids(l.ty, types, seen, out);
+    }
+    collect_block_tys(&f.body.block, types, seen, out);
+}
+
+fn collect_type_ids(
+    id: TypeId,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    if !seen.insert(id) {
+        return;
+    }
+    out.push(id);
+    match types.resolve(id) {
+        Some(Type::Array { element } | Type::Optional { inner: element }) => {
+            collect_type_ids(*element, types, seen, out);
+        }
+        Some(Type::Result { ok, err }) => {
+            collect_type_ids(*ok, types, seen, out);
+            collect_type_ids(*err, types, seen, out);
+        }
+        Some(Type::Promise { ok, err }) => {
+            collect_type_ids(*ok, types, seen, out);
+            if let Some(err) = err {
+                collect_type_ids(*err, types, seen, out);
+            }
+        }
+        Some(Type::Fn { params, ret, err }) => {
+            for p in params {
+                collect_type_ids(*p, types, seen, out);
+            }
+            collect_type_ids(*ret, types, seen, out);
+            if let Some(err) = err {
+                collect_type_ids(*err, types, seen, out);
+            }
+        }
+        Some(Type::WeakMap { key, value }) => {
+            collect_type_ids(*key, types, seen, out);
+            collect_type_ids(*value, types, seen, out);
+        }
+        Some(Type::Union { variants } | Type::Intersection { parts: variants }) => {
+            for v in variants {
+                collect_type_ids(*v, types, seen, out);
+            }
+        }
+        Some(Type::Tuple { elements }) => {
+            for e in elements {
+                collect_type_ids(*e, types, seen, out);
+            }
+        }
+        Some(Type::Generator { inner } | Type::GeneratorResult { inner }) => {
+            collect_type_ids(*inner, types, seen, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_block_tys(
+    block: &MirBlock,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    for stmt in &block.stmts {
+        collect_stmt_tys(stmt, types, seen, out);
+    }
+}
+
+fn collect_stmt_tys(
+    stmt: &MirStmt,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    match stmt {
+        MirStmt::Let { ty, init, .. } => {
+            collect_type_ids(*ty, types, seen, out);
+            if let Some(init) = init {
+                collect_expr_tys(init, types, seen, out);
+            }
+        }
+        MirStmt::Assign { target, value } => {
+            if let Some(ty) = target.ty() {
+                collect_type_ids(ty, types, seen, out);
+            }
+            collect_place_tys(target, types, seen, out);
+            collect_expr_tys(value, types, seen, out);
+        }
+        MirStmt::Expr(expr) | MirStmt::Return(Some(expr)) => {
+            collect_expr_tys(expr, types, seen, out);
+        }
+        MirStmt::ReturnResultErr { error, err_ty: t } | MirStmt::Throw { error, error_ty: t } => {
+            collect_type_ids(*t, types, seen, out);
+            collect_expr_tys(error, types, seen, out);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_tys(cond, types, seen, out);
+            collect_block_tys(then_block, types, seen, out);
+            if let Some(b) = else_block {
+                collect_block_tys(b, types, seen, out);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            collect_expr_tys(cond, types, seen, out);
+            collect_block_tys(body, types, seen, out);
+        }
+        MirStmt::ForOf {
+            iterable,
+            iter_ty,
+            body,
+            ..
+        }
+        | MirStmt::ForAwaitOf {
+            iterable,
+            iter_ty,
+            body,
+            ..
+        } => {
+            collect_type_ids(*iter_ty, types, seen, out);
+            collect_expr_tys(iterable, types, seen, out);
+            collect_block_tys(body, types, seen, out);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            collect_expr_tys(object, types, seen, out);
+            collect_block_tys(body, types, seen, out);
+        }
+        MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::Runtime {
+            args,
+            ty,
+            target_ty,
+            ..
+        } => {
+            collect_type_ids(*ty, types, seen, out);
+            if let Some(t) = target_ty {
+                collect_type_ids(*t, types, seen, out);
+            }
+            for a in args {
+                collect_expr_tys(a, types, seen, out);
+            }
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            collect_expr_tys(disc, types, seen, out);
+            for c in cases {
+                collect_block_tys(&c.body, types, seen, out);
+            }
+            if let Some(b) = default {
+                collect_block_tys(b, types, seen, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            collect_block_tys(body, types, seen, out);
+            if let Some(b) = catch {
+                collect_block_tys(b, types, seen, out);
+            }
+            if let Some(b) = finally {
+                collect_block_tys(b, types, seen, out);
+            }
+        }
+    }
+}
+
+fn collect_place_tys(
+    place: &MirPlace,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    match place {
+        MirPlace::Local { .. } | MirPlace::Global(_) => {}
+        MirPlace::Field { base, ty, .. } => {
+            collect_type_ids(*ty, types, seen, out);
+            collect_place_base_tys(base, types, seen, out);
+        }
+        MirPlace::Index { base, index, ty } => {
+            collect_type_ids(*ty, types, seen, out);
+            collect_expr_tys(base, types, seen, out);
+            collect_expr_tys(index, types, seen, out);
+        }
+    }
+}
+
+fn collect_place_base_tys(
+    base: &MirPlaceBase,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    match base {
+        MirPlaceBase::Local(_) | MirPlaceBase::Global(_) => {}
+        MirPlaceBase::Field { base, ty, .. } => {
+            collect_type_ids(*ty, types, seen, out);
+            collect_place_base_tys(base, types, seen, out);
+        }
+        MirPlaceBase::Index { base, index, ty } => {
+            collect_type_ids(*ty, types, seen, out);
+            collect_expr_tys(base, types, seen, out);
+            collect_expr_tys(index, types, seen, out);
+        }
+        MirPlaceBase::Chain { base, ty } => {
+            collect_type_ids(*ty, types, seen, out);
+            collect_expr_tys(base, types, seen, out);
+        }
+    }
+}
+
+fn collect_expr_tys(
+    expr: &MirExpr,
+    types: &TypeTable,
+    seen: &mut HashSet<TypeId>,
+    out: &mut Vec<TypeId>,
+) {
+    if let Some(ty) = expr.ty() {
+        collect_type_ids(ty, types, seen, out);
+    }
+    match expr {
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. }
+        | MirExpr::Unary { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::TypeOf { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::Import { source: base, .. }
+        | MirExpr::ResultErr { error: base, .. } => collect_expr_tys(base, types, seen, out),
+        MirExpr::Index { base, index, .. } => {
+            collect_expr_tys(base, types, seen, out);
+            collect_expr_tys(index, types, seen, out);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_expr_tys(left, types, seen, out);
+            collect_expr_tys(right, types, seen, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } => collect_expr_tys(e, types, seen, out),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                collect_expr_tys(a, types, seen, out);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_expr_tys(callee, types, seen, out);
+            for a in args {
+                collect_expr_tys(a, types, seen, out);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                collect_expr_tys(v, types, seen, out);
+            }
+        }
+        MirExpr::Closure {
+            params,
+            locals,
+            body,
+            ret_ty,
+            ..
+        } => {
+            for p in params {
+                collect_type_ids(p.ty, types, seen, out);
+            }
+            for l in locals {
+                collect_type_ids(l.ty, types, seen, out);
+            }
+            collect_type_ids(*ret_ty, types, seen, out);
+            collect_block_tys(body, types, seen, out);
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
+    }
+}
+
+fn collect_captured_locals(block: &MirBlock) -> Vec<LocalId> {
+    let mut out = HashSet::new();
+    collect_captures_block(block, &mut out);
+    let mut ids: Vec<LocalId> = out.into_iter().collect();
+    ids.sort_unstable_by_key(|id| id.raw());
+    ids
+}
+
+fn collect_captures_block(block: &MirBlock, out: &mut HashSet<LocalId>) {
+    for stmt in &block.stmts {
+        collect_captures_stmt(stmt, out);
+    }
+}
+
+fn collect_captures_stmt(stmt: &MirStmt, out: &mut HashSet<LocalId>) {
+    match stmt {
+        MirStmt::Let { init, .. } => {
+            if let Some(init) = init {
+                collect_captures_expr(init, out);
+            }
+        }
+        MirStmt::Assign { target, value } => {
+            collect_captures_place(target, out);
+            collect_captures_expr(value, out);
+        }
+        MirStmt::Expr(expr) | MirStmt::Return(Some(expr)) => collect_captures_expr(expr, out),
+        MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
+        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+            collect_captures_expr(error, out);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_captures_expr(cond, out);
+            collect_captures_block(then_block, out);
+            if let Some(b) = else_block {
+                collect_captures_block(b, out);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            collect_captures_expr(cond, out);
+            collect_captures_block(body, out);
+        }
+        MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
+            collect_captures_expr(iterable, out);
+            collect_captures_block(body, out);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            collect_captures_expr(object, out);
+            collect_captures_block(body, out);
+        }
+        MirStmt::Runtime { args, .. } => {
+            for a in args {
+                collect_captures_expr(a, out);
+            }
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            collect_captures_expr(disc, out);
+            for c in cases {
+                collect_captures_block(&c.body, out);
+            }
+            if let Some(b) = default {
+                collect_captures_block(b, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            collect_captures_block(body, out);
+            if let Some(b) = catch {
+                collect_captures_block(b, out);
+            }
+            if let Some(b) = finally {
+                collect_captures_block(b, out);
+            }
+        }
+    }
+}
+
+fn collect_captures_place(place: &MirPlace, out: &mut HashSet<LocalId>) {
+    match place {
+        MirPlace::Local { .. } | MirPlace::Global(_) => {}
+        MirPlace::Field { base, .. } => collect_captures_place_base(base, out),
+        MirPlace::Index { base, index, .. } => {
+            collect_captures_expr(base, out);
+            collect_captures_expr(index, out);
+        }
+    }
+}
+
+fn collect_captures_place_base(base: &MirPlaceBase, out: &mut HashSet<LocalId>) {
+    match base {
+        MirPlaceBase::Local(_) | MirPlaceBase::Global(_) => {}
+        MirPlaceBase::Field { base, .. } => collect_captures_place_base(base, out),
+        MirPlaceBase::Index { base, index, .. } => {
+            collect_captures_expr(base, out);
+            collect_captures_expr(index, out);
+        }
+        MirPlaceBase::Chain { base, .. } => collect_captures_expr(base, out),
+    }
+}
+
+fn collect_captures_expr(expr: &MirExpr, out: &mut HashSet<LocalId>) {
+    match expr {
+        MirExpr::Closure { captures, body, .. } => {
+            for c in captures {
+                out.insert(*c);
+            }
+            collect_captures_block(body, out);
+        }
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. }
+        | MirExpr::Unary { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::TypeOf { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::Import { source: base, .. }
+        | MirExpr::ResultErr { error: base, .. } => collect_captures_expr(base, out),
+        MirExpr::Index { base, index, .. } => {
+            collect_captures_expr(base, out);
+            collect_captures_expr(index, out);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_captures_expr(left, out);
+            collect_captures_expr(right, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } => collect_captures_expr(e, out),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                collect_captures_expr(a, out);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_captures_expr(callee, out);
+            for a in args {
+                collect_captures_expr(a, out);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                collect_captures_expr(v, out);
+            }
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
     }
 }
 

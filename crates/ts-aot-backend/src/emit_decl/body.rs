@@ -1,13 +1,16 @@
 use proc_macro2::{Ident, Literal, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::{LocalId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, LocalId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirPlace, MirPlaceBase, MirStmt,
-    RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam, MirPlace,
+    MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
-use super::ctx::{BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, place_root_global_name};
+use super::ctx::{
+    BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedStorage, place_root_global_name,
+    shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
+};
 use super::ident::ident_from;
 use super::literals::emit_whole_number_literal;
 use super::runtime_op::runtime_op_ident;
@@ -24,6 +27,9 @@ pub(super) fn emit_body(
         return Ok(quote!({ unimplemented!() }));
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    if let Some(prelude) = emit_env_prelude(body_ctx, emit_env, ctx) {
+        stmts.insert(0, prelude);
+    }
     if body_ctx.has_weakmap_liveness() {
         let cache = body_ctx.weakmap_liveness_per_key.borrow();
         let mut prelude: Vec<TokenStream> =
@@ -122,13 +128,13 @@ fn emit_return_stmt(
             .expect("emit_return_stmt inside try requires return_slot to be set by emit_try");
         let value_ts = if body_ctx.is_generator() {
             if let Some(expr) = slot {
-                let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
+                let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
                 quote!(Some(#expr))
             } else {
                 quote!(None)
             }
         } else if let Some(expr) = slot {
-            let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
             quote!(#expr)
         } else {
             quote!(())
@@ -136,13 +142,13 @@ fn emit_return_stmt(
         Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
     } else if body_ctx.is_generator() {
         if let Some(expr) = slot {
-            let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(return Some(#expr);))
         } else {
             Ok(quote!(return None;))
         }
     } else if let Some(expr) = slot {
-        let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
+        let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
         Ok(quote!(return #expr;))
     } else {
         Ok(quote!(return;))
@@ -180,6 +186,13 @@ fn emit_stmt(
             init,
             mutable,
         } => {
+            if let Some(acc) = body_ctx.shared_access_for_local(*local) {
+                let Some(init) = init else {
+                    return Ok(shared_reset_tokens(&acc));
+                };
+                let init = emit_value_expr(init, ctx, emit_env, body_ctx)?;
+                return Ok(shared_write_tokens(&acc, &init));
+            }
             let name = body_ctx.local_ident(*local);
             let ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
             let mutability = if *mutable || body_ctx.local_mut(*local) {
@@ -188,20 +201,32 @@ fn emit_stmt(
                 quote!()
             };
             if let Some(init) = init {
-                let init = emit_expr(init, ctx, emit_env, body_ctx)?;
+                let init = emit_value_expr(init, ctx, emit_env, body_ctx)?;
                 Ok(quote!(let #mutability #name: #ty = #init;))
             } else {
                 Ok(quote!(let #mutability #name: #ty;))
             }
         }
         MirStmt::Assign { target, value } => {
+            if let MirPlace::Local { id } = target
+                && let Some(acc) = body_ctx.shared_access_for_local(*id)
+            {
+                let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
+                return Ok(shared_write_tokens(&acc, &value_tokens));
+            }
+            if let MirPlace::Global(name) = target
+                && let Some(acc) = body_ctx.shared_access_for_name(name)
+            {
+                let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
+                return Ok(shared_write_tokens(&acc, &value_tokens));
+            }
             if let Some(chain_assign) =
                 emit_optional_chain_assign(target, value, ctx, emit_env, body_ctx)?
             {
                 return Ok(chain_assign);
             }
             let target_tokens = emit_place(target, ctx, emit_env, body_ctx)?;
-            let value_tokens = emit_expr(value, ctx, emit_env, body_ctx)?;
+            let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
             let reset = emit_weakmap_liveness_reset(target, body_ctx);
             let assignment = quote! {
                 #target_tokens = #value_tokens;
@@ -269,6 +294,9 @@ fn emit_stmt(
             };
             let iterable = emit_expr(iterable, ctx, emit_env, body_ctx)?;
             let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            if let Some(acc) = body_ctx.shared_access_for_local(item_id) {
+                body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#item_ident)));
+            }
             let liveness_reset =
                 emit_weakmap_liveness_reset(&MirPlace::Local { id: item_id }, body_ctx);
             if !liveness_reset.is_empty() {
@@ -285,10 +313,13 @@ fn emit_stmt(
             }
         }
         MirStmt::ForIn { key, object, body } => {
-            let key = body_ctx.local_ident(*key);
+            let key_ident = body_ctx.local_ident(*key);
             let object = emit_expr(object, ctx, emit_env, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
-            Ok(quote!(for #key in #object { #(#body_stmts)* }))
+            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            if let Some(acc) = body_ctx.shared_access_for_local(*key) {
+                body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#key_ident)));
+            }
+            Ok(quote!(for #key_ident in #object { #(#body_stmts)* }))
         }
         MirStmt::Break => Ok(quote!(break;)),
         MirStmt::Continue => {
@@ -375,8 +406,11 @@ fn emit_place_base(
 ) -> Result<TokenStream, BackendError> {
     let EmitEnv { types, .. } = emit_env;
     match base {
-        MirPlaceBase::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
         MirPlaceBase::Global(name) => {
+            if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
+                return Ok(tokens);
+            }
             let name = ident_from(name);
             Ok(quote!(#name))
         }
@@ -410,6 +444,24 @@ fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
         MirExpr::Local(id) => body_ctx.local_ty(*id),
         other => other.ty(),
     }
+}
+
+fn indirect_callee_fn_kind(
+    callee: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<usize> {
+    let EmitEnv { types, .. } = emit_env;
+    let fn_ty = match callee {
+        MirExpr::Local(id) => body_ctx.local_ty(*id)?,
+        MirExpr::Global(name) => return ctx.fn_value_for_name(name).map(|(k, _)| k),
+        other => other.ty()?,
+    };
+    if !matches!(types.resolve(fn_ty), Some(Type::Fn { .. })) {
+        return None;
+    }
+    ctx.fn_value_kind(fn_ty)
 }
 
 fn is_display_supported_reason(reason_ty: Option<&Type>) -> bool {
@@ -527,8 +579,15 @@ fn emit_expr(
             let literal = Literal::string(id.as_str());
             Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
-        MirExpr::Local(id) => Ok(body_ctx.local_ref(*id)),
+        MirExpr::Local(id) => Ok(body_ctx.local_read(*id)),
         MirExpr::Global(name) => {
+            if let Some(read) = body_ctx.shared_read_for_name(name) {
+                return Ok(read);
+            }
+            if let Some((k, variant)) = ctx.fn_value_for_name(name) {
+                let enum_name = EmitCtx::fn_value_ident(k);
+                return Ok(quote!(#enum_name::#variant));
+            }
             let ident = ident_from(name);
             if ctx.is_mutable_global(name) {
                 Ok(quote!(unsafe { #ident }))
@@ -554,13 +613,34 @@ fn emit_expr(
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented)?;
             let field = ctx.struct_field_ident(struct_id, *field);
+            if let MirExpr::Local(id) = base.as_ref()
+                && let Some(acc) = body_ctx.shared_access_for_local(*id)
+                && let Some(borrowed) = shared_borrow_tokens(&acc)
+            {
+                return Ok(quote!(#borrowed.#field.clone()));
+            }
             let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base.#field))
         }
         MirExpr::Index { base, index, .. } => {
+            let simple_index = matches!(
+                index.as_ref(),
+                MirExpr::Int { .. }
+                    | MirExpr::Float { .. }
+                    | MirExpr::Bool(_)
+                    | MirExpr::Local(_)
+                    | MirExpr::Global(_)
+            );
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
                 return Ok(quote!(#map.map(|o| o[#index])));
+            }
+            if simple_index
+                && let MirExpr::Local(id) = base.as_ref()
+                && let Some(acc) = body_ctx.shared_access_for_local(*id)
+                && let Some(borrowed) = shared_borrow_tokens(&acc)
+            {
+                return Ok(quote!(#borrowed[#index].clone()));
             }
             let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
@@ -573,6 +653,12 @@ fn emit_expr(
         MirExpr::IndirectCall { callee, args, .. } => {
             if let Some(map) = optional_call_map_arm(callee, args, ctx, emit_env, body_ctx)? {
                 return Ok(map);
+            }
+            if let Some(k) = indirect_callee_fn_kind(callee, ctx, emit_env, body_ctx) {
+                let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
+                let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
+                let helper = EmitCtx::fn_call_ident(k);
+                return Ok(quote!(#helper(&#callee, #(#args),*)));
             }
             let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
             let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
@@ -602,8 +688,14 @@ fn emit_expr(
         }
         MirExpr::Binary {
             op, left, right, ..
-        } => emit_binary_expr(*op, left, right, ctx, emit_env, body_ctx),
-        MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, emit_env, body_ctx),
+        } => {
+            let bare = emit_binary_expr(*op, left, right, ctx, emit_env, body_ctx)?;
+            Ok(quote!((#bare)))
+        }
+        MirExpr::Unary { op, expr, .. } => {
+            let bare = emit_unary_expr(*op, expr, ctx, emit_env, body_ctx)?;
+            Ok(quote!((#bare)))
+        }
         MirExpr::Await { expr, ty, .. } => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             let needs_helper = matches!(expr.as_ref(), MirExpr::Import { .. })
@@ -620,17 +712,8 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, emit_env, body_ctx),
         MirExpr::Cast { expr, ty } => {
-            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
-            if !is_numeric_primitive_target(types.resolve(*ty)) {
-                return Err(BackendError::Internal(format!(
-                    "MirExpr::Cast target TypeId({}) is not a numeric primitive; \
-                     Rust's `as` cast cannot lower it. \
-                     Only I8/I16/I32/I64/U8/U16/U32/U64/F32/F64 are supported as cast targets.",
-                    ty.raw()
-                )));
-            }
-            let cast_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
-            Ok(quote!((#inner as #cast_ty)))
+            let bare = emit_cast_expr(expr, *ty, ctx, emit_env, body_ctx)?;
+            Ok(quote!((#bare)))
         }
         MirExpr::TemplateStringsArray { cooked, .. } => {
             let cooked_lits: Vec<TokenStream> = cooked
@@ -677,17 +760,34 @@ fn emit_expr(
             Ok(quote!(#co.yield_(#value).await))
         }
         MirExpr::Closure {
+            id: _,
             params,
             captures,
             locals,
             body,
             ret_ty,
-            ..
+            fn_ty,
         } => {
-            if !captures.is_empty() {
-                return Err(BackendError::NotImplemented);
+            if let Some(sig) = ctx.fn_value_kind(*fn_ty) {
+                return emit_closure_value(
+                    &ClosureEmit {
+                        sig,
+                        params,
+                        captures,
+                        locals,
+                        body,
+                        ret_ty: *ret_ty,
+                    },
+                    ctx,
+                    emit_env,
+                    body_ctx,
+                );
             }
-            let mut child_ctx = BodyCtx::for_closure(*ret_ty);
+            let mut child_ctx = BodyCtx::for_closure(
+                *ret_ty,
+                body_ctx.shared_name_map(),
+                body_ctx.shared_id_map(),
+            );
             let mut candidates: std::collections::HashSet<LocalId> =
                 params.iter().map(|p| p.id).collect();
             for l in locals {
@@ -732,6 +832,326 @@ fn emit_expr(
     }
 }
 
+fn collect_global_names(block: &MirBlock, out: &mut Vec<Atom>) {
+    for stmt in &block.stmts {
+        collect_global_names_stmt(stmt, out);
+    }
+}
+
+fn collect_global_names_stmt(stmt: &MirStmt, out: &mut Vec<Atom>) {
+    match stmt {
+        MirStmt::Let { init: Some(e), .. } | MirStmt::Expr(e) | MirStmt::Return(Some(e)) => {
+            collect_global_names_expr(e, out);
+        }
+        MirStmt::Let { init: None, .. }
+        | MirStmt::Return(None)
+        | MirStmt::Break
+        | MirStmt::Continue => {}
+        MirStmt::Assign { target, value } => {
+            collect_global_names_place(target, out);
+            collect_global_names_expr(value, out);
+        }
+        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+            collect_global_names_expr(error, out);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_global_names_expr(cond, out);
+            collect_global_names(then_block, out);
+            if let Some(b) = else_block {
+                collect_global_names(b, out);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            collect_global_names_expr(cond, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
+            collect_global_names_expr(iterable, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            collect_global_names_expr(object, out);
+            collect_global_names(body, out);
+        }
+        MirStmt::Runtime { args, .. } => {
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            collect_global_names_expr(disc, out);
+            for c in cases {
+                collect_global_names(&c.body, out);
+            }
+            if let Some(b) = default {
+                collect_global_names(b, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            collect_global_names(body, out);
+            if let Some(b) = catch {
+                collect_global_names(b, out);
+            }
+            if let Some(b) = finally {
+                collect_global_names(b, out);
+            }
+        }
+    }
+}
+
+fn collect_global_names_place(place: &MirPlace, out: &mut Vec<Atom>) {
+    match place {
+        MirPlace::Local { .. } => {}
+        MirPlace::Global(name) => out.push(name.clone()),
+        MirPlace::Field { base, .. } => collect_global_names_place_base(base, out),
+        MirPlace::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+    }
+}
+
+fn collect_global_names_place_base(base: &MirPlaceBase, out: &mut Vec<Atom>) {
+    match base {
+        MirPlaceBase::Local(_) => {}
+        MirPlaceBase::Global(name) => out.push(name.clone()),
+        MirPlaceBase::Field { base, .. } => collect_global_names_place_base(base, out),
+        MirPlaceBase::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+        MirPlaceBase::Chain { base, .. } => collect_global_names_expr(base, out),
+    }
+}
+
+fn collect_global_names_expr(expr: &MirExpr, out: &mut Vec<Atom>) {
+    match expr {
+        MirExpr::Global(name) => out.push(name.clone()),
+        MirExpr::Closure { body, .. } => collect_global_names(body, out),
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. }
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Unary { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::TypeOf { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::Import { source: base, .. } => collect_global_names_expr(base, out),
+        MirExpr::Index { base, index, .. } => {
+            collect_global_names_expr(base, out);
+            collect_global_names_expr(index, out);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_global_names_expr(left, out);
+            collect_global_names_expr(right, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } => collect_global_names_expr(e, out),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_global_names_expr(callee, out);
+            for a in args {
+                collect_global_names_expr(a, out);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                collect_global_names_expr(v, out);
+            }
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
+    }
+}
+
+fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Option<TokenStream> {
+    let env = body_ctx.own_env()?;
+    let fields: Vec<TokenStream> = env
+        .fields
+        .iter()
+        .map(|f| {
+            let field = &f.field;
+            let t = emit_type_id_with_ctx(f.ty, emit_env, ctx);
+            match f.storage {
+                SharedStorage::Cell => quote!(#field: std::cell::Cell<Option<#t>>),
+                SharedStorage::RefCell => quote!(#field: std::cell::RefCell<Option<#t>>),
+            }
+        })
+        .collect();
+    let inits: Vec<TokenStream> = env
+        .fields
+        .iter()
+        .map(|f| {
+            let field = &f.field;
+            let init = if let Some(param) = &f.param_init {
+                quote!(Some(#param))
+            } else {
+                quote!(None)
+            };
+            match f.storage {
+                SharedStorage::Cell => quote!(#field: std::cell::Cell::new(#init)),
+                SharedStorage::RefCell => quote!(#field: std::cell::RefCell::new(#init)),
+            }
+        })
+        .collect();
+    let env_type = &env.env_type;
+    let env_ident = &env.env_ident;
+    ctx.push_env_struct(quote! {
+        pub struct #env_type { #(#fields,)* }
+    });
+    Some(
+        quote!(let #env_ident: std::rc::Rc<#env_type> = std::rc::Rc::new(#env_type { #(#inits,)* });),
+    )
+}
+
+struct ClosureEmit<'a> {
+    sig: usize,
+    params: &'a [MirParam],
+    captures: &'a [LocalId],
+    locals: &'a [MirLocalDecl],
+    body: &'a MirBlock,
+    ret_ty: TypeId,
+}
+
+fn emit_closure_value(
+    spec: &ClosureEmit<'_>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let closure_id = ctx.alloc_closure_id();
+    let sig = spec.sig;
+    let params = spec.params;
+    let captures = spec.captures;
+    let locals = spec.locals;
+    let body = spec.body;
+    let ret_ty = spec.ret_ty;
+    let EmitEnv { types, .. } = emit_env;
+
+    let mut envs: Vec<(Ident, Ident)> = Vec::new();
+    for cid in captures {
+        if let Some(acc) = body_ctx.shared_access_for_local(*cid)
+            && !envs.iter().any(|(env, _)| *env == acc.env_ident)
+        {
+            envs.push((acc.env_ident.clone(), acc.env_type.clone()));
+        }
+    }
+    let mut names: Vec<ts_aot_core::Atom> = Vec::new();
+    collect_global_names(body, &mut names);
+    for name in &names {
+        if let Some(acc) = body_ctx.shared_access_for_name(name)
+            && !envs.iter().any(|(env, _)| *env == acc.env_ident)
+        {
+            envs.push((acc.env_ident.clone(), acc.env_type.clone()));
+        }
+    }
+    let capture_tys: Vec<TokenStream> = envs
+        .iter()
+        .map(|(_, env_type)| quote!(std::rc::Rc<#env_type>))
+        .collect();
+    let variant = ctx.register_closure(closure_id, sig, capture_tys.clone());
+
+    let mut child =
+        BodyCtx::for_closure(ret_ty, body_ctx.shared_name_map(), body_ctx.shared_id_map());
+    let mut candidates: std::collections::HashSet<LocalId> = params.iter().map(|p| p.id).collect();
+    for l in locals {
+        candidates.insert(l.id);
+    }
+    let assigned = collect_assigned_locals(&body.stmts, types, &candidates);
+    for l in locals {
+        let name = ident_from(&l.name);
+        child.forget_inherited_name(&name);
+        let mutable = l.mutable || assigned.contains(&l.id);
+        child.register_local(l.id, name, l.ty, mutable);
+    }
+    for p in params {
+        let name = ident_from(&p.name);
+        child.forget_inherited_name(&name);
+        let mutable = assigned.contains(&p.id);
+        child.register_local(p.id, name, p.ty, mutable);
+    }
+    child.detect_own_env(&closure_id.to_string(), body, params, locals, types);
+
+    let mut param_tokens: Vec<TokenStream> = Vec::new();
+    for ((env_ident, _), ty) in envs.iter().zip(capture_tys.iter()) {
+        param_tokens.push(quote!(#env_ident: #ty));
+    }
+    for p in params {
+        let name = child.local_ident(p.id);
+        let ty = emit_type_id_with_ctx(p.ty, emit_env, ctx);
+        if assigned.contains(&p.id) {
+            param_tokens.push(quote!(mut #name: #ty));
+        } else {
+            param_tokens.push(quote!(#name: #ty));
+        }
+    }
+    let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child)?;
+    if let Some(prelude) = emit_env_prelude(&child, emit_env, ctx) {
+        inner_stmts.insert(0, prelude);
+    }
+    let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
+    let fn_ident = format_ident!("__ts_closure_{}", closure_id);
+    ctx.push_closure_fn(
+        quote!(fn #fn_ident(#(#param_tokens),*) -> #ret_tokens { #(#inner_stmts)* }),
+    );
+
+    let enum_name = EmitCtx::fn_value_ident(sig);
+    if envs.is_empty() {
+        Ok(quote!(#enum_name::#variant))
+    } else {
+        let fields: Vec<TokenStream> = envs
+            .iter()
+            .enumerate()
+            .map(|(i, (env_ident, _))| {
+                let field = format_ident!("c{}", i);
+                quote!(#field: #env_ident.clone())
+            })
+            .collect();
+        Ok(quote!(#enum_name::#variant { #(#fields),* }))
+    }
+}
+
+fn emit_value_expr(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Binary {
+            op, left, right, ..
+        } => emit_binary_expr(*op, left, right, ctx, emit_env, body_ctx),
+        MirExpr::Unary { op, expr, .. } => emit_unary_expr(*op, expr, ctx, emit_env, body_ctx),
+        MirExpr::Cast { expr, ty } => emit_cast_expr(expr, *ty, ctx, emit_env, body_ctx),
+        _ => emit_expr(expr, ctx, emit_env, body_ctx),
+    }
+}
+
 fn emit_exprs(
     exprs: &[MirExpr],
     ctx: &EmitCtx,
@@ -755,24 +1175,24 @@ fn emit_binary_expr(
     let left = emit_expr(left, ctx, emit_env, body_ctx)?;
     let right = emit_expr(right, ctx, emit_env, body_ctx)?;
     Ok(match op {
-        BinaryOp::Add => quote!((#left + #right)),
-        BinaryOp::Sub => quote!((#left - #right)),
-        BinaryOp::Mul => quote!((#left * #right)),
-        BinaryOp::Div => quote!((#left / #right)),
-        BinaryOp::Mod => quote!((#left % #right)),
-        BinaryOp::Eq => quote!((#left == #right)),
-        BinaryOp::Ne => quote!((#left != #right)),
-        BinaryOp::Lt => quote!((#left < #right)),
-        BinaryOp::Le => quote!((#left <= #right)),
-        BinaryOp::Gt => quote!((#left > #right)),
-        BinaryOp::Ge => quote!((#left >= #right)),
-        BinaryOp::And => quote!((#left && #right)),
-        BinaryOp::Or => quote!((#left || #right)),
-        BinaryOp::BitAnd => quote!((#left & #right)),
-        BinaryOp::BitOr => quote!((#left | #right)),
-        BinaryOp::BitXor => quote!((#left ^ #right)),
-        BinaryOp::Shl => quote!((#left << #right)),
-        BinaryOp::Shr => quote!((#left >> #right)),
+        BinaryOp::Add => quote!(#left + #right),
+        BinaryOp::Sub => quote!(#left - #right),
+        BinaryOp::Mul => quote!(#left * #right),
+        BinaryOp::Div => quote!(#left / #right),
+        BinaryOp::Mod => quote!(#left % #right),
+        BinaryOp::Eq => quote!(#left == #right),
+        BinaryOp::Ne => quote!(#left != #right),
+        BinaryOp::Lt => quote!(#left < #right),
+        BinaryOp::Le => quote!(#left <= #right),
+        BinaryOp::Gt => quote!(#left > #right),
+        BinaryOp::Ge => quote!(#left >= #right),
+        BinaryOp::And => quote!(#left && #right),
+        BinaryOp::Or => quote!(#left || #right),
+        BinaryOp::BitAnd => quote!(#left & #right),
+        BinaryOp::BitOr => quote!(#left | #right),
+        BinaryOp::BitXor => quote!(#left ^ #right),
+        BinaryOp::Shl => quote!(#left << #right),
+        BinaryOp::Shr => quote!(#left >> #right),
     })
 }
 
@@ -814,9 +1234,30 @@ fn emit_unary_expr(
 ) -> Result<TokenStream, BackendError> {
     let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
     Ok(match op {
-        UnaryOp::Neg => quote!((-#expr)),
-        UnaryOp::Not | UnaryOp::BitNot => quote!((!#expr)),
+        UnaryOp::Neg => quote!(-#expr),
+        UnaryOp::Not | UnaryOp::BitNot => quote!(!#expr),
     })
+}
+
+fn emit_cast_expr(
+    expr: &MirExpr,
+    ty: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let EmitEnv { types, .. } = emit_env;
+    let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+    if !is_numeric_primitive_target(types.resolve(ty)) {
+        return Err(BackendError::Internal(format!(
+            "MirExpr::Cast target TypeId({}) is not a numeric primitive; \
+             Rust's `as` cast cannot lower it. \
+             Only I8/I16/I32/I64/U8/U16/U32/U64/F32/F64 are supported as cast targets.",
+            ty.raw()
+        )));
+    }
+    let cast_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
+    Ok(quote!(#inner as #cast_ty))
 }
 
 fn is_numeric_primitive_target(ty: Option<&Type>) -> bool {
@@ -1288,7 +1729,7 @@ fn emit_js_string_expr(
             let lit = Literal::string(id.as_str());
             quote!(ts_aot_runtime::JsString::from(#lit))
         }
-        MirExpr::Local(id) => body_ctx.local_ref(*id),
+        MirExpr::Local(id) => body_ctx.local_read(*id),
         _ => emit_expr(arg, ctx, emit_env, body_ctx)?,
     };
     Ok(match ownership {
@@ -1407,11 +1848,16 @@ fn emit_try(
             let param_ty = body_ctx
                 .local_ty(param)
                 .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+            let shared_write = body_ctx
+                .shared_access_for_local(param)
+                .map(|acc| shared_write_tokens(&acc, &quote!(#param_ident)))
+                .unwrap_or_default();
             quote! {
                 let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
                     Ok(v) => *v,
                     Err(__e) => std::panic::#resume_unwind(__e),
                 };
+                #shared_write
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#catch_stmts)*
                 }));

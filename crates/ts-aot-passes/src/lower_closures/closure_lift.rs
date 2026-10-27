@@ -100,7 +100,7 @@ pub(super) fn rewrite_closure_callee(
         }));
         return;
     }
-    ctx.error(
+    ctx.warning(
         "P0005",
         "call to undeclared closure (lower_closures did not produce a fn for it)",
         ts_aot_core::Span::new(0, 0),

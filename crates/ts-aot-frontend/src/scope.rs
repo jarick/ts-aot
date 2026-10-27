@@ -121,6 +121,26 @@ impl BodyScope {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
 
+    pub(crate) fn peek_next(&self) -> u32 {
+        self.next_local.get()
+    }
+
+    pub(crate) fn set_next(&self, value: u32) {
+        self.next_local.set(self.next_local.get().max(value));
+    }
+
+    pub(crate) fn type_of_visible(&self, name: &str) -> Option<TypeId> {
+        if let Some(entry) = self.lookup_in_scopes(name) {
+            return Some(entry.ty);
+        }
+        for frame in self.predeclared.iter().rev() {
+            if let Some(pre) = frame.get(name) {
+                return Some(pre.ty);
+            }
+        }
+        None
+    }
+
     pub(crate) fn names(&self) -> Vec<String> {
         let mut seen: Vec<String> = Vec::new();
         for scope in &self.scopes {

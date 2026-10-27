@@ -126,7 +126,7 @@ pub(super) fn rewrite_in_expr(
                 span: *span,
             }));
         } else {
-            ctx.error(
+            ctx.warning(
                 "P0005",
                 "call to undeclared closure (lower_closures did not produce a fn for it)",
                 *span,

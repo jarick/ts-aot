@@ -71,6 +71,12 @@ impl ExprConverter {
         let mut final_locals: Vec<MirLocalDecl> = Vec::new();
         let mut interim: Vec<MirStmt> = Vec::new();
         for s in block.iter() {
+            if let HirStmt::Let { id, name, .. } = s {
+                let mir = self.map_local_id(*id);
+                self.register_local_name(mir, name.clone());
+            }
+        }
+        for s in block.iter() {
             self.convert_stmt_into(
                 s,
                 mutable_locals,
@@ -384,7 +390,7 @@ impl ExprConverter {
                                  AOT target; got unsupported iterable type `{other:?}`"
                             ),
                         };
-                        ctx.error("E0406", message, iter_span);
+                        ctx.warning("E0406", message, iter_span);
                         types.intern(&Type::Error)
                     }
                 };
@@ -444,7 +450,7 @@ impl ExprConverter {
                                  AOT target; got unsupported iterable type `{other:?}`"
                             ),
                         };
-                        ctx.error("E0406", message, iter_span);
+                        ctx.warning("E0406", message, iter_span);
                         types.intern(&Type::Error)
                     }
                 };
@@ -541,11 +547,11 @@ impl ExprConverter {
                         MirExpr::Int { value, .. } => ConstValue::Int(value),
                         MirExpr::String { id, .. } => ConstValue::String(id),
                         other => {
-                            ctx.error(
+                            ctx.warning(
                                 "P0006",
                                 "switch case value must be a const int or string literal; \
                                  non-const expressions (Local, Field, Binary, Call, etc.) are not \
-                                 yet supported in HIR→MIR — case body will not be reachable at runtime",
+                                 yet supported in HIR→MIR - case body will not be reachable at runtime",
                                 Span::new(0, 0),
                             );
                             let _ = other;
@@ -595,16 +601,6 @@ impl ExprConverter {
                 );
                 final_locals.extend(body_locals);
                 let (catch_param, mir_catch) = if let Some(c) = catch {
-                    let (catch_body, catch_locals) = self
-                        .convert_single_stmt_with_shared_struct_ids(
-                            &c.body,
-                            mutable_locals,
-                            shared_struct_ids,
-                            shared_next_struct,
-                            types,
-                            ctx,
-                        );
-                    final_locals.extend(catch_locals);
                     let param = c.binding.as_ref().map(|(local_id, name)| {
                         let new_id = self.map_local_id(*local_id);
                         self.register_local_name(new_id, name.clone());
@@ -616,6 +612,16 @@ impl ExprConverter {
                         });
                         new_id
                     });
+                    let (catch_body, catch_locals) = self
+                        .convert_single_stmt_with_shared_struct_ids(
+                            &c.body,
+                            mutable_locals,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
+                    final_locals.extend(catch_locals);
                     (param, Some(catch_body))
                 } else {
                     (None, None)

@@ -19,7 +19,7 @@ use ts_aot_core::ModuleId;
 #[cfg(test)]
 pub(super) fn emit_type_id(id: TypeId, types: &TypeTable) -> TokenStream {
     let empty_program = MirProgram::new(ModuleId::from_raw(0));
-    let ctx = EmitCtx::build(&empty_program);
+    let ctx = EmitCtx::build(&empty_program, types);
     let emit_env = EmitEnv {
         types,
         program: &empty_program,
@@ -30,6 +30,13 @@ pub(super) fn emit_type_id(id: TypeId, types: &TypeTable) -> TokenStream {
 pub(super) fn emit_type_id_with_ctx(id: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
     let EmitEnv { types, .. } = emit_env;
     if let Some(ty) = types.resolve(id) {
+        if matches!(ty, Type::Fn { .. }) {
+            if let Some(k) = ctx.fn_value_kind(id) {
+                let enum_name = EmitCtx::fn_value_ident(k);
+                return quote!(#enum_name);
+            }
+            return quote!(());
+        }
         emit_type(ty, emit_env, ctx)
     } else {
         let ident = format_ident!("__ty{}", id.raw());

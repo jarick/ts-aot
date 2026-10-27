@@ -212,6 +212,7 @@ fn convert_function_basic_shape() {
     let f = HirFunction {
         name: Atom::new_inline("1"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
@@ -243,10 +244,12 @@ fn convert_function_let_after_params_gets_fresh_id() {
         name: Atom::new_inline("1"),
         params: vec![
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::new_inline("10"),
                 ty: unit_ty(),
             },
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::new_inline("11"),
                 ty: unit_ty(),
             },
@@ -304,6 +307,7 @@ fn convert_function_body_references_param_id_resolves_to_param() {
     let f = HirFunction {
         name: Atom::new_inline("1"),
         params: vec![HirParam {
+            id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("10"),
             ty: unit_ty(),
         }],
@@ -547,10 +551,12 @@ fn convert_function_build_params_preserves_param_atom_name() {
         name: Atom::new_inline("1"),
         params: vec![
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(0),
                 name: first_id.clone(),
                 ty: unit_ty(),
             },
             HirParam {
+                id: ts_aot_core::LocalId::from_raw(1),
                 name: second_id.clone(),
                 ty: unit_ty(),
             },
