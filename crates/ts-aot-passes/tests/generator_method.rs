@@ -254,7 +254,10 @@ fn generator_type_propagation_does_not_corrupt_other_functions_locals() {
             .collect::<Vec<_>>()
     );
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let double_body = hir_dump
         .split_once("fn double")
         .map(|(_, rest)| rest.split_once("fn ").map_or(rest, |(seg, _)| seg))

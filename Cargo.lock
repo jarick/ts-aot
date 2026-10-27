@@ -1104,6 +1104,7 @@ name = "ts-aot-driver"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
  "ts-aot-backend",
  "ts-aot-core",
  "ts-aot-frontend",

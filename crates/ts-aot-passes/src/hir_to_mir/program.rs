@@ -97,7 +97,11 @@ pub(crate) fn convert_function(
 
     let params: Vec<MirParam> = build_params(&f.params);
     let can_throw = body_can_throw(&f.body);
-    let throws = infer_throws(&f.body, f.throws);
+    let throws = if f.is_generator {
+        None
+    } else {
+        infer_throws(&f.body, f.throws)
+    };
 
     MirFunctionDecl {
         id,

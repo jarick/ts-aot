@@ -264,7 +264,7 @@ fn emit_function_with_ctx(
     } else {
         quote!()
     };
-    let asyncness = if f.effects.is_async {
+    let asyncness = if f.effects.is_async && !body_ctx.is_generator() {
         quote!(async)
     } else {
         quote!()

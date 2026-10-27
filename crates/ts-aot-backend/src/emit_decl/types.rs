@@ -108,13 +108,21 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
             let ident = Ident::new(&sanitized, Span::call_site());
             quote!(#ident)
         }
-        Type::Generator { inner } => {
+        Type::Generator { inner, is_async } => {
             let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
-            quote!(ts_aot_runtime::Generator<#inner>)
+            if *is_async {
+                quote!(ts_aot_runtime::AsyncGenerator<#inner>)
+            } else {
+                quote!(ts_aot_runtime::Generator<#inner>)
+            }
         }
         Type::GeneratorResult { inner } => {
             let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
             quote!(ts_aot_runtime::GeneratorResult<#inner>)
+        }
+        Type::AsyncGenYield { inner } => {
+            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
+            quote!(ts_aot_runtime::AsyncGenYield<#inner>)
         }
         Type::GenericParam { id } => {
             let ident = format_ident!("__generic{}", id.raw());

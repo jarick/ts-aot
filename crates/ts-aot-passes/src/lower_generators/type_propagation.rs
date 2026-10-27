@@ -216,10 +216,15 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
         if let HirStmt::Let { id, ty, init, .. } = stmt {
             if let Some(init_expr) = init {
                 self.visit_expr_mut(init_expr);
-                if is_generator_type_id(self.types, init_expr.ty()) {
-                    let gen_ty = init_expr.ty();
-                    *ty = gen_ty;
-                    self.generator_locals.insert(*id, gen_ty);
+                let init_ty = init_expr.ty();
+                if is_generator_type_id(self.types, init_ty)
+                    || matches!(
+                        self.types.resolve(init_ty),
+                        Some(Type::AsyncGenYield { .. })
+                    )
+                {
+                    *ty = init_ty;
+                    self.generator_locals.insert(*id, init_ty);
                 }
             }
             return;
@@ -248,13 +253,24 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
                             if field_name.as_str() == "next"
                                 && is_generator_type_id(self.types, owner.ty())
                             {
-                                let inner_ty = match self.types.resolve(owner.ty()) {
-                                    Some(Type::Generator { inner }) => *inner,
-                                    _ => TypeId::from_raw(0),
+                                let (inner_ty, is_async) = match self.types.resolve(owner.ty()) {
+                                    Some(Type::Generator { inner, is_async }) => {
+                                        (*inner, *is_async)
+                                    }
+                                    _ => (TypeId::from_raw(0), false),
                                 };
-                                *ty = self
-                                    .types
-                                    .intern(&Type::GeneratorResult { inner: inner_ty });
+                                if is_async {
+                                    let yield_ty =
+                                        self.types.intern(&Type::AsyncGenYield { inner: inner_ty });
+                                    *ty = self.types.intern(&Type::Promise {
+                                        ok: yield_ty,
+                                        err: None,
+                                    });
+                                } else {
+                                    *ty = self
+                                        .types
+                                        .intern(&Type::GeneratorResult { inner: inner_ty });
+                                }
                             } else {
                                 let recv_ty = match self.types.resolve(owner.ty()) {
                                     Some(Type::Optional { inner }) => *inner,
@@ -321,6 +337,12 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
             HirExpr::Closure { captures, .. } => {
                 for c in captures {
                     self.visit_expr_mut(c);
+                }
+            }
+            HirExpr::Await { expr, ty, .. } => {
+                self.visit_expr_mut(expr);
+                if let Some(Type::Promise { ok, .. }) = self.types.resolve(expr.ty()) {
+                    *ty = *ok;
                 }
             }
             _ => walk_expr_mut(self, expr),

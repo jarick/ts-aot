@@ -771,7 +771,10 @@ fn convert_let_consumed_by_forof_iter_marks_mutable() {
     let g = LocalId::from_raw(0);
     let mut types = empty_types();
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let body = vec![HirStmt::ForOf {
         binding: LocalId::from_raw(1),
         iter: HirExpr::Local {
@@ -1451,9 +1454,13 @@ fn convert_block_forof_generator_inner_extracts_item_ty() {
     let mut cx = ctx();
     let mut types = empty_types();
     let i64_ty = types.intern(&Type::I64);
-    let inner_gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let inner_gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let outer_gen_ty = types.intern(&Type::Generator {
         inner: inner_gen_ty,
+        is_async: false,
     });
     let iter = HirExpr::Local {
         id: LocalId::from_raw(7),

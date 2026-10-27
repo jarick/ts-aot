@@ -313,6 +313,9 @@ impl SkeletonBuilder {
                 arrow.span,
             );
         }
+        crate::util::validate_unique_param_bindings(senv, &arrow.params, true);
+        let prev_strict = self.strict;
+        self.strict = prev_strict || crate::util::body_has_use_strict(Some(&arrow.body));
         let merged = self.merged_type_params();
         let param_base = scope.peek_next();
         let (params, extra_locals) =
@@ -370,6 +373,7 @@ impl SkeletonBuilder {
             b
         };
         senv.capture_types.pop();
+        self.strict = prev_strict;
         let captures = collect_capture_refs(&mut body, scope);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
@@ -411,6 +415,10 @@ impl SkeletonBuilder {
                 func.span,
             );
         }
+        let strict = self.strict || crate::util::body_has_use_strict(func.body.as_deref());
+        crate::util::validate_unique_param_bindings(senv, &func.params, strict);
+        let prev_strict = self.strict;
+        self.strict = strict;
         let merged = self.merged_type_params();
         let param_base = scope.peek_next();
         let (params, extra_locals) =
@@ -438,6 +446,7 @@ impl SkeletonBuilder {
         );
         scope.set_next(used);
         senv.capture_types.pop();
+        self.strict = prev_strict;
         let captures = collect_capture_refs(&mut body, scope);
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
         let fn_ty = senv.types.intern(&Type::Fn {

@@ -349,10 +349,21 @@ impl ExprConverter {
                 let new_binding = self.map_local_id(*binding);
                 let binding_name = self.unique_synth_local_name(new_binding, "__for_of");
                 let iter_span = iter.span();
+                if matches!(
+                    types.resolve(iter.ty()),
+                    Some(Type::Generator { is_async: true, .. })
+                ) {
+                    ctx.error(
+                        "E0413",
+                        "`for...of` over an async generator is not supported; \
+                         use `for await...of` instead",
+                        iter_span,
+                    );
+                    return;
+                }
                 let item_ty = match types.resolve(iter.ty()) {
-                    Some(Type::Array { element }) | Some(Type::Generator { inner: element }) => {
-                        *element
-                    }
+                    Some(Type::Array { element })
+                    | Some(Type::Generator { inner: element, .. }) => *element,
                     Some(Type::Error) => types.intern(&Type::Error),
                     None => {
                         ctx.warning(
@@ -427,7 +438,7 @@ impl ExprConverter {
                 let binding_name = self.unique_synth_local_name(new_binding, "__for_await_of");
                 let iter_span = iter.span();
                 let item_ty = match types.resolve(iter.ty()) {
-                    Some(Type::Generator { inner: element }) => *element,
+                    Some(Type::Generator { inner: element, .. }) => *element,
                     Some(Type::Error) => types.intern(&Type::Error),
                     None => {
                         ctx.warning(

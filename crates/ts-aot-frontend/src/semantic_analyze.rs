@@ -12,7 +12,7 @@ const PARSE_ERROR_CODE: &str = "P0001";
 const SEMANTIC_ERROR_CODE: &str = "S0001";
 const DEFAULT_SPAN: Span = Span::new(0, 0);
 
-fn error_span(err: &OxcError) -> Span {
+pub(crate) fn error_span(err: &OxcError) -> Span {
     let diag: &dyn OxcDiagnostic = err;
     diag.labels()
         .as_slice()

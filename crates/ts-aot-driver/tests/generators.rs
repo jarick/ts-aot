@@ -27,6 +27,112 @@ fn simple_generator_compiles_and_yields() {
 }
 
 #[test]
+fn generator_with_throw_keeps_generator_return_type_and_panics() {
+    let out = compile("function* gen(): i64 { throw 7; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("ts_aot_runtime::Generator<i64>"),
+        "a throwing generator must still return a plain Generator, got:\n{r}"
+    );
+    assert!(
+        !r.contains("Result<ts_aot_runtime::Generator"),
+        "a throwing generator must not be wrapped in Result (throw happens in next()), got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_throw"),
+        "throw inside a generator must lower to a panic that propagates from next(), got:\n{r}"
+    );
+}
+
+#[test]
+fn async_generator_emits_async_generator_wrapper() {
+    let out = compile("async function* gen(): i64 { yield 1; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("ts_aot_runtime::AsyncGenerator<i64>"),
+        "async generator must return AsyncGenerator, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_async_generator_new"),
+        "async generator must use the async generator wrapper, got:\n{r}"
+    );
+    assert!(
+        !r.contains("async fn gen"),
+        "an async generator must not be emitted as an async fn, got:\n{r}"
+    );
+    assert!(
+        r.contains("AsyncGenYield"),
+        "async generator yields must be wrapped in AsyncGenYield, got:\n{r}"
+    );
+}
+
+#[test]
+fn sync_for_of_over_async_generator_is_rejected() {
+    let out = compile(
+        "async function* g(): i64 { yield 1; } \
+         function run(): i64 { for (const x of g()) { } return 0; }",
+    );
+    let codes: Vec<&str> = out.diagnostics.errors().map(|d| d.code.as_str()).collect();
+    assert!(
+        codes.contains(&"E0413"),
+        "for...of over an async generator must be rejected with E0413, got {codes:?}"
+    );
+}
+
+#[test]
+fn async_generator_next_result_value_and_done_are_lowered() {
+    let out = compile(
+        "async function* g(): i64 { yield 1; } \
+         async function run(): bool { const y = await g().next(); return y.done; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("AsyncGenYield"),
+        "the awaited next() result must be typed as AsyncGenYield, got:\n{r}"
+    );
+    assert!(
+        r.contains("done"),
+        "`.done` must lower to an AsyncGenYield field access, got:\n{r}"
+    );
+}
+
+#[test]
+fn for_await_over_named_async_generator_borrows_it() {
+    let out = compile(
+        "async function* g(): i64 { yield 1; } \
+         async function run(): i64 { const it = g(); for await (const x of it) { } return 0; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("& mut it") || r.contains("&mut it"),
+        "a named async generator iterable must be mutably borrowed (not moved) \
+         so it stays accessible after iteration; got:\n{r}"
+    );
+}
+
+#[test]
+fn for_await_over_async_generator_uses_async_loop() {
+    let out = compile(
+        "async function* g(): i64 { yield 1; } \
+         async function run(): i64 { let s: i64 = 0; for await (const x of g()) { s = s + x; } return s; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__for_await_iter"),
+        "for await over an async generator must emit the async iteration loop, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_await_value"),
+        "for await must await each next() promise, got:\n{r}"
+    );
+}
+
+#[test]
 fn multi_yield_compiles() {
     let out = compile(
         r"
@@ -442,5 +548,28 @@ ts-aot-runtime = {{ path = "{runtime_manifest_str}" }}
     assert!(
         status.success(),
         "cargo check must succeed for the compiled generator crate, exit: {status:?}"
+    );
+}
+
+#[test]
+fn async_generator_await_uses_generator_await_helper() {
+    let out =
+        compile("async function* g(p: Promise<i64>): i64 { const v: i64 = await p; yield v; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_await_value_gen"),
+        "async generator await must use the generator await helper so a rejected await rejects next(), got:\n{r}"
+    );
+}
+
+#[test]
+fn plain_async_function_await_does_not_use_generator_await_helper() {
+    let out = compile("async function f(p: Promise<i64>): Promise<i64> { return await p; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_await_value") && !r.contains("__ts_aot_await_value_gen"),
+        "a plain async function await must not use the generator await helper, got:\n{r}"
     );
 }

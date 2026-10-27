@@ -17,6 +17,10 @@ target
 tests/harness-out/
 tests/test262-report.json
 
+# python bytecode (test262 harness)
+__pycache__/
+*.pyc
+
 # test262 corpus (local-only, not a submodule)
 tests/test262/
 

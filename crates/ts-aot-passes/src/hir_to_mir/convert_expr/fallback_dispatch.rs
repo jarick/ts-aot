@@ -406,7 +406,18 @@ impl ExprConverter {
                     ctx,
                 );
                 let dest = self.fresh_local();
-                let result_ty = types.intern(&Type::GeneratorResult { inner: inner_ty });
+                let result_ty = if matches!(
+                    types.resolve(owner_ty),
+                    Some(Type::Generator { is_async: true, .. })
+                ) {
+                    let yield_ty = types.intern(&Type::AsyncGenYield { inner: inner_ty });
+                    types.intern(&Type::Promise {
+                        ok: yield_ty,
+                        err: None,
+                    })
+                } else {
+                    types.intern(&Type::GeneratorResult { inner: inner_ty })
+                };
                 self.push_temp_local(dest, result_ty);
                 out.push(MirStmt::Runtime {
                     op: RuntimeOp::GeneratorNext,

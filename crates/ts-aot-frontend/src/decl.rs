@@ -222,6 +222,10 @@ impl SkeletonBuilder {
             func.type_parameters.as_deref(),
         );
 
+        let strict = self.strict || crate::util::body_has_use_strict(func.body.as_deref());
+        crate::util::validate_unique_param_bindings(senv, &func.params, strict);
+        let prev_strict = self.strict;
+        self.strict = strict;
         let (params, extra_locals) =
             self.build_params_and_locals(senv, &func.params.items, 0, Some(&type_param_map));
 
@@ -244,6 +248,7 @@ impl SkeletonBuilder {
             false,
         );
         self.type_param_stack.pop();
+        self.strict = prev_strict;
 
         HirFunction {
             name,
@@ -397,6 +402,10 @@ impl SkeletonBuilder {
         }
 
         let needs_synthetic_this = !md.r#static;
+        let strict = true;
+        crate::util::validate_unique_param_bindings(senv, &value.params, strict);
+        let prev_strict = self.strict;
+        self.strict = strict;
         let (method_params, extra_locals) = self.build_params_and_locals(
             senv,
             &value.params.items,
@@ -433,6 +442,7 @@ impl SkeletonBuilder {
         );
         self.in_static_method = saved_static;
         self.type_param_stack.pop();
+        self.strict = prev_strict;
         HirFunction {
             name: method_name,
             params,

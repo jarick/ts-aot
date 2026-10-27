@@ -143,9 +143,17 @@ pub fn substitute_type(
                 },
             )
         }
-        Type::Generator { inner } => {
+        Type::Generator { inner, is_async } => {
             let new_inner = substitute_type(inner, mapping, types, result);
-            intern_substituted(ty, types, result, Type::Generator { inner: new_inner })
+            intern_substituted(
+                ty,
+                types,
+                result,
+                Type::Generator {
+                    inner: new_inner,
+                    is_async,
+                },
+            )
         }
         Type::GeneratorResult { inner } => {
             let new_inner = substitute_type(inner, mapping, types, result);
@@ -155,6 +163,10 @@ pub fn substitute_type(
                 result,
                 Type::GeneratorResult { inner: new_inner },
             )
+        }
+        Type::AsyncGenYield { inner } => {
+            let new_inner = substitute_type(inner, mapping, types, result);
+            intern_substituted(ty, types, result, Type::AsyncGenYield { inner: new_inner })
         }
         _ => {
             result.unchanged += 1;
@@ -195,14 +207,17 @@ mod tests {
         let gen_param = types.intern(&Type::GenericParam {
             id: GenericParamId::from_raw(0),
         });
-        let gen_ty = types.intern(&Type::Generator { inner: gen_param });
+        let gen_ty = types.intern(&Type::Generator {
+            inner: gen_param,
+            is_async: false,
+        });
         let mut mapping = empty_mapping();
         mapping.insert(GenericParamId::from_raw(0), i64_ty);
         let mut result = TypeSubstitutionResult::default();
         let new_id = substitute_type(gen_ty, &mapping, &mut types, &mut result);
         let new_ty = types.resolve(new_id).expect("substituted type resolves");
         match new_ty {
-            Type::Generator { inner } => assert_eq!(
+            Type::Generator { inner, .. } => assert_eq!(
                 *inner, i64_ty,
                 "Generator<GenericParam> must substitute to Generator<i64>"
             ),
@@ -236,7 +251,10 @@ mod tests {
     fn substitute_type_unchanged_generator_without_generic_param() {
         let mut types = TypeTable::new();
         let i64_ty = types.intern(&Type::I64);
-        let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+        let gen_ty = types.intern(&Type::Generator {
+            inner: i64_ty,
+            is_async: false,
+        });
         let mapping = empty_mapping();
         let mut result = TypeSubstitutionResult::default();
         let new_id = substitute_type(gen_ty, &mapping, &mut types, &mut result);

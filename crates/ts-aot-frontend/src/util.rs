@@ -1,4 +1,4 @@
-use oxc_ast::ast::{BindingPattern, FormalParameter};
+use oxc_ast::ast::{BindingPattern, Directive, FormalParameter, FormalParameters, FunctionBody};
 use oxc_span::{SourceType, Span as OxcSpan};
 use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span as CoreSpan, Type, TypeId};
 use ts_aot_ir_hir::{HirDecl, HirExpr, HirParam};
@@ -11,6 +11,71 @@ pub(crate) fn binding_pattern_name(pattern: &BindingPattern<'_>) -> Option<oxc_s
         BindingPattern::BindingIdentifier(id) => Some(id.name.to_compact_str()),
         BindingPattern::AssignmentPattern(ap) => binding_pattern_name(&ap.left),
         BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => None,
+    }
+}
+
+pub(crate) fn collect_binding_names(pattern: &BindingPattern<'_>, out: &mut Vec<Atom>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => out.push(Atom::from(id.name.as_str())),
+        BindingPattern::ObjectPattern(obj) => {
+            for prop in &obj.properties {
+                collect_binding_names(&prop.value, out);
+            }
+            if let Some(rest) = &obj.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(arr) => {
+            for pattern in arr.elements.iter().flatten() {
+                collect_binding_names(pattern, out);
+            }
+            if let Some(rest) = &arr.rest {
+                collect_binding_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(ap) => collect_binding_names(&ap.left, out),
+    }
+}
+
+pub(crate) fn directives_have_use_strict(directives: &[Directive<'_>]) -> bool {
+    directives
+        .iter()
+        .any(|d| d.directive.as_str() == "use strict")
+}
+
+pub(crate) fn body_has_use_strict(body: Option<&FunctionBody<'_>>) -> bool {
+    body.is_some_and(|b| directives_have_use_strict(&b.directives))
+}
+
+pub(crate) fn validate_unique_param_bindings(
+    senv: &mut SkeletonEnv,
+    params: &FormalParameters<'_>,
+    strict: bool,
+) {
+    let non_simple = params.rest.is_some()
+        || params.items.iter().any(|param| {
+            param.initializer.is_some()
+                || !matches!(param.pattern, BindingPattern::BindingIdentifier(_))
+        });
+    if !strict && !non_simple {
+        return;
+    }
+    let mut names: Vec<Atom> = Vec::new();
+    for param in &params.items {
+        collect_binding_names(&param.pattern, &mut names);
+    }
+    if let Some(rest) = &params.rest {
+        collect_binding_names(&rest.rest.argument, &mut names);
+    }
+    let mut seen: std::collections::HashSet<Atom> = std::collections::HashSet::new();
+    for name in &names {
+        if !seen.insert(name.clone()) {
+            senv.diagnostics.push(Diagnostic::error(
+                "E0200",
+                format!("parse error: duplicate parameter name `{name}`"),
+                core_span_from_oxc(params.span),
+            ));
+        }
     }
 }
 

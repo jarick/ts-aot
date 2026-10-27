@@ -6,7 +6,10 @@ fn generator_instance_call(
     types: &mut TypeTable,
 ) -> (HirExpr, TypeId) {
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let expr = HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(HirExpr::Field {
             owner: Box::new(HirExpr::Local {

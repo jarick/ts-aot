@@ -51,7 +51,7 @@ pub(super) fn is_global_typed_array_reference(owner: &HirExpr) -> bool {
 
 pub(crate) fn generator_inner_type(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
     match types.resolve(ty) {
-        Some(Type::Generator { inner }) => Some(*inner),
+        Some(Type::Generator { inner, .. }) => Some(*inner),
         _ => None,
     }
 }

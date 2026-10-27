@@ -1,5 +1,5 @@
 use ts_aot_core::Span;
-use ts_aot_ir_hir::{HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
+use ts_aot_ir_hir::{HirExpr, HirStmt, ObjectLiteralField, Visitor, walk_expr, walk_stmt};
 
 pub(crate) const GENERATOR_DIAG_UNSUPPORTED_YIELD: &str = "E0501";
 pub(crate) const GENERATOR_DIAG_UNRESOLVED_YIELD_TYPE: &str = "E0505";
@@ -69,7 +69,7 @@ impl Visitor for BodyAnalysisVisitor<'_> {
                 if let Some(inner) = yield_expr {
                     let prev = self.ctx;
                     self.ctx = YieldContext::None;
-                    self.visit_expr(inner);
+                    self.visit_yield_argument_allowed(inner);
                     self.ctx = prev;
                 }
             }
@@ -132,7 +132,40 @@ impl Visitor for BodyAnalysisVisitor<'_> {
                     self.visit_expr(c);
                 }
             }
+            HirExpr::ObjectLiteral { fields, .. } => {
+                for field in fields {
+                    if matches!(self.ctx, YieldContext::None)
+                        && let ObjectLiteralField::Spread(HirExpr::Yield { expr: inner, .. }) =
+                            field
+                    {
+                        if let Some(inner) = inner {
+                            self.visit_yield_argument_allowed(inner);
+                        }
+                    } else {
+                        self.visit_expr(field.value());
+                    }
+                }
+            }
             _ => walk_expr(self, expr),
+        }
+    }
+}
+
+impl BodyAnalysisVisitor<'_> {
+    fn visit_yield_argument_allowed(&mut self, value: &HirExpr) {
+        if let HirExpr::Yield {
+            expr: inner, span, ..
+        } = value
+        {
+            if inner.is_some() {
+                self.a.has_valued_yield = true;
+                self.a.first_valued_yield_span.get_or_insert(*span);
+            }
+            if let Some(inner) = inner {
+                self.visit_yield_argument_allowed(inner);
+            }
+        } else {
+            self.visit_expr(value);
         }
     }
 }

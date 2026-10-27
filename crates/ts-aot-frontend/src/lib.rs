@@ -50,6 +50,236 @@ mod tests {
     }
 
     #[test]
+    fn frontend_rejects_duplicate_arrow_parameter_names() {
+        let output = FrontendPass::new().run("test.ts", "const f = (a, a) => 0;");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "duplicate arrow parameters must be a syntax error, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_duplicate_destructured_arrow_parameters() {
+        let output = FrontendPass::new().run("test.ts", "const f = ({ a }, { a }) => 0;");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "duplicate destructured arrow params must be a syntax error, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_repeated_underscore_arrow_parameters() {
+        let output = FrontendPass::new().run("test.ts", "const f = (_, _) => 0;");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "repeated `_` arrow params must be a syntax error, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_allows_distinct_destructured_arrow_parameters() {
+        let output = FrontendPass::new().run("test.ts", "const f = ({ a }, { b }) => 0;");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            !codes.contains(&"E0200"),
+            "distinct destructured arrow params must not be flagged as duplicates, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_duplicate_params_in_use_strict_function() {
+        let output =
+            FrontendPass::new().run("test.ts", "function f(a, a) { \"use strict\"; return a; }");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "duplicate params in a `use strict` function must be a syntax error, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_allows_duplicate_params_in_non_strict_function() {
+        let output = FrontendPass::new().run("test.ts", "function f(a, a) { return a; }");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            !codes.contains(&"E0200"),
+            "sloppy duplicate params must not be rejected, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_duplicate_params_in_class_method() {
+        let output = FrontendPass::new().run("test.ts", "class C { m(a, a) { return a; } }");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "class methods are always strict; duplicate params must be rejected, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_inherits_use_strict_into_nested_function_expression() {
+        let output = FrontendPass::new().run(
+            "test.ts",
+            "function outer() { \"use strict\"; var g = function (a, a) { return a; }; return g; }",
+        );
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "a nested function expression inherits strict from the outer directive, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_module_rejects_duplicate_params_without_use_strict() {
+        let mut types = ts_aot_core::TypeTable::new();
+        let pass = FrontendPass::new();
+        let output = pass.run_with_types(
+            "test.ts",
+            "function f(a, a) { return a; }",
+            &mut types,
+            true,
+        );
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "module code is strict and must reject duplicate parameter names even without a directive, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_script_use_strict_makes_top_level_functions_strict() {
+        let output =
+            FrontendPass::new().run("test.ts", "\"use strict\"; function f(a, a) { return a; }");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "a script with a `use strict` prologue is strict, so top-level functions must reject duplicate parameter names, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_duplicate_params_in_non_simple_function() {
+        let output = FrontendPass::new().run("test.ts", "function f(a, b = 1, a) { return a; }");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "non-simple parameter lists reject duplicate names even when sloppy, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_duplicate_params_in_non_simple_function_expression() {
+        let output =
+            FrontendPass::new().run("test.ts", "var g = function (a, { a }) { return a; };");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "non-simple function-expression parameter lists reject duplicate names even when sloppy, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_nested_function_in_sloppy_arrow_inherits_sloppiness() {
+        let output = FrontendPass::new().run(
+            "test.ts",
+            "var g = () => { return function (a, a) { return a; }; };",
+        );
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            !codes.contains(&"E0200"),
+            "a nested function expression inherits the sloppy strictness of its surrounding arrow, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_nested_function_in_use_strict_arrow_is_strict() {
+        let output = FrontendPass::new().run(
+            "test.ts",
+            "var g = () => { \"use strict\"; return function (a, a) { return a; }; };",
+        );
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "a `use strict` directive in an arrow body makes nested function expressions strict, got {codes:?}"
+        );
+    }
+
+    #[test]
+    fn frontend_rejects_use_strict_with_non_simple_parameters() {
+        let output =
+            FrontendPass::new().run("test.ts", "const f = (a = 0) => { \"use strict\"; };");
+        let codes: Vec<&str> = output
+            .diagnostics
+            .errors()
+            .map(|d| d.code.as_str())
+            .collect();
+        assert!(
+            codes.contains(&"E0200"),
+            "use strict with non-simple parameters must be a syntax error, got {codes:?}"
+        );
+    }
+
+    #[test]
     fn frontend_pass_walks_function_body() {
         let output = FrontendPass::new().run(
             "test.ts",
