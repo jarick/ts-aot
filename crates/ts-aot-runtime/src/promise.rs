@@ -334,6 +334,11 @@ where
 }
 
 #[must_use]
+pub fn __ts_aot_catch_bind(payload: &(dyn Any + Send)) -> crate::string::JsString {
+    crate::string::JsString::from(__ts_aot_panic_message(payload).as_str())
+}
+
+#[must_use]
 pub(crate) fn __ts_aot_panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()

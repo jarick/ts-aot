@@ -27,7 +27,7 @@ pub(super) struct EmitCtx {
     mutable_globals: HashSet<Atom>,
     fn_value_index: HashMap<TypeId, usize>,
     fn_value_sigs: Vec<FnValueSig>,
-    fn_value_variants: Vec<Vec<(Atom, Ident)>>,
+    fn_value_variants: Vec<Vec<(Atom, Ident, bool)>>,
     fn_value_of_fn: HashMap<Atom, (usize, Ident)>,
     closure_variants: RefCell<HashMap<usize, Vec<ClosureVariantInfo>>>,
     closure_fns: RefCell<Vec<TokenStream>>,
@@ -184,7 +184,7 @@ impl EmitCtx {
         &self.fn_value_sigs[k]
     }
 
-    pub(super) fn fn_value_variants(&self, k: usize) -> &[(Atom, Ident)] {
+    pub(super) fn fn_value_variants(&self, k: usize) -> &[(Atom, Ident, bool)] {
         &self.fn_value_variants[k]
     }
 
@@ -232,13 +232,20 @@ pub(super) struct BodyCtx {
     is_async_generator: bool,
     gen_co: Option<Ident>,
     ret_inner: TypeId,
+    async_plain_ok: Option<TypeId>,
     in_try: Cell<bool>,
     in_tla_main: bool,
     pub(super) weakmap_liveness_per_key: RefCell<BTreeMap<LocalId, Ident>>,
     continue_label: RefCell<Option<Ident>>,
+    continue_target: RefCell<Option<Ident>>,
+    break_label: RefCell<Option<Ident>>,
     try_label: RefCell<Option<Ident>>,
     return_slot: RefCell<Option<Ident>>,
+    loop_depth: Cell<u32>,
+    switch_depth: Cell<u32>,
+    try_jump_floor: RefCell<Vec<(u32, u32)>>,
     next_try_id: Cell<u32>,
+    next_block_id: Cell<u32>,
     shared_by_id: HashMap<LocalId, SharedAccess>,
     shared_by_name: HashMap<Ident, SharedAccess>,
     own_env: Option<OwnEnv>,
@@ -380,6 +387,14 @@ impl BodyCtx {
         } else {
             f.ret
         };
+        let async_plain_ok = if !is_generator && f.effects.is_async {
+            match types.resolve(f.ret) {
+                Some(Type::Promise { ok, .. }) => Some(*ok),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let gen_co = is_generator.then(|| format_ident!("__gen_co_{}", f.id.raw()));
         let written = collect_written_locals(&f.body.block, types);
         let mut locals = HashMap::new();
@@ -461,13 +476,20 @@ impl BodyCtx {
             is_async_generator,
             gen_co,
             ret_inner,
+            async_plain_ok,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
+            continue_target: RefCell::new(None),
+            break_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
+            loop_depth: Cell::new(0),
+            switch_depth: Cell::new(0),
+            try_jump_floor: RefCell::new(Vec::new()),
             next_try_id: Cell::new(0),
+            next_block_id: Cell::new(0),
             shared_by_id,
             shared_by_name,
             own_env,
@@ -477,6 +499,12 @@ impl BodyCtx {
     pub(super) fn alloc_try_id(&self) -> u32 {
         let id = self.next_try_id.get();
         self.next_try_id.set(id + 1);
+        id
+    }
+
+    pub(super) fn alloc_block_id(&self) -> u32 {
+        let id = self.next_block_id.get();
+        self.next_block_id.set(id + 1);
         id
     }
 
@@ -495,13 +523,20 @@ impl BodyCtx {
             is_async_generator: false,
             gen_co: None,
             ret_inner: ret,
+            async_plain_ok: None,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
+            continue_target: RefCell::new(None),
+            break_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
+            loop_depth: Cell::new(0),
+            switch_depth: Cell::new(0),
+            try_jump_floor: RefCell::new(Vec::new()),
             next_try_id: Cell::new(0),
+            next_block_id: Cell::new(0),
             shared_by_id: inherited_ids,
             shared_by_name: inherited_names,
             own_env: None,
@@ -752,6 +787,97 @@ impl BodyCtx {
         self.continue_label.borrow().clone()
     }
 
+    pub(super) fn set_continue_target(&self, label: Option<Ident>) {
+        *self.continue_target.borrow_mut() = label;
+    }
+
+    pub(super) fn continue_target(&self) -> Option<Ident> {
+        self.continue_target.borrow().clone()
+    }
+
+    pub(super) fn set_break_label(&self, label: Option<Ident>) {
+        *self.break_label.borrow_mut() = label;
+    }
+
+    pub(super) fn break_label(&self) -> Option<Ident> {
+        self.break_label.borrow().clone()
+    }
+
+    pub(super) fn with_loop_labels<R>(
+        &self,
+        continue_target: Option<Ident>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let prev_continue = self.continue_label();
+        let prev_break = self.break_label();
+        let prev_target = self.continue_target();
+        self.set_continue_label(None);
+        self.set_break_label(None);
+        self.set_continue_target(continue_target);
+        self.loop_depth.set(self.loop_depth.get() + 1);
+        let result = f();
+        self.loop_depth.set(self.loop_depth.get() - 1);
+        self.set_continue_label(prev_continue);
+        self.set_break_label(prev_break);
+        self.set_continue_target(prev_target);
+        result
+    }
+
+    pub(super) fn enter_loop(&self) {
+        self.loop_depth.set(self.loop_depth.get() + 1);
+    }
+
+    pub(super) fn exit_loop(&self) {
+        self.loop_depth.set(self.loop_depth.get() - 1);
+    }
+
+    pub(super) fn enter_switch(&self) {
+        self.switch_depth.set(self.switch_depth.get() + 1);
+    }
+
+    pub(super) fn exit_switch(&self) {
+        self.switch_depth.set(self.switch_depth.get() - 1);
+    }
+
+    pub(super) fn push_try_floor(&self) {
+        self.try_jump_floor
+            .borrow_mut()
+            .push((self.loop_depth.get(), self.switch_depth.get()));
+    }
+
+    pub(super) fn pop_try_floor(&self) {
+        self.try_jump_floor.borrow_mut().pop();
+    }
+
+    pub(super) fn continue_escapes_try(&self) -> bool {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .is_some_and(|&(loop_floor, _)| loop_floor == self.loop_depth.get())
+    }
+
+    pub(super) fn break_escapes_try(&self) -> bool {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .is_some_and(|&(loop_floor, switch_floor)| {
+                loop_floor == self.loop_depth.get() && switch_floor == self.switch_depth.get()
+            })
+    }
+
+    pub(super) fn try_floor_loop(&self) -> Option<u32> {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .map(|&(loop_floor, _)| loop_floor)
+    }
+
+    pub(super) fn enclosing_try_loop_floor(&self) -> u32 {
+        let floors = self.try_jump_floor.borrow();
+        let len = floors.len();
+        if len >= 2 { floors[len - 2].0 } else { 0 }
+    }
+
     pub(super) fn set_try_label(&self, label: Option<Ident>) {
         *self.try_label.borrow_mut() = label;
     }
@@ -770,6 +896,10 @@ impl BodyCtx {
 
     pub(super) fn return_type_id(&self) -> TypeId {
         self.ret_inner
+    }
+
+    pub(super) fn async_plain_ok(&self) -> Option<TypeId> {
+        self.async_plain_ok
     }
 }
 
@@ -961,7 +1091,7 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
 type FnValueRegistry = (
     HashMap<TypeId, usize>,
     Vec<FnValueSig>,
-    Vec<Vec<(Atom, Ident)>>,
+    Vec<Vec<(Atom, Ident, bool)>>,
     HashMap<Atom, (usize, Ident)>,
 );
 
@@ -1042,7 +1172,8 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
         }
     }
 
-    let mut fn_value_variants: Vec<Vec<(Atom, Ident)>> = vec![Vec::new(); fn_value_sigs.len()];
+    let mut fn_value_variants: Vec<Vec<(Atom, Ident, bool)>> =
+        vec![Vec::new(); fn_value_sigs.len()];
     let mut fn_value_of_fn: HashMap<Atom, (usize, Ident)> = HashMap::new();
     for decl in &program.declarations {
         let funcs: Vec<&MirFunctionDecl> = match decl {
@@ -1062,9 +1193,14 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
                 continue;
             }
             let params: Vec<TypeId> = f.params.iter().map(|p| p.ty).collect();
+            let is_throwing = matches!(types.resolve(f.ret), Some(Type::Result { .. }));
+            let eff_ret = match types.resolve(f.ret) {
+                Some(Type::Result { ok, .. }) => *ok,
+                _ => f.ret,
+            };
             let Some(k) = fn_value_sigs
                 .iter()
-                .position(|s| s.params == params && s.ret == f.ret)
+                .position(|s| s.params == params && s.ret == eff_ret)
             else {
                 continue;
             };
@@ -1074,11 +1210,11 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
             let base = pascal_variant_ident(f.name.as_str());
             let mut variant = base.clone();
             let mut suffix = 0u32;
-            while fn_value_variants[k].iter().any(|(_, v)| *v == variant) {
+            while fn_value_variants[k].iter().any(|(_, v, _)| *v == variant) {
                 suffix += 1;
                 variant = format_ident!("{}{}", base, suffix);
             }
-            fn_value_variants[k].push((f.name.clone(), variant.clone()));
+            fn_value_variants[k].push((f.name.clone(), variant.clone(), is_throwing));
             fn_value_of_fn.insert(f.name.clone(), (k, variant));
         }
     }
