@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
@@ -278,6 +279,24 @@ where
     );
     IN_RUNTIME_RUN.set(true);
     let _guard = RuntimeRunGuard;
+    drive_future(future)
+}
+
+pub fn __ts_aot_run_or_poll<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    if IN_RUNTIME_RUN.get() {
+        drive_future(future)
+    } else {
+        __ts_aot_runtime_run(future)
+    }
+}
+
+fn drive_future<F>(future: F) -> F::Output
+where
+    F: Future,
+{
     let flag = Arc::new(AtomicBool::new(true));
     let waker: Waker = Arc::new(TickWaker {
         flag: Arc::clone(&flag),
@@ -311,6 +330,27 @@ where
                  Promise.race result); cannot make progress"
             ),
         }
+    }
+}
+
+#[must_use]
+pub(crate) fn __ts_aot_panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<crate::string::JsString>() {
+        s.to_string_lossy()
+    } else if let Some(n) = payload.downcast_ref::<i64>() {
+        n.to_string()
+    } else if let Some(n) = payload.downcast_ref::<i32>() {
+        n.to_string()
+    } else if let Some(n) = payload.downcast_ref::<f64>() {
+        n.to_string()
+    } else if let Some(b) = payload.downcast_ref::<bool>() {
+        b.to_string()
+    } else {
+        "uncaught error thrown from async generator".to_owned()
     }
 }
 
@@ -609,12 +649,31 @@ where
     out
 }
 
+fn await_value_settle<T: Clone + 'static>(
+    promise: &Promise<T>,
+    on_reject: impl FnOnce(String) -> T,
+) -> T {
+    match __ts_aot_run_or_poll(__ts_aot_await(promise)) {
+        Ok(v) => v,
+        Err(e) => on_reject(e),
+    }
+}
+
 #[must_use]
 pub fn __ts_aot_await_value<T: Clone + 'static>(promise: &Promise<T>) -> T {
-    match __ts_aot_runtime_run(__ts_aot_await(promise)) {
-        Ok(v) => v,
-        Err(e) => panic!("await on rejected promise: {e}"),
-    }
+    await_value_settle(promise, |e| panic!("await on rejected promise: {e}"))
+}
+
+#[must_use]
+pub fn __ts_aot_await_value_gen<T: Clone + 'static>(promise: &Promise<T>) -> T {
+    await_value_settle(promise, |e| crate::host::__ts_aot_async_generator_throw(e))
+}
+
+#[must_use]
+pub fn __ts_aot_await_value_raw<T: Clone + 'static>(promise: &Promise<T>) -> T {
+    await_value_settle(promise, |e| {
+        crate::host::__ts_aot_throw(crate::string::JsString::from(e.as_str()))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

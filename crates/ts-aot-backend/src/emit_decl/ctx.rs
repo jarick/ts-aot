@@ -229,8 +229,9 @@ pub(super) struct BodyCtx {
     reserved_idents: HashSet<Ident>,
     self_param: Option<LocalId>,
     is_generator: bool,
+    is_async_generator: bool,
     gen_co: Option<Ident>,
-    ret: TypeId,
+    ret_inner: TypeId,
     in_try: Cell<bool>,
     in_tla_main: bool,
     pub(super) weakmap_liveness_per_key: RefCell<BTreeMap<LocalId, Ident>>,
@@ -370,6 +371,15 @@ impl BodyCtx {
             f.kind,
             FunctionKind::Generator | FunctionKind::GeneratorMethod { .. }
         );
+        let is_async_generator = is_generator && f.effects.is_async;
+        let ret_inner = if is_generator {
+            match types.resolve(f.ret) {
+                Some(Type::Generator { inner, .. }) => *inner,
+                _ => f.ret,
+            }
+        } else {
+            f.ret
+        };
         let gen_co = is_generator.then(|| format_ident!("__gen_co_{}", f.id.raw()));
         let written = collect_written_locals(&f.body.block, types);
         let mut locals = HashMap::new();
@@ -448,8 +458,9 @@ impl BodyCtx {
             reserved_idents,
             self_param,
             is_generator,
+            is_async_generator,
             gen_co,
-            ret: f.ret,
+            ret_inner,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
@@ -481,8 +492,9 @@ impl BodyCtx {
             reserved_idents: HashSet::new(),
             self_param: None,
             is_generator: false,
+            is_async_generator: false,
             gen_co: None,
-            ret,
+            ret_inner: ret,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
@@ -673,6 +685,10 @@ impl BodyCtx {
         self.is_generator
     }
 
+    pub(super) fn is_async_generator(&self) -> bool {
+        self.is_async_generator
+    }
+
     pub(super) fn gen_co(&self) -> Option<Ident> {
         self.gen_co.clone()
     }
@@ -753,7 +769,7 @@ impl BodyCtx {
     }
 
     pub(super) fn return_type_id(&self) -> TypeId {
-        self.ret
+        self.ret_inner
     }
 }
 
@@ -1141,7 +1157,7 @@ fn collect_type_ids(
                 collect_type_ids(*e, types, seen, out);
             }
         }
-        Some(Type::Generator { inner } | Type::GeneratorResult { inner }) => {
+        Some(Type::Generator { inner, .. } | Type::GeneratorResult { inner }) => {
             collect_type_ids(*inner, types, seen, out);
         }
         _ => {}

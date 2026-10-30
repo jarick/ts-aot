@@ -13,6 +13,20 @@ such as E0500 are printed first by the driver but do not fail compilation, so
 they are not used for classification).
 
 Defaults to a 500-file sample for fast feedback; pass --max 0 for the full set.
+
+Requires PyYAML (declared in tests/requirements.txt). Install the harness
+dependencies before the first run with:
+
+    python -m pip install -r tests/requirements.txt   # `python3` on Linux/macOS
+
+or `just test262-deps` (which picks `python` or `python3` automatically).
+`just test262` builds the release driver and runs the harness over the full set.
+
+Setup: the harness compiles the flattened test262 tests found in
+tests/harness-out (one `*.ts` file per test). That directory is generated from
+the test262 corpus checked out at tests/test262 and is not committed. No in-repo
+generator is provided, so populate tests/harness-out with the flattened tests
+before the first run; the harness exits with an error if it is missing or empty.
 """
 import argparse
 import json
@@ -20,6 +34,8 @@ import re
 import subprocess
 import sys
 import time
+
+import yaml
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -29,6 +45,22 @@ HARNESS_DIR = ROOT / "harness-out"
 TS_AOT = ROOT.parent / "target" / "release" / "ts-aot.exe"
 
 ERROR_RE = re.compile(r"\b([EPS]\d{4}): error:")
+PARSE_REJECT_CODES = frozenset({"E0100", "E0200"})
+FRONTMATTER_RE = re.compile(r"/\*---(.*?)---\*/", re.S)
+
+
+def expected_compile_failure(text: str) -> bool:
+    m = FRONTMATTER_RE.search(text)
+    if not m:
+        return False
+    try:
+        meta = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        return False
+    if not isinstance(meta, dict):
+        return False
+    negative = meta.get("negative")
+    return isinstance(negative, dict) and negative.get("phase") == "parse"
 
 
 def compile_one(ts_path: Path, emit: str, timeout_s: int = 15):
@@ -48,6 +80,21 @@ def compile_one(ts_path: Path, emit: str, timeout_s: int = 15):
         return -2, f"EXCEPTION: {e}"
 
 
+def record_sample(slot, ts_path: Path, primary: str, stderr: str, key: str = "sample") -> None:
+    if len(slot[key]) >= 8:
+        return
+    err_lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    first_err = next(
+        (ln for ln in err_lines if ": error:" in ln),
+        err_lines[0] if err_lines else "",
+    )
+    slot[key].append({
+        "file": ts_path.name,
+        "primary": primary,
+        "first_err": first_err,
+    })
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max", type=int, default=500, help="Max tests to run (None for all)")
@@ -61,8 +108,13 @@ def main():
     if not TS_AOT.exists():
         print(f"ERROR: ts-aot not found at {TS_AOT}; build it first", file=sys.stderr)
         sys.exit(1)
-    if not HARNESS_DIR.exists():
-        print(f"ERROR: harness dir not found at {HARNESS_DIR}", file=sys.stderr)
+    if not HARNESS_DIR.exists() or not any(HARNESS_DIR.glob("*.ts")):
+        print(
+            f"ERROR: no test262 tests found in {HARNESS_DIR}; populate it with the "
+            f"flattened `*.ts` tests derived from the test262 corpus before running "
+            f"the harness (see the module docstring for setup)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     test_files = sorted(p for p in HARNESS_DIR.glob("*.ts") if p.name != "runtime.zig")
@@ -73,42 +125,55 @@ def main():
           file=sys.stderr)
 
     by_emit = {e: {"pass": 0, "fail": 0, "other": 0,
+                   "neg_rejected": 0, "false_accept": 0,
                    "primary": Counter(), "all_codes": Counter(),
-                   "sample": []} for e in emits}
+                   "sample": [], "false_accept_sample": [],
+                   "crash_sample": [], "timeout_sample": []} for e in emits}
     t0 = time.time()
 
     def job(ts, emit):
-        return ts, emit, compile_one(ts, emit)
+        text = ts.read_text(encoding="utf-8", errors="replace")
+        return ts, emit, compile_one(ts, emit), expected_compile_failure(text)
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = [ex.submit(job, ts, e) for ts in test_files for e in emits]
         done = 0
         total_jobs = len(futs)
         for f in as_completed(futs):
-            ts, emit, (code, stderr) = f.result()
+            ts, emit, (code, stderr), expect_fail = f.result()
             slot = by_emit[emit]
             if code == 0:
                 slot["pass"] += 1
-            elif code in (-1, -2):
-                slot["other"] += 1
+                if expect_fail:
+                    slot["false_accept"] += 1
+                    if len(slot["false_accept_sample"]) < 8:
+                        slot["false_accept_sample"].append({"file": ts.name})
+            elif code == 101:
+                slot["fail"] += 1
+                slot["primary"]["CRASH"] += 1
+                record_sample(slot, ts, "CRASH", stderr, key="crash_sample")
+            elif code == -2:
+                slot["fail"] += 1
+                slot["primary"]["EXCEPTION"] += 1
+                record_sample(slot, ts, "EXCEPTION", stderr, key="crash_sample")
+            elif code == -1:
+                slot["fail"] += 1
+                slot["primary"]["TIMEOUT"] += 1
+                record_sample(slot, ts, "TIMEOUT", stderr, key="timeout_sample")
+            elif code < 0:
+                slot["fail"] += 1
+                slot["primary"]["SIGNAL"] += 1
+                record_sample(slot, ts, "SIGNAL", stderr, key="crash_sample")
             else:
                 slot["fail"] += 1
                 codes = ERROR_RE.findall(stderr)
+                if expect_fail and any(c in PARSE_REJECT_CODES for c in codes):
+                    slot["neg_rejected"] += 1
                 primary = codes[0] if codes else "UNKNOWN"
                 slot["primary"][primary] += 1
                 for c in codes:
                     slot["all_codes"][c] += 1
-                if len(slot["sample"]) < 8:
-                    err_lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
-                    first_err = next(
-                        (ln for ln in err_lines if ": error:" in ln),
-                        err_lines[0] if err_lines else "",
-                    )
-                    slot["sample"].append({
-                        "file": ts.name,
-                        "primary": primary,
-                        "first_err": first_err,
-                    })
+                record_sample(slot, ts, primary, stderr)
             done += 1
             if done % 500 == 0 or done == total_jobs:
                 rate = done / max(time.time() - t0, 0.001)
@@ -124,6 +189,10 @@ def main():
         run = s["pass"] + s["fail"] + s["other"]
         rate = 100.0 * s["pass"] / max(run, 1)
         print(f"[{emit}] pass={s['pass']}/{run}  fail={s['fail']}  other={s['other']}  ({rate:.2f}%)")
+        compile_outcome = s["pass"] - s["false_accept"] + s["neg_rejected"]
+        compile_outcome_rate = 100.0 * compile_outcome / max(run, 1)
+        print(f"[{emit}] compile_outcome={compile_outcome}/{run}  ({compile_outcome_rate:.2f}%)  "
+              f"neg_rejected={s['neg_rejected']}  false_accept={s['false_accept']}")
         if s["fail"]:
             print(f"  Primary errors:")
             for c, n in s["primary"].most_common(5):
@@ -135,6 +204,15 @@ def main():
             for s2 in s["sample"][:5]:
                 print(f"    [{s2['primary']}] {s2['file']}")
                 print(f"        {s2['first_err']}")
+        if s["false_accept"]:
+            print(f"  False accepts (expected parse-reject but compiled):")
+            for s2 in s["false_accept_sample"][:5]:
+                print(f"    {s2['file']}")
+        for label, key in (("Crashes/exceptions", "crash_sample"), ("Timeouts", "timeout_sample")):
+            if s[key]:
+                print(f"  {label}:")
+                for s2 in s[key][:5]:
+                    print(f"    [{s2['primary']}] {s2['file']}: {s2['first_err']}")
         print()
 
     report_path = ROOT / "test262-report.json"
@@ -147,9 +225,19 @@ def main():
             "fail": by_emit[e]["fail"],
             "other": by_emit[e]["other"],
             "pass_rate": round(100.0 * by_emit[e]["pass"] / max(by_emit[e]["pass"] + by_emit[e]["fail"] + by_emit[e]["other"], 1), 2),
+            "neg_rejected": by_emit[e]["neg_rejected"],
+            "false_accept": by_emit[e]["false_accept"],
+            "compile_outcome_rate": round(
+                100.0 * (by_emit[e]["pass"] - by_emit[e]["false_accept"] + by_emit[e]["neg_rejected"])
+                / max(by_emit[e]["pass"] + by_emit[e]["fail"] + by_emit[e]["other"], 1),
+                2,
+            ),
             "primary_codes": dict(by_emit[e]["primary"]),
             "all_codes": dict(by_emit[e]["all_codes"]),
             "sample": by_emit[e]["sample"],
+            "false_accept_samples": by_emit[e]["false_accept_sample"],
+            "crash_samples": by_emit[e]["crash_sample"],
+            "timeout_samples": by_emit[e]["timeout_sample"],
         } for e in emits},
     }, indent=2))
     print(f"Report written to {report_path}")

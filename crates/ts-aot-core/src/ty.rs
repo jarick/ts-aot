@@ -79,8 +79,12 @@ pub enum Type {
     },
     Generator {
         inner: TypeId,
+        is_async: bool,
     },
     GeneratorResult {
+        inner: TypeId,
+    },
+    AsyncGenYield {
         inner: TypeId,
     },
     GenericParam {
@@ -418,12 +422,15 @@ mod tests {
     fn generator_equality_depends_on_inner_type() {
         let a = Type::Generator {
             inner: TypeId::from_raw(7),
+            is_async: false,
         };
         let b = Type::Generator {
             inner: TypeId::from_raw(7),
+            is_async: false,
         };
         let c = Type::Generator {
             inner: TypeId::from_raw(8),
+            is_async: false,
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
@@ -445,7 +452,8 @@ mod tests {
         assert_ne!(
             a,
             Type::Generator {
-                inner: TypeId::from_raw(1)
+                inner: TypeId::from_raw(1),
+                is_async: false
             },
             "Generator and GeneratorResult must remain distinct"
         );

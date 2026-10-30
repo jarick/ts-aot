@@ -161,7 +161,9 @@ fn process_generator_function(
         return;
     }
 
-    if let Some(span) = analysis.first_expression_yield_span {
+    if !f.is_async
+        && let Some(span) = analysis.first_expression_yield_span
+    {
         ctx.error(
             GENERATOR_DIAG_UNSUPPORTED_YIELD,
             "yield in expression position is not supported yet \
@@ -174,17 +176,15 @@ fn process_generator_function(
 
     if analysis.has_throw {
         let span = analysis.first_throw_span.unwrap_or_else(|| Span::new(0, 0));
-        ctx.error(
+        ctx.warning(
             GENERATOR_DIAG_UNSUPPORTED_YIELD,
-            "throw inside a generator is not supported yet \
-             (throw before the generator is created instead)",
+            "throw inside a generator is lowered to a panic that propagates out of `next()`; \
+             catch it around the `next()` call",
             span,
         );
-        stats.generators_rejected += 1;
-        return;
     }
 
-    if analysis.has_await {
+    if analysis.has_await && !f.is_async {
         let span = analysis.first_await_span.unwrap_or_else(|| Span::new(0, 0));
         ctx.error(
             GENERATOR_DIAG_UNSUPPORTED_YIELD,
@@ -217,7 +217,10 @@ fn process_generator_function(
         f.body.push(HirStmt::Return { value: None });
     }
 
-    let generator_ty = types.intern(&Type::Generator { inner: inner_ty });
+    let generator_ty = types.intern(&Type::Generator {
+        inner: inner_ty,
+        is_async: f.is_async,
+    });
     f.ret = generator_ty;
     generator_fn_names.insert(qualified_name(namespace_path, f.name.as_str()));
     stats.generators_transformed += 1;

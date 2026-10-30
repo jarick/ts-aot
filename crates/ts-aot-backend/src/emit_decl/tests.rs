@@ -972,7 +972,10 @@ fn reassigned_param_emits_mut_in_signature() {
 fn generator_next_consumes_param_emits_mut_in_signature() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let gen_result_ty = types.intern(&Type::GeneratorResult { inner: i64_ty });
     let g_param = LocalId::from_raw(1);
     let temp = LocalId::from_raw(2);
@@ -1011,7 +1014,10 @@ fn generator_next_consumes_param_emits_mut_in_signature() {
 fn indirect_generator_next_consumes_param_emits_mut() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let gen_result_ty = types.intern(&Type::GeneratorResult { inner: i64_ty });
     let struct_id = StructId::from_raw(0);
     let box_ty = types.intern(&Type::Struct { id: struct_id });
@@ -1813,7 +1819,10 @@ fn emit_type_result_resolves_ok_and_err_via_table() {
 fn emit_type_generator_emits_namespaced_generic() {
     let mut types = TypeTable::new();
     let i64_id = types.intern(&Type::I64);
-    let gen_id = types.intern(&Type::Generator { inner: i64_id });
+    let gen_id = types.intern(&Type::Generator {
+        inner: i64_id,
+        is_async: false,
+    });
     let tokens = emit_type_id(gen_id, &types);
     assert_eq!(
         tokens.to_string(),
@@ -2661,6 +2670,321 @@ fn yield_inside_try_finally_is_allowed() {
     prog.push_decl(MirDecl::Function(func));
     emit_decls(&prog, &ts_aot_core::TypeTable::new())
         .expect("yield in finally must remain valid (finally is outside the catch_unwind closure)");
+}
+
+#[test]
+fn async_generator_return_inside_try_uses_inner_slot_and_wraps_finished() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                        value: 1,
+                        ty: i64_ty,
+                    }))],
+                },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock::new()),
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("__return_slot_0 : Option < Option < i64 >>"),
+        "generator try slot must use the inner return type (i64), got:\n{s}"
+    );
+    assert!(
+        s.contains("AsyncGenYield :: finished (__v)"),
+        "async generator replay must wrap the slot value in AsyncGenYield::finished, got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_try_finally_wraps_rethrow_for_promise_rejection() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock::new()),
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(
+        s.contains("__ts_aot_async_generator_rethrow"),
+        "async generator try/finally must wrap the rethrow so next() rejects, got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_nested_try_wraps_rethrow_only_at_outermost() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    let inner = MirStmt::Try {
+        body: MirBlock::new(),
+        catch_param: None,
+        catch: None,
+        finally: Some(MirBlock::new()),
+    };
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock { stmts: vec![inner] },
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock::new()),
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert_eq!(
+        s.matches("__ts_aot_async_generator_rethrow").count(),
+        1,
+        "only the outermost try in a nested async-generator try must wrap the escape payload (nested tries keep it raw), got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_nested_finally_throw_uses_raw_path_for_outer_catch() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let str_ty = types.intern(&Type::String);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let catch_local = LocalId::from_raw(0);
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    let inner = MirStmt::Try {
+        body: MirBlock::new(),
+        catch_param: None,
+        catch: None,
+        finally: Some(MirBlock {
+            stmts: vec![MirStmt::Throw {
+                error: MirExpr::String {
+                    id: Atom::from("boom"),
+                    ty: str_ty,
+                },
+                error_ty: str_ty,
+            }],
+        }),
+    };
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: catch_local,
+            name: Atom::from("e"),
+            ty: str_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock { stmts: vec![inner] },
+                catch_param: Some(catch_local),
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    let normalized: String = s.split_whitespace().collect();
+    assert!(
+        normalized.contains("downcast"),
+        "the enclosing catch must be emitted so it can run for the nested-finally throw, got:\n{s}"
+    );
+    assert!(
+        normalized.contains("__ts_aot_throw("),
+        "a throw inside a nested finally must use the raw throw path so the enclosing catch catches it, got:\n{s}"
+    );
+    assert!(
+        !normalized.contains("__ts_aot_async_generator_throw("),
+        "a nested-finally throw must not be wrapped as an async-generator throw (the enclosing catch would miss it), got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_await_inside_try_uses_raw_helper_for_catch() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let catch_local = LocalId::from_raw(0);
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: catch_local,
+            name: Atom::from("e"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Expr(MirExpr::Await {
+                        expr: Box::new(MirExpr::Int {
+                            value: 0,
+                            ty: promise_ty,
+                        }),
+                        ty: i64_ty,
+                    })],
+                },
+                catch_param: Some(catch_local),
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    let normalized: String = s.split_whitespace().collect();
+    assert!(
+        normalized.contains("__ts_aot_await_value_raw"),
+        "an await inside a try must use the raw helper so the enclosing catch catches the rejection, got:\n{s}"
+    );
+    assert!(
+        !normalized.contains("__ts_aot_await_value_gen"),
+        "inside a try an async-generator await must not reject through next(), got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_inner_try_inside_outer_finally_wraps_rethrow() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let str_ty = types.intern(&Type::String);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    let inner = MirStmt::Try {
+        body: MirBlock {
+            stmts: vec![MirStmt::Throw {
+                error: MirExpr::String {
+                    id: Atom::from("boom"),
+                    ty: str_ty,
+                },
+                error_ty: str_ty,
+            }],
+        },
+        catch_param: None,
+        catch: None,
+        finally: Some(MirBlock::new()),
+    };
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: None,
+                catch: None,
+                finally: Some(MirBlock { stmts: vec![inner] }),
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert_eq!(
+        s.matches("__ts_aot_async_generator_rethrow").count(),
+        2,
+        "the outer try and the inner try (emitted inside the outer finally) must each wrap their escape payload, got:\n{s}"
+    );
+}
+
+#[test]
+fn async_generator_catch_mismatch_wraps_rethrow_for_promise_rejection() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: true,
+    });
+    let catch_local = LocalId::from_raw(0);
+    let mut f = empty_func("g");
+    f.ret = gen_ty;
+    f.kind = FunctionKind::Generator;
+    f.effects.is_async = true;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: catch_local,
+            name: Atom::from("e"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: Some(catch_local),
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    let normalized: String = s.split_whitespace().collect();
+    assert!(
+        normalized.contains("resume_unwind(ts_aot_runtime::__ts_aot_async_generator_rethrow("),
+        "async generator catch-parameter mismatch must wrap the rethrow so next() rejects, got:\n{s}"
+    );
 }
 
 #[test]
@@ -4580,7 +4904,10 @@ fn for_of_item_consumed_by_map_set_marks_item_mut() {
 fn for_of_generator_iterable_marks_iterable_param_mut() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let gen_param = LocalId::from_raw(0);
     let item = LocalId::from_raw(1);
     let mut f = empty_func("drain");
@@ -4625,7 +4952,10 @@ fn for_of_generator_iterable_marks_iterable_param_mut() {
 fn closure_param_for_of_generator_iterable_emits_mut() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let outer_param = LocalId::from_raw(0);
     let closure_param = LocalId::from_raw(10);
     let item = LocalId::from_raw(11);

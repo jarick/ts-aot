@@ -232,11 +232,19 @@ impl SkeletonBuilder {
         let binding = self.for_binding(senv, &f.left, scope);
         let body = self.walk_child(senv, &f.body, scope);
         scope.pop();
-        out.push(HirStmt::ForOf {
-            binding,
-            iter,
-            body,
-        });
+        if f.r#await {
+            out.push(HirStmt::ForAwaitOf {
+                binding,
+                iter,
+                body,
+            });
+        } else {
+            out.push(HirStmt::ForOf {
+                binding,
+                iter,
+                body,
+            });
+        }
     }
 
     fn walk_for_in(

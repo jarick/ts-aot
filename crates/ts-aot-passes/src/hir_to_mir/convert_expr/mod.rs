@@ -105,6 +105,14 @@ impl ExprConverter {
                 }
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
+                let field_ty = match types.resolve(owner.ty()) {
+                    Some(Type::AsyncGenYield { inner }) => match field_name.as_str() {
+                        "value" => types.intern(&Type::Optional { inner: *inner }),
+                        "done" => types.intern(&Type::Bool),
+                        _ => *ty,
+                    },
+                    _ => *ty,
+                };
                 MirExpr::Field {
                     base: Box::new(self.convert_expr(
                         owner,
@@ -115,7 +123,7 @@ impl ExprConverter {
                         ctx,
                     )),
                     field: resolved_field,
-                    ty: *ty,
+                    ty: field_ty,
                 }
             }
             HirExpr::Index {

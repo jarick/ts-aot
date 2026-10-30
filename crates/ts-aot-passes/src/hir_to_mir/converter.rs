@@ -413,6 +413,23 @@ impl ExprConverter {
             );
             return placeholder;
         };
+        if matches!(types.resolve(ty), Some(Type::AsyncGenYield { .. })) {
+            return match field_name.as_str() {
+                "value" => FieldId::from_raw(0),
+                "done" => FieldId::from_raw(1),
+                _ => {
+                    ctx.warning(
+                        "P0012",
+                        format!(
+                            "`AsyncGenYield` has no field `{}`; expected `value` or `done`",
+                            field_name.as_str()
+                        ),
+                        Span::new(0, 0),
+                    );
+                    placeholder
+                }
+            };
+        }
         if matches!(types.resolve(ty), Some(Type::Error)) {
             ctx.warning(
                 "P0013",

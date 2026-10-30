@@ -44,9 +44,15 @@ pub(super) fn emit_body(
                     .to_string(),
             )
         })?;
-        Ok(quote!({
-            ts_aot_runtime::__ts_aot_generator_new(|#co| async move { #(#stmts)* })
-        }))
+        if body_ctx.is_async_generator() {
+            Ok(quote!({
+                ts_aot_runtime::__ts_aot_async_generator_new(|#co| async move { #(#stmts)* })
+            }))
+        } else {
+            Ok(quote!({
+                ts_aot_runtime::__ts_aot_generator_new(|#co| async move { #(#stmts)* })
+            }))
+        }
     } else {
         Ok(quote!({ #(#stmts)* }))
     }
@@ -141,9 +147,20 @@ fn emit_return_stmt(
         };
         Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
     } else if body_ctx.is_generator() {
+        let async_gen = body_ctx.is_async_generator();
         if let Some(expr) = slot {
             let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-            Ok(quote!(return Some(#expr);))
+            if async_gen {
+                Ok(quote!(
+                    return Some(ts_aot_runtime::AsyncGenYield::finished(Some(#expr)));
+                ))
+            } else {
+                Ok(quote!(return Some(#expr);))
+            }
+        } else if async_gen {
+            Ok(quote!(
+                return Some(ts_aot_runtime::AsyncGenYield::finished(None));
+            ))
         } else {
             Ok(quote!(return None;))
         }
@@ -250,8 +267,10 @@ fn emit_stmt(
         MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, emit_env, body_ctx),
         MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
             let error = emit_expr(error, ctx, emit_env, body_ctx)?;
-            if body_ctx.in_try() {
-                Ok(quote!(__ts_aot_throw(#error);))
+            if body_ctx.is_async_generator() && !body_ctx.in_try() {
+                Ok(quote!(ts_aot_runtime::__ts_aot_async_generator_throw(#error);))
+            } else if body_ctx.in_try() || body_ctx.is_generator() {
+                Ok(quote!(ts_aot_runtime::__ts_aot_throw(#error);))
             } else {
                 Ok(quote!(return Err(#error);))
             }
@@ -273,7 +292,7 @@ fn emit_stmt(
             let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
             Ok(quote!(while #cond { #(#body_stmts)* }))
         }
-        MirStmt::ForOf {
+        this @ (MirStmt::ForOf {
             item,
             iterable,
             iter_ty,
@@ -284,7 +303,12 @@ fn emit_stmt(
             iterable,
             iter_ty,
             body,
-        } => {
+        }) => {
+            let is_for_await = matches!(this, MirStmt::ForAwaitOf { .. });
+            let iter_local = match iterable {
+                MirExpr::Local(id) => Some(*id),
+                _ => None,
+            };
             let item_id = *item;
             let item_ident = body_ctx.local_ident(item_id);
             let item = if body_ctx.local_mut(item_id) {
@@ -301,6 +325,60 @@ fn emit_stmt(
                 emit_weakmap_liveness_reset(&MirPlace::Local { id: item_id }, body_ctx);
             if !liveness_reset.is_empty() {
                 body_stmts.insert(0, liveness_reset);
+            }
+            if is_for_await
+                && matches!(
+                    types.resolve(*iter_ty),
+                    Some(ts_aot_core::Type::Generator { is_async: true, .. })
+                )
+            {
+                let await_path = await_helper_path(body_ctx);
+                let (owner_init, advance) = if let Some(id) = iter_local {
+                    if let Some(acc) = body_ctx.shared_access_for_local(id)
+                        && acc.storage == SharedStorage::RefCell
+                    {
+                        let env = &acc.env_ident;
+                        let field = &acc.field;
+                        (
+                            quote!(),
+                            quote! {{
+                                let mut __for_await_guard = #env.#field.borrow_mut();
+                                let __for_await_iter = __for_await_guard.as_mut().unwrap();
+                                #await_path(&__for_await_iter.next())
+                            }},
+                        )
+                    } else {
+                        (
+                            quote!(),
+                            quote! {{
+                                let __for_await_iter = &mut #iterable;
+                                #await_path(&__for_await_iter.next())
+                            }},
+                        )
+                    }
+                } else {
+                    (
+                        quote!(let mut __for_await_owner = #iterable;),
+                        quote! {{
+                            let __for_await_iter = &mut __for_await_owner;
+                            #await_path(&__for_await_iter.next())
+                        }},
+                    )
+                };
+                return Ok(quote!({
+                    #owner_init
+                    loop {
+                        let __for_await_yield = #advance;
+                        if __for_await_yield.done {
+                            break;
+                        }
+                        let #item = match __for_await_yield.value {
+                            Some(__for_await_value) => __for_await_value,
+                            None => break,
+                        };
+                        #(#body_stmts)*
+                    }
+                }));
             }
             let needs_mut_ref = matches!(
                 types.resolve(*iter_ty),
@@ -608,6 +686,20 @@ fn emit_expr(
                 let field = ctx.struct_field_ident(struct_id, *field);
                 return Ok(quote!(#map.map(|o| o.#field)));
             }
+            if let Some(base_ty) = expr_base_ty(base, body_ctx)
+                && matches!(
+                    types.resolve(base_ty),
+                    Some(ts_aot_core::Type::AsyncGenYield { .. })
+                )
+            {
+                let field_ident = if field.raw() == 0 {
+                    format_ident!("value")
+                } else {
+                    format_ident!("done")
+                };
+                let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+                return Ok(quote!(#base.#field_ident));
+            }
             let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
             let struct_id = types
                 .struct_id(base_ty)
@@ -704,7 +796,8 @@ fn emit_expr(
                     .is_some_and(|ty| matches!(ty, Type::Promise { .. }));
             if needs_helper {
                 let ok_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
-                Ok(quote!(ts_aot_runtime::__ts_aot_await_value::<#ok_ty>(&#inner)))
+                let helper = await_helper_path(body_ctx);
+                Ok(quote!(#helper::<#ok_ty>(&#inner)))
             } else {
                 Ok(inner)
             }
@@ -757,7 +850,13 @@ fn emit_expr(
             } else {
                 quote!(())
             };
-            Ok(quote!(#co.yield_(#value).await))
+            if body_ctx.is_async_generator() {
+                Ok(quote!(
+                    #co.yield_(ts_aot_runtime::AsyncGenYield::yielded(#value)).await
+                ))
+            } else {
+                Ok(quote!(#co.yield_(#value).await))
+            }
         }
         MirExpr::Closure {
             id: _,
@@ -1771,6 +1870,16 @@ fn emit_switch(
     Ok(quote!(match #disc_expr { #(#arms),* }))
 }
 
+fn await_helper_path(body_ctx: &BodyCtx) -> TokenStream {
+    if body_ctx.in_try() {
+        quote!(ts_aot_runtime::__ts_aot_await_value_raw)
+    } else if body_ctx.is_async_generator() {
+        quote!(ts_aot_runtime::__ts_aot_await_value_gen)
+    } else {
+        quote!(ts_aot_runtime::__ts_aot_await_value)
+    }
+}
+
 fn emit_try(
     body: &MirBlock,
     catch_param: Option<LocalId>,
@@ -1803,15 +1912,14 @@ fn emit_try(
         None
     };
 
-    body_ctx.set_in_try(false);
+    body_ctx.set_in_try(prev_in_try);
     body_ctx.set_try_label(None);
+    body_ctx.set_return_slot(prev_return_slot);
     let finally_stmts = if let Some(fin) = finally {
         Some(emit_block_stmts(fin, ctx, emit_env, body_ctx)?)
     } else {
         None
     };
-    body_ctx.set_in_try(prev_in_try);
-    body_ctx.set_return_slot(prev_return_slot);
 
     let catch_unwind = format_ident!("catch_unwind");
     let assert_unwind_safe = format_ident!("AssertUnwindSafe");
@@ -1825,12 +1933,19 @@ fn emit_try(
     };
     let slot_decl = quote!(let mut #slot_ident: #slot_ty = None;);
     let is_nested = body_ctx.return_slot().is_some();
+    let wrap_escape = body_ctx.is_async_generator() && !is_nested;
     let outer_slot_ident = body_ctx.return_slot();
     let replay_return = if is_nested {
         let outer_slot = outer_slot_ident.expect("nested try must have an outer return slot");
         quote! {
             if let Some(__v) = #slot_ident {
                 #outer_slot = Some(__v);
+            }
+        }
+    } else if body_ctx.is_async_generator() {
+        quote! {
+            if let Some(__v) = #slot_ident {
+                return Some(ts_aot_runtime::AsyncGenYield::finished(__v));
             }
         }
     } else {
@@ -1852,10 +1967,15 @@ fn emit_try(
                 .shared_access_for_local(param)
                 .map(|acc| shared_write_tokens(&acc, &quote!(#param_ident)))
                 .unwrap_or_default();
+            let mismatch_rethrow = if wrap_escape {
+                quote!(ts_aot_runtime::__ts_aot_async_generator_rethrow(__e))
+            } else {
+                quote!(__e)
+            };
             quote! {
                 let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
                     Ok(v) => *v,
-                    Err(__e) => std::panic::#resume_unwind(__e),
+                    Err(__e) => std::panic::#resume_unwind(#mismatch_rethrow),
                 };
                 #shared_write
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
@@ -1877,11 +1997,6 @@ fn emit_try(
         }
     } else if finally_stmts.is_some() {
         quote! {
-            let __e = if let Ok(__sentinel) = __e.downcast::<TsAotThrowSentinel>() {
-                __sentinel
-            } else {
-                std::panic::#resume_unwind(__e)
-            };
             __pending_throw = Some(__e);
         }
     } else {
@@ -1892,6 +2007,12 @@ fn emit_try(
         quote! { #(#finally_stmts)* }
     } else {
         quote! {}
+    };
+
+    let final_rethrow = if wrap_escape {
+        quote!(ts_aot_runtime::__ts_aot_async_generator_rethrow(__e))
+    } else {
+        quote!(__e)
     };
 
     Ok(quote! {{
@@ -1911,7 +2032,7 @@ fn emit_try(
         }
         #finally_block
         if let Some(__e) = __pending_throw {
-            std::panic::#resume_unwind(__e);
+            std::panic::#resume_unwind(#final_rethrow);
         }
         #replay_return
     }})

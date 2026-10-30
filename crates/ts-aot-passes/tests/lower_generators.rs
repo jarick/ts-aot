@@ -164,7 +164,10 @@ fn lower_generators_rewrites_ret_and_keeps_body() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     push_generator(
         &mut hir,
         "gen",
@@ -681,7 +684,7 @@ fn lower_generators_rejects_await_inside_generator() {
 }
 
 #[test]
-fn lower_generators_rejects_throw_inside_generator() {
+fn lower_generators_supports_throw_inside_generator() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
@@ -697,14 +700,14 @@ fn lower_generators_rejects_throw_inside_generator() {
         ],
     );
     let stats = lower_generators(&mut hir, &mut types, &mut ctx);
-    assert_eq!(stats.generators_transformed, 0);
-    assert_eq!(stats.generators_rejected, 1);
-    assert!(ctx.has_errors());
+    assert_eq!(stats.generators_transformed, 1);
+    assert_eq!(stats.generators_rejected, 0);
+    assert!(!ctx.has_errors());
     let diag = ctx
         .diagnostics()
         .iter()
         .find(|d| d.code.as_str() == "E0501")
-        .expect("E0501 diagnostic must be present");
+        .expect("E0501 warning must be present");
     assert!(diag.message.contains("throw"));
 }
 
@@ -1223,7 +1226,10 @@ fn lower_generators_propagates_generator_type_through_yield_call() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let pre_call_ty = types.intern(&Type::Error);
     let inner = call_to_global("gen", pre_call_ty);
     let yield_expr = HirExpr::Yield {
@@ -1296,7 +1302,10 @@ fn propagate_generator_types_dedups_global_span_diagnostic() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     push_generator(
         &mut hir,
         "gen",
@@ -1354,7 +1363,10 @@ fn propagate_generator_types_reaches_nested_namespace_functions() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let nested_gen = HirFunction {
         name: Atom::from("nested_gen"),
         params: Vec::new(),
@@ -1495,7 +1507,10 @@ fn propagate_generator_types_keeps_separate_generators_per_namespace() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let make_gen = || HirFunction {
         name: Atom::from("gen"),
@@ -1599,7 +1614,10 @@ fn propagate_generator_types_resolves_namespace_scoped_next() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let gen_fn = HirFunction {
         name: Atom::from("gen"),
@@ -1737,7 +1755,10 @@ fn propagate_generator_types_resolves_bare_name_global_call_in_namespace() {
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let gen_fn = HirFunction {
         name: Atom::from("gen"),
@@ -1928,7 +1949,10 @@ fn propagate_generator_types_does_not_shadow_root_generator_with_namespace_plain
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let root_gen = HirFunction {
         name: Atom::from("gen"),
@@ -2153,7 +2177,10 @@ fn propagate_generator_types_qualifier_does_not_shadow_root_generator_with_names
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let root_gen = HirFunction {
         name: Atom::from("gen"),
@@ -2288,7 +2315,10 @@ fn propagate_generator_types_resolves_root_generator_bare_from_namespace_without
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let root_gen = HirFunction {
         name: Atom::from("gen"),
@@ -2480,7 +2510,10 @@ fn propagate_generator_types_skips_root_generator_shadowed_by_namespaced_global(
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let root_gen = HirFunction {
         name: Atom::from("gen"),
@@ -2622,7 +2655,10 @@ fn propagate_generator_types_skips_outer_generator_shadowed_by_inner_namespace_n
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
 
     let root_gen = HirFunction {
         name: Atom::from("gen"),
@@ -2843,7 +2879,10 @@ fn propagate_generator_types_does_not_reassign_closure_local_sharing_outer_local
     let (mut types, mut ctx) = (TypeTable::new(), PassContext::new());
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     let i64_ty = types.intern(&Type::I64);
-    let gen_ty = types.intern(&Type::Generator { inner: i64_ty });
+    let gen_ty = types.intern(&Type::Generator {
+        inner: i64_ty,
+        is_async: false,
+    });
     let unit_ty = types.intern(&Type::Void);
 
     let shared_local_id = LocalId::from_raw(0);

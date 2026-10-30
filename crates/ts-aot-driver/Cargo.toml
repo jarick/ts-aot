@@ -20,6 +20,9 @@ ts-aot-ir-hir = { path = "../ts-aot-ir-hir" }
 ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
 ts-aot-passes = { path = "../ts-aot-passes" }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"

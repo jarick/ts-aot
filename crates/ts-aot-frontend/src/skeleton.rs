@@ -87,6 +87,7 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) type_param_stack: Vec<TypeParamMap>,
     pub(crate) in_static_method: bool,
     pub(crate) module: bool,
+    pub(crate) strict: bool,
     pub(crate) tla_main_body: Vec<TlaMainItem>,
     pub(crate) tla_main_name: Atom,
     pub(crate) tla_top_level_scope: BodyScope,
@@ -158,6 +159,7 @@ impl SkeletonBuilder {
             type_param_stack: Vec::new(),
             in_static_method: false,
             module,
+            strict: module,
             tla_main_body: Vec::new(),
             tla_main_name,
             tla_top_level_scope: BodyScope::new(0),
@@ -166,6 +168,7 @@ impl SkeletonBuilder {
     }
 
     pub(crate) fn build(mut self, senv: &mut SkeletonEnv<'_>, program: &Program<'_>) {
+        self.strict = self.module || crate::util::directives_have_use_strict(&program.directives);
         self.pre_register_class_types(senv, program);
         self.pre_resolve_all_aliases(senv, program);
         for stmt in &program.body {

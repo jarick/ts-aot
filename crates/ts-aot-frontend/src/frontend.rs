@@ -70,6 +70,22 @@ impl FrontendPass {
         }
 
         let oxc_program: &Program<'_> = &ret.program;
+        if source.contains("use strict") {
+            for sem_err in &oxc_semantic::SemanticBuilder::new()
+                .with_check_syntax_error(true)
+                .build(oxc_program)
+                .diagnostics
+            {
+                let msg = sem_err.to_string();
+                if msg.contains("non-simple parameter list") {
+                    diagnostics.push(Diagnostic::error(
+                        PARSE_ERROR_CODE,
+                        format!("parse error: {msg}"),
+                        crate::semantic_analyze::error_span(sem_err),
+                    ));
+                }
+            }
+        }
         let mut senv = SkeletonEnv {
             types,
             diagnostics: &mut diagnostics,
