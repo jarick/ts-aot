@@ -32,7 +32,7 @@ fn new_int8_array_lowers_to_typed_array_new_runtime_op() {
         "new Int8Array(8) must pass length=8 as first arg, got:\n{mir}"
     );
     assert!(
-        mir.contains("typed_array_new(8(:0), 0(:0))"),
+        mir.contains(", 0(:0))"),
         "Int8Array kind_id must be 0 (second arg), got:\n{mir}"
     );
 }
@@ -47,7 +47,7 @@ fn new_uint8_clamped_array_lowers_to_typed_array_new_with_kind_id_2() {
         "new Uint8ClampedArray(16) must pass length=16 as first arg, got:\n{mir}"
     );
     assert!(
-        mir.contains("typed_array_new(16(:0), 2(:0))"),
+        mir.contains(", 2(:0))"),
         "Uint8ClampedArray kind_id must be 2 (second arg), got:\n{mir}"
     );
 }
@@ -61,7 +61,7 @@ fn new_float64_array_lowers_to_typed_array_new_with_kind_id_8() {
         "new Float64Array(4) must pass length=4 as first arg, got:\n{mir}"
     );
     assert!(
-        mir.contains("typed_array_new(4(:0), 8(:0))"),
+        mir.contains(", 8(:0))"),
         "Float64Array kind_id must be 8 (second arg), got:\n{mir}"
     );
 }

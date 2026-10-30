@@ -9,6 +9,10 @@ use crate::string::JsString;
 
 #[must_use]
 pub fn __ts_aot_typeof<T: 'static>(value: &T) -> &'static str {
+    if let Some(caught) = (value as &dyn std::any::Any).downcast_ref::<crate::caught::CaughtValue>()
+    {
+        return caught.typeof_str();
+    }
     let _ = value;
     let id = TypeId::of::<T>();
     if id == TypeId::of::<i8>()
@@ -50,12 +54,32 @@ pub fn __ts_aot_typeof_null() -> &'static str {
 pub fn __ts_aot_op_in<L: 'static, R: 'static>(value: &L, object: &R) -> bool {
     let any_value = value as &dyn std::any::Any;
     if let Some(arr) = (object as &dyn std::any::Any).downcast_ref::<Vec<i64>>() {
-        let Some(idx) = any_value.downcast_ref::<i64>() else {
+        let idx = if let Some(v) = any_value.downcast_ref::<i64>() {
+            *v
+        } else if let Some(v) = any_value.downcast_ref::<i32>() {
+            i64::from(*v)
+        } else if let Some(v) = any_value.downcast_ref::<u32>() {
+            i64::from(*v)
+        } else if let Some(v) = any_value.downcast_ref::<u64>() {
+            match i64::try_from(*v) {
+                Ok(v) => v,
+                Err(_) => return false,
+            }
+        } else if let Some(v) = any_value.downcast_ref::<f64>() {
+            use num_traits::ToPrimitive;
+            if v.fract() != 0.0 {
+                return false;
+            }
+            match v.to_i64() {
+                Some(v) => v,
+                None => return false,
+            }
+        } else {
             __ts_aot_throw(
                 "__ts_aot_op_in: Vec<i64> requires i64 key, got unsupported key type".to_owned(),
             );
         };
-        let Ok(i) = usize::try_from(*idx) else {
+        let Ok(i) = usize::try_from(idx) else {
             return false;
         };
         return i < arr.len();

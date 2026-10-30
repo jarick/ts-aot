@@ -1,5 +1,5 @@
 use ts_aot_core::TypeTable;
-use ts_aot_ir_hir::{HirCatchClause, HirStmt, HirSwitchCase};
+use ts_aot_ir_hir::{HirCatchBinding, HirCatchClause, HirStmt, HirSwitchCase};
 
 use super::substitute::{TypeParamMap, TypeSubstitutionResult};
 use super::substitute_decl::{substitute_body, substitute_decl as substitute_decl_inner};
@@ -105,7 +105,11 @@ pub fn substitute_stmt(
         } => HirStmt::Try {
             body: Box::new(substitute_stmt(body, mapping, types, result)),
             catch: catch.as_ref().map(|c| HirCatchClause {
-                binding: c.binding.clone(),
+                binding: c.binding.as_ref().map(|b| HirCatchBinding {
+                    id: b.id,
+                    name: b.name.clone(),
+                    ty: substitute_type(b.ty, mapping, types, result),
+                }),
                 body: Box::new(substitute_stmt(&c.body, mapping, types, result)),
             }),
             finally: finally

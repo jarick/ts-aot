@@ -8,7 +8,7 @@ use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UpdateOperator;
 use ts_aot_core::{Atom, Diagnostic, FieldId, LocalId, Span, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirDecl, HirExpr, HirStmt};
 
 use crate::body::FunctionBodyInput;
 use crate::ops::{
@@ -58,6 +58,24 @@ fn strip_nullish(ty: TypeId, types: &mut TypeTable) -> TypeId {
             }
         }
         _ => ty,
+    }
+}
+
+fn hir_is_string_valued(e: &HirExpr, types: &TypeTable) -> bool {
+    match e {
+        HirExpr::String(..) | HirExpr::Template { .. } => true,
+        HirExpr::Binary {
+            op: HirBinaryOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => hir_is_string_valued(lhs, types) || hir_is_string_valued(rhs, types),
+        HirExpr::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => hir_is_string_valued(then_branch, types) && hir_is_string_valued(else_branch, types),
+        _ => e.has_static_type() && matches!(types.resolve(e.ty()), Some(Type::String)),
     }
 }
 
@@ -720,7 +738,13 @@ impl SkeletonBuilder {
         let cond = self.walk_expr(senv, &c.test, scope);
         let then_branch = self.walk_expr(senv, &c.consequent, scope);
         let else_branch = self.walk_expr(senv, &c.alternate, scope);
-        let ty = senv.error_ty();
+        let ty = if hir_is_string_valued(&then_branch, senv.types)
+            && hir_is_string_valued(&else_branch, senv.types)
+        {
+            senv.types.intern(&ts_aot_core::Type::String)
+        } else {
+            senv.error_ty()
+        };
         HirExpr::Ternary {
             cond: Box::new(cond),
             then_branch: Box::new(then_branch),
@@ -928,7 +952,28 @@ impl SkeletonBuilder {
                 }
             }
         }
-        let ty = senv.error_ty();
+        let date_shadowed = senv.program.declarations.iter().any(|d| {
+            let name = match d {
+                HirDecl::Function(f) => &f.name,
+                HirDecl::Class(c) => &c.name,
+                HirDecl::TypeAlias { name, .. }
+                | HirDecl::Enum { name, .. }
+                | HirDecl::Global { name, .. }
+                | HirDecl::Interface { name, .. }
+                | HirDecl::Namespace { name, .. } => name,
+            };
+            name.as_str() == "Date"
+        });
+        let ty = match &new_expr.callee {
+            Expression::Identifier(id)
+                if id.name.as_str() == "Date"
+                    && scope.lookup("Date").is_none()
+                    && !date_shadowed =>
+            {
+                senv.types.intern(&ts_aot_core::Type::Date)
+            }
+            _ => senv.error_ty(),
+        };
         HirExpr::New {
             callee: Box::new(callee_expr),
             args,
@@ -952,7 +997,15 @@ impl SkeletonBuilder {
                 } else {
                     owner
                 };
-                let ty = senv.error_ty();
+                let has_length = matches!(
+                    senv.types.resolve(owner.ty()),
+                    Some(ts_aot_core::Type::String | ts_aot_core::Type::Array { .. })
+                );
+                let ty = if s.property.name.as_str() == "length" && has_length {
+                    senv.types.intern(&ts_aot_core::Type::I64)
+                } else {
+                    senv.error_ty()
+                };
                 HirExpr::Field {
                     owner: Box::new(owner),
                     field: FieldId::from_raw(0),
@@ -1104,9 +1157,6 @@ fn collect_capture_refs(stmts: &mut [HirStmt], scope: &BodyScope) -> Vec<HirExpr
                 && self.seen.insert(name.clone())
             {
                 self.ordered.push((name.clone(), *span));
-            }
-            if matches!(expr, HirExpr::Closure { .. }) {
-                return;
             }
             walk_expr(self, expr);
         }

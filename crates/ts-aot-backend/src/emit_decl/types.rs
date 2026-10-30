@@ -130,3 +130,21 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
         }
     }
 }
+
+pub(super) fn is_comparable_primitive(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Bool
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+            | Type::String
+    )
+}

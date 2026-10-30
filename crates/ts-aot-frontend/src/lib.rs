@@ -202,6 +202,27 @@ mod tests {
     }
 
     #[test]
+    fn frontend_lowers_try_statement() {
+        let src = "function f(): i64 { try { throw \"x\"; } catch (e) { } return 0; }";
+        let output = FrontendPass::new().run("test.ts", src);
+        let ts_aot_ir_hir::HirDecl::Function(func) = &output.program.declarations[0] else {
+            panic!(
+                "expected a function declaration, got {:?}",
+                output.program.declarations
+            );
+        };
+        let has_try = func
+            .body
+            .iter()
+            .any(|s| matches!(s, ts_aot_ir_hir::HirStmt::Try { .. }));
+        assert!(
+            has_try,
+            "a try statement must lower to HirStmt::Try (no longer dropped), got: {:?}",
+            func.body
+        );
+    }
+
+    #[test]
     fn frontend_rejects_duplicate_params_in_non_simple_function() {
         let output = FrontendPass::new().run("test.ts", "function f(a, b = 1, a) { return a; }");
         let codes: Vec<&str> = output

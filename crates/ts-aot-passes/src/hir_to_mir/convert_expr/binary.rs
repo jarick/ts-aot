@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
@@ -83,6 +83,156 @@ fn op_name_for_bigint(op: HirBinaryOp) -> &'static str {
     }
 }
 
+fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Assignment { .. } | HirExpr::CompoundUpdate { .. } => true,
+        HirExpr::Field { owner, .. }
+        | HirExpr::Unary { expr: owner, .. }
+        | HirExpr::Await { expr: owner, .. }
+        | HirExpr::TypeAssertion { expr: owner, .. }
+        | HirExpr::OptionalChain { base: owner, .. }
+        | HirExpr::Yield {
+            expr: Some(owner), ..
+        }
+        | HirExpr::Import { source: owner, .. } => hir_expr_may_reassign(owner),
+        HirExpr::Index { owner, index, .. } => {
+            hir_expr_may_reassign(owner) || hir_expr_may_reassign(index)
+        }
+        HirExpr::Binary { lhs, rhs, .. } => {
+            hir_expr_may_reassign(lhs) || hir_expr_may_reassign(rhs)
+        }
+        HirExpr::Call { args, .. } => args.iter().any(hir_expr_may_reassign),
+        HirExpr::New { callee, args, .. } => {
+            hir_expr_may_reassign(callee) || args.iter().any(hir_expr_may_reassign)
+        }
+        HirExpr::StructLiteral { fields, .. } => {
+            fields.iter().any(|(_, v)| hir_expr_may_reassign(v))
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            fields.iter().any(|f| hir_expr_may_reassign(f.value()))
+        }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            hir_expr_may_reassign(cond)
+                || hir_expr_may_reassign(then_branch)
+                || hir_expr_may_reassign(else_branch)
+        }
+        HirExpr::ArrayLiteral { elements, .. }
+        | HirExpr::Sequence {
+            exprs: elements, ..
+        } => elements.iter().any(hir_expr_may_reassign),
+        HirExpr::Template { expressions, .. } => expressions.iter().any(hir_expr_may_reassign),
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
+        | HirExpr::Local { .. }
+        | HirExpr::Global { .. }
+        | HirExpr::Closure { .. }
+        | HirExpr::Yield { expr: None, .. }
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => false,
+    }
+}
+
+fn hir_expr_contains_call(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Call { .. }
+        | HirExpr::New { .. }
+        | HirExpr::Await { .. }
+        | HirExpr::Yield { expr: Some(_), .. }
+        | HirExpr::Template { tag: Some(_), .. } => true,
+        HirExpr::Field { owner, .. }
+        | HirExpr::Unary { expr: owner, .. }
+        | HirExpr::TypeAssertion { expr: owner, .. }
+        | HirExpr::OptionalChain { base: owner, .. }
+        | HirExpr::Import { source: owner, .. } => hir_expr_contains_call(owner),
+        HirExpr::Index { owner, index, .. } => {
+            hir_expr_contains_call(owner) || hir_expr_contains_call(index)
+        }
+        HirExpr::Binary { lhs, rhs, .. } => {
+            hir_expr_contains_call(lhs) || hir_expr_contains_call(rhs)
+        }
+        HirExpr::Assignment { target, value, .. } => {
+            hir_expr_contains_call(target) || hir_expr_contains_call(value)
+        }
+        HirExpr::CompoundUpdate { target, rhs, .. } => {
+            hir_expr_contains_call(target) || hir_expr_contains_call(rhs)
+        }
+        HirExpr::StructLiteral { fields, .. } => {
+            fields.iter().any(|(_, v)| hir_expr_contains_call(v))
+        }
+        HirExpr::ObjectLiteral { fields, .. } => {
+            fields.iter().any(|f| hir_expr_contains_call(f.value()))
+        }
+        HirExpr::Ternary {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            hir_expr_contains_call(cond)
+                || hir_expr_contains_call(then_branch)
+                || hir_expr_contains_call(else_branch)
+        }
+        HirExpr::ArrayLiteral { elements, .. }
+        | HirExpr::Sequence {
+            exprs: elements, ..
+        } => elements.iter().any(hir_expr_contains_call),
+        HirExpr::Template { expressions, .. } => expressions.iter().any(hir_expr_contains_call),
+        HirExpr::Unit(_)
+        | HirExpr::Bool(_, _)
+        | HirExpr::Int(_, _)
+        | HirExpr::Float(_, _)
+        | HirExpr::String(_, _)
+        | HirExpr::Null(_)
+        | HirExpr::Undefined(_)
+        | HirExpr::Local { .. }
+        | HirExpr::Global { .. }
+        | HirExpr::Closure { .. }
+        | HirExpr::Yield { expr: None, .. }
+        | HirExpr::RegExp { .. }
+        | HirExpr::BigInt { .. } => false,
+    }
+}
+
+fn hir_is_place(expr: &HirExpr) -> bool {
+    matches!(
+        expr,
+        HirExpr::Local { .. }
+            | HirExpr::Global { .. }
+            | HirExpr::Field { .. }
+            | HirExpr::Index { .. }
+    )
+}
+
+fn is_string_operand(expr: &HirExpr, types: &TypeTable) -> bool {
+    match expr {
+        HirExpr::String(..) | HirExpr::Template { .. } => true,
+        HirExpr::Binary {
+            op: HirBinaryOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => is_string_operand(lhs, types) || is_string_operand(rhs, types),
+        HirExpr::Ternary {
+            then_branch,
+            else_branch,
+            ..
+        } => is_string_operand(then_branch, types) && is_string_operand(else_branch, types),
+        _ => hir_expr_type_id(expr)
+            .and_then(|t| types.resolve(t))
+            .is_some_and(|t| matches!(t, Type::String)),
+    }
+}
+
 impl ExprConverter {
     pub(super) fn convert_binary(
         &mut self,
@@ -96,6 +246,66 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if op == HirBinaryOp::Add
+            && (is_string_operand(lhs, types) || is_string_operand(rhs, types))
+        {
+            let string_ty = types.intern(&Type::String);
+            let lhs_mir = match lhs {
+                HirExpr::Null(_) => MirExpr::String {
+                    id: Atom::from("null"),
+                    ty: string_ty,
+                },
+                HirExpr::Undefined(_) => MirExpr::String {
+                    id: Atom::from("undefined"),
+                    ty: string_ty,
+                },
+                _ => self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx),
+            };
+            let lhs_is_inline = hir_is_place(lhs) || hir_expr_contains_call(lhs);
+            let rhs_may_change_lhs =
+                hir_expr_may_reassign(rhs) || (lhs_is_inline && hir_expr_contains_call(rhs));
+            let lhs_snapshot_ty = if rhs_may_change_lhs {
+                hir_expr_type_id(lhs)
+                    .filter(|t| !matches!(types.resolve(*t), None | Some(Type::Error)))
+                    .or_else(|| is_string_operand(lhs, types).then_some(string_ty))
+            } else {
+                None
+            };
+            let lhs_operand = if let Some(lhs_temp_ty) = lhs_snapshot_ty {
+                let lhs_temp = self.fresh_local();
+                self.push_temp_local(lhs_temp, lhs_temp_ty);
+                out.push(MirStmt::Let {
+                    local: lhs_temp,
+                    ty: lhs_temp_ty,
+                    init: Some(lhs_mir),
+                    mutable: false,
+                });
+                MirExpr::Local(lhs_temp)
+            } else {
+                lhs_mir
+            };
+            let rhs_mir = match rhs {
+                HirExpr::Null(_) => MirExpr::String {
+                    id: Atom::from("null"),
+                    ty: string_ty,
+                },
+                HirExpr::Undefined(_) => MirExpr::String {
+                    id: Atom::from("undefined"),
+                    ty: string_ty,
+                },
+                _ => self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx),
+            };
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, string_ty);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::StringConcat,
+                args: vec![lhs_operand, rhs_mir],
+                dest: Some(dest),
+                ty: string_ty,
+                target_ty: None,
+            });
+            return MirExpr::Local(dest);
+        }
         if let Some(bigint_op) = bigint_op_for_binary(op)
             && expr_yields_bigint(lhs, types)
             && expr_yields_bigint(rhs, types)
@@ -150,13 +360,14 @@ impl ExprConverter {
                     self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
                 let rhs_mir =
                     self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let bool_ty = types.intern(&Type::Bool);
                 let dest = self.fresh_local();
-                self.push_temp_local(dest, ty);
+                self.push_temp_local(dest, bool_ty);
                 out.push(MirStmt::Runtime {
                     op: RuntimeOp::OpIn,
                     args: vec![lhs_mir, rhs_mir],
                     dest: Some(dest),
-                    ty,
+                    ty: bool_ty,
                     target_ty: None,
                 });
                 MirExpr::Local(dest)

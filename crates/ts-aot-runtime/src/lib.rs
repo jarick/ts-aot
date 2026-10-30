@@ -3,6 +3,7 @@ pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 mod array;
 mod array_buffer;
 mod bigint;
+mod caught;
 mod date;
 mod generator;
 mod host;
@@ -34,6 +35,10 @@ pub use bigint::{
     __ts_aot_bigint_not, __ts_aot_bigint_or, __ts_aot_bigint_rem, __ts_aot_bigint_shl,
     __ts_aot_bigint_shr, __ts_aot_bigint_sub, __ts_aot_bigint_to_number, __ts_aot_bigint_to_string,
     __ts_aot_bigint_xor, BigIntHandle, BigIntSyntaxError, parse_string_integer_literal,
+};
+pub use caught::{
+    __ts_aot_catch_bind, __ts_aot_catch_typed, __ts_aot_caught_eq, __ts_aot_caught_eq_dyn,
+    CaughtValue, FromCaught,
 };
 pub use date::{
     __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,
@@ -70,8 +75,8 @@ pub use promise::{
     __ts_aot_promise_create, __ts_aot_promise_finally, __ts_aot_promise_finally_value,
     __ts_aot_promise_race, __ts_aot_promise_reject, __ts_aot_promise_reject_value,
     __ts_aot_promise_resolve, __ts_aot_promise_resolve_value, __ts_aot_promise_then,
-    __ts_aot_promise_then_value, __ts_aot_runtime_run, AggregateError, AwaitFuture, Promise,
-    PromiseSettledResult,
+    __ts_aot_promise_then_value, __ts_aot_run_or_poll, __ts_aot_runtime_run, AggregateError,
+    AwaitFuture, Promise, PromiseSettledResult,
 };
 pub use regex::{__ts_aot_regex_new, RegExpHandle};
 pub use result::{__ts_aot_result_err, __ts_aot_result_ok, __ts_aot_result_unwrap_ok};

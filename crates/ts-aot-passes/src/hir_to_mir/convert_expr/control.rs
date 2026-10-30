@@ -72,14 +72,6 @@ impl ExprConverter {
     ) -> MirExpr {
         let cond_mir =
             self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
-        let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
-        out.push(MirStmt::Let {
-            local: dest,
-            ty,
-            init: None,
-            mutable: true,
-        });
         let mut then_stmts: Vec<MirStmt> = Vec::new();
         let then_value = self.convert_expr(
             then_branch,
@@ -89,10 +81,6 @@ impl ExprConverter {
             types,
             ctx,
         );
-        then_stmts.push(MirStmt::Assign {
-            target: MirPlace::Local { id: dest },
-            value: then_value,
-        });
         let mut else_stmts: Vec<MirStmt> = Vec::new();
         let else_value = self.convert_expr(
             else_branch,
@@ -102,6 +90,30 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let dest_ty = if matches!(types.resolve(ty), None | Some(Type::Error)) {
+            match (then_value.ty(), else_value.ty()) {
+                (Some(a), Some(b))
+                    if a == b && !matches!(types.resolve(a), None | Some(Type::Error)) =>
+                {
+                    a
+                }
+                _ => ty,
+            }
+        } else {
+            ty
+        };
+        let dest = self.fresh_local();
+        self.push_temp_local(dest, dest_ty);
+        out.push(MirStmt::Let {
+            local: dest,
+            ty: dest_ty,
+            init: None,
+            mutable: true,
+        });
+        then_stmts.push(MirStmt::Assign {
+            target: MirPlace::Local { id: dest },
+            value: then_value,
+        });
         else_stmts.push(MirStmt::Assign {
             target: MirPlace::Local { id: dest },
             value: else_value,
