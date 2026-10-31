@@ -2949,6 +2949,65 @@ fn async_generator_inner_try_inside_outer_finally_wraps_rethrow() {
 }
 
 #[test]
+fn try_err_arm_breaks_loop_after_handling() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let catch_local = LocalId::from_raw(0);
+    let mut f = empty_func("f");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: catch_local,
+            name: Atom::from("e"),
+            ty: i64_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock::new(),
+                catch_param: Some(catch_local),
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    let prefix = "match __try_result {";
+    let match_pos = s
+        .find(prefix)
+        .expect("the try loop must match on __try_result");
+    let open = match_pos + prefix.len();
+    let mut depth = 1i32;
+    let mut end = open;
+    for (i, ch) in s[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let arms = &s[open..end];
+    let err_start = arms
+        .find("Err (__e) =>")
+        .expect("the try loop's match must have an Err (__e) arm");
+    let err_arm = &arms[err_start..];
+    assert!(
+        err_arm.contains("break '__try_"),
+        "the Err (__e) arm of the try loop's match must break the loop so the try body runs \
+         exactly once (a missing break there re-enters the body), and finally still runs once; \
+         got:\n{s}"
+    );
+}
+
+#[test]
 fn async_generator_catch_mismatch_wraps_rethrow_for_promise_rejection() {
     let mut types = ts_aot_core::TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
@@ -3321,7 +3380,7 @@ fn try_with_catch_emits_catch_unwind() {
         "Try/Catch closure must use AssertUnwindSafe to bypass UnwindSafe bound, got: {s}"
     );
     assert!(
-        s.contains("if let Err") || s.contains("if let  Err"),
+        s.contains("match __catch_result"),
         "Try/Catch must wrap catch arm in `if let Err(...)` check, got: {s}"
     );
 }
@@ -3417,7 +3476,7 @@ fn try_with_catch_and_finally_emits_both() {
         "Try/Catch/Finally must use catch_unwind, got: {s}"
     );
     assert!(
-        s.contains("if let Err"),
+        s.contains("match __catch_result"),
         "Try/Catch/Finally must have Err branch with catch body, got: {s}"
     );
     assert!(
@@ -3743,7 +3802,7 @@ fn try_return_in_body_runs_finally_then_replays_return() {
     let s = emit_decls(&prog, &ts_aot_core::TypeTable::new())
         .expect("emit must succeed")
         .to_string();
-    let break_pos = s.find("break __try_");
+    let break_pos = s.find("break '__try_");
     let finally_pos = s.find("7 ;");
     let slot_set_pos = s.find("__return_slot_0 = Some (42)");
     let replay_pos = s.find("if let Some (__v) = __return_slot_0");
@@ -3808,7 +3867,7 @@ fn try_catch_return_in_catch_runs_finally_then_replays_return() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains("break __try_"),
+        s.contains("break '__try_"),
         "catch body's `return 99` must be transformed to `break #try_label` so finally runs. \
          Bare `return 99` inside the catch would exit the function and skip finally. Got: {s}"
     );
@@ -3817,7 +3876,7 @@ fn try_catch_return_in_catch_runs_finally_then_replays_return() {
         "catch body's return must set runtime slot `__return_slot_0 = Some(99);` so finally can \
          observe and replay it. Got: {s}"
     );
-    let break_pos = s.find("break __try_").expect("break in emit");
+    let break_pos = s.find("break '__try_").expect("break in emit");
     let finally_pos = s.find("5 ;").expect("finally in emit");
     let replay_pos = s
         .find("if let Some (__v) = __return_slot_0")
@@ -3892,7 +3951,7 @@ fn try_with_conditional_return_emits_closure_safe_signal() {
          {{ return __v; }}` so whichever branch executed drives the actual return. Got: {s}"
     );
     assert!(
-        s.contains("Ok (__ReturnSignal :: Break)"),
+        s.contains("return __ReturnSignal :: Break"),
         "each return must also signal `return Ok(__ReturnSignal::Break);` so the outer loop \
          can perform the break (no cross-closure `break #label;`). Got: {s}"
     );
@@ -4124,22 +4183,66 @@ fn do_while_continue_in_body_uses_labeled_continue_for_cond_recheck() {
         .expect("emit must succeed")
         .to_string();
     assert!(
-        s.contains("__do_while_") && s.contains(": loop"),
-        "DoWhile must wrap body in a labeled loop `__do_while_N: loop {{ ... }}` so the cond \
-         check fires on every iteration (including continue paths). Plain `loop` would let a \
-         bare `continue;` skip the `if !cond {{ break; }}` check and break do-while semantics. \
-         Got: {s}"
+        s.contains("__do_while_continue_")
+            && s.contains("__do_while_break_")
+            && s.contains(": loop"),
+        "DoWhile must lower to a labeled loop whose body sits in a labeled block \
+         (`'break: loop {{ 'continue: {{ body }} if !cond {{ break 'break; }} }}`) so the cond \
+         check fires on every iteration. Got: {s}"
     );
     assert!(
-        s.contains("continue") && !s.contains("continue ;"),
-        "Continue in DoWhile body must use the do-while label (e.g. `continue __do_while_0;`) \
-         so it lands on the `if !cond {{ break; }}` line instead of jumping to the loop's top. \
-         Bare `continue;` would skip the cond recheck. Got: {s}"
+        s.contains("break '__do_while_continue_"),
+        "Continue in a DoWhile body must break out of the continue block so it reaches the \
+         bottom condition check instead of jumping to the loop top. Got: {s}"
     );
     assert!(
-        s.contains("break __do_while_") || s.contains("break  __do_while_"),
-        "Break in DoWhile's cond check must also use the label for consistency (and so nested \
-         loops exit the right one). Got: {s}"
+        s.contains("break '__do_while_break_"),
+        "the DoWhile condition check must break the surrounding loop so it exits when cond is \
+         false. Got: {s}"
+    );
+    assert!(
+        !s.contains("continue ;"),
+        "a DoWhile continue must not fall through as a bare `continue;` (that would skip the \
+         condition check). Got: {s}"
+    );
+}
+
+#[test]
+fn do_while_break_in_body_targets_do_while_not_enclosing_switch() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("f");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Switch {
+                disc: Box::new(MirExpr::Int {
+                    value: 1,
+                    ty: i64_ty,
+                }),
+                cases: vec![SwitchCase {
+                    value: ConstValue::Int(1),
+                    body: MirBlock {
+                        stmts: vec![MirStmt::DoWhile {
+                            body: MirBlock {
+                                stmts: vec![MirStmt::Break],
+                            },
+                            cond: MirExpr::Bool(false),
+                        }],
+                    },
+                }],
+                default: None,
+            }],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(
+        s.contains("break '__do_while_break_"),
+        "a `break` inside a do-while body must target the do-while loop (its own break label), \
+         not an enclosing switch, got:\n{s}"
     );
 }
 

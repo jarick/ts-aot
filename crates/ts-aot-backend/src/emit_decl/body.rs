@@ -1,4 +1,4 @@
-use proc_macro2::{Ident, Literal, TokenStream};
+use proc_macro2::{Ident, Literal, Punct, Spacing, TokenStream};
 use quote::{format_ident, quote};
 use ts_aot_core::{Atom, LocalId, Type, TypeId, TypeTable};
 
@@ -17,6 +17,11 @@ use super::runtime_op::runtime_op_ident;
 use super::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
 
+fn loop_label(ident: &Ident) -> TokenStream {
+    let apostrophe = Punct::new('\'', Spacing::Joint);
+    quote!(#apostrophe #ident)
+}
+
 pub(super) fn emit_body(
     f: &MirFunctionDecl,
     ctx: &EmitCtx,
@@ -27,6 +32,9 @@ pub(super) fn emit_body(
         return Ok(quote!({ unimplemented!() }));
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    if block_contains_try(&f.body.block) {
+        stmts.insert(0, return_signal_enum());
+    }
     if let Some(prelude) = emit_env_prelude(body_ctx, emit_env, ctx) {
         stmts.insert(0, prelude);
     }
@@ -36,6 +44,21 @@ pub(super) fn emit_body(
             cache.values().map(emit_weakmap_liveness_binding).collect();
         prelude.append(&mut stmts);
         stmts = prelude;
+    }
+    if !body_ctx.is_generator() && !mir_block_terminates(&f.body.block) {
+        let async_unit_completion = f.effects.is_async
+            && matches!(
+                emit_env.types.resolve(f.ret),
+                Some(Type::Promise { ok, .. })
+                    if matches!(emit_env.types.resolve(*ok), Some(Type::Void))
+            );
+        if async_unit_completion {
+            stmts.push(quote!(
+                return ts_aot_runtime::__ts_aot_promise_resolve_value::<()>(());
+            ));
+        } else if !matches!(emit_env.types.resolve(f.ret), Some(Type::Void)) {
+            stmts.push(quote!(unreachable!()));
+        }
     }
     if body_ctx.is_generator() {
         let co = body_ctx.gen_co().ok_or_else(|| {
@@ -55,6 +78,55 @@ pub(super) fn emit_body(
         }
     } else {
         Ok(quote!({ #(#stmts)* }))
+    }
+}
+
+fn return_signal_enum() -> TokenStream {
+    quote!(
+        enum __ReturnSignal {
+            Continue,
+            Break,
+            LoopBreak,
+            LoopContinue,
+        }
+    )
+}
+
+fn block_contains_try(block: &MirBlock) -> bool {
+    block.stmts.iter().any(stmt_contains_try)
+}
+
+fn mir_block_terminates(block: &MirBlock) -> bool {
+    block.stmts.last().is_some_and(|stmt| {
+        matches!(
+            stmt,
+            MirStmt::Return(_)
+                | MirStmt::ReturnResultErr { .. }
+                | MirStmt::Throw { .. }
+                | MirStmt::Break
+                | MirStmt::Continue
+        )
+    })
+}
+
+fn stmt_contains_try(stmt: &MirStmt) -> bool {
+    match stmt {
+        MirStmt::Try { .. } => true,
+        MirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => block_contains_try(then_block) || else_block.as_ref().is_some_and(block_contains_try),
+        MirStmt::While { body, .. }
+        | MirStmt::DoWhile { body, .. }
+        | MirStmt::ForOf { body, .. }
+        | MirStmt::ForAwaitOf { body, .. }
+        | MirStmt::ForIn { body, .. } => block_contains_try(body),
+        MirStmt::Switch { cases, default, .. } => {
+            cases.iter().any(|case| block_contains_try(&case.body))
+                || default.as_ref().is_some_and(block_contains_try)
+        }
+        _ => false,
     }
 }
 
@@ -141,11 +213,18 @@ fn emit_return_stmt(
             }
         } else if let Some(expr) = slot {
             let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-            quote!(#expr)
+            if let Some(ok) = body_ctx.async_plain_ok() {
+                let ok_ty = emit_type_id_with_ctx(ok, emit_env, ctx);
+                quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<#ok_ty>(#expr))
+            } else {
+                quote!(#expr)
+            }
+        } else if body_ctx.async_plain_ok().is_some() {
+            quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<()>(()))
         } else {
             quote!(())
         };
-        Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
+        Ok(quote!(#slot_ident = Some(#value_ts); return __ReturnSignal::Break;))
     } else if body_ctx.is_generator() {
         let async_gen = body_ctx.is_async_generator();
         if let Some(expr) = slot {
@@ -166,7 +245,18 @@ fn emit_return_stmt(
         }
     } else if let Some(expr) = slot {
         let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-        Ok(quote!(return #expr;))
+        if let Some(ok) = body_ctx.async_plain_ok() {
+            let ok_ty = emit_type_id_with_ctx(ok, emit_env, ctx);
+            Ok(quote!(
+                return ts_aot_runtime::__ts_aot_promise_resolve_value::<#ok_ty>(#expr);
+            ))
+        } else {
+            Ok(quote!(return #expr;))
+        }
+    } else if body_ctx.async_plain_ok().is_some() {
+        Ok(quote!(
+            return ts_aot_runtime::__ts_aot_promise_resolve_value::<()>(());
+        ))
     } else {
         Ok(quote!(return;))
     }
@@ -179,14 +269,30 @@ fn emit_do_while(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let label = format_ident!("__do_while_{}", body.stmts.len());
-    let prev_label = body_ctx.continue_label();
-    body_ctx.set_continue_label(Some(label.clone()));
+    let id = body_ctx.alloc_block_id();
+    let continue_ident = format_ident!("__do_while_continue_{id}");
+    let break_ident = format_ident!("__do_while_break_{id}");
+    let prev_continue = body_ctx.continue_label();
+    let prev_break = body_ctx.break_label();
+    body_ctx.set_continue_label(Some(continue_ident.clone()));
+    body_ctx.set_break_label(Some(break_ident.clone()));
+    body_ctx.enter_loop();
     let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
-    body_ctx.set_continue_label(prev_label);
+    body_ctx.exit_loop();
+    body_ctx.set_continue_label(prev_continue);
+    body_ctx.set_break_label(prev_break);
     let body_stmts = body_stmts?;
     let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
-    Ok(quote!(#label: loop { #(#body_stmts)* if !(#cond) { break #label; } }))
+    let continue_lt = loop_label(&continue_ident);
+    let break_lt = loop_label(&break_ident);
+    Ok(quote!(
+        #break_lt: loop {
+            #continue_lt: {
+                #(#body_stmts)*
+            }
+            if !(#cond) { break #break_lt; }
+        }
+    ))
 }
 
 fn emit_stmt(
@@ -289,7 +395,8 @@ fn emit_stmt(
         ),
         MirStmt::While { cond, body } => {
             let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let body_stmts = body_ctx
+                .with_loop_labels(None, || emit_block_stmts(body, ctx, emit_env, body_ctx))?;
             Ok(quote!(while #cond { #(#body_stmts)* }))
         }
         this @ (MirStmt::ForOf {
@@ -317,7 +424,11 @@ fn emit_stmt(
                 quote!(#item_ident)
             };
             let iterable = emit_expr(iterable, ctx, emit_env, body_ctx)?;
-            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let loop_label_ident = format_ident!("__for_of_{}", body_ctx.alloc_block_id());
+            let mut body_stmts = body_ctx
+                .with_loop_labels(Some(loop_label_ident.clone()), || {
+                    emit_block_stmts(body, ctx, emit_env, body_ctx)
+                })?;
             if let Some(acc) = body_ctx.shared_access_for_local(item_id) {
                 body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#item_ident)));
             }
@@ -365,9 +476,10 @@ fn emit_stmt(
                         }},
                     )
                 };
+                let loop_label_lt = loop_label(&loop_label_ident);
                 return Ok(quote!({
                     #owner_init
-                    loop {
+                    #loop_label_lt: loop {
                         let __for_await_yield = #advance;
                         if __for_await_yield.done {
                             break;
@@ -380,29 +492,50 @@ fn emit_stmt(
                     }
                 }));
             }
+            let loop_label_lt = loop_label(&loop_label_ident);
             let needs_mut_ref = matches!(
                 types.resolve(*iter_ty),
                 Some(ts_aot_core::Type::Generator { .. })
             );
             if needs_mut_ref {
-                Ok(quote!(for #item in &mut (#iterable) { #(#body_stmts)* }))
+                Ok(quote!(#loop_label_lt: for #item in &mut (#iterable) { #(#body_stmts)* }))
             } else {
-                Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
+                Ok(quote!(#loop_label_lt: for #item in #iterable { #(#body_stmts)* }))
             }
         }
         MirStmt::ForIn { key, object, body } => {
             let key_ident = body_ctx.local_ident(*key);
             let object = emit_expr(object, ctx, emit_env, body_ctx)?;
-            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let loop_label_ident = format_ident!("__for_in_{}", body_ctx.alloc_block_id());
+            let mut body_stmts = body_ctx
+                .with_loop_labels(Some(loop_label_ident.clone()), || {
+                    emit_block_stmts(body, ctx, emit_env, body_ctx)
+                })?;
             if let Some(acc) = body_ctx.shared_access_for_local(*key) {
                 body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#key_ident)));
             }
-            Ok(quote!(for #key_ident in #object { #(#body_stmts)* }))
+            let loop_label_lt = loop_label(&loop_label_ident);
+            Ok(quote!(#loop_label_lt: for #key_ident in #object { #(#body_stmts)* }))
         }
-        MirStmt::Break => Ok(quote!(break;)),
+        MirStmt::Break => {
+            if body_ctx.break_escapes_try() {
+                Ok(quote!(return __ReturnSignal::LoopBreak;))
+            } else if let Some(label) = body_ctx.break_label() {
+                let label_lt = loop_label(&label);
+                Ok(quote!(break #label_lt;))
+            } else {
+                Ok(quote!(break;))
+            }
+        }
         MirStmt::Continue => {
-            if let Some(label) = body_ctx.continue_label() {
-                Ok(quote!(continue #label;))
+            if body_ctx.continue_escapes_try() {
+                Ok(quote!(return __ReturnSignal::LoopContinue;))
+            } else if let Some(label) = body_ctx.continue_label() {
+                let label_lt = loop_label(&label);
+                Ok(quote!(break #label_lt;))
+            } else if let Some(target) = body_ctx.continue_target() {
+                let target_lt = loop_label(&target);
+                Ok(quote!(continue #target_lt;))
             } else {
                 Ok(quote!(continue;))
             }
@@ -916,7 +1049,10 @@ fn emit_expr(
                 })
                 .collect();
             let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, emit_env, ctx);
-            let inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
+            let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
+            if block_contains_try(body) {
+                inner_stmts.insert(0, return_signal_enum());
+            }
             let stmts = if child_ctx.has_weakmap_liveness() {
                 let cache = child_ctx.weakmap_liveness_per_key.borrow();
                 let mut prelude: Vec<TokenStream> =
@@ -1212,6 +1348,9 @@ fn emit_closure_value(
     let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child)?;
     if let Some(prelude) = emit_env_prelude(&child, emit_env, ctx) {
         inner_stmts.insert(0, prelude);
+    }
+    if block_contains_try(body) {
+        inner_stmts.insert(0, return_signal_enum());
     }
     let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
     let fn_ident = format_ident!("__ts_closure_{}", closure_id);
@@ -1846,6 +1985,10 @@ fn emit_switch(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let disc_expr = emit_expr(disc, ctx, emit_env, body_ctx)?;
+    let switch_ident = format_ident!("__switch_{}", body_ctx.alloc_block_id());
+    let prev_break = body_ctx.break_label();
+    body_ctx.set_break_label(Some(switch_ident.clone()));
+    body_ctx.enter_switch();
     let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
     for case in cases {
         let pat = match &case.value {
@@ -1867,7 +2010,10 @@ fn emit_switch(
     } else {
         arms.push(quote!(_ => {}));
     }
-    Ok(quote!(match #disc_expr { #(#arms),* }))
+    body_ctx.exit_switch();
+    body_ctx.set_break_label(prev_break);
+    let lt = loop_label(&switch_ident);
+    Ok(quote!(#lt: { match #disc_expr { #(#arms),* } }))
 }
 
 fn await_helper_path(body_ctx: &BodyCtx) -> TokenStream {
@@ -1898,6 +2044,7 @@ fn emit_try(
     body_ctx.set_in_try(true);
     body_ctx.set_try_label(Some(label.clone()));
     body_ctx.set_return_slot(Some(slot_ident.clone()));
+    body_ctx.push_try_floor();
     let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
     body_ctx.set_try_label(prev_try_label);
     let body_stmts = body_stmts?;
@@ -1911,6 +2058,11 @@ fn emit_try(
     } else {
         None
     };
+
+    let this_loop_floor = body_ctx.try_floor_loop().unwrap_or(0);
+    let enclosing_loop_floor = body_ctx.enclosing_try_loop_floor();
+    body_ctx.pop_try_floor();
+    let loop_in_enclosing = this_loop_floor > enclosing_loop_floor;
 
     body_ctx.set_in_try(prev_in_try);
     body_ctx.set_try_label(None);
@@ -1960,38 +2112,55 @@ fn emit_try(
         let catch_stmts = catch_stmts.expect("catch block present");
         if let Some(param) = catch_param {
             let param_ident = body_ctx.local_ident(param);
-            let param_ty = body_ctx
-                .local_ty(param)
-                .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+            let param_ty_id = body_ctx.local_ty(param);
+            let is_any_catch =
+                param_ty_id.is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::Error)));
             let shared_write = body_ctx
                 .shared_access_for_local(param)
                 .map(|acc| shared_write_tokens(&acc, &quote!(#param_ident)))
                 .unwrap_or_default();
-            let mismatch_rethrow = if wrap_escape {
-                quote!(ts_aot_runtime::__ts_aot_async_generator_rethrow(__e))
+            let bind = if is_any_catch {
+                quote!(let #param_ident = ts_aot_runtime::__ts_aot_catch_bind(&*__e);)
             } else {
-                quote!(__e)
+                let param_ty = param_ty_id
+                    .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+                let mismatch_rethrow = if wrap_escape {
+                    quote!(ts_aot_runtime::__ts_aot_async_generator_rethrow(__e))
+                } else {
+                    quote!(__e)
+                };
+                quote! {
+                    let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
+                        Ok(v) => *v,
+                        Err(__e) => std::panic::#resume_unwind(#mismatch_rethrow),
+                    };
+                }
             };
             quote! {
-                let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
-                    Ok(v) => *v,
-                    Err(__e) => std::panic::#resume_unwind(#mismatch_rethrow),
-                };
+                #bind
                 #shared_write
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#catch_stmts)*
+                    __ReturnSignal::Continue
                 }));
-                if let Err(__e2) = __catch_result {
-                    __pending_throw = Some(__e2);
+                match __catch_result {
+                    Ok(__ReturnSignal::LoopBreak) => __loop_jump = 1,
+                    Ok(__ReturnSignal::LoopContinue) => __loop_jump = 2,
+                    Err(__e2) => __pending_throw = Some(__e2),
+                    Ok(_) => {}
                 }
             }
         } else {
             quote! {
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#catch_stmts)*
+                    __ReturnSignal::Continue
                 }));
-                if let Err(__e2) = __catch_result {
-                    __pending_throw = Some(__e2);
+                match __catch_result {
+                    Ok(__ReturnSignal::LoopBreak) => __loop_jump = 1,
+                    Ok(__ReturnSignal::LoopContinue) => __loop_jump = 2,
+                    Err(__e2) => __pending_throw = Some(__e2),
+                    Ok(_) => {}
                 }
             }
         }
@@ -2015,24 +2184,68 @@ fn emit_try(
         quote!(__e)
     };
 
+    let break_replay = if body_ctx.break_escapes_try() {
+        quote!(return __ReturnSignal::LoopBreak;)
+    } else if let Some(label) = body_ctx.break_label() {
+        let lt = loop_label(&label);
+        quote!(break #lt;)
+    } else if loop_in_enclosing {
+        quote!(break;)
+    } else {
+        quote!(unreachable!("break escapes a try without an enclosing loop");)
+    };
+    let continue_replay = if loop_in_enclosing {
+        if let Some(label) = body_ctx.continue_label() {
+            let lt = loop_label(&label);
+            quote!(break #lt;)
+        } else if let Some(target) = body_ctx.continue_target() {
+            let lt = loop_label(&target);
+            quote!(continue #lt;)
+        } else {
+            quote!(continue;)
+        }
+    } else if body_ctx.in_try() {
+        quote!(return __ReturnSignal::LoopContinue;)
+    } else {
+        quote!(unreachable!("continue escapes a try without an enclosing loop");)
+    };
+
+    let label_lt = loop_label(&label);
     Ok(quote! {{
-        enum __ReturnSignal { Continue, Break }
         #slot_decl
         let mut __pending_throw: Option<Box<dyn std::any::Any + Send>> = None;
-        #label: loop {
+        let mut __loop_jump: u8 = 0;
+        #label_lt: loop {
             let __try_result: Result<__ReturnSignal, Box<dyn std::any::Any + Send>> =
                 std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#body_stmts)*
-                    Ok::<_, Box<dyn std::any::Any + Send>>(__ReturnSignal::Continue)
+                    __ReturnSignal::Continue
                 }));
             match __try_result {
-                Ok(__ReturnSignal::Break | __ReturnSignal::Continue) => break #label,
-                Err(__e) => { #body_arm }
+                Ok(__ReturnSignal::Break | __ReturnSignal::Continue) => break #label_lt,
+                Ok(__ReturnSignal::LoopBreak) => {
+                    __loop_jump = 1;
+                    break #label_lt;
+                }
+                Ok(__ReturnSignal::LoopContinue) => {
+                    __loop_jump = 2;
+                    break #label_lt;
+                }
+                Err(__e) => {
+                    #body_arm
+                    break #label_lt;
+                }
             }
         }
         #finally_block
         if let Some(__e) = __pending_throw {
             std::panic::#resume_unwind(#final_rethrow);
+        }
+        if __loop_jump == 1 {
+            #break_replay
+        }
+        if __loop_jump == 2 {
+            #continue_replay
         }
         #replay_return
     }})

@@ -552,6 +552,168 @@ ts-aot-runtime = {{ path = "{runtime_manifest_str}" }}
 }
 
 #[test]
+fn closure_with_try_declares_return_signal() {
+    let out = compile(
+        "function f(): i64 { const g: () => i64 = (): i64 => { let i: i64 = 0; while (true) { try { i = i + 1; if (i == 3) { break; } } catch (e) { } } return i; }; return g(); }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ReturnSignal"),
+        "a closure whose body contains a try must declare __ReturnSignal in its own body, got:\n{r}"
+    );
+}
+
+#[test]
+fn async_void_fallthrough_resolves_instead_of_panicking() {
+    let out = compile("async function f(): Promise<void> { const x: i64 = 1; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_promise_resolve_value"),
+        "an async `Promise<void>` body that falls through must return a resolved promise, got:\n{r}"
+    );
+    assert!(
+        !r.contains("unreachable"),
+        "an async `Promise<void>` body must not fall through to unreachable!(), got:\n{r}"
+    );
+}
+
+#[test]
+fn continue_inside_switch_in_for_of_uses_labeled_continue() {
+    let out = compile(
+        "function f(a: Array<i64>): i64 { let s: i64 = 0; for (const x of a) { switch (x) { case 2: continue; } s = s + x; } return s; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("continue '__for_of_"),
+        "a `continue` inside a switch inside a for-of must be a labeled continue (Rust E0695 \
+         otherwise), got:\n{r}"
+    );
+}
+
+#[test]
+fn async_explicit_return_wraps_value_in_resolved_promise() {
+    let out = compile("async function f(): Promise<i64> { return 5; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_promise_resolve_value"),
+        "an async `Promise<i64>` explicit return must be wrapped in a resolved promise, got:\n{r}"
+    );
+}
+
+#[test]
+fn non_void_function_ending_in_try_emits_terminator() {
+    let out = compile("function f(): i64 { try { return 1; } catch (e) { return 2; } }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("unreachable"),
+        "a non-void function whose body ends in a try must get a trailing terminator so the \
+         generated Rust type-checks, got:\n{r}"
+    );
+}
+
+#[test]
+fn throwing_closure_value_wraps_lifted_fn_in_variant() {
+    let out =
+        compile("function f(): i64 { const g: () => i64 = (): i64 => { throw 1; }; return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__TsFnValue0::"),
+        "a throwing closure used as a value must wrap its lifted fn in the fn-value enum \
+         variant, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_throw"),
+        "calling a throwing closure value must unwrap the Result and rethrow, got:\n{r}"
+    );
+}
+
+#[test]
+fn break_inside_try_lowers_via_loop_signal() {
+    let out = compile(
+        "function f(): i64 { let i: i64 = 0; while (true) { try { i = i + 1; if (i == 3) { break; } } catch (e) { } } return i; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ReturnSignal::LoopBreak") && r.contains("__loop_jump"),
+        "a `break` that leaves a try must lower through the try-loop escape signal so it can \
+         resume at the enclosing loop, got:\n{r}"
+    );
+}
+
+#[test]
+fn continue_inside_try_lowers_via_loop_signal() {
+    let out = compile(
+        "function f(): i64 { let i: i64 = 0; while (i < 5) { try { i = i + 1; if (i == 2) { continue; } } catch (e) { } } return i; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ReturnSignal::LoopContinue"),
+        "a `continue` that leaves a try must lower through the try-loop escape signal, got:\n{r}"
+    );
+}
+
+#[test]
+fn switch_break_uses_labeled_block() {
+    let out = compile(
+        "function f(): i64 { let x: i64 = 0; switch (1) { case 1: x = 7; break; } return x; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__switch_"),
+        "a `switch` must lower to a labeled block so `break` exits the switch, got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_lowers_to_any_payload_binding() {
+    let out = compile("function f(): i64 { try { throw 1; } catch (e) { } return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("catch_unwind") && r.contains("__ts_aot_catch_bind"),
+        "an untyped `catch (e)` must lower to a catch-all binding that can hold any thrown \
+         payload (e.g. a non-string `throw 1`), got:\n{r}"
+    );
+}
+
+#[test]
+fn typed_catch_lowers_to_typed_downcast() {
+    let out = compile("function f(): i64 { try { throw 1; } catch (e: i64) { } return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("downcast") && !r.contains("__ts_aot_catch_bind"),
+        "an annotated `catch (e: i64)` must downcast to the annotated type, got:\n{r}"
+    );
+}
+
+#[test]
+fn async_generator_caught_rejected_await_uses_raw_helper() {
+    let out = compile(
+        "async function* g(p: Promise<i64>): i64 { try { const v: i64 = await p; } catch (e) { } return 1; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_await_value_raw"),
+        "an await inside a try must use the raw helper so the user's catch catches the rejection, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_catch_bind"),
+        "the catch clause must be emitted, got:\n{r}"
+    );
+}
+
+#[test]
 fn async_generator_await_uses_generator_await_helper() {
     let out =
         compile("async function* g(p: Promise<i64>): i64 { const v: i64 = await p; yield v; }");

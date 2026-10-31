@@ -1,11 +1,11 @@
 use oxc_ast::ast::{
     BindingPattern, Declaration, ForInStatement, ForOfStatement, ForStatement, ForStatementInit,
-    ForStatementLeft, Statement, SwitchStatement, VariableDeclaration, match_assignment_target,
-    match_declaration, match_expression,
+    ForStatementLeft, Statement, SwitchStatement, TryStatement, VariableDeclaration,
+    match_assignment_target, match_declaration, match_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, LocalId, Span, Type};
-use ts_aot_ir_hir::{HirCallee, HirExpr, HirStmt, HirSwitchCase};
+use ts_aot_ir_hir::{HirCallee, HirCatchBinding, HirCatchClause, HirExpr, HirStmt, HirSwitchCase};
 
 use crate::ops::{label_atom, left_span};
 use crate::scope::BodyScope;
@@ -177,6 +177,7 @@ impl SkeletonBuilder {
             Statement::ForOfStatement(f) => self.walk_for_of(senv, f, out, scope),
             Statement::ForInStatement(f) => self.walk_for_in(senv, f, out, scope),
             Statement::SwitchStatement(sw) => self.walk_switch(senv, sw, out, scope),
+            Statement::TryStatement(t) => self.walk_try(senv, t, out, scope),
             Statement::ThrowStatement(t) => {
                 let expr = self.walk_expr(senv, &t.argument, scope);
                 out.push(HirStmt::Throw { expr });
@@ -283,6 +284,55 @@ impl SkeletonBuilder {
         }
         scope.pop();
         out.push(HirStmt::Switch { disc, cases });
+    }
+
+    fn walk_try(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        t: &TryStatement<'_>,
+        out: &mut Vec<HirStmt>,
+        scope: &mut BodyScope,
+    ) {
+        scope.push();
+        let body = HirStmt::Block(self.walk_block_with_predeclare(senv, &t.block.body, scope));
+        scope.pop();
+
+        let catch = t.handler.as_ref().map(|handler| {
+            scope.push();
+            let binding = handler.param.as_ref().and_then(|p| {
+                let Some(name) = binding_pattern_name(&p.pattern) else {
+                    senv.report_unwalked(
+                        "destructuring catch bindings are not supported by the body walker",
+                        p.span,
+                    );
+                    return None;
+                };
+                let ty = if p.type_annotation.is_some() {
+                    self.resolve_ts_type_from_annotation(senv, p.type_annotation.as_deref())
+                } else {
+                    senv.error_ty()
+                };
+                let id = scope.declare(name.as_str(), ty);
+                Some(HirCatchBinding::new(id, Atom::from(name.as_str()), ty))
+            });
+            let cbody =
+                HirStmt::Block(self.walk_block_with_predeclare(senv, &handler.body.body, scope));
+            scope.pop();
+            HirCatchClause::new(binding, Box::new(cbody))
+        });
+
+        let finally = t.finalizer.as_ref().map(|f| {
+            scope.push();
+            let block = HirStmt::Block(self.walk_block_with_predeclare(senv, &f.body, scope));
+            scope.pop();
+            Box::new(block)
+        });
+
+        out.push(HirStmt::Try {
+            body: Box::new(body),
+            catch,
+            finally,
+        });
     }
 
     fn walk_var_decl(
