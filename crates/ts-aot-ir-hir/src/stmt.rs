@@ -272,14 +272,28 @@ fn tail_class(stmts: &[HirStmt]) -> TailClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HirCatchBinding {
+    pub id: LocalId,
+    pub name: Atom,
+    pub ty: TypeId,
+}
+
+impl HirCatchBinding {
+    #[must_use]
+    pub const fn new(id: LocalId, name: Atom, ty: TypeId) -> Self {
+        Self { id, name, ty }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HirCatchClause {
-    pub binding: Option<(LocalId, Atom)>,
+    pub binding: Option<HirCatchBinding>,
     pub body: Box<HirStmt>,
 }
 
 impl HirCatchClause {
     #[must_use]
-    pub const fn new(binding: Option<(LocalId, Atom)>, body: Box<HirStmt>) -> Self {
+    pub const fn new(binding: Option<HirCatchBinding>, body: Box<HirStmt>) -> Self {
         Self { binding, body }
     }
 }
@@ -443,7 +457,11 @@ mod tests {
     #[test]
     fn try_with_catch_and_finally() {
         let body = Box::new(HirStmt::expr(HirExpr::Unit(Span::default())));
-        let binding = (LocalId::from_raw(0), Atom::new_inline("1"));
+        let binding = HirCatchBinding::new(
+            LocalId::from_raw(0),
+            Atom::new_inline("1"),
+            TypeId::from_raw(0),
+        );
         let catch_body = Box::new(HirStmt::ret(None));
         let catch = HirCatchClause::new(Some(binding), catch_body);
         let finally = Box::new(HirStmt::ret(None));

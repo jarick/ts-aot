@@ -23,11 +23,16 @@ pub(super) struct RuntimeCallSpec<'a> {
 pub(super) struct EmitCtx {
     struct_names: HashMap<StructId, Ident>,
     function_names: HashMap<FunctionId, Ident>,
+    function_ret: HashMap<FunctionId, TypeId>,
+    function_async: HashSet<FunctionId>,
+    function_owner: HashMap<FunctionId, StructId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
     mutable_globals: HashSet<Atom>,
+    function_arity: HashMap<Atom, usize>,
+    global_tys: HashMap<Atom, TypeId>,
     fn_value_index: HashMap<TypeId, usize>,
     fn_value_sigs: Vec<FnValueSig>,
-    fn_value_variants: Vec<Vec<(Atom, Ident)>>,
+    fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>>,
     fn_value_of_fn: HashMap<Atom, (usize, Ident)>,
     closure_variants: RefCell<HashMap<usize, Vec<ClosureVariantInfo>>>,
     closure_fns: RefCell<Vec<TokenStream>>,
@@ -53,12 +58,24 @@ impl EmitCtx {
     pub(super) fn build(program: &MirProgram, types: &TypeTable) -> Self {
         let mut struct_names = HashMap::new();
         let mut function_names = HashMap::new();
+        let mut function_ret = HashMap::new();
+        let mut function_async = HashSet::new();
+        let mut function_owner = HashMap::new();
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
         let mut mutable_globals = HashSet::new();
+        let mut global_tys = HashMap::new();
+        let mut function_arity = HashMap::new();
         for decl in &program.declarations {
             match decl {
                 MirDecl::Function(f) => {
                     function_names.insert(f.id, ident_from(&f.name));
+                    function_ret.insert(f.id, f.ret);
+                    function_arity
+                        .entry(f.name.clone())
+                        .or_insert(f.params.len());
+                    if f.effects.is_async && f.kind != FunctionKind::Generator {
+                        function_async.insert(f.id);
+                    }
                 }
                 MirDecl::Struct(s) => {
                     struct_names.insert(s.id, ident_from(&s.name));
@@ -67,9 +84,24 @@ impl EmitCtx {
                     }
                     for method in &s.methods {
                         function_names.insert(method.id, ident_from(&method.name));
+                        function_ret.insert(method.id, method.ret);
+                        if method.effects.is_async
+                            && !matches!(
+                                method.kind,
+                                FunctionKind::Generator | FunctionKind::GeneratorMethod { .. }
+                            )
+                        {
+                            function_async.insert(method.id);
+                        }
+                        if let FunctionKind::Method { owner, .. }
+                        | FunctionKind::GeneratorMethod { owner, .. } = method.kind
+                        {
+                            function_owner.insert(method.id, owner);
+                        }
                     }
                 }
                 MirDecl::Global(g) => {
+                    global_tys.insert(g.name.clone(), g.ty);
                     if g.mutable {
                         mutable_globals.insert(g.name.clone());
                     }
@@ -81,8 +113,13 @@ impl EmitCtx {
         Self {
             struct_names,
             function_names,
+            function_ret,
+            function_async,
+            function_owner,
             struct_fields,
             mutable_globals,
+            global_tys,
+            function_arity,
             fn_value_index,
             fn_value_sigs,
             fn_value_variants,
@@ -184,7 +221,7 @@ impl EmitCtx {
         &self.fn_value_sigs[k]
     }
 
-    pub(super) fn fn_value_variants(&self, k: usize) -> &[(Atom, Ident)] {
+    pub(super) fn fn_value_variants(&self, k: usize) -> &[(Atom, Ident, bool, bool)] {
         &self.fn_value_variants[k]
     }
 
@@ -200,6 +237,14 @@ impl EmitCtx {
         self.mutable_globals.contains(name)
     }
 
+    pub(super) fn global_ty(&self, name: &Atom) -> Option<TypeId> {
+        self.global_tys.get(name).copied()
+    }
+
+    pub(super) fn function_arity(&self, name: &Atom) -> Option<usize> {
+        self.function_arity.get(name).copied()
+    }
+
     pub(super) fn struct_ident(&self, id: StructId) -> Ident {
         self.struct_names
             .get(&id)
@@ -212,6 +257,18 @@ impl EmitCtx {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| format_ident!("__fn{}", id.raw()))
+    }
+
+    pub(super) fn function_ret(&self, id: FunctionId) -> Option<TypeId> {
+        self.function_ret.get(&id).copied()
+    }
+
+    pub(super) fn function_is_async(&self, id: FunctionId) -> bool {
+        self.function_async.contains(&id)
+    }
+
+    pub(super) fn function_owner(&self, id: FunctionId) -> Option<StructId> {
+        self.function_owner.get(&id).copied()
     }
 
     pub(super) fn struct_field_ident(&self, struct_id: StructId, field_id: FieldId) -> Ident {
@@ -232,16 +289,26 @@ pub(super) struct BodyCtx {
     is_async_generator: bool,
     gen_co: Option<Ident>,
     ret_inner: TypeId,
+    async_plain_ok: Option<TypeId>,
     in_try: Cell<bool>,
     in_tla_main: bool,
     pub(super) weakmap_liveness_per_key: RefCell<BTreeMap<LocalId, Ident>>,
     continue_label: RefCell<Option<Ident>>,
+    continue_target: RefCell<Option<Ident>>,
+    break_label: RefCell<Option<Ident>>,
     try_label: RefCell<Option<Ident>>,
     return_slot: RefCell<Option<Ident>>,
+    loop_depth: Cell<u32>,
+    switch_depth: Cell<u32>,
+    try_jump_floor: RefCell<Vec<(u32, u32)>>,
     next_try_id: Cell<u32>,
+    next_block_id: Cell<u32>,
     shared_by_id: HashMap<LocalId, SharedAccess>,
     shared_by_name: HashMap<Ident, SharedAccess>,
     own_env: Option<OwnEnv>,
+    dynamic_locals: RefCell<HashSet<LocalId>>,
+    dynamic_names: RefCell<HashSet<Atom>>,
+    move_safe_locals: RefCell<HashSet<LocalId>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -264,6 +331,7 @@ pub(super) struct EnvField {
     pub(super) ty: TypeId,
     pub(super) storage: SharedStorage,
     pub(super) param_init: Option<Ident>,
+    pub(super) dynamic: bool,
 }
 
 pub(super) struct OwnEnv {
@@ -380,6 +448,18 @@ impl BodyCtx {
         } else {
             f.ret
         };
+        let async_plain_ok = if !is_generator && f.effects.is_async {
+            match types.resolve(f.ret) {
+                Some(Type::Promise { ok, .. }) => Some(*ok),
+                Some(Type::Result { ok, .. }) => match types.resolve(*ok) {
+                    Some(Type::Promise { ok: inner, .. }) => Some(*inner),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else {
+            None
+        };
         let gen_co = is_generator.then(|| format_ident!("__gen_co_{}", f.id.raw()));
         let written = collect_written_locals(&f.body.block, types);
         let mut locals = HashMap::new();
@@ -404,6 +484,19 @@ impl BodyCtx {
             .map(|p| p.id)
             .filter(|id| Some(*id) != self_param)
             .collect();
+        let dynamic_ids = dynamic_locals_for(&f.body.block, &f.params, &f.body.locals, types);
+        let mut dynamic_names: HashSet<Atom> = HashSet::new();
+        for p in &f.params {
+            if dynamic_ids.contains(&p.id) {
+                dynamic_names.insert(p.name.clone());
+            }
+        }
+        for l in &f.body.locals {
+            if dynamic_ids.contains(&l.id) {
+                dynamic_names.insert(l.name.clone());
+            }
+        }
+        let move_safe_locals = collect_move_safe_locals(&f.body.block, &f.body.locals);
         let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
         for id in collect_captured_locals(&f.body.block) {
             if Some(id) == self_param {
@@ -426,6 +519,7 @@ impl BodyCtx {
                     ty,
                     storage,
                     param_init,
+                    dynamic: dynamic_ids.contains(&id),
                 },
             ));
         }
@@ -461,22 +555,38 @@ impl BodyCtx {
             is_async_generator,
             gen_co,
             ret_inner,
+            async_plain_ok,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
+            continue_target: RefCell::new(None),
+            break_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
+            loop_depth: Cell::new(0),
+            switch_depth: Cell::new(0),
+            try_jump_floor: RefCell::new(Vec::new()),
             next_try_id: Cell::new(0),
+            next_block_id: Cell::new(0),
             shared_by_id,
             shared_by_name,
             own_env,
+            dynamic_locals: RefCell::new(dynamic_ids),
+            dynamic_names: RefCell::new(dynamic_names),
+            move_safe_locals: RefCell::new(move_safe_locals),
         }
     }
 
     pub(super) fn alloc_try_id(&self) -> u32 {
         let id = self.next_try_id.get();
         self.next_try_id.set(id + 1);
+        id
+    }
+
+    pub(super) fn alloc_block_id(&self) -> u32 {
+        let id = self.next_block_id.get();
+        self.next_block_id.set(id + 1);
         id
     }
 
@@ -495,16 +605,26 @@ impl BodyCtx {
             is_async_generator: false,
             gen_co: None,
             ret_inner: ret,
+            async_plain_ok: None,
             in_try: Cell::new(false),
             in_tla_main: false,
             weakmap_liveness_per_key: RefCell::new(BTreeMap::new()),
             continue_label: RefCell::new(None),
+            continue_target: RefCell::new(None),
+            break_label: RefCell::new(None),
             try_label: RefCell::new(None),
             return_slot: RefCell::new(None),
+            loop_depth: Cell::new(0),
+            switch_depth: Cell::new(0),
+            try_jump_floor: RefCell::new(Vec::new()),
             next_try_id: Cell::new(0),
+            next_block_id: Cell::new(0),
             shared_by_id: inherited_ids,
             shared_by_name: inherited_names,
             own_env: None,
+            dynamic_locals: RefCell::new(HashSet::new()),
+            dynamic_names: RefCell::new(HashSet::new()),
+            move_safe_locals: RefCell::new(HashSet::new()),
         }
     }
 
@@ -553,6 +673,7 @@ impl BodyCtx {
             let storage = shared_storage_for(types.resolve(ty));
             let field = format_ident!("{}_{}", name, id.raw());
             let param_init = param_ids.contains(&id).then(|| name.clone());
+            let dynamic = self.is_dynamic(id);
             fields.push((
                 id,
                 name,
@@ -561,11 +682,22 @@ impl BodyCtx {
                     ty,
                     storage,
                     param_init,
+                    dynamic,
                 },
             ));
         }
         if fields.is_empty() {
             return;
+        }
+        for p in params {
+            if self.is_dynamic(p.id) {
+                self.dynamic_names.borrow_mut().insert(p.name.clone());
+            }
+        }
+        for l in locals {
+            if self.is_dynamic(l.id) {
+                self.dynamic_names.borrow_mut().insert(l.name.clone());
+            }
         }
         let env_ident = format_ident!("__env_c{}", key);
         let env_type = format_ident!("__ScopeEnvC{}", key);
@@ -752,6 +884,97 @@ impl BodyCtx {
         self.continue_label.borrow().clone()
     }
 
+    pub(super) fn set_continue_target(&self, label: Option<Ident>) {
+        *self.continue_target.borrow_mut() = label;
+    }
+
+    pub(super) fn continue_target(&self) -> Option<Ident> {
+        self.continue_target.borrow().clone()
+    }
+
+    pub(super) fn set_break_label(&self, label: Option<Ident>) {
+        *self.break_label.borrow_mut() = label;
+    }
+
+    pub(super) fn break_label(&self) -> Option<Ident> {
+        self.break_label.borrow().clone()
+    }
+
+    pub(super) fn with_loop_labels<R>(
+        &self,
+        continue_target: Option<Ident>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let prev_continue = self.continue_label();
+        let prev_break = self.break_label();
+        let prev_target = self.continue_target();
+        self.set_continue_label(None);
+        self.set_break_label(None);
+        self.set_continue_target(continue_target);
+        self.loop_depth.set(self.loop_depth.get() + 1);
+        let result = f();
+        self.loop_depth.set(self.loop_depth.get() - 1);
+        self.set_continue_label(prev_continue);
+        self.set_break_label(prev_break);
+        self.set_continue_target(prev_target);
+        result
+    }
+
+    pub(super) fn enter_loop(&self) {
+        self.loop_depth.set(self.loop_depth.get() + 1);
+    }
+
+    pub(super) fn exit_loop(&self) {
+        self.loop_depth.set(self.loop_depth.get() - 1);
+    }
+
+    pub(super) fn enter_switch(&self) {
+        self.switch_depth.set(self.switch_depth.get() + 1);
+    }
+
+    pub(super) fn exit_switch(&self) {
+        self.switch_depth.set(self.switch_depth.get() - 1);
+    }
+
+    pub(super) fn push_try_floor(&self) {
+        self.try_jump_floor
+            .borrow_mut()
+            .push((self.loop_depth.get(), self.switch_depth.get()));
+    }
+
+    pub(super) fn pop_try_floor(&self) {
+        self.try_jump_floor.borrow_mut().pop();
+    }
+
+    pub(super) fn continue_escapes_try(&self) -> bool {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .is_some_and(|&(loop_floor, _)| loop_floor == self.loop_depth.get())
+    }
+
+    pub(super) fn break_escapes_try(&self) -> bool {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .is_some_and(|&(loop_floor, switch_floor)| {
+                loop_floor == self.loop_depth.get() && switch_floor == self.switch_depth.get()
+            })
+    }
+
+    pub(super) fn try_floor_loop(&self) -> Option<u32> {
+        self.try_jump_floor
+            .borrow()
+            .last()
+            .map(|&(loop_floor, _)| loop_floor)
+    }
+
+    pub(super) fn enclosing_try_loop_floor(&self) -> u32 {
+        let floors = self.try_jump_floor.borrow();
+        let len = floors.len();
+        if len >= 2 { floors[len - 2].0 } else { 0 }
+    }
+
     pub(super) fn set_try_label(&self, label: Option<Ident>) {
         *self.try_label.borrow_mut() = label;
     }
@@ -770,6 +993,237 @@ impl BodyCtx {
 
     pub(super) fn return_type_id(&self) -> TypeId {
         self.ret_inner
+    }
+
+    pub(super) fn async_plain_ok(&self) -> Option<TypeId> {
+        self.async_plain_ok
+    }
+
+    pub(super) fn is_dynamic(&self, id: LocalId) -> bool {
+        self.dynamic_locals.borrow().contains(&id)
+    }
+
+    pub(super) fn inherit_dynamic(&self, parent: &BodyCtx) {
+        self.dynamic_locals
+            .borrow_mut()
+            .extend(parent.dynamic_locals.borrow().iter().copied());
+        self.dynamic_names
+            .borrow_mut()
+            .extend(parent.dynamic_names.borrow().iter().cloned());
+    }
+
+    pub(super) fn is_dynamic_name(&self, name: &Atom) -> bool {
+        self.dynamic_names.borrow().contains(name)
+    }
+
+    pub(super) fn seed_dynamic(
+        &self,
+        block: &MirBlock,
+        params: &[MirParam],
+        locals: &[MirLocalDecl],
+        types: &TypeTable,
+    ) {
+        let ids = dynamic_locals_for(block, params, locals, types);
+        for p in params {
+            if ids.contains(&p.id) {
+                self.dynamic_names.borrow_mut().insert(p.name.clone());
+            }
+        }
+        for l in locals {
+            if ids.contains(&l.id) {
+                self.dynamic_names.borrow_mut().insert(l.name.clone());
+            }
+        }
+        self.dynamic_locals.borrow_mut().extend(ids);
+    }
+
+    pub(super) fn seed_move_safe(&self, block: &MirBlock, locals: &[MirLocalDecl]) {
+        let ids = collect_move_safe_locals(block, locals);
+        self.move_safe_locals.borrow_mut().extend(ids);
+    }
+
+    pub(super) fn is_move_safe(&self, id: LocalId) -> bool {
+        self.move_safe_locals.borrow().contains(&id)
+    }
+}
+
+fn collect_move_safe_locals(block: &MirBlock, locals: &[MirLocalDecl]) -> HashSet<LocalId> {
+    let mut uses: HashMap<LocalId, (u32, bool)> = HashMap::new();
+    count_uses_block(block, false, &mut uses);
+    locals
+        .iter()
+        .filter(|l| l.name.as_str().is_empty())
+        .filter(|l| {
+            uses.get(&l.id)
+                .is_some_and(|&(n, in_loop)| n == 1 && !in_loop)
+        })
+        .map(|l| l.id)
+        .collect()
+}
+
+fn bump_use(uses: &mut HashMap<LocalId, (u32, bool)>, id: LocalId, in_loop: bool) {
+    let entry = uses.entry(id).or_insert((0, false));
+    entry.0 += 1;
+    entry.1 |= in_loop;
+}
+
+fn count_uses_block(block: &MirBlock, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
+    for stmt in &block.stmts {
+        count_uses_stmt(stmt, in_loop, uses);
+    }
+}
+
+fn count_uses_stmt(stmt: &MirStmt, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
+    match stmt {
+        MirStmt::Let { init: Some(e), .. } | MirStmt::Expr(e) | MirStmt::Return(Some(e)) => {
+            count_uses_expr(e, in_loop, uses);
+        }
+        MirStmt::Let { init: None, .. }
+        | MirStmt::Return(None)
+        | MirStmt::Break
+        | MirStmt::Continue => {}
+        MirStmt::Assign { target, value } => {
+            count_uses_place(target, in_loop, uses);
+            count_uses_expr(value, in_loop, uses);
+        }
+        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+            count_uses_expr(error, in_loop, uses);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            count_uses_expr(cond, in_loop, uses);
+            count_uses_block(then_block, in_loop, uses);
+            if let Some(b) = else_block {
+                count_uses_block(b, in_loop, uses);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            count_uses_expr(cond, true, uses);
+            count_uses_block(body, true, uses);
+        }
+        MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
+            count_uses_expr(iterable, in_loop, uses);
+            count_uses_block(body, true, uses);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            count_uses_expr(object, in_loop, uses);
+            count_uses_block(body, true, uses);
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            count_uses_expr(disc, in_loop, uses);
+            for case in cases {
+                count_uses_block(&case.body, in_loop, uses);
+            }
+            if let Some(b) = default {
+                count_uses_block(b, in_loop, uses);
+            }
+        }
+        MirStmt::Runtime { args, .. } => {
+            for a in args {
+                count_uses_expr(a, in_loop, uses);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            count_uses_block(body, in_loop, uses);
+            if let Some(c) = catch {
+                count_uses_block(c, in_loop, uses);
+            }
+            if let Some(f) = finally {
+                count_uses_block(f, in_loop, uses);
+            }
+        }
+    }
+}
+
+fn count_uses_place(place: &MirPlace, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
+    match place {
+        MirPlace::Local { .. } | MirPlace::Global(_) => {}
+        MirPlace::Field { base, .. } => count_uses_place_base(base, in_loop, uses),
+        MirPlace::Index { base, index, .. } => {
+            count_uses_expr(base, in_loop, uses);
+            count_uses_expr(index, in_loop, uses);
+        }
+    }
+}
+
+fn count_uses_place_base(
+    base: &MirPlaceBase,
+    in_loop: bool,
+    uses: &mut HashMap<LocalId, (u32, bool)>,
+) {
+    match base {
+        MirPlaceBase::Local(id) => bump_use(uses, *id, in_loop),
+        MirPlaceBase::Global(_) => {}
+        MirPlaceBase::Field { base, .. } => count_uses_place_base(base, in_loop, uses),
+        MirPlaceBase::Index { base, index, .. } => {
+            count_uses_expr(base, in_loop, uses);
+            count_uses_expr(index, in_loop, uses);
+        }
+        MirPlaceBase::Chain { base, .. } => count_uses_expr(base, in_loop, uses),
+    }
+}
+
+fn count_uses_expr(expr: &MirExpr, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
+    match expr {
+        MirExpr::Local(id) => bump_use(uses, *id, in_loop),
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. } => count_uses_expr(base, in_loop, uses),
+        MirExpr::Index { base, index, .. } => {
+            count_uses_expr(base, in_loop, uses);
+            count_uses_expr(index, in_loop, uses);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            count_uses_expr(left, in_loop, uses);
+            count_uses_expr(right, in_loop, uses);
+        }
+        MirExpr::Unary { expr, .. }
+        | MirExpr::Await { expr, .. }
+        | MirExpr::TypeOf { expr, .. }
+        | MirExpr::Cast { expr, .. }
+        | MirExpr::ResultErr { error: expr, .. }
+        | MirExpr::Import { source: expr, .. } => count_uses_expr(expr, in_loop, uses),
+        MirExpr::Yield { expr: Some(e), .. } => count_uses_expr(e, in_loop, uses),
+        MirExpr::Call { args, .. } => {
+            for a in args {
+                count_uses_expr(a, in_loop, uses);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            count_uses_expr(callee, in_loop, uses);
+            for a in args {
+                count_uses_expr(a, in_loop, uses);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                count_uses_expr(v, in_loop, uses);
+            }
+        }
+        MirExpr::Closure { body, .. } => count_uses_block(body, true, uses),
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Global(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
     }
 }
 
@@ -849,6 +1303,113 @@ pub(super) fn collect_written_locals(block: &MirBlock, types: &TypeTable) -> Has
     let mut written = HashSet::new();
     collect_from_block(block, types, &mut written);
     written
+}
+
+fn dynamic_locals_for(
+    block: &MirBlock,
+    params: &[MirParam],
+    locals: &[MirLocalDecl],
+    types: &TypeTable,
+) -> HashSet<LocalId> {
+    let mut locals_ty: HashMap<LocalId, TypeId> = HashMap::new();
+    for p in params {
+        locals_ty.insert(p.id, p.ty);
+    }
+    for l in locals {
+        locals_ty.insert(l.id, l.ty);
+    }
+    let mut ids = HashSet::new();
+    collect_dynamic_locals(block, &locals_ty, types, &mut ids);
+    ids
+}
+
+fn collect_dynamic_locals(
+    block: &MirBlock,
+    locals_ty: &HashMap<LocalId, TypeId>,
+    types: &TypeTable,
+    out: &mut HashSet<LocalId>,
+) {
+    for stmt in &block.stmts {
+        match stmt {
+            MirStmt::Try {
+                body,
+                catch_param,
+                catch,
+                finally,
+            } => {
+                if let Some(p) = catch_param
+                    && locals_ty
+                        .get(p)
+                        .and_then(|t| types.resolve(*t))
+                        .is_some_and(|t| matches!(t, Type::Error))
+                {
+                    out.insert(*p);
+                }
+                collect_dynamic_locals(body, locals_ty, types, out);
+                if let Some(c) = catch {
+                    collect_dynamic_locals(c, locals_ty, types, out);
+                }
+                if let Some(f) = finally {
+                    collect_dynamic_locals(f, locals_ty, types, out);
+                }
+            }
+            MirStmt::Let {
+                local,
+                init: Some(init),
+                ..
+            } => {
+                if let MirExpr::Local(id) = init
+                    && out.contains(id)
+                    && locals_ty
+                        .get(local)
+                        .and_then(|t| types.resolve(*t))
+                        .is_some_and(|t| matches!(t, Type::Error))
+                {
+                    out.insert(*local);
+                }
+            }
+            MirStmt::Assign {
+                target: MirPlace::Local { id },
+                value,
+            } => {
+                if let MirExpr::Local(v) = value
+                    && out.contains(v)
+                    && locals_ty
+                        .get(id)
+                        .and_then(|t| types.resolve(*t))
+                        .is_some_and(|t| matches!(t, Type::Error))
+                {
+                    out.insert(*id);
+                }
+            }
+            MirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_dynamic_locals(then_block, locals_ty, types, out);
+                if let Some(b) = else_block {
+                    collect_dynamic_locals(b, locals_ty, types, out);
+                }
+            }
+            MirStmt::While { body, .. }
+            | MirStmt::DoWhile { body, .. }
+            | MirStmt::ForOf { body, .. }
+            | MirStmt::ForAwaitOf { body, .. }
+            | MirStmt::ForIn { body, .. } => {
+                collect_dynamic_locals(body, locals_ty, types, out);
+            }
+            MirStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    collect_dynamic_locals(&case.body, locals_ty, types, out);
+                }
+                if let Some(d) = default {
+                    collect_dynamic_locals(d, locals_ty, types, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub(super) fn collect_assigned_locals(
@@ -961,7 +1522,7 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
 type FnValueRegistry = (
     HashMap<TypeId, usize>,
     Vec<FnValueSig>,
-    Vec<Vec<(Atom, Ident)>>,
+    Vec<Vec<(Atom, Ident, bool, bool)>>,
     HashMap<Atom, (usize, Ident)>,
 );
 
@@ -1042,7 +1603,8 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
         }
     }
 
-    let mut fn_value_variants: Vec<Vec<(Atom, Ident)>> = vec![Vec::new(); fn_value_sigs.len()];
+    let mut fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>> =
+        vec![Vec::new(); fn_value_sigs.len()];
     let mut fn_value_of_fn: HashMap<Atom, (usize, Ident)> = HashMap::new();
     for decl in &program.declarations {
         let funcs: Vec<&MirFunctionDecl> = match decl {
@@ -1054,17 +1616,22 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
             if !matches!(
                 f.kind,
                 FunctionKind::Plain | FunctionKind::Closure | FunctionKind::RuntimeShim
-            ) || f.effects.is_async
-            {
+            ) {
                 continue;
             }
             if program.tla_main_name.as_ref().is_some_and(|n| *n == f.name) {
                 continue;
             }
             let params: Vec<TypeId> = f.params.iter().map(|p| p.ty).collect();
+            let is_throwing = matches!(types.resolve(f.ret), Some(Type::Result { .. }));
+            let is_async = f.effects.is_async;
+            let eff_ret = match types.resolve(f.ret) {
+                Some(Type::Result { ok, .. }) => *ok,
+                _ => f.ret,
+            };
             let Some(k) = fn_value_sigs
                 .iter()
-                .position(|s| s.params == params && s.ret == f.ret)
+                .position(|s| s.params == params && s.ret == eff_ret)
             else {
                 continue;
             };
@@ -1074,11 +1641,14 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
             let base = pascal_variant_ident(f.name.as_str());
             let mut variant = base.clone();
             let mut suffix = 0u32;
-            while fn_value_variants[k].iter().any(|(_, v)| *v == variant) {
+            while fn_value_variants[k]
+                .iter()
+                .any(|(_, v, _, _)| *v == variant)
+            {
                 suffix += 1;
                 variant = format_ident!("{}{}", base, suffix);
             }
-            fn_value_variants[k].push((f.name.clone(), variant.clone()));
+            fn_value_variants[k].push((f.name.clone(), variant.clone(), is_throwing, is_async));
             fn_value_of_fn.insert(f.name.clone(), (k, variant));
         }
     }

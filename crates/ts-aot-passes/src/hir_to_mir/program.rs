@@ -592,7 +592,9 @@ fn convert_decl(
             };
             state.converted_names.insert(final_mir_name.clone());
             state.seen_sanitized_names.insert(final_sanitized);
-            let mir_init = init.as_ref().and_then(|e| lower_global_init(e, state.ctx));
+            let mir_init = init
+                .as_ref()
+                .and_then(|e| lower_global_init(e, state.ctx, state.types));
             Some(MirDecl::Global(MirGlobalDecl {
                 name: final_mir_name,
                 ty: *ty,
@@ -853,23 +855,27 @@ fn throw_expr_type(expr: &HirExpr) -> TypeId {
     }
 }
 
-fn lower_global_init(init: &HirExpr, ctx: &mut PassContext) -> Option<MirExpr> {
+fn lower_global_init(
+    init: &HirExpr,
+    ctx: &mut PassContext,
+    types: &mut TypeTable,
+) -> Option<MirExpr> {
     let mir_init = match init {
         HirExpr::Int(v, _) => MirExpr::Int {
             value: i128::from(*v),
-            ty: TypeId::from_raw(0),
+            ty: types.intern(&Type::I64),
         },
         HirExpr::Float(bits, _) => MirExpr::Float {
             value: f64::from_bits(*bits),
-            ty: TypeId::from_raw(0),
+            ty: types.intern(&Type::F64),
         },
         HirExpr::Bool(b, _) => MirExpr::Bool(*b),
         HirExpr::String(id, _) => MirExpr::String {
             id: id.clone(),
-            ty: TypeId::from_raw(0),
+            ty: types.intern(&Type::String),
         },
         HirExpr::Null(_) => MirExpr::Null {
-            ty: TypeId::from_raw(0),
+            ty: types.intern(&Type::Null),
         },
         HirExpr::Undefined(_) | HirExpr::Unit(_) => MirExpr::Unit,
         HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),

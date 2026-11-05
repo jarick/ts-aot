@@ -256,6 +256,53 @@ mod tests {
     }
 
     #[test]
+    fn async_generator_catch_mismatch_runs_finally_and_rejects_next_promise() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran_finally = Arc::new(AtomicBool::new(false));
+        let ran_finally_inner = ran_finally.clone();
+        let mut generator = __ts_aot_async_generator_new::<i64, _>(move |_co| async move {
+            let mut pending: Option<Box<dyn std::any::Any + Send>> = None;
+            let try_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> () {
+                crate::host::__ts_aot_throw("boom".to_string());
+            }));
+            if let Err(__e) = try_result {
+                let catch_result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> () {
+                        match __e.downcast::<i64>() {
+                            Ok(_) => {}
+                            Err(__e) => std::panic::resume_unwind(__e),
+                        }
+                    }));
+                if let Err(__e2) = catch_result {
+                    pending = Some(__e2);
+                }
+            }
+            ran_finally_inner.store(true, Ordering::SeqCst);
+            if let Some(__e) = pending {
+                std::panic::resume_unwind(crate::host::__ts_aot_async_generator_rethrow(__e));
+            }
+            Some(AsyncGenYield {
+                value: None,
+                done: true,
+            })
+        });
+        let promise = generator.next();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = __ts_aot_await_value(&promise);
+        }));
+        assert!(
+            outcome.is_err(),
+            "a catch-parameter mismatch must reject the next() promise"
+        );
+        assert!(
+            ran_finally.load(Ordering::SeqCst),
+            "the finally block must run when a catch-parameter mismatch is re-raised"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "boom")]
     fn async_generator_catch_body_throw_rejects_next_promise() {
         let mut generator = __ts_aot_async_generator_new::<i64, _>(|_co| async move {

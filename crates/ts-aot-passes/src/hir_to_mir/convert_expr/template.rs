@@ -63,6 +63,7 @@ impl ExprConverter {
             });
             MirExpr::Local(dest)
         } else {
+            let ty = types.intern(&ts_aot_core::Type::String);
             let mut parts: Vec<MirExpr> = Vec::with_capacity(expressions.len() * 2 + 1);
             for (i, cooked_opt) in cooked_parts.iter().enumerate() {
                 let cooked_text = cooked_opt.as_ref().map_or("", ts_aot_core::Atom::as_str);

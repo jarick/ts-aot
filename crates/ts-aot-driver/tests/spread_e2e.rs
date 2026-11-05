@@ -56,11 +56,8 @@ fn e2e_array_spread_with_multiple_sources_preserves_operand_sequence() {
     let named_temps: Vec<&str> = operands
         .iter()
         .map(|op| {
-            if op.starts_with("__tmp") {
-                "__tmp"
-            } else {
-                *op
-            }
+            let op = op.strip_suffix(" . clone ()").unwrap_or(op);
+            if op.starts_with("__tmp") { "__tmp" } else { op }
         })
         .collect();
     assert_eq!(

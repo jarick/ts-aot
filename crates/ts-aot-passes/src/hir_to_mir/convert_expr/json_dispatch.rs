@@ -17,7 +17,7 @@ impl ExprConverter {
         &mut self,
         callee: &HirCallee,
         args: &[HirExpr],
-        ty: TypeId,
+        _ty: TypeId,
         out: &mut Vec<MirStmt>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
@@ -149,13 +149,17 @@ impl ExprConverter {
             .iter()
             .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
             .collect();
+        let result_ty = match op_kind {
+            JsonOpKind::Parse => target_ty,
+            JsonOpKind::Stringify => types.intern(&Type::String),
+        };
         let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
+        self.push_temp_local(dest, result_ty);
         out.push(MirStmt::Runtime {
             op,
             args: mir_args,
             dest: Some(dest),
-            ty,
+            ty: result_ty,
             target_ty: Some(target_ty),
         });
         Some(MirExpr::Local(dest))

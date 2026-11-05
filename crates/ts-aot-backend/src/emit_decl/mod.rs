@@ -69,12 +69,22 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             .collect();
 
         let mut enum_variants: Vec<TokenStream> =
-            variants.iter().map(|(_, v)| quote!(#v)).collect();
+            variants.iter().map(|(_, v, _, _)| quote!(#v)).collect();
         let mut arms: Vec<TokenStream> = Vec::new();
         let mut debug_arms: Vec<TokenStream> = Vec::new();
-        for (fname, variant) in variants {
+        for (fname, variant, is_throwing, is_async) in variants {
             let fident = ident_from(fname);
-            arms.push(quote!(#enum_name::#variant => #fident(#(#arg_names),*),));
+            let mut call = quote!(#fident(#(#arg_names),*));
+            if *is_async {
+                call = quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call));
+            }
+            if *is_throwing {
+                call = quote!(match #call {
+                    Ok(__v) => __v,
+                    Err(__e) => ts_aot_runtime::__ts_aot_throw(__e),
+                });
+            }
+            arms.push(quote!(#enum_name::#variant => #call,));
             debug_arms.push(
                 quote!(#enum_name::#variant => f.write_str(stringify!(#enum_name::#variant)),),
             );

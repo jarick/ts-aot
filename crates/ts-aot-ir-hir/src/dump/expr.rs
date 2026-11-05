@@ -187,10 +187,10 @@ fn dump_switch_case(case: &HirSwitchCase, d: &mut Dumper) {
 
 fn dump_catch(catch: &HirCatchClause, d: &mut Dumper) {
     match &catch.binding {
-        Some((id, name)) => d.write(&format!(
+        Some(binding) => d.write(&format!(
             "catch (id={}, name={}) {{\n",
-            id.raw(),
-            name.as_str()
+            binding.id.raw(),
+            binding.name.as_str()
         )),
         None => d.write("catch {\n"),
     }
@@ -765,7 +765,11 @@ mod tests {
         let s = HirStmt::Try {
             body: Box::new(HirStmt::ret(None)),
             catch: Some(HirCatchClause::new(
-                Some((LocalId::from_raw(0), Atom::new_inline("e"))),
+                Some(crate::stmt::HirCatchBinding::new(
+                    LocalId::from_raw(0),
+                    Atom::new_inline("e"),
+                    TypeId::from_raw(0),
+                )),
                 Box::new(HirStmt::ret(None)),
             )),
             finally: Some(Box::new(HirStmt::ret(None))),

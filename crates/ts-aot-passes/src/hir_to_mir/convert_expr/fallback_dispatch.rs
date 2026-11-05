@@ -128,8 +128,9 @@ impl ExprConverter {
                 );
                 return Some(MirExpr::Unit);
             }
+            let bool_ty = types.intern(&Type::Bool);
             let dest = self.fresh_local();
-            self.push_temp_local(dest, ty);
+            self.push_temp_local(dest, bool_ty);
             let op = if is_array_static_type(&args[0], types) {
                 RuntimeOp::ArrayIsArray
             } else {
@@ -139,7 +140,7 @@ impl ExprConverter {
                 op,
                 args: mir_args,
                 dest: Some(dest),
-                ty,
+                ty: bool_ty,
                 target_ty: None,
             });
             return Some(MirExpr::Local(dest));
@@ -164,14 +165,33 @@ impl ExprConverter {
                 );
                 return Some(MirExpr::Unit);
             }
+            let element_ty = match hir_expr_type_id(&args[0]).and_then(|t| types.resolve(t)) {
+                Some(Type::Array { element }) => *element,
+                Some(Type::String) => types.intern(&Type::String),
+                _ => ty,
+            };
+            let result_ty = if mir_args.len() == 2 {
+                let mapped = match &args[1] {
+                    HirExpr::Global { name, .. } => self
+                        .program
+                        .find_function_by_name(name)
+                        .map_or(ty, |f| f.ret),
+                    _ => ty,
+                };
+                types.intern(&Type::Array { element: mapped })
+            } else {
+                types.intern(&Type::Array {
+                    element: element_ty,
+                })
+            };
             let dest = self.fresh_local();
-            self.push_temp_local(dest, ty);
+            self.push_temp_local(dest, result_ty);
             if mir_args.len() == 1 && is_string_typed_source(&args[0], types) {
                 out.push(MirStmt::Runtime {
                     op: RuntimeOp::ArrayFromString,
                     args: mir_args,
                     dest: Some(dest),
-                    ty,
+                    ty: result_ty,
                     target_ty: None,
                 });
                 return Some(MirExpr::Local(dest));
@@ -204,7 +224,7 @@ impl ExprConverter {
                 op,
                 args: mir_args,
                 dest: Some(dest),
-                ty,
+                ty: result_ty,
                 target_ty: None,
             });
             return Some(MirExpr::Local(dest));

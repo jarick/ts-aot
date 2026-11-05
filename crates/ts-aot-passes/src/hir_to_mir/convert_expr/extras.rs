@@ -252,13 +252,14 @@ impl ExprConverter {
                 types,
                 ctx,
             );
+            let result_ty = types.intern(&Type::Date);
             let dest = self.fresh_local();
-            self.push_temp_local(dest, ty);
+            self.push_temp_local(dest, result_ty);
             out.push(MirStmt::Runtime {
                 op,
                 args: vec![arg],
                 dest: Some(dest),
-                ty,
+                ty: result_ty,
                 target_ty: None,
             });
             return MirExpr::Local(dest);

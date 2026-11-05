@@ -68,13 +68,17 @@ impl ExprConverter {
             .iter()
             .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
             .collect();
+        let result_ty = match date_field.as_str() {
+            "now" | "parse" => types.intern(&Type::I64),
+            _ => ty,
+        };
         let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
+        self.push_temp_local(dest, result_ty);
         out.push(MirStmt::Runtime {
             op,
             args: mir_args,
             dest: Some(dest),
-            ty,
+            ty: result_ty,
             target_ty: None,
         });
         Some(MirExpr::Local(dest))
@@ -84,7 +88,7 @@ impl ExprConverter {
         &mut self,
         callee: &HirCallee,
         args: &[HirExpr],
-        ty: TypeId,
+        _ty: TypeId,
         out: &mut Vec<MirStmt>,
         shared_struct_ids: &mut HashMap<TypeId, StructId>,
         shared_next_struct: &mut u32,
@@ -140,13 +144,17 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let result_ty = match date_method_field.as_str() {
+            "toISOString" => types.intern(&Type::String),
+            _ => types.intern(&Type::I64),
+        };
         let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
+        self.push_temp_local(dest, result_ty);
         out.push(MirStmt::Runtime {
             op,
             args: vec![receiver_mir],
             dest: Some(dest),
-            ty,
+            ty: result_ty,
             target_ty: None,
         });
         Some(MirExpr::Local(dest))

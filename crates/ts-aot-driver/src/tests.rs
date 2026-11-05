@@ -1375,12 +1375,14 @@ fn e2e_method_on_class_typed_global_resolves_via_declared_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__foo (obj)"),
-        "a method call on a class-typed global must resolve via the declared global type, got:\n{rust}"
+        rust.contains("C__foo (obj . clone ())"),
+        "a method call on a class-typed global must resolve via the declared global type and \
+         clone the non-Copy static receiver (moving out of a static is E0507), got:\n{rust}"
     );
     assert!(
-        rust.contains("C__get_y (obj)"),
-        "an accessor read on a class-typed global must resolve via the declared global type, got:\n{rust}"
+        rust.contains("C__get_y (obj . clone ())"),
+        "an accessor read on a class-typed global must resolve via the declared global type and \
+         clone the non-Copy static receiver, got:\n{rust}"
     );
 }
 
@@ -1434,7 +1436,7 @@ fn e2e_setter_assignment_evaluates_to_assigned_value() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__set_y (c ,"),
+        rust.contains("C__set_y (c"),
         "the setter must be invoked, got:\n{rust}"
     );
     assert!(
@@ -1452,11 +1454,11 @@ fn e2e_accessor_compound_update_routes_through_getter_and_setter() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__get_y (c)"),
+        rust.contains("C__get_y (c"),
         "a compound accessor update must read through the getter, got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (c ,"),
+        rust.contains("C__set_y (c"),
         "a compound accessor update must write through the setter, got:\n{rust}"
     );
 }
@@ -1471,21 +1473,43 @@ fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__get_y (g)"),
-        "a place-like (global) receiver must be forwarded without a by-value temp, got:\n{rust}"
+        rust.contains("C__get_y (g . clone ())"),
+        "a global receiver must be forwarded without an intermediate by-value temp (a direct \
+         clone is used because moving out of a static is E0507), got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (g ,"),
-        "a place-like (global) receiver must be forwarded to the setter as-is, got:\n{rust}"
+        rust.contains("C__set_y (g . clone () ,"),
+        "a global receiver must be forwarded to the setter as-is (cloned, not spilled into a \
+         temp), got:\n{rust}"
     );
 }
 
 #[test]
 fn e2e_accessor_compound_update_preserves_prefix_and_postfix_results() {
     fn setter_value_arg(rust: &str) -> String {
-        let call = rust.rsplit("C__set_y (").next().expect("setter call");
-        let args = call.split(')').next().expect("setter args");
-        args.rsplit(", ").next().unwrap().trim().to_owned()
+        let marker = "C__set_y (";
+        let start = rust.rfind(marker).expect("setter call") + marker.len();
+        let mut depth = 1i32;
+        let mut end = start;
+        for (i, ch) in rust[start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rust[start..end]
+            .rsplit(", ")
+            .next()
+            .unwrap()
+            .trim()
+            .to_owned()
     }
     fn returned_local(rust: &str) -> String {
         rust.rsplit("return ")
@@ -1597,5 +1621,147 @@ fn e2e_destructuring_method_parameter_binds_property_value() {
         rust.contains("let x : i64 = __tmp1 . x"),
         "a destructured method parameter must read the property from the value parameter \
          (after the synthetic `this`), got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_string_concat_result_temp_is_moved_not_cloned() {
+    let out = compile(
+        "function f(): string { const a: string = \"x\"; const b: string = \"y\"; return a + b; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("__ts_aot_string_concat"),
+        "expected a StringConcat runtime call, got:\n{rust}"
+    );
+    assert!(
+        !rust.contains(". clone ()"),
+        "a plain `a + b` must borrow the operands and move the result; it must not clone \
+         anything, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_string_concat_snapshots_lhs_only_when_rhs_reassigns() {
+    let out = compile(
+        "function f(): i64 { let s: string = \"a\"; const r: string = s + (s = \"b\"); if (r === \"ab\") { return 1; } return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("s . clone ()"),
+        "when the right operand reassigns the left operand's binding, the left value must be \
+         snapshotted (cloned) before the reassignment, got:\n{rust}"
+    );
+    assert!(
+        rust.contains("__ts_aot_string_concat"),
+        "expected a StringConcat runtime call, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_shared_capture_read_is_cloned_once() {
+    let out = compile(
+        "function f(): string { let s: string = \"hi\"; const g = (): string => s; s = \"x\"; return g(); }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        !rust.contains(". clone () . clone ()"),
+        "a captured (shared) local read must not be cloned twice, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_in_operator_borrows_operands_and_types_bool() {
+    let out = compile(
+        "function f(): i64 { const arr: i64[] = [1]; if (0 in arr) { return 1; } return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("bool = __ts_aot_op_in (& 0 , & arr)"),
+        "`in` must borrow both operands (`&value`, `&object`) and bind a `bool` result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_array_is_array_borrows_operand_and_types_bool() {
+    let out = compile(
+        "function f(): i64 { const arr: i64[] = [1]; if (Array.isArray(arr)) { return 1; } return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("bool = __ts_aot_array_is_array (& arr)"),
+        "`Array.isArray` must borrow its operand and bind a `bool` result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_date_parse_borrows_string_and_types_i64() {
+    let out = compile("function f(): i64 { const t: string = \"2020\"; return Date.parse(t); }");
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("i64 = __ts_aot_date_parse (& t)"),
+        "`Date.parse` must borrow its string argument and bind an `i64` result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_array_from_borrows_source_and_types_array() {
+    let out = compile(
+        "function f(): i64 { const src: i64[] = [1]; const a: i64[] = Array.from(src); return a.length; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("Vec < i64 > = __ts_aot_array_from (& src)"),
+        "`Array.from` must borrow its source and bind an array result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_json_stringify_string_borrows_and_types_string() {
+    let out = compile(
+        "function f(): i64 { const s: string = \"hi\"; const j: string = JSON.stringify(s); return j.length; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("JsString = __ts_aot_json_stringify_string (& s)"),
+        "`JSON.stringify(str)` must borrow its argument and bind a `JsString` result, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_caught_literal_inequality_negates_whole_comparison() {
+    let out = compile(
+        "function f(): i64 { try { throw 1; } catch (e) { if (e !== null) { return 1; } } return 0; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        rust.contains("! (e == ts_aot_runtime :: CaughtValue :: Null)"),
+        "`!==` on a caught literal must negate the whole comparison (`!(e == ...)`), got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("! e =="),
+        "the negation must not bind to the left operand only, got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_optional_copy_local_assignment_is_not_cloned() {
+    let out = compile(
+        "function f(): i64 { let x: number | null = 5; let y: number | null = x; y = null; return (x ?? 0) as i64; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        !rust.contains("x . clone ()"),
+        "copying an `Option<Copy>` local must not clone it, got:\n{rust}"
     );
 }

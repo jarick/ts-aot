@@ -1,4 +1,4 @@
-use proc_macro2::{Ident, Literal, TokenStream};
+use proc_macro2::{Ident, Literal, Punct, Spacing, TokenStream};
 use quote::{format_ident, quote};
 use ts_aot_core::{Atom, LocalId, Type, TypeId, TypeTable};
 
@@ -17,6 +17,24 @@ use super::runtime_op::runtime_op_ident;
 use super::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
 
+fn loop_label(ident: &Ident) -> TokenStream {
+    let apostrophe = Punct::new('\'', Spacing::Joint);
+    quote!(#apostrophe #ident)
+}
+
+fn with_loop_body<F>(
+    body_ctx: &BodyCtx,
+    prefix: &str,
+    emit_body: F,
+) -> Result<(TokenStream, Vec<TokenStream>), BackendError>
+where
+    F: FnOnce() -> Result<Vec<TokenStream>, BackendError>,
+{
+    let ident = format_ident!("__{}_{}", prefix, body_ctx.alloc_block_id());
+    let stmts = body_ctx.with_loop_labels(Some(ident.clone()), emit_body)?;
+    Ok((loop_label(&ident), stmts))
+}
+
 pub(super) fn emit_body(
     f: &MirFunctionDecl,
     ctx: &EmitCtx,
@@ -27,6 +45,9 @@ pub(super) fn emit_body(
         return Ok(quote!({ unimplemented!() }));
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
+    if block_contains_try(&f.body.block) {
+        stmts.insert(0, return_signal_enum());
+    }
     if let Some(prelude) = emit_env_prelude(body_ctx, emit_env, ctx) {
         stmts.insert(0, prelude);
     }
@@ -36,6 +57,37 @@ pub(super) fn emit_body(
             cache.values().map(emit_weakmap_liveness_binding).collect();
         prelude.append(&mut stmts);
         stmts = prelude;
+    }
+    if !body_ctx.is_generator() && !mir_block_terminates(&f.body.block) {
+        let (through_result, promise_ok) = match emit_env.types.resolve(f.ret) {
+            Some(Type::Result { ok, .. }) => (
+                true,
+                as_promise_type(*ok, emit_env).map(|(_, promise_ok)| promise_ok),
+            ),
+            _ => (
+                false,
+                as_promise_type(f.ret, emit_env).map(|(_, promise_ok)| promise_ok),
+            ),
+        };
+        let async_unit_completion = f.effects.is_async
+            && promise_ok.is_some_and(|ok| matches!(emit_env.types.resolve(ok), Some(Type::Void)));
+        let result_void = matches!(
+            emit_env.types.resolve(f.ret),
+            Some(Type::Result { ok, .. })
+                if matches!(emit_env.types.resolve(*ok), Some(Type::Void))
+        );
+        if async_unit_completion {
+            let unit = quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<()>(()));
+            if through_result {
+                stmts.push(quote!(return Ok(#unit);));
+            } else {
+                stmts.push(quote!(return #unit;));
+            }
+        } else if result_void {
+            stmts.push(quote!(return Ok(());));
+        } else if !matches!(emit_env.types.resolve(f.ret), Some(Type::Void)) {
+            stmts.push(quote!(unreachable!()));
+        }
     }
     if body_ctx.is_generator() {
         let co = body_ctx.gen_co().ok_or_else(|| {
@@ -55,6 +107,55 @@ pub(super) fn emit_body(
         }
     } else {
         Ok(quote!({ #(#stmts)* }))
+    }
+}
+
+fn return_signal_enum() -> TokenStream {
+    quote!(
+        enum __ReturnSignal {
+            Continue,
+            Break,
+            LoopBreak,
+            LoopContinue,
+        }
+    )
+}
+
+fn block_contains_try(block: &MirBlock) -> bool {
+    block.stmts.iter().any(stmt_contains_try)
+}
+
+fn mir_block_terminates(block: &MirBlock) -> bool {
+    block.stmts.last().is_some_and(|stmt| {
+        matches!(
+            stmt,
+            MirStmt::Return(_)
+                | MirStmt::ReturnResultErr { .. }
+                | MirStmt::Throw { .. }
+                | MirStmt::Break
+                | MirStmt::Continue
+        )
+    })
+}
+
+fn stmt_contains_try(stmt: &MirStmt) -> bool {
+    match stmt {
+        MirStmt::Try { .. } => true,
+        MirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => block_contains_try(then_block) || else_block.as_ref().is_some_and(block_contains_try),
+        MirStmt::While { body, .. }
+        | MirStmt::DoWhile { body, .. }
+        | MirStmt::ForOf { body, .. }
+        | MirStmt::ForAwaitOf { body, .. }
+        | MirStmt::ForIn { body, .. } => block_contains_try(body),
+        MirStmt::Switch { cases, default, .. } => {
+            cases.iter().any(|case| block_contains_try(&case.body))
+                || default.as_ref().is_some_and(block_contains_try)
+        }
+        _ => false,
     }
 }
 
@@ -122,6 +223,70 @@ fn emit_runtime_stmt(
     }
 }
 
+fn as_promise_type(ty: TypeId, emit_env: &EmitEnv) -> Option<(TypeId, TypeId)> {
+    match emit_env.types.resolve(ty) {
+        Some(Type::Promise { ok, .. }) => Some((ty, *ok)),
+        _ => None,
+    }
+}
+
+fn finalize_return_value(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let ret_ty = body_ctx.return_type_id();
+    let (through_result, promise, scalar) = match emit_env.types.resolve(ret_ty) {
+        Some(Type::Result { ok, .. }) => match as_promise_type(*ok, emit_env) {
+            Some((promise_ty, promise_ok)) => (true, Some((promise_ty, promise_ok)), promise_ok),
+            None => (true, None, *ok),
+        },
+        _ => match as_promise_type(ret_ty, emit_env) {
+            Some((promise_ty, promise_ok)) => (false, Some((promise_ty, promise_ok)), promise_ok),
+            None => (false, None, ret_ty),
+        },
+    };
+
+    let (inner_expr, mut inner_tokens) = if through_result {
+        if let MirExpr::ResultOk { value, .. } = expr {
+            (
+                value.as_ref(),
+                emit_value_expr(value, ctx, emit_env, body_ctx)?,
+            )
+        } else if matches!(
+            value_ty(expr, ctx, emit_env, body_ctx).and_then(|t| emit_env.types.resolve(t)),
+            Some(Type::Result { .. })
+        ) {
+            return emit_value_expr(expr, ctx, emit_env, body_ctx);
+        } else {
+            (expr, emit_value_expr(expr, ctx, emit_env, body_ctx)?)
+        }
+    } else {
+        (expr, emit_value_expr(expr, ctx, emit_env, body_ctx)?)
+    };
+
+    if is_dynamic_expr(inner_expr, body_ctx)
+        && matches!(emit_env.types.resolve(scalar), Some(Type::String))
+    {
+        inner_tokens = quote!(#inner_tokens.to_js_string());
+    }
+
+    if let Some((promise_ty, promise_ok)) = promise
+        && value_ty(inner_expr, ctx, emit_env, body_ctx) != Some(promise_ty)
+    {
+        let ok_ty = emit_type_id_with_ctx(promise_ok, emit_env, ctx);
+        inner_tokens =
+            quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<#ok_ty>(#inner_tokens));
+    }
+
+    Ok(if through_result {
+        quote!(Ok(#inner_tokens))
+    } else {
+        inner_tokens
+    })
+}
+
 fn emit_return_stmt(
     slot: Option<&MirExpr>,
     ctx: &EmitCtx,
@@ -140,12 +305,13 @@ fn emit_return_stmt(
                 quote!(None)
             }
         } else if let Some(expr) = slot {
-            let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-            quote!(#expr)
+            finalize_return_value(expr, ctx, emit_env, body_ctx)?
+        } else if body_ctx.async_plain_ok().is_some() {
+            async_unit_return(emit_env, body_ctx)
         } else {
             quote!(())
         };
-        Ok(quote!(#slot_ident = Some(#value_ts); return Ok(__ReturnSignal::Break);))
+        Ok(quote!(#slot_ident = Some(#value_ts); return __ReturnSignal::Break;))
     } else if body_ctx.is_generator() {
         let async_gen = body_ctx.is_async_generator();
         if let Some(expr) = slot {
@@ -165,10 +331,25 @@ fn emit_return_stmt(
             Ok(quote!(return None;))
         }
     } else if let Some(expr) = slot {
-        let expr = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-        Ok(quote!(return #expr;))
+        let value = finalize_return_value(expr, ctx, emit_env, body_ctx)?;
+        Ok(quote!(return #value;))
+    } else if body_ctx.async_plain_ok().is_some() {
+        let unit = async_unit_return(emit_env, body_ctx);
+        Ok(quote!(return #unit;))
     } else {
         Ok(quote!(return;))
+    }
+}
+
+fn async_unit_return(emit_env: &EmitEnv, body_ctx: &BodyCtx) -> TokenStream {
+    let unit = quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<()>(()));
+    if matches!(
+        emit_env.types.resolve(body_ctx.return_type_id()),
+        Some(Type::Result { .. })
+    ) {
+        quote!(Ok(#unit))
+    } else {
+        unit
     }
 }
 
@@ -179,14 +360,30 @@ fn emit_do_while(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let label = format_ident!("__do_while_{}", body.stmts.len());
-    let prev_label = body_ctx.continue_label();
-    body_ctx.set_continue_label(Some(label.clone()));
+    let id = body_ctx.alloc_block_id();
+    let continue_ident = format_ident!("__do_while_continue_{id}");
+    let break_ident = format_ident!("__do_while_break_{id}");
+    let prev_continue = body_ctx.continue_label();
+    let prev_break = body_ctx.break_label();
+    body_ctx.set_continue_label(Some(continue_ident.clone()));
+    body_ctx.set_break_label(Some(break_ident.clone()));
+    body_ctx.enter_loop();
     let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
-    body_ctx.set_continue_label(prev_label);
+    body_ctx.exit_loop();
+    body_ctx.set_continue_label(prev_continue);
+    body_ctx.set_break_label(prev_break);
     let body_stmts = body_stmts?;
     let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
-    Ok(quote!(#label: loop { #(#body_stmts)* if !(#cond) { break #label; } }))
+    let continue_lt = loop_label(&continue_ident);
+    let break_lt = loop_label(&break_ident);
+    Ok(quote!(
+        #break_lt: loop {
+            #continue_lt: {
+                #(#body_stmts)*
+            }
+            if !(#cond) { break #break_lt; }
+        }
+    ))
 }
 
 fn emit_stmt(
@@ -207,19 +404,30 @@ fn emit_stmt(
                 let Some(init) = init else {
                     return Ok(shared_reset_tokens(&acc));
                 };
-                let init = emit_value_expr(init, ctx, emit_env, body_ctx)?;
+                let init = emit_owned_value(init, ctx, emit_env, body_ctx)?;
                 return Ok(shared_write_tokens(&acc, &init));
             }
             let name = body_ctx.local_ident(*local);
-            let ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
+            let target_ty = *ty;
+            let dynamic_copy = init.as_ref().is_some_and(|init| {
+                is_dynamic_expr(init, body_ctx)
+                    && matches!(emit_env.types.resolve(target_ty), Some(Type::Error))
+            });
+            let ty = if dynamic_copy {
+                quote!(ts_aot_runtime::CaughtValue)
+            } else {
+                emit_type_id_with_ctx(target_ty, emit_env, ctx)
+            };
             let mutability = if *mutable || body_ctx.local_mut(*local) {
                 quote!(mut)
             } else {
                 quote!()
             };
             if let Some(init) = init {
-                let init = emit_value_expr(init, ctx, emit_env, body_ctx)?;
-                Ok(quote!(let #mutability #name: #ty = #init;))
+                let init_tokens = emit_owned_value(init, ctx, emit_env, body_ctx)?;
+                let init_tokens =
+                    dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
+                Ok(quote!(let #mutability #name: #ty = #init_tokens;))
             } else {
                 Ok(quote!(let #mutability #name: #ty;))
             }
@@ -228,13 +436,13 @@ fn emit_stmt(
             if let MirPlace::Local { id } = target
                 && let Some(acc) = body_ctx.shared_access_for_local(*id)
             {
-                let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
+                let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
                 return Ok(shared_write_tokens(&acc, &value_tokens));
             }
             if let MirPlace::Global(name) = target
                 && let Some(acc) = body_ctx.shared_access_for_name(name)
             {
-                let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
+                let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
                 return Ok(shared_write_tokens(&acc, &value_tokens));
             }
             if let Some(chain_assign) =
@@ -243,7 +451,16 @@ fn emit_stmt(
                 return Ok(chain_assign);
             }
             let target_tokens = emit_place(target, ctx, emit_env, body_ctx)?;
-            let value_tokens = emit_value_expr(value, ctx, emit_env, body_ctx)?;
+            let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
+            let value_tokens = match target {
+                MirPlace::Local { id } => match body_ctx.local_ty(*id) {
+                    Some(target_ty) => {
+                        dynamic_string_coerce(value, value_tokens, target_ty, emit_env, body_ctx)
+                    }
+                    None => value_tokens,
+                },
+                _ => value_tokens,
+            };
             let reset = emit_weakmap_liveness_reset(target, body_ctx);
             let assignment = quote! {
                 #target_tokens = #value_tokens;
@@ -289,8 +506,10 @@ fn emit_stmt(
         ),
         MirStmt::While { cond, body } => {
             let cond = emit_expr(cond, ctx, emit_env, body_ctx)?;
-            let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
-            Ok(quote!(while #cond { #(#body_stmts)* }))
+            let (loop_label_lt, body_stmts) = with_loop_body(body_ctx, "while", || {
+                emit_block_stmts(body, ctx, emit_env, body_ctx)
+            })?;
+            Ok(quote!(#loop_label_lt: while #cond { #(#body_stmts)* }))
         }
         this @ (MirStmt::ForOf {
             item,
@@ -317,7 +536,9 @@ fn emit_stmt(
                 quote!(#item_ident)
             };
             let iterable = emit_expr(iterable, ctx, emit_env, body_ctx)?;
-            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let (loop_label_lt, mut body_stmts) = with_loop_body(body_ctx, "for_of", || {
+                emit_block_stmts(body, ctx, emit_env, body_ctx)
+            })?;
             if let Some(acc) = body_ctx.shared_access_for_local(item_id) {
                 body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#item_ident)));
             }
@@ -367,7 +588,7 @@ fn emit_stmt(
                 };
                 return Ok(quote!({
                     #owner_init
-                    loop {
+                    #loop_label_lt: loop {
                         let __for_await_yield = #advance;
                         if __for_await_yield.done {
                             break;
@@ -385,24 +606,41 @@ fn emit_stmt(
                 Some(ts_aot_core::Type::Generator { .. })
             );
             if needs_mut_ref {
-                Ok(quote!(for #item in &mut (#iterable) { #(#body_stmts)* }))
+                Ok(quote!(#loop_label_lt: for #item in &mut (#iterable) { #(#body_stmts)* }))
             } else {
-                Ok(quote!(for #item in #iterable { #(#body_stmts)* }))
+                Ok(quote!(#loop_label_lt: for #item in #iterable { #(#body_stmts)* }))
             }
         }
         MirStmt::ForIn { key, object, body } => {
             let key_ident = body_ctx.local_ident(*key);
             let object = emit_expr(object, ctx, emit_env, body_ctx)?;
-            let mut body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx)?;
+            let (loop_label_lt, mut body_stmts) = with_loop_body(body_ctx, "for_in", || {
+                emit_block_stmts(body, ctx, emit_env, body_ctx)
+            })?;
             if let Some(acc) = body_ctx.shared_access_for_local(*key) {
                 body_stmts.insert(0, shared_write_tokens(&acc, &quote!(#key_ident)));
             }
-            Ok(quote!(for #key_ident in #object { #(#body_stmts)* }))
+            Ok(quote!(#loop_label_lt: for #key_ident in #object { #(#body_stmts)* }))
         }
-        MirStmt::Break => Ok(quote!(break;)),
+        MirStmt::Break => {
+            if body_ctx.break_escapes_try() {
+                Ok(quote!(return __ReturnSignal::LoopBreak;))
+            } else if let Some(label) = body_ctx.break_label() {
+                let label_lt = loop_label(&label);
+                Ok(quote!(break #label_lt;))
+            } else {
+                Ok(quote!(break;))
+            }
+        }
         MirStmt::Continue => {
-            if let Some(label) = body_ctx.continue_label() {
-                Ok(quote!(continue #label;))
+            if body_ctx.continue_escapes_try() {
+                Ok(quote!(return __ReturnSignal::LoopContinue;))
+            } else if let Some(label) = body_ctx.continue_label() {
+                let label_lt = loop_label(&label);
+                Ok(quote!(break #label_lt;))
+            } else if let Some(target) = body_ctx.continue_target() {
+                let target_lt = loop_label(&target);
+                Ok(quote!(continue #target_lt;))
             } else {
                 Ok(quote!(continue;))
             }
@@ -522,6 +760,127 @@ fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
         MirExpr::Local(id) => body_ctx.local_ty(*id),
         other => other.ty(),
     }
+}
+
+fn value_ty(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<TypeId> {
+    match expr {
+        MirExpr::Call { callee, .. } => ctx
+            .function_ret(*callee)
+            .or_else(|| expr_base_ty(expr, body_ctx)),
+        MirExpr::IndirectCall { callee, .. } => {
+            let callee_ty = expr_base_ty(callee, body_ctx)?;
+            match emit_env.types.resolve(callee_ty) {
+                Some(Type::Fn { ret, .. }) => Some(*ret),
+                _ => expr_base_ty(expr, body_ctx),
+            }
+        }
+        _ => expr_base_ty(expr, body_ctx),
+    }
+}
+
+fn is_copy_type(types: &TypeTable, ty: TypeId) -> bool {
+    match types.resolve(ty) {
+        Some(
+            Type::Bool
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+            | Type::Date
+            | Type::Symbol,
+        ) => true,
+        Some(Type::Optional { inner }) => is_copy_type(types, *inner),
+        _ => false,
+    }
+}
+
+fn is_non_copy_place(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> bool {
+    match expr {
+        MirExpr::Local(id) => {
+            if body_ctx.shared_access_for_local(*id).is_some() || body_ctx.is_move_safe(*id) {
+                return false;
+            }
+            body_ctx
+                .local_ty(*id)
+                .is_some_and(|t| !is_copy_type(emit_env.types, t))
+        }
+        MirExpr::Global(name) => {
+            body_ctx.shared_access_for_name(name).is_none()
+                && ctx
+                    .global_ty(name)
+                    .is_some_and(|t| !is_copy_type(emit_env.types, t))
+        }
+        MirExpr::Field { base, .. } => {
+            if is_shared_local_base(base, body_ctx) {
+                return false;
+            }
+            expr.ty().is_some_and(|t| !is_copy_type(emit_env.types, t))
+        }
+        MirExpr::Index { base, index, .. } => {
+            let simple_index = matches!(
+                index.as_ref(),
+                MirExpr::Int { .. }
+                    | MirExpr::Float { .. }
+                    | MirExpr::Bool(_)
+                    | MirExpr::Local(_)
+                    | MirExpr::Global(_)
+            );
+            if simple_index && is_shared_local_base(base, body_ctx) {
+                return false;
+            }
+            expr.ty().is_some_and(|t| !is_copy_type(emit_env.types, t))
+        }
+        _ => false,
+    }
+}
+
+fn is_shared_local_base(base: &MirExpr, body_ctx: &BodyCtx) -> bool {
+    matches!(base, MirExpr::Local(id)
+        if body_ctx
+            .shared_access_for_local(*id)
+            .is_some_and(|acc| acc.storage == SharedStorage::RefCell))
+}
+
+fn emit_owned_value(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let tokens = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
+    if is_non_copy_place(expr, ctx, emit_env, body_ctx) {
+        Ok(quote!(#tokens.clone()))
+    } else {
+        Ok(tokens)
+    }
+}
+
+fn emit_owned_exprs(
+    exprs: &[MirExpr],
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Vec<TokenStream>, BackendError> {
+    exprs
+        .iter()
+        .map(|e| emit_owned_value(e, ctx, emit_env, body_ctx))
+        .collect()
 }
 
 fn indirect_callee_fn_kind(
@@ -738,9 +1097,21 @@ fn emit_expr(
             Ok(quote!(#base[#index]))
         }
         MirExpr::Call { callee, args, .. } => {
-            let callee = ctx.function_ident(*callee);
-            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#callee(#(#args),*)))
+            let is_async = ctx.function_is_async(*callee);
+            let callee_ident = ctx.function_ident(*callee);
+            let callee = if let Some(owner) = ctx.function_owner(*callee) {
+                let owner_ident = ctx.struct_ident(owner);
+                quote!(#owner_ident::#callee_ident)
+            } else {
+                quote!(#callee_ident)
+            };
+            let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
+            let call = quote!(#callee(#(#args),*));
+            if is_async {
+                Ok(quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call)))
+            } else {
+                Ok(call)
+            }
         }
         MirExpr::IndirectCall { callee, args, .. } => {
             if let Some(map) = optional_call_map_arm(callee, args, ctx, emit_env, body_ctx)? {
@@ -748,12 +1119,12 @@ fn emit_expr(
             }
             if let Some(k) = indirect_callee_fn_kind(callee, ctx, emit_env, body_ctx) {
                 let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
-                let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
+                let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
                 let helper = EmitCtx::fn_call_ident(k);
                 return Ok(quote!(#helper(&#callee, #(#args),*)));
             }
             let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
-            let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
+            let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
             Ok(quote!(#callee(#(#args),*)))
         }
         MirExpr::StructLiteral {
@@ -764,7 +1135,7 @@ fn emit_expr(
                 .iter()
                 .map(|(field_id, value)| {
                     let field = ctx.struct_field_ident(*struct_id, *field_id);
-                    let value = emit_expr(value, ctx, emit_env, body_ctx)?;
+                    let value = emit_owned_value(value, ctx, emit_env, body_ctx)?;
                     Ok(quote!(#field: #value))
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
@@ -791,11 +1162,17 @@ fn emit_expr(
         MirExpr::Await { expr, ty, .. } => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             let needs_helper = matches!(expr.as_ref(), MirExpr::Import { .. })
-                || expr_base_ty(expr, body_ctx)
+                || value_ty(expr, ctx, emit_env, body_ctx)
                     .and_then(|ty_id| types.resolve(ty_id))
                     .is_some_and(|ty| matches!(ty, Type::Promise { .. }));
             if needs_helper {
-                let ok_ty = emit_type_id_with_ctx(*ty, emit_env, ctx);
+                let ok_ty_id = value_ty(expr, ctx, emit_env, body_ctx)
+                    .and_then(|t| match types.resolve(t) {
+                        Some(Type::Promise { ok, .. }) => Some(*ok),
+                        _ => None,
+                    })
+                    .unwrap_or(*ty);
+                let ok_ty = emit_type_id_with_ctx(ok_ty_id, emit_env, ctx);
                 let helper = await_helper_path(body_ctx);
                 Ok(quote!(#helper::<#ok_ty>(&#inner)))
             } else {
@@ -887,6 +1264,9 @@ fn emit_expr(
                 body_ctx.shared_name_map(),
                 body_ctx.shared_id_map(),
             );
+            child_ctx.inherit_dynamic(body_ctx);
+            child_ctx.seed_dynamic(body, params, locals, types);
+            child_ctx.seed_move_safe(body, locals);
             let mut candidates: std::collections::HashSet<LocalId> =
                 params.iter().map(|p| p.id).collect();
             for l in locals {
@@ -916,7 +1296,10 @@ fn emit_expr(
                 })
                 .collect();
             let ret_ty_tokens = emit_type_id_with_ctx(*ret_ty, emit_env, ctx);
-            let inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
+            let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child_ctx)?;
+            if block_contains_try(body) {
+                inner_stmts.insert(0, return_signal_enum());
+            }
             let stmts = if child_ctx.has_weakmap_liveness() {
                 let cache = child_ctx.weakmap_liveness_per_key.borrow();
                 let mut prelude: Vec<TokenStream> =
@@ -1095,7 +1478,11 @@ fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Op
         .iter()
         .map(|f| {
             let field = &f.field;
-            let t = emit_type_id_with_ctx(f.ty, emit_env, ctx);
+            let t = if f.dynamic {
+                quote!(ts_aot_runtime::CaughtValue)
+            } else {
+                emit_type_id_with_ctx(f.ty, emit_env, ctx)
+            };
             match f.storage {
                 SharedStorage::Cell => quote!(#field: std::cell::Cell<Option<#t>>),
                 SharedStorage::RefCell => quote!(#field: std::cell::RefCell<Option<#t>>),
@@ -1177,6 +1564,9 @@ fn emit_closure_value(
 
     let mut child =
         BodyCtx::for_closure(ret_ty, body_ctx.shared_name_map(), body_ctx.shared_id_map());
+    child.inherit_dynamic(body_ctx);
+    child.seed_dynamic(body, params, locals, types);
+    child.seed_move_safe(body, locals);
     let mut candidates: std::collections::HashSet<LocalId> = params.iter().map(|p| p.id).collect();
     for l in locals {
         candidates.insert(l.id);
@@ -1212,6 +1602,9 @@ fn emit_closure_value(
     let mut inner_stmts = emit_block_stmts(body, ctx, emit_env, &child)?;
     if let Some(prelude) = emit_env_prelude(&child, emit_env, ctx) {
         inner_stmts.insert(0, prelude);
+    }
+    if block_contains_try(body) {
+        inner_stmts.insert(0, return_signal_enum());
     }
     let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
     let fn_ident = format_ident!("__ts_closure_{}", closure_id);
@@ -1271,6 +1664,11 @@ fn emit_binary_expr(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+        && let Some(tokens) = emit_dynamic_equality(op, left, right, ctx, emit_env, body_ctx)?
+    {
+        return Ok(tokens);
+    }
     let left = emit_expr(left, ctx, emit_env, body_ctx)?;
     let right = emit_expr(right, ctx, emit_env, body_ctx)?;
     Ok(match op {
@@ -1293,6 +1691,110 @@ fn emit_binary_expr(
         BinaryOp::Shl => quote!(#left << #right),
         BinaryOp::Shr => quote!(#left >> #right),
     })
+}
+
+fn is_dynamic_expr(expr: &MirExpr, body_ctx: &BodyCtx) -> bool {
+    match expr {
+        MirExpr::Local(id) => body_ctx.is_dynamic(*id),
+        MirExpr::Global(name) => body_ctx.is_dynamic_name(name),
+        _ => false,
+    }
+}
+
+fn dynamic_string_coerce(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> TokenStream {
+    if is_dynamic_expr(expr, body_ctx)
+        && matches!(emit_env.types.resolve(target), Some(Type::String))
+    {
+        quote!(#tokens.to_js_string())
+    } else {
+        tokens
+    }
+}
+
+fn is_caught_comparable(emit_env: &EmitEnv, ty: TypeId) -> bool {
+    emit_env
+        .types
+        .resolve(ty)
+        .is_some_and(super::types::is_comparable_primitive)
+}
+
+fn caught_operand_ty(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<TokenStream> {
+    if matches!(expr, MirExpr::Bool(_)) {
+        return Some(quote!(bool));
+    }
+    let ty = expr_base_ty(expr, body_ctx)?;
+    if !is_caught_comparable(emit_env, ty) {
+        return None;
+    }
+    Some(emit_type_id_with_ctx(ty, emit_env, ctx))
+}
+
+fn emit_caught_literal_eq(
+    caught: &MirExpr,
+    other: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let variant = match other {
+        MirExpr::Null { .. } => quote!(ts_aot_runtime::CaughtValue::Null),
+        MirExpr::Unit => quote!(ts_aot_runtime::CaughtValue::Undefined),
+        _ => return Ok(None),
+    };
+    let caught = emit_expr(caught, ctx, emit_env, body_ctx)?;
+    Ok(Some(quote!(#caught == #variant)))
+}
+
+fn emit_dynamic_equality(
+    op: BinaryOp,
+    left: &MirExpr,
+    right: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let left_dynamic = is_dynamic_expr(left, body_ctx);
+    let right_dynamic = is_dynamic_expr(right, body_ctx);
+    if !left_dynamic && !right_dynamic {
+        return Ok(None);
+    }
+    let neg = matches!(op, BinaryOp::Ne);
+    if !left_dynamic || !right_dynamic {
+        let (caught_expr, other_expr) = if left_dynamic {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        if let Some(call) =
+            emit_caught_literal_eq(caught_expr, other_expr, ctx, emit_env, body_ctx)?
+        {
+            return Ok(Some(if neg { quote!(!(#call)) } else { call }));
+        }
+        let caught = emit_expr(caught_expr, ctx, emit_env, body_ctx)?;
+        let call = if let Some(other_ty) = caught_operand_ty(other_expr, ctx, emit_env, body_ctx) {
+            let other = emit_owned_value(other_expr, ctx, emit_env, body_ctx)?;
+            quote!(ts_aot_runtime::__ts_aot_caught_eq::<#other_ty>(&#caught, #other))
+        } else {
+            let other = emit_expr(other_expr, ctx, emit_env, body_ctx)?;
+            quote!(ts_aot_runtime::__ts_aot_caught_eq_dyn(&#caught, &#other))
+        };
+        return Ok(Some(if neg { quote!(!#call) } else { call }));
+    }
+    let left = emit_expr(left, ctx, emit_env, body_ctx)?;
+    let right = emit_expr(right, ctx, emit_env, body_ctx)?;
+    let call = quote!(#left == #right);
+    Ok(Some(if neg { quote!(!(#call)) } else { call }))
 }
 
 pub(super) fn emit_float(value: f64) -> TokenStream {
@@ -1333,8 +1835,8 @@ fn emit_unary_expr(
 ) -> Result<TokenStream, BackendError> {
     let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
     Ok(match op {
-        UnaryOp::Neg => quote!(-#expr),
-        UnaryOp::Not | UnaryOp::BitNot => quote!(!#expr),
+        UnaryOp::Neg => quote!(-(#expr)),
+        UnaryOp::Not | UnaryOp::BitNot => quote!(!(#expr)),
     })
 }
 
@@ -1480,6 +1982,77 @@ fn emit_runtime_call(
                 #idx
             )))
         }
+        RuntimeOp::ArrayIsArray => {
+            let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_array_is_array(&#value)))
+        }
+        RuntimeOp::ArrayIsArrayFalse => Ok(quote!(__ts_aot_array_is_array_false())),
+        RuntimeOp::OpIn => {
+            let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let object = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_op_in(&#value, &#object)))
+        }
+        RuntimeOp::ArrayFrom => {
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_array_from(&#arr)))
+        }
+        RuntimeOp::ArrayFromMapped => {
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let mapfn = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let fn_value_kind = match &args[1] {
+                MirExpr::Global(name) => ctx.fn_value_for_name(name).map(|(k, _)| k),
+                _ => None,
+            };
+            let arity = match &args[1] {
+                MirExpr::Global(name) => ctx.function_arity(name).unwrap_or(1),
+                _ => 1,
+            };
+            let call = match fn_value_kind {
+                Some(k) => {
+                    let helper = EmitCtx::fn_call_ident(k);
+                    if arity >= 2 {
+                        quote!(#helper(&#mapfn, __ts_aot_item, __ts_aot_idx))
+                    } else {
+                        quote!(#helper(&#mapfn, __ts_aot_item))
+                    }
+                }
+                None => {
+                    if arity >= 2 {
+                        quote!(#mapfn(__ts_aot_item, __ts_aot_idx))
+                    } else {
+                        quote!(#mapfn(__ts_aot_item))
+                    }
+                }
+            };
+            let wrapper = if arity >= 2 {
+                quote!(|__ts_aot_item, __ts_aot_idx| #call)
+            } else {
+                quote!(|__ts_aot_item, _| #call)
+            };
+            Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
+        }
+        RuntimeOp::ObjectKeys => {
+            let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_object_keys(&#map)))
+        }
+        RuntimeOp::DateParse => {
+            let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_date_parse(#s)))
+        }
+        RuntimeOp::JsonParseString => {
+            let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_json_parse_string(#s)))
+        }
+        RuntimeOp::JsonStringifyString => {
+            let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_json_stringify_string(#s)))
+        }
+        RuntimeOp::ArrayBufferSlice => {
+            let buf = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let begin = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let end = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_array_buffer_slice(&#buf, #begin, #end)))
+        }
         RuntimeOp::ArrayCreate => emit_array_op_with_element_type(
             "__ts_aot_array_create",
             args,
@@ -1519,13 +2092,13 @@ fn emit_runtime_call(
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, emit_env, body_ctx),
         RuntimeOp::ArrayPush => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            let item = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let item = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
         }
         RuntimeOp::ArraySet => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
-            let value = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
+            let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
         }
         RuntimeOp::ArrayLen => {
@@ -1642,7 +2215,7 @@ fn emit_runtime_call(
                 };
                 Ok(quote!(#name::<#ty_tokens>(#reason)))
             } else {
-                let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+                let value = emit_owned_value(&args[0], ctx, emit_env, body_ctx)?;
                 Ok(quote!(#name::<#ty_tokens>(#value)))
             }
         }
@@ -1651,7 +2224,7 @@ fn emit_runtime_call(
         | RuntimeOp::PromiseFinallyInstance => {
             let name = runtime_op_ident(op)?;
             let promise = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            let handler = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let handler = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
             let input_ty_tokens = match target_ty {
                 Some(t) => emit_type_id_with_ctx(t, emit_env, ctx),
                 None => emit_type_id_with_ctx(ty, emit_env, ctx),
@@ -1674,7 +2247,7 @@ fn emit_runtime_call(
         RuntimeOp::WeakMapSet => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
-            let value = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
+            let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
             Ok(quote!({
@@ -1786,7 +2359,7 @@ fn emit_array_op_with_element_type(
     let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
     let parts: Vec<TokenStream> = args
         .iter()
-        .map(|a| emit_expr(a, ctx, emit_env, body_ctx))
+        .map(|a| emit_owned_value(a, ctx, emit_env, body_ctx))
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
     Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))
@@ -1823,6 +2396,18 @@ fn emit_js_string_expr(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    let is_string = matches!(arg, MirExpr::String { .. })
+        || value_ty(arg, ctx, emit_env, body_ctx)
+            .and_then(|t| emit_env.types.resolve(t))
+            .is_some_and(|t| matches!(t, Type::String));
+    if !is_string {
+        let value = emit_expr(arg, ctx, emit_env, body_ctx)?;
+        let coerced = quote!(ts_aot_runtime::JsString::from((#value).to_string().as_str()));
+        return Ok(match ownership {
+            StringOwnership::Borrowed => quote!(&#coerced),
+            StringOwnership::Owned => coerced,
+        });
+    }
     let core = match arg {
         MirExpr::String { id, .. } => {
             let lit = Literal::string(id.as_str());
@@ -1846,6 +2431,10 @@ fn emit_switch(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let disc_expr = emit_expr(disc, ctx, emit_env, body_ctx)?;
+    let switch_ident = format_ident!("__switch_{}", body_ctx.alloc_block_id());
+    let prev_break = body_ctx.break_label();
+    body_ctx.set_break_label(Some(switch_ident.clone()));
+    body_ctx.enter_switch();
     let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
     for case in cases {
         let pat = match &case.value {
@@ -1867,7 +2456,10 @@ fn emit_switch(
     } else {
         arms.push(quote!(_ => {}));
     }
-    Ok(quote!(match #disc_expr { #(#arms),* }))
+    body_ctx.exit_switch();
+    body_ctx.set_break_label(prev_break);
+    let lt = loop_label(&switch_ident);
+    Ok(quote!(#lt: { match #disc_expr { #(#arms),* } }))
 }
 
 fn await_helper_path(body_ctx: &BodyCtx) -> TokenStream {
@@ -1898,8 +2490,9 @@ fn emit_try(
     body_ctx.set_in_try(true);
     body_ctx.set_try_label(Some(label.clone()));
     body_ctx.set_return_slot(Some(slot_ident.clone()));
+    body_ctx.push_try_floor();
     let body_stmts = emit_block_stmts(body, ctx, emit_env, body_ctx);
-    body_ctx.set_try_label(prev_try_label);
+    body_ctx.set_try_label(prev_try_label.clone());
     let body_stmts = body_stmts?;
 
     let catch_stmts = if let Some(catch_block) = catch {
@@ -1912,8 +2505,13 @@ fn emit_try(
         None
     };
 
+    let this_loop_floor = body_ctx.try_floor_loop().unwrap_or(0);
+    let enclosing_loop_floor = body_ctx.enclosing_try_loop_floor();
+    body_ctx.pop_try_floor();
+    let loop_in_enclosing = this_loop_floor > enclosing_loop_floor;
+
     body_ctx.set_in_try(prev_in_try);
-    body_ctx.set_try_label(None);
+    body_ctx.set_try_label(prev_try_label);
     body_ctx.set_return_slot(prev_return_slot);
     let finally_stmts = if let Some(fin) = finally {
         Some(emit_block_stmts(fin, ctx, emit_env, body_ctx)?)
@@ -1940,6 +2538,7 @@ fn emit_try(
         quote! {
             if let Some(__v) = #slot_ident {
                 #outer_slot = Some(__v);
+                return __ReturnSignal::Break;
             }
         }
     } else if body_ctx.is_async_generator() {
@@ -1960,38 +2559,66 @@ fn emit_try(
         let catch_stmts = catch_stmts.expect("catch block present");
         if let Some(param) = catch_param {
             let param_ident = body_ctx.local_ident(param);
-            let param_ty = body_ctx
-                .local_ty(param)
-                .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+            let param_ty_id = body_ctx.local_ty(param);
+            let is_any_catch =
+                param_ty_id.is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::Error)));
             let shared_write = body_ctx
                 .shared_access_for_local(param)
                 .map(|acc| shared_write_tokens(&acc, &quote!(#param_ident)))
                 .unwrap_or_default();
-            let mismatch_rethrow = if wrap_escape {
-                quote!(ts_aot_runtime::__ts_aot_async_generator_rethrow(__e))
+            let bind = if is_any_catch {
+                quote!(let #param_ident: ts_aot_runtime::CaughtValue = ts_aot_runtime::__ts_aot_catch_bind(&*__e);)
             } else {
-                quote!(__e)
+                let param_ty = param_ty_id
+                    .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+                let extractable = param_ty_id.is_some_and(|t| {
+                    emit_env
+                        .types
+                        .resolve(t)
+                        .is_some_and(super::types::is_comparable_primitive)
+                });
+                if extractable {
+                    quote! {
+                        let #param_ident: #param_ty =
+                            match ts_aot_runtime::__ts_aot_catch_typed::<#param_ty>(__e) {
+                                Ok(v) => v,
+                                Err(__e) => std::panic::#resume_unwind(__e),
+                            };
+                    }
+                } else {
+                    quote! {
+                        let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
+                            Ok(v) => *v,
+                            Err(__e) => std::panic::#resume_unwind(__e),
+                        };
+                    }
+                }
             };
             quote! {
-                let #param_ident: #param_ty = match __e.downcast::<#param_ty>() {
-                    Ok(v) => *v,
-                    Err(__e) => std::panic::#resume_unwind(#mismatch_rethrow),
-                };
-                #shared_write
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
+                    #bind
+                    #shared_write
                     #(#catch_stmts)*
+                    __ReturnSignal::Continue
                 }));
-                if let Err(__e2) = __catch_result {
-                    __pending_throw = Some(__e2);
+                match __catch_result {
+                    Ok(__ReturnSignal::LoopBreak) => __loop_jump = 1,
+                    Ok(__ReturnSignal::LoopContinue) => __loop_jump = 2,
+                    Err(__e2) => __pending_throw = Some(__e2),
+                    Ok(_) => {}
                 }
             }
         } else {
             quote! {
                 let __catch_result = std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#catch_stmts)*
+                    __ReturnSignal::Continue
                 }));
-                if let Err(__e2) = __catch_result {
-                    __pending_throw = Some(__e2);
+                match __catch_result {
+                    Ok(__ReturnSignal::LoopBreak) => __loop_jump = 1,
+                    Ok(__ReturnSignal::LoopContinue) => __loop_jump = 2,
+                    Err(__e2) => __pending_throw = Some(__e2),
+                    Ok(_) => {}
                 }
             }
         }
@@ -2015,24 +2642,68 @@ fn emit_try(
         quote!(__e)
     };
 
+    let break_replay = if body_ctx.break_escapes_try() {
+        quote!(return __ReturnSignal::LoopBreak;)
+    } else if let Some(label) = body_ctx.break_label() {
+        let lt = loop_label(&label);
+        quote!(break #lt;)
+    } else if loop_in_enclosing {
+        quote!(break;)
+    } else {
+        quote!(unreachable!("break escapes a try without an enclosing loop");)
+    };
+    let continue_replay = if loop_in_enclosing {
+        if let Some(label) = body_ctx.continue_label() {
+            let lt = loop_label(&label);
+            quote!(break #lt;)
+        } else if let Some(target) = body_ctx.continue_target() {
+            let lt = loop_label(&target);
+            quote!(continue #lt;)
+        } else {
+            quote!(continue;)
+        }
+    } else if body_ctx.in_try() {
+        quote!(return __ReturnSignal::LoopContinue;)
+    } else {
+        quote!(unreachable!("continue escapes a try without an enclosing loop");)
+    };
+
+    let label_lt = loop_label(&label);
     Ok(quote! {{
-        enum __ReturnSignal { Continue, Break }
         #slot_decl
         let mut __pending_throw: Option<Box<dyn std::any::Any + Send>> = None;
-        #label: loop {
+        let mut __loop_jump: u8 = 0;
+        #label_lt: loop {
             let __try_result: Result<__ReturnSignal, Box<dyn std::any::Any + Send>> =
                 std::panic::#catch_unwind(std::panic::#assert_unwind_safe(|| {
                     #(#body_stmts)*
-                    Ok::<_, Box<dyn std::any::Any + Send>>(__ReturnSignal::Continue)
+                    __ReturnSignal::Continue
                 }));
             match __try_result {
-                Ok(__ReturnSignal::Break | __ReturnSignal::Continue) => break #label,
-                Err(__e) => { #body_arm }
+                Ok(__ReturnSignal::Break | __ReturnSignal::Continue) => break #label_lt,
+                Ok(__ReturnSignal::LoopBreak) => {
+                    __loop_jump = 1;
+                    break #label_lt;
+                }
+                Ok(__ReturnSignal::LoopContinue) => {
+                    __loop_jump = 2;
+                    break #label_lt;
+                }
+                Err(__e) => {
+                    #body_arm
+                    break #label_lt;
+                }
             }
         }
         #finally_block
         if let Some(__e) = __pending_throw {
             std::panic::#resume_unwind(#final_rethrow);
+        }
+        if __loop_jump == 1 {
+            #break_replay
+        }
+        if __loop_jump == 2 {
+            #continue_replay
         }
         #replay_return
     }})

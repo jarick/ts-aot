@@ -44,18 +44,18 @@ impl ExprConverter {
             HirExpr::Bool(b, _) => MirExpr::Bool(*b),
             HirExpr::Int(v, _) => MirExpr::Int {
                 value: i128::from(*v),
-                ty: TypeId::from_raw(0),
+                ty: types.intern(&Type::I64),
             },
             HirExpr::Float(bits, _) => MirExpr::Float {
                 value: f64::from_bits(*bits),
-                ty: TypeId::from_raw(0),
+                ty: types.intern(&Type::F64),
             },
             HirExpr::String(id, _) => MirExpr::String {
                 id: id.clone(),
-                ty: TypeId::from_raw(0),
+                ty: types.intern(&Type::String),
             },
             HirExpr::Null(_) => MirExpr::Null {
-                ty: TypeId::from_raw(0),
+                ty: types.intern(&Type::Null),
             },
             HirExpr::Undefined(_) => MirExpr::Unit,
             HirExpr::Local { id, .. } => self.map_local(*id),

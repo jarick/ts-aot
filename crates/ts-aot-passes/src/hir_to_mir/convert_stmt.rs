@@ -233,8 +233,28 @@ impl ExprConverter {
                     ty: bool_ty,
                     mutable: true,
                 });
+                let continue_flag = self.fresh_local();
+                final_locals.push(MirLocalDecl {
+                    id: continue_flag,
+                    name: Atom::from(""),
+                    ty: bool_ty,
+                    mutable: true,
+                });
 
-                let mut inner_stmts = rewrite_break_continue_for_loop(body_mir.stmts, is_break, 0);
+                let mut inner_stmts = vec![MirStmt::Let {
+                    local: continue_flag,
+                    ty: bool_ty,
+                    init: Some(MirExpr::Bool(false)),
+                    mutable: true,
+                }];
+                let continue_count = std::cell::Cell::new(0u32);
+                inner_stmts.extend(rewrite_break_continue_for_loop(
+                    body_mir.stmts,
+                    is_break,
+                    continue_flag,
+                    0,
+                    &continue_count,
+                ));
                 inner_stmts.push(MirStmt::Break);
 
                 let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 2);
@@ -295,12 +315,31 @@ impl ExprConverter {
                     ty: bool_ty,
                     mutable: true,
                 });
+                let continue_flag = self.fresh_local();
+                final_locals.push(MirLocalDecl {
+                    id: continue_flag,
+                    name: Atom::from(""),
+                    ty: bool_ty,
+                    mutable: true,
+                });
 
-                let mut inner_stmts = vec![MirStmt::Assign {
-                    target: MirPlace::Local { id: first_id },
-                    value: MirExpr::Bool(false),
-                }];
-                inner_stmts.extend(rewrite_break_continue_for_loop(body_mir.stmts, is_break, 0));
+                let mut inner_stmts = vec![
+                    assign_bool(first_id, false),
+                    MirStmt::Let {
+                        local: continue_flag,
+                        ty: bool_ty,
+                        init: Some(MirExpr::Bool(false)),
+                        mutable: true,
+                    },
+                ];
+                let continue_count = std::cell::Cell::new(0u32);
+                inner_stmts.extend(rewrite_break_continue_for_loop(
+                    body_mir.stmts,
+                    is_break,
+                    continue_flag,
+                    0,
+                    &continue_count,
+                ));
                 inner_stmts.push(MirStmt::Break);
 
                 let continue_cond = MirExpr::Binary {
@@ -612,13 +651,13 @@ impl ExprConverter {
                 );
                 final_locals.extend(body_locals);
                 let (catch_param, mir_catch) = if let Some(c) = catch {
-                    let param = c.binding.as_ref().map(|(local_id, name)| {
-                        let new_id = self.map_local_id(*local_id);
-                        self.register_local_name(new_id, name.clone());
+                    let param = c.binding.as_ref().map(|binding| {
+                        let new_id = self.map_local_id(binding.id);
+                        self.register_local_name(new_id, binding.name.clone());
                         final_locals.push(MirLocalDecl {
                             id: new_id,
-                            name: name.clone(),
-                            ty: TypeId::from_raw(0),
+                            name: binding.name.clone(),
+                            ty: binding.ty,
                             mutable: false,
                         });
                         new_id
@@ -789,41 +828,54 @@ impl<'a> Visitor for CollectMutableVisitor<'a> {
     }
 }
 
+fn assign_bool(local: LocalId, value: bool) -> MirStmt {
+    MirStmt::Assign {
+        target: MirPlace::Local { id: local },
+        value: MirExpr::Bool(value),
+    }
+}
+
 fn rewrite_break_continue_for_loop(
     stmts: Vec<MirStmt>,
     is_break_local: LocalId,
-    our_depth: usize,
+    continue_flag_local: LocalId,
+    switch_depth: usize,
+    continue_count: &std::cell::Cell<u32>,
 ) -> Vec<MirStmt> {
     let mut out = Vec::with_capacity(stmts.len());
     for s in stmts {
         match s {
-            MirStmt::Continue if our_depth == 0 => {
+            MirStmt::Continue => {
+                if switch_depth > 0 {
+                    continue_count.set(continue_count.get() + 1);
+                    out.push(assign_bool(continue_flag_local, true));
+                }
                 out.push(MirStmt::Break);
             }
-            MirStmt::Break if our_depth == 0 => {
-                out.push(MirStmt::Assign {
-                    target: MirPlace::Local { id: is_break_local },
-                    value: MirExpr::Bool(true),
-                });
+            MirStmt::Break if switch_depth == 0 => {
+                out.push(assign_bool(is_break_local, true));
                 out.push(MirStmt::Break);
-            }
-            MirStmt::While { cond, body } => {
-                let new_body =
-                    rewrite_break_continue_for_loop(body.stmts, is_break_local, our_depth + 1);
-                out.push(MirStmt::While {
-                    cond,
-                    body: MirBlock { stmts: new_body },
-                });
             }
             MirStmt::If {
                 cond,
                 then_block,
                 else_block,
             } => {
-                let new_then =
-                    rewrite_break_continue_for_loop(then_block.stmts, is_break_local, our_depth);
+                let new_then = rewrite_break_continue_for_loop(
+                    then_block.stmts,
+                    is_break_local,
+                    continue_flag_local,
+                    switch_depth,
+                    continue_count,
+                );
                 let new_else = else_block.map(|b| MirBlock {
-                    stmts: rewrite_break_continue_for_loop(b.stmts, is_break_local, our_depth),
+                    stmts: rewrite_break_continue_for_loop(
+                        b.stmts,
+                        is_break_local,
+                        continue_flag_local,
+                        switch_depth,
+                        continue_count,
+                    ),
                 });
                 out.push(MirStmt::If {
                     cond,
@@ -831,28 +883,91 @@ fn rewrite_break_continue_for_loop(
                     else_block: new_else,
                 });
             }
-            MirStmt::ForOf {
-                item,
-                iterable,
-                iter_ty,
-                body,
+            MirStmt::Switch {
+                disc,
+                cases,
+                default,
             } => {
-                let new_body =
-                    rewrite_break_continue_for_loop(body.stmts, is_break_local, our_depth + 1);
-                out.push(MirStmt::ForOf {
-                    item,
-                    iterable,
-                    iter_ty,
-                    body: MirBlock { stmts: new_body },
+                let before = continue_count.get();
+                let new_cases: Vec<ts_aot_ir_mir::SwitchCase> = cases
+                    .into_iter()
+                    .map(|case| {
+                        let ts_aot_ir_mir::SwitchCase { value, body } = case;
+                        ts_aot_ir_mir::SwitchCase {
+                            value,
+                            body: MirBlock {
+                                stmts: rewrite_break_continue_for_loop(
+                                    body.stmts,
+                                    is_break_local,
+                                    continue_flag_local,
+                                    switch_depth + 1,
+                                    continue_count,
+                                ),
+                            },
+                        }
+                    })
+                    .collect();
+                let new_default = default.map(|b| MirBlock {
+                    stmts: rewrite_break_continue_for_loop(
+                        b.stmts,
+                        is_break_local,
+                        continue_flag_local,
+                        switch_depth + 1,
+                        continue_count,
+                    ),
                 });
+                let has_continue = continue_count.get() > before;
+                out.push(MirStmt::Switch {
+                    disc,
+                    cases: new_cases,
+                    default: new_default,
+                });
+                if has_continue {
+                    out.push(MirStmt::If {
+                        cond: MirExpr::Local(continue_flag_local),
+                        then_block: MirBlock::with(MirStmt::Break),
+                        else_block: None,
+                    });
+                }
             }
-            MirStmt::ForIn { key, object, body } => {
-                let new_body =
-                    rewrite_break_continue_for_loop(body.stmts, is_break_local, our_depth + 1);
-                out.push(MirStmt::ForIn {
-                    key,
-                    object,
-                    body: MirBlock { stmts: new_body },
+            MirStmt::Try {
+                body,
+                catch_param,
+                catch,
+                finally,
+            } => {
+                let new_body = MirBlock {
+                    stmts: rewrite_break_continue_for_loop(
+                        body.stmts,
+                        is_break_local,
+                        continue_flag_local,
+                        switch_depth,
+                        continue_count,
+                    ),
+                };
+                let new_catch = catch.map(|c| MirBlock {
+                    stmts: rewrite_break_continue_for_loop(
+                        c.stmts,
+                        is_break_local,
+                        continue_flag_local,
+                        switch_depth,
+                        continue_count,
+                    ),
+                });
+                let new_finally = finally.map(|f| MirBlock {
+                    stmts: rewrite_break_continue_for_loop(
+                        f.stmts,
+                        is_break_local,
+                        continue_flag_local,
+                        switch_depth,
+                        continue_count,
+                    ),
+                });
+                out.push(MirStmt::Try {
+                    body: new_body,
+                    catch_param,
+                    catch: new_catch,
+                    finally: new_finally,
                 });
             }
             other => out.push(other),

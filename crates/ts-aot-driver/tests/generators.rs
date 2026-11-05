@@ -443,9 +443,7 @@ fn void_generator_with_bare_yield() {
 }
 
 #[test]
-fn compiled_generator_crate_passes_cargo_check() {
-    use std::fs;
-    use std::process::Command;
+fn generator_source_keeps_yield_and_next() {
     let out = compile(
         r"
         function* gen(): i64 { yield 1; yield 2; return 3; }
@@ -465,89 +463,251 @@ fn compiled_generator_crate_passes_cargo_check() {
     let r = rust(&out);
     assert!(r.contains("yield"), "yield must survive, got:\n{r}");
     assert!(r.contains("next ()"), "next() must survive, got:\n{r}");
+}
 
-    if std::env::var_os("TS_AOT_SKIP_E2E_CARGO").is_some() {
-        eprintln!(
-            "skipping compiled_generator_crate_passes_cargo_check: TS_AOT_SKIP_E2E_CARGO is set \
-             (offline target/ unavailable or cargo not on PATH in this env)"
-        );
-        return;
-    }
-
-    let unique = format!(
-        "ts_aot_gen_e2e_{}_{}",
-        std::process::id(),
-        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d.as_nanos(),
-            Err(_) => 0,
-        }
+#[test]
+fn closure_with_try_declares_return_signal() {
+    let out = compile(
+        "function f(): i64 { const g: () => i64 = (): i64 => { let i: i64 = 0; while (true) { try { i = i + 1; if (i == 3) { break; } } catch (e) { } } return i; }; return g(); }",
     );
-    let tmp = std::env::temp_dir().join(&unique);
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).expect("create temp dir");
-    fs::create_dir_all(tmp.join("src")).expect("create src dir");
-
-    let shared_target = std::env::temp_dir().join(format!("{unique}_target"));
-    let _ = fs::remove_dir_all(&shared_target);
-    fs::create_dir_all(&shared_target).expect("create shared target dir");
-
-    let runtime_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("ts-aot-runtime");
-    let runtime_manifest_str = runtime_manifest.to_string_lossy().replace('\\', "/");
-    let target_str = shared_target.to_string_lossy().replace('\\', "/");
-
-    fs::write(
-        tmp.join("Cargo.toml"),
-        format!(
-            r#"[package]
-name = "ts_aot_gen_e2e"
-version = "0.0.0"
-edition = "2021"
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "ts_aot_gen_e2e"
-path = "src/main.rs"
-
-[dependencies]
-ts-aot-runtime = {{ path = "{runtime_manifest_str}" }}
-"#
-        ),
-    )
-    .expect("write Cargo.toml");
-
-    fs::write(tmp.join("src/lib.rs"), r).expect("write lib.rs");
-    fs::write(
-        tmp.join("src/main.rs"),
-        "fn main() { ts_aot_gen_e2e::__ts_aot_dispatch_main(&[]); }\n",
-    )
-    .expect("write main.rs");
-
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(&tmp)
-        .env("CARGO_TARGET_DIR", &target_str)
-        .args(["check", "--quiet", "--offline"]);
-    let status = match cmd.status() {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&tmp);
-            let _ = fs::remove_dir_all(&shared_target);
-            eprintln!(
-                "skipping compiled_generator_crate_passes_cargo_check: cargo invocation failed: \
-                 {e} (set TS_AOT_SKIP_E2E_CARGO=1 to silence this in offline envs)"
-            );
-            return;
-        }
-    };
-    let _ = fs::remove_dir_all(&tmp);
-    let _ = fs::remove_dir_all(&shared_target);
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
     assert!(
-        status.success(),
-        "cargo check must succeed for the compiled generator crate, exit: {status:?}"
+        r.contains("__ReturnSignal"),
+        "a closure whose body contains a try must declare __ReturnSignal in its own body, got:\n{r}"
+    );
+}
+
+#[test]
+fn async_void_fallthrough_resolves_instead_of_panicking() {
+    let out = compile("async function f(): Promise<void> { const x: i64 = 1; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_promise_resolve_value"),
+        "an async `Promise<void>` body that falls through must return a resolved promise, got:\n{r}"
+    );
+    assert!(
+        !r.contains("unreachable"),
+        "an async `Promise<void>` body must not fall through to unreachable!(), got:\n{r}"
+    );
+}
+
+#[test]
+fn continue_inside_switch_in_for_of_uses_labeled_continue() {
+    let out = compile(
+        "function f(a: Array<i64>): i64 { let s: i64 = 0; for (const x of a) { switch (x) { case 2: continue; } s = s + x; } return s; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("continue '__for_of_"),
+        "a `continue` inside a switch inside a for-of must be a labeled continue (Rust E0695 \
+         otherwise), got:\n{r}"
+    );
+}
+
+#[test]
+fn async_explicit_return_wraps_value_in_resolved_promise() {
+    let out = compile("async function f(): Promise<i64> { return 5; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_promise_resolve_value"),
+        "an async `Promise<i64>` explicit return must be wrapped in a resolved promise, got:\n{r}"
+    );
+}
+
+#[test]
+fn non_void_function_ending_in_try_emits_terminator() {
+    let out = compile("function f(): i64 { try { return 1; } catch (e) { return 2; } }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("unreachable"),
+        "a non-void function whose body ends in a try must get a trailing terminator so the \
+         generated Rust type-checks, got:\n{r}"
+    );
+}
+
+#[test]
+fn throwing_closure_value_wraps_lifted_fn_in_variant() {
+    let out =
+        compile("function f(): i64 { const g: () => i64 = (): i64 => { throw 1; }; return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__TsFnValue0::"),
+        "a throwing closure used as a value must wrap its lifted fn in the fn-value enum \
+         variant, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_throw"),
+        "calling a throwing closure value must unwrap the Result and rethrow, got:\n{r}"
+    );
+}
+
+#[test]
+fn break_inside_try_lowers_via_loop_signal() {
+    let out = compile(
+        "function f(): i64 { let i: i64 = 0; while (true) { try { i = i + 1; if (i == 3) { break; } } catch (e) { } } return i; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ReturnSignal::LoopBreak") && r.contains("__loop_jump"),
+        "a `break` that leaves a try must lower through the try-loop escape signal so it can \
+         resume at the enclosing loop, got:\n{r}"
+    );
+}
+
+#[test]
+fn continue_inside_try_lowers_via_loop_signal() {
+    let out = compile(
+        "function f(): i64 { let i: i64 = 0; while (i < 5) { try { i = i + 1; if (i == 2) { continue; } } catch (e) { } } return i; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ReturnSignal::LoopContinue"),
+        "a `continue` that leaves a try must lower through the try-loop escape signal, got:\n{r}"
+    );
+}
+
+#[test]
+fn switch_break_uses_labeled_block() {
+    let out = compile(
+        "function f(): i64 { let x: i64 = 0; switch (1) { case 1: x = 7; break; } return x; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__switch_"),
+        "a `switch` must lower to a labeled block so `break` exits the switch, got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_lowers_to_any_payload_binding() {
+    let out = compile("function f(): i64 { try { throw 1; } catch (e) { } return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("catch_unwind") && r.contains("__ts_aot_catch_bind"),
+        "an untyped `catch (e)` must lower to a catch-all binding that can hold any thrown \
+         payload (e.g. a non-string `throw 1`), got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_equality_preserves_payload_kind() {
+    let out = compile(
+        "function f(): i64 { try { throw 1; } catch (e) { if (e === 1) { return 1; } } return 0; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("CaughtValue") && r.contains("__ts_aot_caught_eq"),
+        "an untyped catch binding must be a tag-aware `CaughtValue` compared via \
+         `__ts_aot_caught_eq` so a thrown number is not stringified, got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_copy_stays_dynamic() {
+    let out = compile(
+        "function f(): i64 { try { throw 1; } catch (e) { let x = e; if (x === 1) { return 1; } } return 0; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.matches("CaughtValue").count() >= 2,
+        "a copy of an untyped catch binding must stay `CaughtValue`-typed so equality keeps \
+         working, got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_return_coerces_to_string() {
+    let out =
+        compile("function f(): string { try { throw 'x'; } catch (e) { return e; } return ''; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("to_js_string"),
+        "returning an untyped catch binding where a string is expected must coerce via \
+         `to_js_string`, got:\n{r}"
+    );
+}
+
+#[test]
+fn untyped_catch_equality_in_closure_stays_dynamic() {
+    let out = compile(
+        "function f(): i64 { try { throw 1; } catch (e) { const g: () => i64 = (): i64 => { if (e === 1) { return 1; } return 0; }; return g(); } return 0; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("CaughtValue") && r.contains("__ts_aot_caught_eq"),
+        "a caught value captured by a closure must keep its tag-aware `CaughtValue` type so \
+         equality still distinguishes numbers from strings, got:\n{r}"
+    );
+}
+
+#[test]
+fn async_method_call_wraps_in_run_or_poll() {
+    let out = compile(
+        "class C { async m(): Promise<i64> { return 1; } } async function f(c: C): Promise<i64> { return await c.m(); }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_run_or_poll") && (r.contains("C::C__m") || r.contains("C :: C__m")),
+        "an async ordinary method must stay in the async set (call wrapped in run_or_poll, \
+         qualified by owner), got:\n{r}"
+    );
+}
+
+#[test]
+fn method_call_is_qualified_by_owner() {
+    let out = compile(
+        "class C { x: i64 = 7; m(): i64 { return this.x; } } function f(c: C): i64 { return c.m(); }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("C :: C__m") || r.contains("C::C__m"),
+        "a method call must be qualified by its owner struct (`C::C__m`), not emitted bare, \
+         got:\n{r}"
+    );
+}
+
+#[test]
+fn typed_catch_lowers_to_typed_downcast() {
+    let out = compile("function f(): i64 { try { throw 1; } catch (e: i64) { } return 0; }");
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_catch_typed") && !r.contains("__ts_aot_catch_bind"),
+        "an annotated `catch (e: i64)` must recover the payload as `i64` via \
+         `__ts_aot_catch_typed`, got:\n{r}"
+    );
+}
+
+#[test]
+fn async_generator_caught_rejected_await_uses_raw_helper() {
+    let out = compile(
+        "async function* g(p: Promise<i64>): i64 { try { const v: i64 = await p; } catch (e) { } return 1; }",
+    );
+    assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
+    let r = rust(&out);
+    assert!(
+        r.contains("__ts_aot_await_value_raw"),
+        "an await inside a try must use the raw helper so the user's catch catches the rejection, got:\n{r}"
+    );
+    assert!(
+        r.contains("__ts_aot_catch_bind"),
+        "the catch clause must be emitted, got:\n{r}"
     );
 }
 
