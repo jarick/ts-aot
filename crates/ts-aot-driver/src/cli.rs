@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, ValueEnum};
 
 use crate::{CompileOptions, EmitStage};
@@ -13,6 +14,7 @@ pub enum EmitStageArg {
     Rust,
     Hir,
     Mir,
+    Crate,
 }
 
 impl From<EmitStageArg> for EmitStage {
@@ -21,6 +23,7 @@ impl From<EmitStageArg> for EmitStage {
             EmitStageArg::Rust => EmitStage::Rust,
             EmitStageArg::Hir => EmitStage::Hir,
             EmitStageArg::Mir => EmitStage::Mir,
+            EmitStageArg::Crate => EmitStage::Crate,
         }
     }
 }
@@ -57,12 +60,20 @@ pub struct CompileArgs {
         help = "Treat input as an ES module (enables top-level await)"
     )]
     pub module: bool,
+
+    #[arg(long = "crate-name", value_name = "NAME")]
+    pub crate_name: Option<String>,
+
+    #[arg(long = "runtime-path", value_name = "PATH")]
+    pub runtime_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedArgs {
     pub input: String,
     pub output: Option<String>,
+    pub crate_name: Option<String>,
+    pub runtime_path: Option<String>,
     pub opts: CompileOptions,
 }
 
@@ -71,6 +82,8 @@ impl From<CompileArgs> for ParsedArgs {
         Self {
             input: args.file.display().to_string(),
             output: args.output.map(|p| p.display().to_string()),
+            crate_name: args.crate_name,
+            runtime_path: args.runtime_path.map(|p| p.display().to_string()),
             opts: CompileOptions {
                 emit: args.emit.into(),
                 module: args.module,
@@ -79,10 +92,27 @@ impl From<CompileArgs> for ParsedArgs {
     }
 }
 
+impl ParsedArgs {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.opts.emit != EmitStage::Crate
+            && (self.crate_name.is_some() || self.runtime_path.is_some())
+        {
+            return Err("--crate-name/--runtime-path require --emit crate".to_owned());
+        }
+        Ok(())
+    }
+}
+
 pub fn parse_args<I: IntoIterator<Item = OsString>>(args: I) -> Result<ParsedArgs, clap::Error> {
     let cli = Cli::try_parse_from(args)?;
     match cli {
-        Cli::Compile(c) => Ok(c.into()),
+        Cli::Compile(c) => {
+            let parsed: ParsedArgs = c.into();
+            parsed
+                .validate()
+                .map_err(|msg| clap::Error::raw(ErrorKind::ArgumentConflict, msg))?;
+            Ok(parsed)
+        }
         Cli::Help { .. } => Err(clap::Error::raw(clap::error::ErrorKind::DisplayHelp, "")),
     }
 }
@@ -273,5 +303,53 @@ mod tests {
         assert_eq!(EmitStage::from(EmitStageArg::Rust), EmitStage::Rust);
         assert_eq!(EmitStage::from(EmitStageArg::Hir), EmitStage::Hir);
         assert_eq!(EmitStage::from(EmitStageArg::Mir), EmitStage::Mir);
+    }
+
+    #[test]
+    fn emit_stage_arg_maps_crate_variant() {
+        use crate::EmitStage;
+        assert_eq!(EmitStage::from(EmitStageArg::Crate), EmitStage::Crate);
+    }
+
+    #[test]
+    fn compile_with_emit_crate_and_crate_options() {
+        let parsed = run(&[
+            "ts-aot",
+            "compile",
+            "in.ts",
+            "--emit",
+            "crate",
+            "-o",
+            "out_dir",
+            "--crate-name",
+            "my_ts_app",
+            "--runtime-path",
+            "/abs/runtime",
+        ])
+        .unwrap();
+        assert_eq!(parsed.opts.emit.as_str(), "crate");
+        assert_eq!(parsed.output.as_deref(), Some("out_dir"));
+        assert_eq!(parsed.crate_name.as_deref(), Some("my_ts_app"));
+        assert_eq!(parsed.runtime_path.as_deref(), Some("/abs/runtime"));
+    }
+
+    #[test]
+    fn crate_options_require_emit_crate() {
+        let err = run(&["ts-aot", "compile", "in.ts", "--crate-name", "x"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let err = run(&["ts-aot", "compile", "in.ts", "--runtime-path", "/r"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        assert!(
+            run(&[
+                "ts-aot",
+                "compile",
+                "in.ts",
+                "--emit",
+                "crate",
+                "--crate-name",
+                "x",
+            ])
+            .is_ok()
+        );
     }
 }

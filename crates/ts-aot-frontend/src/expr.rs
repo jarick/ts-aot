@@ -36,8 +36,6 @@ impl SkeletonEnv<'_> {
     }
 }
 
-/// Narrows a type by removing `null` and `undefined` (used by the non-null
-/// assertion `x!`). Runtime behaviour is unaffected.
 fn strip_nullish(ty: TypeId, types: &mut TypeTable) -> TypeId {
     match types.resolve(ty).cloned() {
         Some(Type::Optional { inner }) => inner,

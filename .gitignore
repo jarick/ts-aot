@@ -24,6 +24,11 @@ __pycache__/
 # test262 corpus (local-only, not a submodule)
 tests/test262/
 
+# crate-output example (generated)
+examples/crate-output/gen_ts_app/
+examples/crate-output/consumer/target/
+examples/crate-output/consumer/Cargo.lock
+
 # leftover build artifacts
 *.wasm.o
 *.wasm

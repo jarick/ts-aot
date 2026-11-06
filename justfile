@@ -35,3 +35,7 @@ test262-deps:
 test262:
     cargo build --release --locked -p ts-aot-driver --bin ts-aot
     {{python}} tests/test262_harness.py --max 0 --emit mir --workers 12
+
+crate-example:
+    cargo run --locked -p ts-aot-driver --bin ts-aot -- compile examples/crate-output/add.ts --emit crate -o examples/crate-output/gen_ts_app
+    cargo run --manifest-path examples/crate-output/consumer/Cargo.toml

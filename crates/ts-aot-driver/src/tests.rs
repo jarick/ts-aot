@@ -33,6 +33,32 @@ fn simple_function_default_emit_produces_rust_source() {
 }
 
 #[test]
+fn crate_stage_emits_lib_style_rust() {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function add(a: number, b: number): number { return a + b; }",
+        &CompileOptions {
+            emit: EmitStage::Crate,
+            module: true,
+        },
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert!(
+        !rust.contains("fn main ()"),
+        "crate stage must not emit `fn main`:\n{rust}"
+    );
+    assert!(
+        rust.contains("pub fn add"),
+        "crate stage must expose the export as `pub fn`:\n{rust}"
+    );
+    assert!(
+        rust.contains("pub const __TS_AOT_DISPATCH_TABLE"),
+        "crate stage must publish the dispatch table:\n{rust}"
+    );
+}
+
+#[test]
 fn rust_emit_uses_pipeline_typetable_not_fresh_empty() {
     let out = Driver::new().compile_source(
         "test.ts",

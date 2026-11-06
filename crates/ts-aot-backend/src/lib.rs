@@ -7,7 +7,7 @@ mod emit_decl;
 mod error;
 mod render;
 
-pub use emit_decl::emit_decls;
+pub use emit_decl::{emit_decls, emit_decls_with_style};
 pub use error::BackendError;
 pub use render::{RenderConfig, render_tokens};
 
@@ -38,6 +38,15 @@ pub fn compile_to_string_with_types(
 ) -> Result<String, BackendError> {
     let cfg = RenderConfig::default();
     let tokens = compile_with_types(program, types, &cfg)?;
+    Ok(render_tokens(&tokens, &cfg))
+}
+
+pub fn compile_to_string_lib(
+    program: &MirProgram,
+    types: &TypeTable,
+) -> Result<String, BackendError> {
+    let cfg = RenderConfig::default();
+    let tokens = emit_decls_with_style(program, types, true)?;
     Ok(render_tokens(&tokens, &cfg))
 }
 
