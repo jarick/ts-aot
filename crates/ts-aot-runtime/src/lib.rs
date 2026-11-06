@@ -1,5 +1,6 @@
 pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
+mod arena;
 mod array;
 mod array_buffer;
 mod bigint;
@@ -20,6 +21,7 @@ mod type_of;
 mod typed_array;
 mod weakmap;
 
+pub use arena::{Ctx, Host, run_in_arena};
 pub use array::{
     __ts_aot_array_concat, __ts_aot_array_create, __ts_aot_array_create_with_len,
     __ts_aot_array_from, __ts_aot_array_from_length_mapped, __ts_aot_array_from_mapped,
