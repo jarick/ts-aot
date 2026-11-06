@@ -44,14 +44,16 @@ fn e2e_array_spread_with_multiple_sources_preserves_operand_sequence() {
     assert!(!out.has_errors(), "must compile; got {:?}", out.diagnostics);
     let rust = out.rust_source.clone().expect("emit");
     let rust = common::normalize_rust(&rust);
-    let call_marker = "__ts_aot_array_concat::<i64>(vec !";
+    let call_marker = "__ts_aot_array_concat::<i64>(";
     let call_start = rust.find(call_marker).expect("concat call must be present");
     let after = &rust[call_start + call_marker.len()..];
-    let inner_end = after
-        .find("])")
-        .expect("concat call must terminate with ])");
+    let after = after
+        .split("in __ctx . arena ;")
+        .nth(1)
+        .expect("concat must build a bumpalo vec");
+    let inner_end = after.find(']').expect("concat call must terminate with ]");
     let inner = &after[..inner_end];
-    let inner = inner.trim_start().trim_start_matches('[').trim_start();
+    let inner = inner.trim_start();
     let operands: Vec<&str> = inner.split(", ").collect();
     let named_temps: Vec<&str> = operands
         .iter()

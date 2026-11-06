@@ -26,14 +26,19 @@ fn empty_func(name: &str) -> MirFunctionDecl {
 }
 
 fn signature_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
-    s.split(&format!("fn {fn_name} ("))
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("")
+    let after_fn = s.split(&format!("fn {fn_name}")).nth(1).unwrap_or("");
+    let after_generics = if let Some(rest) = after_fn.trim_start().strip_prefix('<') {
+        rest.split_once('>').map_or(rest, |(_, r)| r)
+    } else {
+        after_fn
+    };
+    let trimmed = after_generics.trim_start();
+    let after_paren = trimmed.strip_prefix('(').unwrap_or(trimmed);
+    after_paren.split('{').next().unwrap_or("")
 }
 
 fn for_header_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
-    let after_fn = s.split(&format!("fn {fn_name} (")).nth(1).unwrap_or("");
+    let after_fn = s.split(&format!("fn {fn_name}")).nth(1).unwrap_or("");
     after_fn
         .split(" for ")
         .nth(1)
@@ -125,7 +130,9 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("pub fn __ts_aot_dispatch_add (_args : & [u64]) -> u64"),
+        s.contains(
+            "pub fn __ts_aot_dispatch_add < 'a > (__ctx : & ts_aot_runtime :: Ctx < 'a > , _args : & [u64]) -> u64"
+        ),
         "dispatch wrapper must be emitted for i64-typed plain function, got: {s}"
     );
     assert!(
@@ -141,7 +148,9 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
         "dispatch table constant must be emitted when any dispatchable function exists, got: {s}"
     );
     assert!(
-        s.contains("(\"add\" , __ts_aot_dispatch_add as fn (& [u64]) -> u64)"),
+        s.contains(
+            "(\"add\" , __ts_aot_dispatch_add as for < 'a > fn (& ts_aot_runtime :: Ctx < 'a > , & [u64]) -> u64)"
+        ),
         "table entry must reference the wrapper with original function name as string, got: {s}"
     );
 }
@@ -670,8 +679,8 @@ fn array_typed_return_emits_vec_placeholder() {
     let sig = signature_fragment(&s, "make_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("->Vec<i64>"),
-        "return type `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+        sig_norm.contains("->bumpalo::collections::Vec<'a,i64>"),
+        "return type `i64[]` must emit as `bumpalo::collections::Vec<'a, i64>` in the signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
     );
 }
 
@@ -696,8 +705,8 @@ fn array_typed_param_emits_vec_placeholder() {
     let sig = signature_fragment(&s, "take_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("v:Vec<i64>"),
-        "param typed `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+        sig_norm.contains("v:bumpalo::collections::Vec<'a,i64>"),
+        "param typed `i64[]` must emit as `bumpalo::collections::Vec<'a, i64>` in the signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
     );
 }
 
@@ -1856,7 +1865,10 @@ fn emit_type_array_resolves_element_via_table() {
     let str_id = types.intern(&Type::String);
     let arr_id = types.intern(&Type::Array { element: str_id });
     let tokens = emit_type_id(arr_id, &types);
-    assert_eq!(tokens.to_string(), "Vec < ts_aot_runtime :: JsString >");
+    assert_eq!(
+        tokens.to_string(),
+        "bumpalo :: collections :: Vec < 'a , ts_aot_runtime :: JsString < 'a > >"
+    );
 }
 
 #[test]
@@ -1871,7 +1883,7 @@ fn emit_type_result_resolves_ok_and_err_via_table() {
     let tokens = emit_type_id(res_id, &types);
     assert_eq!(
         tokens.to_string(),
-        "Result < i32 , ts_aot_runtime :: JsString >"
+        "Result < i32 , ts_aot_runtime :: JsString < 'a > >"
     );
 }
 
@@ -1940,7 +1952,7 @@ fn function_returning_result_emits_result_type_with_ok_and_err_stmts() {
     let tokens = emit_function(&f, &types).expect("function should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("-> Result < i32 , ts_aot_runtime :: JsString >"),
+        s.contains("-> Result < i32 , ts_aot_runtime :: JsString < 'a > >"),
         "ret type must be Result<i32, JsString>, got: {s}"
     );
     assert!(
@@ -2944,7 +2956,7 @@ fn async_generator_nested_finally_throw_uses_raw_path_for_outer_catch() {
         .to_string();
     let normalized: String = s.split_whitespace().collect();
     assert!(
-        normalized.contains("__ts_aot_catch_typed"),
+        normalized.contains("__ts_aot_catch_string"),
         "the enclosing catch must be emitted so it can run for the nested-finally throw, got:\n{s}"
     );
     assert!(
@@ -5144,7 +5156,7 @@ fn dispatch_wrapper_renames_underscore_param_to_usable_ident() {
          `{wrapper_body}`"
     );
     assert!(
-        wrapper_body.contains("dispatchable (__tmp0)"),
+        wrapper_body.contains("dispatchable (__ctx , __tmp0)"),
         "dispatch wrapper must call the inner function with the renamed `__tmp0` arg, got: \
          `{wrapper_body}`"
     );
@@ -6088,7 +6100,7 @@ fn weakmap_liveness_reset_on_reassignment_emits_fresh_token() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     let fn_body = normalize_token_whitespace(
-        s.split("fn reassign_key (")
+        s.split("fn reassign_key")
             .nth(1)
             .and_then(|rest| rest.split("return").next())
             .unwrap_or(""),
@@ -6218,7 +6230,7 @@ fn weakmap_liveness_unaffected_by_field_assignment_on_key_local() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     let fn_body = normalize_token_whitespace(
-        s.split("fn field_assign_key (")
+        s.split("fn field_assign_key")
             .nth(1)
             .and_then(|rest| rest.split("return").next())
             .unwrap_or(""),

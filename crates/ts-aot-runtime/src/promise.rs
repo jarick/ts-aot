@@ -671,9 +671,7 @@ pub fn __ts_aot_await_value_gen<T: Clone + 'static>(promise: &Promise<T>) -> T {
 
 #[must_use]
 pub fn __ts_aot_await_value_raw<T: Clone + 'static>(promise: &Promise<T>) -> T {
-    await_value_settle(promise, |e| {
-        crate::host::__ts_aot_throw(crate::string::JsString::from(e.as_str()))
-    })
+    await_value_settle(promise, |e| crate::host::__ts_aot_throw(e))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

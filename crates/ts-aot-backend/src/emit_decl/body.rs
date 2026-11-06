@@ -1098,6 +1098,7 @@ fn emit_expr(
         }
         MirExpr::Call { callee, args, .. } => {
             let is_async = ctx.function_is_async(*callee);
+            let is_method = ctx.function_owner(*callee).is_some();
             let callee_ident = ctx.function_ident(*callee);
             let callee = if let Some(owner) = ctx.function_owner(*callee) {
                 let owner_ident = ctx.struct_ident(owner);
@@ -1106,7 +1107,22 @@ fn emit_expr(
                 quote!(#callee_ident)
             };
             let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
-            let call = quote!(#callee(#(#args),*));
+            let call_args = if is_method {
+                let mut v: Vec<TokenStream> = Vec::with_capacity(args.len() + 1);
+                let mut iter = args.into_iter();
+                if let Some(first) = iter.next() {
+                    v.push(first);
+                }
+                v.push(quote!(__ctx));
+                v.extend(iter);
+                v
+            } else {
+                let mut v: Vec<TokenStream> = Vec::with_capacity(args.len() + 1);
+                v.push(quote!(__ctx));
+                v.extend(args);
+                v
+            };
+            let call = quote!(#callee(#(#call_args),*));
             if is_async {
                 Ok(quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call)))
             } else {
@@ -1121,7 +1137,7 @@ fn emit_expr(
                 let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
                 let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
                 let helper = EmitCtx::fn_call_ident(k);
-                return Ok(quote!(#helper(&#callee, #(#args),*)));
+                return Ok(quote!(#helper(__ctx, &#callee, #(#args),*)));
             }
             let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
             let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
@@ -1139,7 +1155,10 @@ fn emit_expr(
                     Ok(quote!(#field: #value))
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
-            Ok(quote!(#name { #(#fields),* }))
+            Ok(quote!(#name {
+                #(#fields,)*
+                _marker: ::core::marker::PhantomData,
+            }))
         }
         MirExpr::ResultOk { value, .. } => {
             let value = emit_expr(value, ctx, emit_env, body_ctx)?;
@@ -1193,7 +1212,7 @@ fn emit_expr(
                     quote!(ts_aot_runtime::JsString::from(#lit))
                 })
                 .collect();
-            Ok(quote!(vec![#(#cooked_lits),*]))
+            Ok(quote!(bumpalo::vec![in __ctx.arena; #(#cooked_lits),*]))
         }
         MirExpr::RegExp { pattern, flags, .. } => {
             let pattern_lit = Literal::string(pattern);
@@ -1608,9 +1627,14 @@ fn emit_closure_value(
     }
     let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
     let fn_ident = format_ident!("__ts_closure_{}", closure_id);
-    ctx.push_closure_fn(
-        quote!(fn #fn_ident(#(#param_tokens),*) -> #ret_tokens { #(#inner_stmts)* }),
-    );
+    ctx.push_closure_fn(quote!(
+        fn #fn_ident<'a>(
+            __ctx: &ts_aot_runtime::Ctx<'a>,
+            #(#param_tokens),*
+        ) -> #ret_tokens {
+            #(#inner_stmts)*
+        }
+    ));
 
     let enum_name = EmitCtx::fn_value_ident(sig);
     if envs.is_empty() {
@@ -1994,7 +2018,7 @@ fn emit_runtime_call(
         }
         RuntimeOp::ArrayFrom => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_array_from(&#arr)))
+            Ok(quote!(__ts_aot_array_from(__ctx, &#arr)))
         }
         RuntimeOp::ArrayFromMapped => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2011,16 +2035,16 @@ fn emit_runtime_call(
                 Some(k) => {
                     let helper = EmitCtx::fn_call_ident(k);
                     if arity >= 2 {
-                        quote!(#helper(&#mapfn, __ts_aot_item, __ts_aot_idx))
+                        quote!(#helper(__ctx, &#mapfn, __ts_aot_item, __ts_aot_idx))
                     } else {
-                        quote!(#helper(&#mapfn, __ts_aot_item))
+                        quote!(#helper(__ctx, &#mapfn, __ts_aot_item))
                     }
                 }
                 None => {
                     if arity >= 2 {
-                        quote!(#mapfn(__ts_aot_item, __ts_aot_idx))
+                        quote!(#mapfn(__ctx, __ts_aot_item, __ts_aot_idx))
                     } else {
-                        quote!(#mapfn(__ts_aot_item))
+                        quote!(#mapfn(__ctx, __ts_aot_item))
                     }
                 }
             };
@@ -2029,11 +2053,15 @@ fn emit_runtime_call(
             } else {
                 quote!(|__ts_aot_item, _| #call)
             };
-            Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
+            Ok(quote!(__ts_aot_array_from_mapped(
+                __ctx,
+                &#arr,
+                #wrapper
+            )))
         }
         RuntimeOp::ObjectKeys => {
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_object_keys(&#map)))
+            Ok(quote!(__ts_aot_object_keys(__ctx, &#map)))
         }
         RuntimeOp::DateParse => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
@@ -2041,11 +2069,11 @@ fn emit_runtime_call(
         }
         RuntimeOp::JsonParseString => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_json_parse_string(#s)))
+            Ok(quote!(__ts_aot_json_parse_string(__ctx, #s)))
         }
         RuntimeOp::JsonStringifyString => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_json_stringify_string(#s)))
+            Ok(quote!(__ts_aot_json_stringify_string(__ctx, #s)))
         }
         RuntimeOp::ArrayBufferSlice => {
             let buf = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2075,7 +2103,7 @@ fn emit_runtime_call(
                 _ => ty,
             };
             let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
-            Ok(quote!(__ts_aot_array_hole::<#element_ty>()))
+            Ok(quote!(__ts_aot_array_hole::<#element_ty>(__ctx)))
         }
         RuntimeOp::GeneratorNext => {
             let owner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2124,6 +2152,11 @@ fn emit_runtime_call(
         | RuntimeOp::StringCharAt => {
             let string_arg_indices = string_op_string_arg_indices(op);
             let name = runtime_op_ident(op)?;
+            let ctx_arg = if runtime_op_takes_ctx(op) {
+                quote!(__ctx,)
+            } else {
+                quote!()
+            };
             let emitted: Vec<TokenStream> = args
                 .iter()
                 .enumerate()
@@ -2135,7 +2168,7 @@ fn emit_runtime_call(
                     }
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
-            Ok(quote!(#name(#(#emitted),*)))
+            Ok(quote!(#name(#ctx_arg #(#emitted),*)))
         }
         RuntimeOp::MapSet => {
             let name = runtime_op_ident(op)?;
@@ -2153,7 +2186,7 @@ fn emit_runtime_call(
         RuntimeOp::ArrayFromString => {
             let name = runtime_op_ident(op)?;
             let source_expr = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(#source_expr)))
+            Ok(quote!(#name(__ctx, #source_expr)))
         }
         RuntimeOp::HostConsoleLog | RuntimeOp::SymbolFor => {
             let name = runtime_op_ident(op)?;
@@ -2166,10 +2199,18 @@ fn emit_runtime_call(
             let ty_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             if op == RuntimeOp::JsonParse {
                 let arg = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-                Ok(quote!(#name::<#ty_tokens>(#arg)))
+                if let Some(Type::Array { element }) = types.resolve(target) {
+                    let element_tokens = emit_type_id_with_ctx(*element, emit_env, ctx);
+                    Ok(quote!(bumpalo::collections::Vec::from_iter_in(
+                        __ts_aot_json_parse::<Vec<#element_tokens>>(#arg),
+                        __ctx.arena,
+                    )))
+                } else {
+                    Ok(quote!(#name::<#ty_tokens>(#arg)))
+                }
             } else {
                 let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-                Ok(quote!(#name::<#ty_tokens>(&#arg)))
+                Ok(quote!(#name::<#ty_tokens>(__ctx, &#arg)))
             }
         }
         RuntimeOp::SymbolNew => {
@@ -2329,10 +2370,34 @@ fn emit_runtime_call(
         }
         _ => {
             let name = runtime_op_ident(op)?;
+            let ctx_arg = if runtime_op_takes_ctx(op) {
+                quote!(__ctx,)
+            } else {
+                quote!()
+            };
             let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(#(#args),*)))
+            Ok(quote!(#name(#ctx_arg #(#args),*)))
         }
     }
+}
+
+fn runtime_op_takes_ctx(op: RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::StringConcat
+            | RuntimeOp::StringCharAt
+            | RuntimeOp::StringFromCharCode
+            | RuntimeOp::StringFromCodePoint
+            | RuntimeOp::JsonParseString
+            | RuntimeOp::JsonStringifyString
+            | RuntimeOp::JsonStringify
+            | RuntimeOp::ArrayFromString
+            | RuntimeOp::ArrayCreateWithLen
+            | RuntimeOp::ArrayFromLengthMapped
+            | RuntimeOp::ObjectKeys
+            | RuntimeOp::DateToIsoString
+            | RuntimeOp::SymbolKeyFor
+    )
 }
 
 fn string_op_string_arg_indices(op: RuntimeOp) -> &'static [usize] {
@@ -2362,7 +2427,7 @@ fn emit_array_op_with_element_type(
         .map(|a| emit_owned_value(a, ctx, emit_env, body_ctx))
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
-    Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))
+    Ok(quote!(#name::<#element_ty>(__ctx, bumpalo::vec![in __ctx.arena; #(#parts),*])))
 }
 
 fn emit_js_string_arg(
@@ -2571,13 +2636,23 @@ fn emit_try(
             } else {
                 let param_ty = param_ty_id
                     .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+                let is_string = param_ty_id
+                    .is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::String)));
                 let extractable = param_ty_id.is_some_and(|t| {
                     emit_env
                         .types
                         .resolve(t)
                         .is_some_and(super::types::is_comparable_primitive)
                 });
-                if extractable {
+                if is_string {
+                    quote! {
+                        let #param_ident: #param_ty =
+                            match ts_aot_runtime::__ts_aot_catch_string(__ctx, __e) {
+                                Ok(v) => v,
+                                Err(__e) => std::panic::#resume_unwind(__e),
+                            };
+                    }
+                } else if extractable {
                     quote! {
                         let #param_ident: #param_ty =
                             match ts_aot_runtime::__ts_aot_catch_typed::<#param_ty>(__e) {

@@ -150,7 +150,7 @@ fn e2e_symbol_key_for_emits_symbol_key_for_runtime_call_in_rust_source() {
         "Rust source must contain __ts_aot_symbol_key_for call; got:\n{rust}"
     );
     assert!(
-        rust.contains("Option<ts_aot_runtime::JsString>"),
+        rust.contains("Option<ts_aot_runtime::JsString<'a>>"),
         "Symbol.keyFor(s) must lower to Option<ts_aot_runtime::JsString> return type \
          (None for unregistered, Some(JsString) for registered) per ECMAScript spec; got:\n{rust}"
     );

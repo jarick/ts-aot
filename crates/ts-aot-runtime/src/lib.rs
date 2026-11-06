@@ -38,9 +38,10 @@ pub use bigint::{
     __ts_aot_bigint_shr, __ts_aot_bigint_sub, __ts_aot_bigint_to_number, __ts_aot_bigint_to_string,
     __ts_aot_bigint_xor, BigIntHandle, BigIntSyntaxError, parse_string_integer_literal,
 };
+pub use bumpalo::Bump;
 pub use caught::{
-    __ts_aot_catch_bind, __ts_aot_catch_typed, __ts_aot_caught_eq, __ts_aot_caught_eq_dyn,
-    CaughtValue, FromCaught,
+    __ts_aot_catch_bind, __ts_aot_catch_string, __ts_aot_catch_typed, __ts_aot_caught_eq,
+    __ts_aot_caught_eq_dyn, CaughtValue, FromCaught,
 };
 pub use date::{
     __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,

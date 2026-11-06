@@ -486,7 +486,8 @@ fn array_of_closures_compiles() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let source = out.rust_source.expect("rust_source");
     assert!(
-        source.contains("Vec < __TsFnValue0 >") || source.contains("Vec<__TsFnValue0>"),
+        source.contains("bumpalo :: collections :: Vec < 'a , __TsFnValue0 < 'a > >")
+            || source.contains("bumpalo::collections::Vec<'a,__TsFnValue0<'a>>"),
         "an annotated array of closures must be typed as Vec<FnValue>; got:\n{source}"
     );
 }
@@ -498,7 +499,8 @@ fn annotated_int_array_literal_is_typed() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let source = out.rust_source.expect("rust_source");
     assert!(
-        source.contains("Vec < i64 >") || source.contains("Vec<i64>"),
+        source.contains("bumpalo :: collections :: Vec < 'a , i64 >")
+            || source.contains("bumpalo::collections::Vec<'a,i64>"),
         "an annotated array literal must carry its element type; got:\n{source}"
     );
 }
