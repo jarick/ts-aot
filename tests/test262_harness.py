@@ -63,6 +63,19 @@ def expected_compile_failure(text: str) -> bool:
     return isinstance(negative, dict) and negative.get("phase") == "parse"
 
 
+# test262 is JavaScript, but the harness parses the flattened tests as
+# TypeScript (the shim carries TS annotations). A default value on a `set`
+# accessor parameter (`set m(x = 42)`) is valid JS but a TypeScript parse error
+# ("A 'set' accessor cannot have an initializer.", TS1052), so tests rejected
+# with that diagnostic are not applicable to a TypeScript frontend and are
+# excluded from the statistics.
+SETTER_INITIALIZER_MSG = "A 'set' accessor cannot have an initializer."
+
+
+def is_ts_incompatible(code: int, stderr: str) -> bool:
+    return code != 0 and SETTER_INITIALIZER_MSG in stderr
+
+
 def compile_one(ts_path: Path, emit: str, timeout_s: int = 15):
     try:
         r = subprocess.run(
@@ -125,7 +138,7 @@ def main():
           file=sys.stderr)
 
     by_emit = {e: {"pass": 0, "fail": 0, "other": 0,
-                   "neg_rejected": 0, "false_accept": 0,
+                   "neg_rejected": 0, "false_accept": 0, "skipped": 0,
                    "primary": Counter(), "all_codes": Counter(),
                    "sample": [], "false_accept_sample": [],
                    "crash_sample": [], "timeout_sample": []} for e in emits}
@@ -142,6 +155,13 @@ def main():
         for f in as_completed(futs):
             ts, emit, (code, stderr), expect_fail = f.result()
             slot = by_emit[emit]
+            if is_ts_incompatible(code, stderr):
+                slot["skipped"] += 1
+                done += 1
+                if done % 500 == 0 or done == total_jobs:
+                    rate = done / max(time.time() - t0, 0.001)
+                    print(f"  done {done}/{total_jobs} ({rate:.1f}/s)", file=sys.stderr)
+                continue
             if code == 0:
                 slot["pass"] += 1
                 if expect_fail:
@@ -193,6 +213,9 @@ def main():
         compile_outcome_rate = 100.0 * compile_outcome / max(run, 1)
         print(f"[{emit}] compile_outcome={compile_outcome}/{run}  ({compile_outcome_rate:.2f}%)  "
               f"neg_rejected={s['neg_rejected']}  false_accept={s['false_accept']}")
+        if s["skipped"]:
+            print(f"[{emit}] skipped={s['skipped']} "
+                  f"(TS-incompatible: `set` accessor parameter default)")
         if s["fail"]:
             print(f"  Primary errors:")
             for c, n in s["primary"].most_common(5):
@@ -227,6 +250,7 @@ def main():
             "pass_rate": round(100.0 * by_emit[e]["pass"] / max(by_emit[e]["pass"] + by_emit[e]["fail"] + by_emit[e]["other"], 1), 2),
             "neg_rejected": by_emit[e]["neg_rejected"],
             "false_accept": by_emit[e]["false_accept"],
+            "skipped": by_emit[e]["skipped"],
             "compile_outcome_rate": round(
                 100.0 * (by_emit[e]["pass"] - by_emit[e]["false_accept"] + by_emit[e]["neg_rejected"])
                 / max(by_emit[e]["pass"] + by_emit[e]["fail"] + by_emit[e]["other"], 1),
