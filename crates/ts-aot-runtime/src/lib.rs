@@ -40,9 +40,11 @@ pub use bigint::{
     __ts_aot_bigint_shr, __ts_aot_bigint_sub, __ts_aot_bigint_to_number, __ts_aot_bigint_to_string,
     __ts_aot_bigint_xor, BigIntHandle, BigIntSyntaxError, parse_string_integer_literal,
 };
+pub use bumpalo;
+pub use bumpalo::Bump;
 pub use caught::{
-    __ts_aot_catch_bind, __ts_aot_catch_typed, __ts_aot_caught_eq, __ts_aot_caught_eq_dyn,
-    CaughtValue, FromCaught,
+    __ts_aot_catch_bind, __ts_aot_catch_string, __ts_aot_catch_typed, __ts_aot_caught_eq,
+    __ts_aot_caught_eq_dyn, CaughtValue, FromCaught,
 };
 pub use date::{
     __ts_aot_date_get_date, __ts_aot_date_get_full_year, __ts_aot_date_get_hours,
@@ -60,8 +62,8 @@ pub use host::{
     __ts_aot_throw,
 };
 pub use json::{
-    __ts_aot_json_parse, __ts_aot_json_parse_string, __ts_aot_json_stringify,
-    __ts_aot_json_stringify_string,
+    __ts_aot_json_parse, __ts_aot_json_parse_string, __ts_aot_json_parse_vec_string,
+    __ts_aot_json_stringify, __ts_aot_json_stringify_string,
 };
 pub use map::{__ts_aot_map_create, __ts_aot_map_get, __ts_aot_map_set, __ts_aot_object_keys};
 pub use math::{

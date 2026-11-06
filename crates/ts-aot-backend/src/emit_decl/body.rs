@@ -13,6 +13,7 @@ use super::ctx::{
     BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedStorage, place_root_global_name,
     shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
 };
+use super::global_is_durable_string;
 use super::ident::ident_from;
 use super::literals::{emit_float_from_int, emit_whole_number_literal};
 use super::runtime_op::runtime_op_ident;
@@ -271,7 +272,7 @@ fn finalize_return_value(
     if is_dynamic_expr(inner_expr, body_ctx)
         && matches!(emit_env.types.resolve(scalar), Some(Type::String))
     {
-        inner_tokens = quote!(#inner_tokens.to_js_string());
+        inner_tokens = quote!(#inner_tokens.to_js_string(__ctx));
     }
 
     inner_tokens = numeric_coerce(inner_expr, inner_tokens, scalar, ctx, emit_env, body_ctx);
@@ -279,6 +280,13 @@ fn finalize_return_value(
     if let Some((promise_ty, promise_ok)) = promise
         && value_ty(inner_expr, ctx, emit_env, body_ctx) != Some(promise_ty)
     {
+        if type_requires_arena(promise_ok, ctx, emit_env) {
+            return Err(BackendError::NotImplemented(
+                "promise-returning function: the resolved value borrows the arena, but the \
+                 promise helpers require `T: Clone + 'static`; store an owned value (for example \
+                 `Promise<i64>`) or convert the value before resolving the promise",
+            ));
+        }
         let ok_ty = emit_type_id_with_ctx(promise_ok, emit_env, ctx);
         inner_tokens =
             quote!(ts_aot_runtime::__ts_aot_promise_resolve_value::<#ok_ty>(#inner_tokens));
@@ -465,6 +473,19 @@ fn emit_stmt(
                     }
                     None => value_tokens,
                 },
+                MirPlace::Global(name) if is_durable_string_global(name, ctx, emit_env) => {
+                    let coerced = match ctx.global_ty(name) {
+                        Some(target_ty) => dynamic_string_coerce(
+                            value,
+                            value_tokens,
+                            target_ty,
+                            emit_env,
+                            body_ctx,
+                        ),
+                        None => value_tokens,
+                    };
+                    quote!(#coerced.to_string_lossy())
+                }
                 _ => value_tokens,
             };
             let reset = emit_weakmap_liveness_reset(target, body_ctx);
@@ -489,12 +510,14 @@ fn emit_stmt(
         }
         MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, emit_env, body_ctx),
         MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
-            let error = emit_expr(error, ctx, emit_env, body_ctx)?;
             if body_ctx.is_async_generator() && !body_ctx.in_try() {
-                Ok(quote!(ts_aot_runtime::__ts_aot_async_generator_throw(#error);))
+                let payload = emit_throw_payload(error, ctx, emit_env, body_ctx)?;
+                Ok(quote!(ts_aot_runtime::__ts_aot_async_generator_throw(#payload);))
             } else if body_ctx.in_try() || body_ctx.is_generator() {
-                Ok(quote!(ts_aot_runtime::__ts_aot_throw(#error);))
+                let payload = emit_throw_payload(error, ctx, emit_env, body_ctx)?;
+                Ok(quote!(ts_aot_runtime::__ts_aot_throw(#payload);))
             } else {
+                let error = emit_expr(error, ctx, emit_env, body_ctx)?;
                 Ok(quote!(return Err(#error);))
             }
         }
@@ -690,6 +713,11 @@ fn emit_stmt(
     }
 }
 
+fn is_durable_string_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+    ctx.global_ty(name)
+        .is_some_and(|ty| global_is_durable_string(ty, emit_env))
+}
+
 fn emit_global_access(
     name: &Atom,
     ctx: &EmitCtx,
@@ -705,16 +733,24 @@ fn emit_global_access(
         return quote!(#enum_name::#variant);
     }
     let ident = ident_from(name);
-    let non_copy = owned
+    let mutable = ctx.is_mutable_global(name);
+    let inner = if is_durable_string_global(name, ctx, emit_env) {
+        let base = if mutable {
+            quote!((*::core::ptr::addr_of!(#ident)))
+        } else {
+            quote!(#ident)
+        };
+        quote!(ts_aot_runtime::JsString::Valid(__ctx.arena.alloc_str(#base.as_str())))
+    } else if owned
         && ctx
             .global_ty(name)
-            .is_some_and(|t| !is_copy_type(emit_env.types, t));
-    let inner = if non_copy {
+            .is_some_and(|t| !is_copy_type(emit_env.types, t))
+    {
         quote!(#ident.clone())
     } else {
         quote!(#ident)
     };
-    if ctx.is_mutable_global(name) {
+    if mutable {
         quote!(unsafe { #inner })
     } else {
         quote!(#inner)
@@ -866,8 +902,69 @@ fn value_ty(
             }
         }
         MirExpr::Global(name) => ctx.global_ty(name).or_else(|| expr_base_ty(expr, body_ctx)),
+        MirExpr::Field { base, field, .. } => value_ty(base, ctx, emit_env, body_ctx)
+            .and_then(|base_ty| struct_field_type(emit_env, base_ty, *field))
+            .or_else(|| expr_base_ty(expr, body_ctx)),
         _ => expr_base_ty(expr, body_ctx),
     }
+}
+
+pub(super) fn type_requires_arena(ty: TypeId, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+    let EmitEnv { types, .. } = emit_env;
+    match types.resolve(ty) {
+        Some(Type::String | Type::Array { .. }) => true,
+        Some(Type::Struct { id }) => ctx.struct_needs_lifetime(*id),
+        Some(Type::Named { .. }) => types
+            .struct_id(ty)
+            .is_some_and(|id| ctx.struct_needs_lifetime(id)),
+        Some(Type::Promise { ok, .. }) => type_requires_arena(*ok, ctx, emit_env),
+        Some(Type::Result { ok, err }) => {
+            type_requires_arena(*ok, ctx, emit_env) || type_requires_arena(*err, ctx, emit_env)
+        }
+        Some(
+            Type::Optional { inner }
+            | Type::Generator { inner, .. }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner },
+        ) => type_requires_arena(*inner, ctx, emit_env),
+        Some(Type::WeakMap { value, .. }) => type_requires_arena(*value, ctx, emit_env),
+        Some(Type::Fn { .. }) => ctx.fn_value_kind(ty).is_some(),
+        _ => false,
+    }
+}
+
+fn emit_throw_payload(
+    error: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let error_tokens = emit_expr(error, ctx, emit_env, body_ctx)?;
+    let Some(ty) = value_ty(error, ctx, emit_env, body_ctx) else {
+        return Ok(error_tokens);
+    };
+    if !type_requires_arena(ty, ctx, emit_env) {
+        return Ok(error_tokens);
+    }
+    match emit_env.types.resolve(ty) {
+        Some(Type::String) => Ok(quote!(ts_aot_runtime::CaughtValue::from(#error_tokens))),
+        _ => Err(BackendError::NotImplemented(
+            "throw: this value borrows the arena and cannot cross the `'static` panic boundary \
+             of `try`/`catch`; only a string or a primitive value can be thrown from inside a \
+             `try`",
+        )),
+    }
+}
+
+fn struct_field_type(emit_env: &EmitEnv, ty: TypeId, field: FieldId) -> Option<TypeId> {
+    let id = match emit_env.types.resolve(ty)? {
+        Type::Struct { id } => *id,
+        _ => return None,
+    };
+    emit_env.program.declarations.iter().find_map(|d| match d {
+        MirDecl::Struct(s) if s.id == id => s.fields.iter().find(|f| f.id == field).map(|f| f.ty),
+        _ => None,
+    })
 }
 
 fn emit_same_value(
@@ -1341,7 +1438,11 @@ fn emit_expr(
                 Some(Type::String)
             ) {
                 let base = emit_expr(base, ctx, emit_env, body_ctx)?;
-                return Ok(quote!(ts_aot_runtime::__ts_aot_string_char_at(&#base, #index as i64)));
+                return Ok(quote!(ts_aot_runtime::__ts_aot_string_char_at(
+                    __ctx,
+                    &#base,
+                    #index as i64,
+                )));
             }
             if simple_index
                 && let MirExpr::Local(id) = base.as_ref()
@@ -1355,6 +1456,7 @@ fn emit_expr(
         }
         MirExpr::Call { callee, args, .. } => {
             let is_async = ctx.function_is_async(*callee);
+            let is_method = ctx.function_owner(*callee).is_some();
             let callee_ident = ctx.function_ident(*callee);
             let param_tys = ctx.function_params(*callee);
             let callee = if let Some(owner) = ctx.function_owner(*callee) {
@@ -1364,7 +1466,22 @@ fn emit_expr(
                 quote!(#callee_ident)
             };
             let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
-            let call = quote!(#callee(#(#args),*));
+            let call_args = if is_method {
+                let mut v: Vec<TokenStream> = Vec::with_capacity(args.len() + 1);
+                let mut iter = args.into_iter();
+                if let Some(first) = iter.next() {
+                    v.push(first);
+                }
+                v.push(quote!(__ctx));
+                v.extend(iter);
+                v
+            } else {
+                let mut v: Vec<TokenStream> = Vec::with_capacity(args.len() + 1);
+                v.push(quote!(__ctx));
+                v.extend(args);
+                v
+            };
+            let call = quote!(#callee(#(#call_args),*));
             if is_async {
                 Ok(quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call)))
             } else {
@@ -1379,7 +1496,7 @@ fn emit_expr(
                 let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
                 let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
                 let helper = EmitCtx::fn_call_ident(k);
-                return Ok(quote!(#helper(&#callee, #(#args),*)));
+                return Ok(quote!(#helper(__ctx, &#callee, #(#args),*)));
             }
             let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
             let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
@@ -1419,10 +1536,24 @@ fn emit_expr(
                     continue;
                 }
                 let fname = ctx.struct_field_ident(*struct_id, fid);
-                let fdef = super::emit_const_default(fty, ctx, emit_env, 0, &mut budget)?;
+                let fdef = super::emit_const_default(
+                    fty,
+                    ctx,
+                    emit_env,
+                    0,
+                    &mut budget,
+                    super::types::LifetimeMode::Full,
+                )?;
                 emitted.push(quote!(#fname: #fdef));
             }
-            Ok(quote!(#name { #(#emitted),* }))
+            if ctx.struct_needs_lifetime(*struct_id) {
+                Ok(quote!(#name {
+                    #(#emitted,)*
+                    _marker: ::core::marker::PhantomData,
+                }))
+            } else {
+                Ok(quote!(#name { #(#emitted),* }))
+            }
         }
         MirExpr::ResultOk { value, .. } => {
             let value = emit_expr(value, ctx, emit_env, body_ctx)?;
@@ -1476,7 +1607,9 @@ fn emit_expr(
                     quote!(ts_aot_runtime::JsString::from(#lit))
                 })
                 .collect();
-            Ok(quote!(vec![#(#cooked_lits),*]))
+            Ok(quote!(
+                ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#cooked_lits),*]
+            ))
         }
         MirExpr::RegExp { pattern, flags, .. } => {
             let pattern_lit = Literal::string(pattern);
@@ -1791,11 +1924,17 @@ fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Op
     let env_type = &env.env_type;
     let env_ident = &env.env_ident;
     ctx.push_env_struct(quote! {
-        pub struct #env_type { #(#fields,)* }
+        pub struct #env_type<'a> {
+            #(#fields,)*
+            _marker: ::core::marker::PhantomData<&'a ()>,
+        }
     });
-    Some(
-        quote!(let #env_ident: std::rc::Rc<#env_type> = std::rc::Rc::new(#env_type { #(#inits,)* });),
-    )
+    Some(quote!(
+        let #env_ident: std::rc::Rc<#env_type<'a>> = std::rc::Rc::new(#env_type {
+            #(#inits,)*
+            _marker: ::core::marker::PhantomData,
+        });
+    ))
 }
 
 struct ClosureEmit<'a> {
@@ -1841,7 +1980,7 @@ fn emit_closure_value(
     }
     let capture_tys: Vec<TokenStream> = envs
         .iter()
-        .map(|(_, env_type)| quote!(std::rc::Rc<#env_type>))
+        .map(|(_, env_type)| quote!(std::rc::Rc<#env_type<'a>>))
         .collect();
     let variant = ctx.register_closure(closure_id, sig, capture_tys.clone());
 
@@ -1891,9 +2030,14 @@ fn emit_closure_value(
     }
     let ret_tokens = emit_type_id_with_ctx(ret_ty, emit_env, ctx);
     let fn_ident = format_ident!("__ts_closure_{}", closure_id);
-    ctx.push_closure_fn(
-        quote!(fn #fn_ident(#(#param_tokens),*) -> #ret_tokens { #(#inner_stmts)* }),
-    );
+    ctx.push_closure_fn(quote!(
+        fn #fn_ident<'a>(
+            __ctx: &ts_aot_runtime::Ctx<'a>,
+            #(#param_tokens),*
+        ) -> #ret_tokens {
+            #(#inner_stmts)*
+        }
+    ));
 
     let enum_name = EmitCtx::fn_value_ident(sig);
     if envs.is_empty() {
@@ -2041,7 +2185,7 @@ fn dynamic_string_coerce(
     if is_dynamic_expr(expr, body_ctx)
         && matches!(emit_env.types.resolve(target), Some(Type::String))
     {
-        quote!(#tokens.to_js_string())
+        quote!(#tokens.to_js_string(__ctx))
     } else {
         tokens
     }
@@ -2066,6 +2210,29 @@ fn numeric_coerce(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> TokenStream {
+    numeric_coerce_impl(expr, tokens, target, ctx, emit_env, body_ctx, false)
+}
+
+fn numeric_coerce_exact(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> TokenStream {
+    numeric_coerce_impl(expr, tokens, target, ctx, emit_env, body_ctx, true)
+}
+
+fn numeric_coerce_impl(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    cast_int_widths: bool,
+) -> TokenStream {
     let dst = emit_env.types.resolve(target);
     match expr {
         MirExpr::Int { value, .. } => match dst {
@@ -2086,7 +2253,8 @@ fn numeric_coerce(
             };
             let both_numeric = (is_float_type(src) || is_integer_type(src))
                 && (is_float_type(dst) || is_integer_type(dst));
-            if both_numeric && is_float_type(src) != is_float_type(dst) {
+            let width_mismatch = cast_int_widths && src != dst;
+            if both_numeric && (is_float_type(src) != is_float_type(dst) || width_mismatch) {
                 let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
                 quote!(((#tokens) as #dst_tokens))
             } else {
@@ -2385,7 +2553,7 @@ fn emit_runtime_call(
         }
         RuntimeOp::ArrayFrom => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_array_from(&#arr)))
+            Ok(quote!(__ts_aot_array_from(__ctx, &#arr)))
         }
         RuntimeOp::ArrayFromMapped => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2402,16 +2570,16 @@ fn emit_runtime_call(
                 Some(k) => {
                     let helper = EmitCtx::fn_call_ident(k);
                     if arity >= 2 {
-                        quote!(#helper(&#mapfn, __ts_aot_item, __ts_aot_idx))
+                        quote!(#helper(__ctx, &#mapfn, __ts_aot_item, __ts_aot_idx))
                     } else {
-                        quote!(#helper(&#mapfn, __ts_aot_item))
+                        quote!(#helper(__ctx, &#mapfn, __ts_aot_item))
                     }
                 }
                 None => {
                     if arity >= 2 {
-                        quote!(#mapfn(__ts_aot_item, __ts_aot_idx))
+                        quote!(#mapfn(__ctx, __ts_aot_item, __ts_aot_idx))
                     } else {
-                        quote!(#mapfn(__ts_aot_item))
+                        quote!(#mapfn(__ctx, __ts_aot_item))
                     }
                 }
             };
@@ -2420,7 +2588,11 @@ fn emit_runtime_call(
             } else {
                 quote!(|__ts_aot_item, _| #call)
             };
-            Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
+            Ok(quote!(__ts_aot_array_from_mapped(
+                __ctx,
+                &#arr,
+                #wrapper
+            )))
         }
         RuntimeOp::ObjectKeys => {
             if let Some(sid) =
@@ -2439,16 +2611,19 @@ fn emit_runtime_call(
                 };
                 return Ok(quote!({
                     #eval
-                    __ts_aot_array_create::<ts_aot_runtime::JsString>(vec![#(#lits),*])
+                    __ts_aot_array_create::<ts_aot_runtime::JsString>(
+                        __ctx,
+                        ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#lits),*],
+                    )
                 }));
             }
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_object_keys(&#map)))
+            Ok(quote!(__ts_aot_object_keys(__ctx, &#map)))
         }
         RuntimeOp::ArrayOwnKeys => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let include_length = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_array_own_keys(&#arr, #include_length)))
+            Ok(quote!(__ts_aot_array_own_keys(__ctx, &#arr, #include_length)))
         }
         RuntimeOp::ObjectIs => {
             let a_ty = value_ty(&args[0], ctx, emit_env, body_ctx);
@@ -2499,11 +2674,11 @@ fn emit_runtime_call(
         }
         RuntimeOp::JsonParseString => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_json_parse_string(#s)))
+            Ok(quote!(__ts_aot_json_parse_string(__ctx, #s)))
         }
         RuntimeOp::JsonStringifyString => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_json_stringify_string(#s)))
+            Ok(quote!(__ts_aot_json_stringify_string(__ctx, #s)))
         }
         RuntimeOp::ArrayBufferSlice => {
             let buf = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2533,7 +2708,7 @@ fn emit_runtime_call(
                 _ => ty,
             };
             let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
-            Ok(quote!(__ts_aot_array_hole::<#element_ty>()))
+            Ok(quote!(__ts_aot_array_hole::<#element_ty>(__ctx)))
         }
         RuntimeOp::GeneratorNext => {
             let owner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2592,6 +2767,11 @@ fn emit_runtime_call(
         | RuntimeOp::StringCharAt => {
             let string_arg_indices = string_op_string_arg_indices(op);
             let name = runtime_op_ident(op)?;
+            let ctx_arg = if runtime_op_takes_ctx(op) {
+                quote!(__ctx,)
+            } else {
+                quote!()
+            };
             let emitted: Vec<TokenStream> = args
                 .iter()
                 .enumerate()
@@ -2603,7 +2783,7 @@ fn emit_runtime_call(
                     }
                 })
                 .collect::<Result<Vec<_>, BackendError>>()?;
-            Ok(quote!(#name(#(#emitted),*)))
+            Ok(quote!(#name(#ctx_arg #(#emitted),*)))
         }
         RuntimeOp::MapSet => {
             let name = runtime_op_ident(op)?;
@@ -2621,7 +2801,7 @@ fn emit_runtime_call(
         RuntimeOp::ArrayFromString => {
             let name = runtime_op_ident(op)?;
             let source_expr = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(#source_expr)))
+            Ok(quote!(#name(__ctx, #source_expr)))
         }
         RuntimeOp::HostConsoleLog | RuntimeOp::SymbolFor => {
             let name = runtime_op_ident(op)?;
@@ -2634,10 +2814,25 @@ fn emit_runtime_call(
             let ty_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             if op == RuntimeOp::JsonParse {
                 let arg = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
-                Ok(quote!(#name::<#ty_tokens>(#arg)))
+                if let Some(Type::Array { element }) = types.resolve(target) {
+                    if matches!(types.resolve(*element), Some(Type::String)) {
+                        return Ok(quote!(ts_aot_runtime::__ts_aot_json_parse_vec_string(
+                            __ctx, #arg
+                        )));
+                    }
+                    let element_tokens = emit_type_id_with_ctx(*element, emit_env, ctx);
+                    Ok(
+                        quote!(ts_aot_runtime::bumpalo::collections::Vec::from_iter_in(
+                            __ts_aot_json_parse::<Vec<#element_tokens>>(#arg),
+                            __ctx.arena,
+                        )),
+                    )
+                } else {
+                    Ok(quote!(#name::<#ty_tokens>(#arg)))
+                }
             } else {
                 let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-                Ok(quote!(#name::<#ty_tokens>(&#arg)))
+                Ok(quote!(#name::<#ty_tokens>(__ctx, &#arg)))
             }
         }
         RuntimeOp::SymbolNew => {
@@ -2652,16 +2847,40 @@ fn emit_runtime_call(
                 Ok(quote!(__ts_aot_symbol_new_desc(&#desc_expr)))
             }
         }
+        RuntimeOp::PromiseAll | RuntimeOp::PromiseAllSettled => Err(BackendError::NotImplemented(
+            "promise combinator: `Promise.all`/`Promise.allSettled` take an arena-backed array of \
+             promises and resolve to an array of their results; the emitted array borrows the \
+             arena while the runtime helpers take an owned `std::vec::Vec`, and the resolved \
+             element type cannot satisfy the `'static` bound the promise helpers require, so \
+             emitting this call would produce Rust that does not compile",
+        )),
+        RuntimeOp::PromiseRace | RuntimeOp::PromiseAny => Err(BackendError::NotImplemented(
+            "promise combinator: `Promise.race`/`Promise.any` take an arena-backed array of \
+             promises; the emitted array borrows the arena while the runtime helpers take an \
+             owned `std::vec::Vec`, so emitting this call would produce Rust that does not \
+             compile",
+        )),
         RuntimeOp::PromiseResolveStatic | RuntimeOp::PromiseRejectStatic => {
             let name = runtime_op_ident(op)?;
             let target = target_ty.unwrap_or(ty);
+            if type_requires_arena(target, ctx, emit_env) {
+                let message = if matches!(op, RuntimeOp::PromiseRejectStatic) {
+                    "Promise.reject: the promise's value type borrows the arena, but the promise \
+                     helpers require `T: Clone + 'static`; a promise whose value is an \
+                     arena-backed string, array, or struct cannot satisfy that bound"
+                } else {
+                    "Promise: the resolved value borrows the arena, but the promise helpers \
+                     require `T: Clone + 'static`; a promise whose value is an arena-backed \
+                     string, array, or struct cannot satisfy that bound"
+                };
+                return Err(BackendError::NotImplemented(message));
+            }
             let ty_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             if matches!(op, RuntimeOp::PromiseRejectStatic) {
                 let reason = match &args[0] {
                     MirExpr::String { id, .. } => {
                         let lit = Literal::string(id.as_str());
-                        quote!(ts_aot_runtime::JsString::from(#lit).to_string_lossy()
-                            .into_owned())
+                        quote!(ts_aot_runtime::JsString::from(#lit).to_string_lossy())
                     }
                     _ if matches!(
                         expr_base_ty(&args[0], body_ctx).and_then(|ty| types.resolve(ty)),
@@ -2669,7 +2888,7 @@ fn emit_runtime_call(
                     ) =>
                     {
                         let js = emit_js_string_owned(&args[0], ctx, emit_env, body_ctx)?;
-                        quote!(#js.to_string_lossy().into_owned())
+                        quote!(#js.to_string_lossy())
                     }
                     _ => {
                         let reason_ty =
@@ -2686,6 +2905,7 @@ fn emit_runtime_call(
                 Ok(quote!(#name::<#ty_tokens>(#reason)))
             } else {
                 let value = emit_owned_value(&args[0], ctx, emit_env, body_ctx)?;
+                let value = numeric_coerce_exact(&args[0], value, target, ctx, emit_env, body_ctx);
                 Ok(quote!(#name::<#ty_tokens>(#value)))
             }
         }
@@ -2693,6 +2913,16 @@ fn emit_runtime_call(
         | RuntimeOp::PromiseCatchInstance
         | RuntimeOp::PromiseFinallyInstance => {
             let name = runtime_op_ident(op)?;
+            if let Some(input) = target_ty
+                && type_requires_arena(input, ctx, emit_env)
+            {
+                return Err(BackendError::NotImplemented(
+                    "promise instance method: the promise resolves to a value that borrows the \
+                     arena, but the runtime helpers require `T: Clone + 'static`; a promise whose \
+                     value is an arena-backed string, array, or struct cannot use \
+                     `then`/`catch`/`finally`",
+                ));
+            }
             let promise = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let handler = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
             let input_ty_tokens = match target_ty {
@@ -2793,10 +3023,34 @@ fn emit_runtime_call(
         }
         _ => {
             let name = runtime_op_ident(op)?;
+            let ctx_arg = if runtime_op_takes_ctx(op) {
+                quote!(__ctx,)
+            } else {
+                quote!()
+            };
             let args = emit_exprs(args, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(#(#args),*)))
+            Ok(quote!(#name(#ctx_arg #(#args),*)))
         }
     }
+}
+
+fn runtime_op_takes_ctx(op: RuntimeOp) -> bool {
+    matches!(
+        op,
+        RuntimeOp::StringConcat
+            | RuntimeOp::StringCharAt
+            | RuntimeOp::StringFromCharCode
+            | RuntimeOp::StringFromCodePoint
+            | RuntimeOp::JsonParseString
+            | RuntimeOp::JsonStringifyString
+            | RuntimeOp::JsonStringify
+            | RuntimeOp::ArrayFromString
+            | RuntimeOp::ArrayCreateWithLen
+            | RuntimeOp::ArrayFromLengthMapped
+            | RuntimeOp::ObjectKeys
+            | RuntimeOp::DateToIsoString
+            | RuntimeOp::SymbolKeyFor
+    )
 }
 
 fn string_op_string_arg_indices(op: RuntimeOp) -> &'static [usize] {
@@ -2836,7 +3090,9 @@ fn emit_array_op_with_element_type(
         })
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
-    Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))
+    Ok(
+        quote!(#name::<#element_ty>(__ctx, ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#parts),*])),
+    )
 }
 
 fn emit_js_string_arg(
@@ -3045,13 +3301,23 @@ fn emit_try(
             } else {
                 let param_ty = param_ty_id
                     .map_or_else(|| quote!(()), |t| emit_type_id_with_ctx(t, emit_env, ctx));
+                let is_string = param_ty_id
+                    .is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::String)));
                 let extractable = param_ty_id.is_some_and(|t| {
                     emit_env
                         .types
                         .resolve(t)
                         .is_some_and(super::types::is_comparable_primitive)
                 });
-                if extractable {
+                if is_string {
+                    quote! {
+                        let #param_ident: #param_ty =
+                            match ts_aot_runtime::__ts_aot_catch_string(__ctx, __e) {
+                                Ok(v) => v,
+                                Err(__e) => std::panic::#resume_unwind(__e),
+                            };
+                    }
+                } else if extractable {
                     quote! {
                         let #param_ident: #param_ty =
                             match ts_aot_runtime::__ts_aot_catch_typed::<#param_ty>(__e) {

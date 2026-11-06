@@ -27,6 +27,8 @@ pub struct ExprConverter {
     pub(super) method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
     pub(super) class_struct_by_name: HashMap<Atom, StructId>,
     pub(super) current_call_type_args: Vec<TypeId>,
+    pub(super) current_return_ty: Option<TypeId>,
+    pub(super) expected_ty: Option<TypeId>,
     pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
     pub(super) global_types: OnceLock<HashMap<Atom, TypeId>>,
 }
@@ -66,6 +68,8 @@ impl ExprConverter {
             method_param_tys: HashMap::new(),
             class_struct_by_name: HashMap::new(),
             current_call_type_args: Vec::new(),
+            current_return_ty: None,
+            expected_ty: None,
             class_index: OnceLock::new(),
             global_types: OnceLock::new(),
         }
@@ -245,7 +249,13 @@ impl ExprConverter {
         self.temp_locals.clear();
         self.struct_ids.clear();
         self.current_call_type_args.clear();
+        self.current_return_ty = None;
+        self.expected_ty = None;
         self.seed_params(param_ids);
+    }
+
+    pub(crate) fn set_return_ty(&mut self, ty: TypeId) {
+        self.current_return_ty = Some(ty);
     }
 
     pub(super) fn resolve_callee(

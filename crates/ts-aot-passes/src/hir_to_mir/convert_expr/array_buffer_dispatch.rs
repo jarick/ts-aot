@@ -78,8 +78,9 @@ impl ExprConverter {
         );
         let mut mir_args: Vec<MirExpr> = vec![receiver_mir];
         for arg in args {
-            mir_args.push(self.convert_expr(
+            mir_args.push(self.convert_call_arg(
                 arg,
+                None,
                 out,
                 shared_struct_ids,
                 shared_next_struct,

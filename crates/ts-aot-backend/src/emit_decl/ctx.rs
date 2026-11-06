@@ -32,6 +32,7 @@ pub(super) struct EmitCtx {
     mutable_globals: HashSet<Atom>,
     function_arity: HashMap<Atom, usize>,
     global_tys: HashMap<Atom, TypeId>,
+    struct_lifetimes: HashMap<StructId, bool>,
     fn_value_index: HashMap<TypeId, usize>,
     fn_value_sigs: Vec<FnValueSig>,
     fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>>,
@@ -55,6 +56,59 @@ pub(super) struct FnValueSig {
 pub(super) struct EmitEnv<'a> {
     pub(super) types: &'a TypeTable,
     pub(super) program: &'a MirProgram,
+}
+
+fn collect_struct_lifetimes(program: &MirProgram, types: &TypeTable) -> HashMap<StructId, bool> {
+    let mut needs: HashMap<StructId, bool> = HashMap::new();
+    for decl in &program.declarations {
+        if let MirDecl::Struct(s) = decl {
+            needs.insert(s.id, false);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for decl in &program.declarations {
+            let MirDecl::Struct(s) = decl else {
+                continue;
+            };
+            if needs.get(&s.id).copied().unwrap_or(false) {
+                continue;
+            }
+            if s.fields
+                .iter()
+                .any(|f| type_needs_lifetime(f.ty, types, &needs))
+            {
+                needs.insert(s.id, true);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    needs
+}
+
+fn type_needs_lifetime(ty: TypeId, types: &TypeTable, needs: &HashMap<StructId, bool>) -> bool {
+    match types.resolve(ty) {
+        Some(Type::String | Type::Array { .. } | Type::Fn { .. }) => true,
+        Some(Type::Struct { id }) => needs.get(id).copied().unwrap_or(true),
+        Some(
+            Type::Optional { inner }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner }
+            | Type::Generator { inner, .. }
+            | Type::Promise { ok: inner, .. }
+            | Type::WeakMap { value: inner, .. },
+        ) => type_needs_lifetime(*inner, types, needs),
+        Some(Type::Result { ok, err }) => {
+            type_needs_lifetime(*ok, types, needs) || type_needs_lifetime(*err, types, needs)
+        }
+        Some(Type::Named { .. }) => types
+            .struct_id(ty)
+            .is_some_and(|id| needs.get(&id).copied().unwrap_or(true)),
+        _ => false,
+    }
 }
 
 impl EmitCtx {
@@ -120,6 +174,7 @@ impl EmitCtx {
         }
         let (fn_value_index, fn_value_sigs, fn_value_variants, fn_value_of_fn) =
             collect_fn_values(program, types);
+        let struct_lifetimes = collect_struct_lifetimes(program, types);
         Self {
             struct_names,
             function_names,
@@ -132,6 +187,7 @@ impl EmitCtx {
             mutable_globals,
             global_tys,
             function_arity,
+            struct_lifetimes,
             fn_value_index,
             fn_value_sigs,
             fn_value_variants,
@@ -152,6 +208,10 @@ impl EmitCtx {
 
     pub(super) fn runtime_used(&self) -> bool {
         self.used_runtime.get()
+    }
+
+    pub(super) fn struct_needs_lifetime(&self, id: StructId) -> bool {
+        self.struct_lifetimes.get(&id).copied().unwrap_or(true)
     }
 
     pub(super) fn alloc_closure_id(&self) -> u32 {

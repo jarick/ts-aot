@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use crate::arena::Ctx;
 use crate::string::JsString;
 
 struct RegistryState {
     next_id: i64,
-    forward: HashMap<JsString, i64>,
-    reverse: HashMap<i64, JsString>,
+    forward: HashMap<Vec<u16>, i64>,
+    reverse: HashMap<i64, Vec<u16>>,
 }
 
 impl RegistryState {
@@ -42,24 +43,31 @@ pub fn __ts_aot_symbol_new() -> i64 {
 }
 
 #[must_use]
-pub fn __ts_aot_symbol_new_desc(description: &JsString) -> i64 {
+pub fn __ts_aot_symbol_new_desc(description: &JsString<'_>) -> i64 {
     let _ = description;
     allocate_unique_id(&mut lock_registry())
 }
 
 #[must_use]
-pub fn __ts_aot_symbol_for(key: &JsString) -> i64 {
+pub fn __ts_aot_symbol_for(key: &JsString<'_>) -> i64 {
+    let units = key.to_units();
     let mut state = lock_registry();
-    if let Some(&id) = state.forward.get(key) {
+    if let Some(&id) = state.forward.get(&units) {
         return id;
     }
     let id = allocate_unique_id(&mut state);
-    state.forward.insert(key.clone(), id);
-    state.reverse.insert(id, key.clone());
+    state.forward.insert(units.clone(), id);
+    state.reverse.insert(id, units);
     id
 }
 
 #[must_use]
-pub fn __ts_aot_symbol_key_for(sym: i64) -> Option<JsString> {
-    lock_registry().reverse.get(&sym).cloned()
+pub fn __ts_aot_symbol_key_for<'a>(ctx: &Ctx<'a>, sym: i64) -> Option<JsString<'a>> {
+    lock_registry()
+        .reverse
+        .get(&sym)
+        .map(|units| match String::from_utf16(units) {
+            Ok(s) => JsString::Valid(ctx.arena.alloc_str(&s)),
+            Err(_) => JsString::Raw(ctx.arena.alloc_slice_copy(units)),
+        })
 }

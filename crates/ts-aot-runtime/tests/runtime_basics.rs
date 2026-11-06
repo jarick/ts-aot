@@ -1,3 +1,4 @@
+use bumpalo::collections::Vec as BumpVec;
 use indexmap::IndexMap;
 use ts_aot_runtime::{
     __ts_aot_array_create_with_len, __ts_aot_array_from, __ts_aot_array_from_length_mapped,
@@ -12,11 +13,53 @@ use ts_aot_runtime::{
     __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_char_at,
     __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
     __ts_aot_string_len, __ts_aot_string_substring_utf16, __ts_aot_throw, __ts_aot_typeof,
-    __ts_aot_typeof_null, __ts_aot_typeof_unit, JsString, TsArrayMarker,
+    __ts_aot_typeof_null, __ts_aot_typeof_unit, Ctx, Host, JsString, TsArrayMarker, run_in_arena,
 };
 
-fn js(s: &str) -> JsString {
+fn js(s: &str) -> JsString<'_> {
     JsString::from(s)
+}
+
+fn with_ctx<R>(f: impl for<'a> FnOnce(&Ctx<'a>) -> R) -> R {
+    struct H;
+    impl Host for H {}
+    run_in_arena(&H, f)
+}
+
+fn leak(s: JsString<'_>) -> JsString<'static> {
+    match s {
+        JsString::Valid(t) => JsString::Valid(Box::leak(t.to_owned().into_boxed_str())),
+        JsString::Raw(u) => JsString::Raw(Box::leak(u.to_owned().into_boxed_slice())),
+    }
+}
+
+fn from_units(v: Vec<u16>) -> JsString<'static> {
+    JsString::Raw(Box::leak(v.into_boxed_slice()))
+}
+
+fn array_from_string(s: &JsString<'_>) -> Vec<JsString<'static>> {
+    with_ctx(|ctx| {
+        __ts_aot_array_from_string(ctx, s)
+            .into_iter()
+            .map(leak)
+            .collect()
+    })
+}
+
+fn char_at(s: &JsString<'_>, i: i64) -> JsString<'static> {
+    with_ctx(|ctx| leak(__ts_aot_string_char_at(ctx, s, i)))
+}
+
+fn substring_utf16(s: &JsString<'_>, a: i64, b: i64) -> JsString<'static> {
+    with_ctx(|ctx| leak(__ts_aot_string_substring_utf16(ctx, s, a, b)))
+}
+
+fn from_char_code(codes: &[i64]) -> JsString<'static> {
+    with_ctx(|ctx| leak(__ts_aot_string_from_char_code(ctx, codes)))
+}
+
+fn from_code_point(points: &[i64]) -> JsString<'static> {
+    with_ctx(|ctx| leak(__ts_aot_string_from_code_point(ctx, points)))
 }
 
 fn assert_f64_exact(actual: f64, expected: f64) {
@@ -351,11 +394,13 @@ fn runtime_array_get_set_and_len() {
 
 #[test]
 fn runtime_array_is_array_returns_true_for_vec() {
-    let arr: Vec<i64> = vec![1, 2, 3];
-    assert!(
-        __ts_aot_array_is_array(&arr),
-        "Vec<i64> must be detected as array, got false"
-    );
+    with_ctx(|ctx| {
+        let arr = BumpVec::from_iter_in([1_i64, 2, 3], ctx.arena);
+        assert!(
+            __ts_aot_array_is_array(&arr),
+            "bump Vec<i64> must be detected as array, got false"
+        );
+    });
 }
 
 #[test]
@@ -365,25 +410,31 @@ fn runtime_array_is_array_false_helper_returns_false() {
 
 #[test]
 fn runtime_array_is_array_returns_true_for_vec_of_marker() {
-    let arr: Vec<TsArrayMarker> = vec![TsArrayMarker, TsArrayMarker];
-    assert!(
-        __ts_aot_array_is_array(&arr),
-        "Vec<TsArrayMarker> must be detected as array via the explicit marker"
-    );
-    let marker = TsArrayMarker;
-    assert!(
-        __ts_aot_array_is_array(&marker),
-        "TsArrayMarker itself must be detected as array"
-    );
+    with_ctx(|ctx| {
+        let arr = BumpVec::from_iter_in([TsArrayMarker, TsArrayMarker], ctx.arena);
+        assert!(
+            __ts_aot_array_is_array(&arr),
+            "bump Vec<TsArrayMarker> must be detected as array via the explicit marker"
+        );
+        let marker = TsArrayMarker;
+        assert!(
+            __ts_aot_array_is_array(&marker),
+            "TsArrayMarker itself must be detected as array"
+        );
+    });
 }
 
 #[test]
 fn runtime_array_is_array_returns_true_for_nested_vec() {
-    let nested: Vec<Vec<i64>> = vec![vec![1, 2], vec![3, 4]];
-    assert!(
-        __ts_aot_array_is_array(&nested),
-        "Vec<Vec<i64>> must be detected as array (generic Vec<T> blanket impl)"
-    );
+    with_ctx(|ctx| {
+        let a = BumpVec::from_iter_in([1_i64, 2], ctx.arena);
+        let b = BumpVec::from_iter_in([3_i64, 4], ctx.arena);
+        let nested = BumpVec::from_iter_in([a, b], ctx.arena);
+        assert!(
+            __ts_aot_array_is_array(&nested),
+            "bump Vec<Vec<i64>> must be detected as array (generic Vec<T> blanket impl)"
+        );
+    });
 }
 
 #[test]
@@ -395,81 +446,101 @@ fn runtime_array_is_array_returns_false_for_non_vec() {
 
 #[test]
 fn runtime_array_create_with_len_zero_returns_empty_vec() {
-    let v: Vec<i64> = __ts_aot_array_create_with_len(0);
-    assert_eq!(v, [] as [i64; 0]);
-    assert_f64_exact(__ts_aot_array_len(&v), 0.0);
+    with_ctx(|ctx| {
+        let v = __ts_aot_array_create_with_len::<i64>(ctx, 0);
+        assert_eq!(v.as_slice(), [] as [i64; 0]);
+        assert_f64_exact(__ts_aot_array_len(&v), 0.0);
+    });
 }
 
 #[test]
 fn runtime_array_create_with_len_fills_with_default() {
-    let v: Vec<i64> = __ts_aot_array_create_with_len(3);
-    assert_f64_exact(__ts_aot_array_len(&v), 3.0);
-    assert_eq!(v, vec![0, 0, 0]);
-    let s: Vec<String> = __ts_aot_array_create_with_len(2);
-    assert_eq!(s, vec![String::new(), String::new()]);
+    with_ctx(|ctx| {
+        let v = __ts_aot_array_create_with_len::<i64>(ctx, 3);
+        assert_f64_exact(__ts_aot_array_len(&v), 3.0);
+        assert_eq!(v.as_slice(), &[0, 0, 0]);
+        let s = __ts_aot_array_create_with_len::<String>(ctx, 2);
+        assert_eq!(s.as_slice(), &[String::new(), String::new()]);
+    });
 }
 
 #[test]
 #[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_negative_panics() {
-    let _v: Vec<i64> = __ts_aot_array_create_with_len(-1);
+    with_ctx(|ctx| {
+        let _v = __ts_aot_array_create_with_len::<i64>(ctx, -1);
+    });
 }
 
 #[test]
 #[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_exceeding_max_dense_len_panics() {
-    let _v: Vec<i64> =
-        __ts_aot_array_create_with_len(i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN) + 1);
+    with_ctx(|ctx| {
+        let _v = __ts_aot_array_create_with_len::<i64>(
+            ctx,
+            i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN) + 1,
+        );
+    });
 }
 
 #[test]
 #[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_at_max_dense_len_boundary_panics() {
-    let _v: Vec<i64> =
-        __ts_aot_array_create_with_len(i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN));
+    with_ctx(|ctx| {
+        let _v = __ts_aot_array_create_with_len::<i64>(
+            ctx,
+            i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN),
+        );
+    });
 }
 
 #[test]
 fn runtime_array_create_with_len_just_below_max_dense_len_succeeds() {
-    let n = i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN) - 1;
-    let v: Vec<u8> = __ts_aot_array_create_with_len(n);
-    assert_eq!(i64::try_from(v.len()).unwrap(), n);
+    with_ctx(|ctx| {
+        let n = i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN) - 1;
+        let v = __ts_aot_array_create_with_len::<u8>(ctx, n);
+        assert_eq!(i64::try_from(v.len()).unwrap(), n);
+    });
 }
 
 #[test]
 fn runtime_array_push_appends_to_vec() {
-    let mut v: Vec<i64> = Vec::new();
-    __ts_aot_array_push(&mut v, 1);
-    __ts_aot_array_push(&mut v, 2);
-    __ts_aot_array_push(&mut v, 3);
-    assert_eq!(v, vec![1, 2, 3]);
+    with_ctx(|ctx| {
+        let mut v: BumpVec<i64> = BumpVec::new_in(ctx.arena);
+        __ts_aot_array_push(&mut v, 1);
+        __ts_aot_array_push(&mut v, 2);
+        __ts_aot_array_push(&mut v, 3);
+        assert_eq!(v.as_slice(), &[1, 2, 3]);
+    });
 }
 
 #[test]
 fn runtime_array_from_clones_source_vec() {
-    let src: Vec<i64> = vec![1, 2, 3];
-    let dst: Vec<i64> = __ts_aot_array_from(&src);
-    assert_eq!(dst, src);
-    assert_f64_exact(__ts_aot_array_len(&src), 3.0);
-    assert_f64_exact(__ts_aot_array_len(&dst), 3.0);
-    let str_vec: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
-    let str_dst: Vec<String> = __ts_aot_array_from(&str_vec);
-    assert_eq!(str_dst, vec!["a".to_owned(), "b".to_owned()]);
+    with_ctx(|ctx| {
+        let src = [1_i64, 2, 3];
+        let dst = __ts_aot_array_from(ctx, &src);
+        assert_eq!(dst.as_slice(), src);
+        assert_f64_exact(__ts_aot_array_len(&src), 3.0);
+        assert_f64_exact(__ts_aot_array_len(&dst), 3.0);
+        let str_vec: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
+        let str_dst = __ts_aot_array_from(ctx, &str_vec);
+        assert_eq!(str_dst.as_slice(), &["a".to_owned(), "b".to_owned()]);
+    });
 }
 
 #[test]
 fn runtime_array_from_string_returns_code_point_strings() {
-    let scalars: Vec<JsString> = __ts_aot_array_from_string(&js("abc"));
+    let scalars: Vec<JsString> = array_from_string(&js("abc"));
     assert_eq!(scalars, vec![js("a"), js("b"), js("c")]);
-    let empty: Vec<JsString> = __ts_aot_array_from_string(&js(""));
+    let empty: Vec<JsString> = array_from_string(&js(""));
     assert_eq!(empty, [] as [JsString; 0]);
-    let cafe: Vec<JsString> = __ts_aot_array_from_string(&js("café"));
+    let cafe: Vec<JsString> = array_from_string(&js("café"));
     assert_eq!(cafe, vec![js("c"), js("a"), js("f"), js("é")]);
 }
 
 #[test]
 fn runtime_array_from_string_with_astral_char_yields_one_string_element() {
-    let scalars: Vec<JsString> = __ts_aot_array_from_string(&js("😀"));
+    let scalars: Vec<JsString> = array_from_string(&js("😀"));
     assert_eq!(
         scalars.len(),
         1,
@@ -480,98 +551,116 @@ fn runtime_array_from_string_with_astral_char_yields_one_string_element() {
 
 #[test]
 fn runtime_array_from_string_preserves_lone_surrogates_as_raw_units() {
-    let raw = JsString::from_units(vec![
+    let raw = from_units(vec![
         u16::from(b'a'),
         0xD83D,
         u16::from(b'b'),
         0xDE00,
         u16::from(b'c'),
     ]);
-    let scalars: Vec<JsString> = __ts_aot_array_from_string(&raw);
+    let scalars: Vec<JsString> = array_from_string(&raw);
     assert_eq!(scalars.len(), 5, "got {scalars:?}");
     assert_eq!(scalars[0], js("a"));
-    assert_eq!(scalars[1], JsString::from_units(vec![0xD83D]));
+    assert_eq!(scalars[1], from_units(vec![0xD83D]));
     assert_eq!(scalars[2], js("b"));
-    assert_eq!(scalars[3], JsString::from_units(vec![0xDE00]));
+    assert_eq!(scalars[3], from_units(vec![0xDE00]));
     assert_eq!(scalars[4], js("c"));
 }
 
 #[test]
 fn runtime_array_from_mapped_applies_function_to_each_element() {
-    let src: Vec<i64> = vec![1, 2, 3];
-    let doubled: Vec<i64> = __ts_aot_array_from_mapped(&src, |x, _i| x * 2);
-    assert_eq!(doubled, vec![2, 4, 6]);
-    let neg: Vec<i64> = __ts_aot_array_from_mapped(&src, |x, _i| -x);
-    assert_eq!(neg, vec![-1, -2, -3]);
-    let str_src: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
-    let upper: Vec<String> = __ts_aot_array_from_mapped(&str_src, |s, _i| s.to_uppercase());
-    assert_eq!(upper, vec!["A".to_owned(), "B".to_owned()]);
+    with_ctx(|ctx| {
+        let src = [1_i64, 2, 3];
+        let doubled = __ts_aot_array_from_mapped(ctx, &src, |x, _i| x * 2);
+        assert_eq!(doubled.as_slice(), &[2, 4, 6]);
+        let neg = __ts_aot_array_from_mapped(ctx, &src, |x, _i| -x);
+        assert_eq!(neg.as_slice(), &[-1, -2, -3]);
+        let str_src = ["a".to_owned(), "b".to_owned()];
+        let upper = __ts_aot_array_from_mapped(ctx, &str_src, |s, _i| s.to_uppercase());
+        assert_eq!(upper.as_slice(), &["A".to_owned(), "B".to_owned()]);
+    });
 }
 
 #[test]
 fn runtime_array_from_mapped_passes_zero_based_index_to_mapper() {
-    let src: Vec<i64> = vec![10, 20, 30];
-    let with_index: Vec<i64> = __ts_aot_array_from_mapped(&src, |x, i| x + i);
-    assert_eq!(with_index, vec![10, 21, 32]);
-    let only_index: Vec<i64> = __ts_aot_array_from_mapped(&src, |_x, i| i);
-    assert_eq!(only_index, vec![0, 1, 2]);
-    let empty: Vec<i64> = __ts_aot_array_from_mapped::<i64, i64, _>(&[], |_x, i| i * 10);
-    assert_eq!(empty, [] as [i64; 0]);
+    with_ctx(|ctx| {
+        let src = [10_i64, 20, 30];
+        let with_index = __ts_aot_array_from_mapped(ctx, &src, |x, i| x + i);
+        assert_eq!(with_index.as_slice(), &[10, 21, 32]);
+        let only_index = __ts_aot_array_from_mapped(ctx, &src, |_x, i| i);
+        assert_eq!(only_index.as_slice(), &[0, 1, 2]);
+        let empty = __ts_aot_array_from_mapped::<i64, i64, _>(ctx, &[], |_x, i| i * 10);
+        assert_eq!(empty.as_slice(), [] as [i64; 0]);
+    });
 }
 
 #[test]
 fn runtime_array_from_length_mapped_calls_mapfn_with_index() {
-    let result: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(3, |_v, i| i * 2);
-    assert_eq!(result, vec![0, 2, 4]);
-    let empty: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(0, |_v, _i| 99);
-    assert_eq!(empty, [] as [i64; 0]);
-    let str_result: Vec<String> =
-        __ts_aot_array_from_length_mapped::<(), String, _>(2, |_v, i| format!("idx{i}"));
-    assert_eq!(str_result, vec!["idx0".to_owned(), "idx1".to_owned()]);
+    with_ctx(|ctx| {
+        let result = __ts_aot_array_from_length_mapped::<i64, i64, _>(ctx, 3, |_v, i| i * 2);
+        assert_eq!(result.as_slice(), &[0, 2, 4]);
+        let empty = __ts_aot_array_from_length_mapped::<i64, i64, _>(ctx, 0, |_v, _i| 99);
+        assert_eq!(empty.as_slice(), [] as [i64; 0]);
+        let str_result =
+            __ts_aot_array_from_length_mapped::<(), String, _>(ctx, 2, |_v, i| format!("idx{i}"));
+        assert_eq!(
+            str_result.as_slice(),
+            &["idx0".to_owned(), "idx1".to_owned()]
+        );
+    });
 }
 
 #[test]
 #[should_panic(expected = "out-of-range length")]
 fn runtime_array_from_length_mapped_negative_length_panics() {
-    let _v: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(-1, |_v, _i| 0);
+    with_ctx(|ctx| {
+        let _v = __ts_aot_array_from_length_mapped::<i64, i64, _>(ctx, -1, |_v, _i| 0);
+    });
 }
 
 #[test]
 #[should_panic(expected = "out-of-range length")]
 fn runtime_array_from_length_mapped_at_max_dense_len_boundary_panics() {
-    let _v: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(
-        i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN),
-        |_v, _i| 0,
-    );
+    with_ctx(|ctx| {
+        let _v = __ts_aot_array_from_length_mapped::<i64, i64, _>(
+            ctx,
+            i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN),
+            |_v, _i| 0,
+        );
+    });
 }
 
 #[test]
 fn runtime_array_from_mapped_accepts_fnmut_with_mutable_state() {
-    let src: Vec<i64> = vec![10, 20, 30];
-    let mut counter: i64 = 0;
-    let result: Vec<i64> = __ts_aot_array_from_mapped(&src, |x, _i| {
-        counter += x;
-        x + counter
+    with_ctx(|ctx| {
+        let src = [10_i64, 20, 30];
+        let mut counter: i64 = 0;
+        let result = __ts_aot_array_from_mapped(ctx, &src, |x, _i| {
+            counter += x;
+            x + counter
+        });
+        assert_eq!(
+            result.as_slice(),
+            &[20, 50, 90],
+            "FnMut closure must mutate captured state across calls (counter: 0->10->30->60, returns x+counter: 10+10=20, 20+30=50, 30+60=90)"
+        );
     });
-    assert_eq!(
-        result,
-        vec![20, 50, 90],
-        "FnMut closure must mutate captured state across calls (counter: 0->10->30->60, returns x+counter: 10+10=20, 20+30=50, 30+60=90)"
-    );
 }
 
 #[test]
 fn runtime_array_from_length_mapped_accepts_fnmut_with_mutable_state() {
-    let mut counter: i64 = 0;
-    let result: Vec<i64> = __ts_aot_array_from_length_mapped::<i64, i64, _>(3, |_v, _i| {
-        counter += 1;
-        counter
+    with_ctx(|ctx| {
+        let mut counter: i64 = 0;
+        let result = __ts_aot_array_from_length_mapped::<i64, i64, _>(ctx, 3, |_v, _i| {
+            counter += 1;
+            counter
+        });
+        assert_eq!(
+            result.as_slice(),
+            &[1, 2, 3],
+            "FnMut closure must mutate captured state across calls (counter: 0->1->2->3)"
+        );
     });
-    assert_eq!(
-        result,
-        vec![1, 2, 3],
-        "FnMut closure must mutate captured state across calls (counter: 0->1->2->3)"
-    );
 }
 
 #[test]
@@ -623,45 +712,45 @@ fn runtime_string_index_of_negative_from_index_treated_as_zero() {
 
 #[test]
 fn runtime_string_char_at_returns_scalar_at_index() {
-    assert_eq!(__ts_aot_string_char_at(&js("hello"), 0), js("h"));
-    assert_eq!(__ts_aot_string_char_at(&js("hello"), 4), js("o"));
-    assert_eq!(__ts_aot_string_char_at(&js("café"), 3), js("é"));
+    assert_eq!(char_at(&js("hello"), 0), js("h"));
+    assert_eq!(char_at(&js("hello"), 4), js("o"));
+    assert_eq!(char_at(&js("café"), 3), js("é"));
 }
 
 #[test]
 fn runtime_string_char_at_out_of_range_returns_empty_string() {
-    assert_eq!(__ts_aot_string_char_at(&js("hello"), 5), js(""));
-    assert_eq!(__ts_aot_string_char_at(&js("hello"), 100), js(""));
-    assert_eq!(__ts_aot_string_char_at(&js("hello"), -1), js(""));
+    assert_eq!(char_at(&js("hello"), 5), js(""));
+    assert_eq!(char_at(&js("hello"), 100), js(""));
+    assert_eq!(char_at(&js("hello"), -1), js(""));
 }
 
 #[test]
 fn runtime_string_from_char_code_builds_string_from_codes() {
-    assert_eq!(__ts_aot_string_from_char_code(&[72, 105]), js("Hi"));
-    assert_eq!(__ts_aot_string_from_char_code(&[]), js(""));
-    assert_eq!(__ts_aot_string_from_char_code(&[65, 66, 67]), js("ABC"));
+    assert_eq!(from_char_code(&[72, 105]), js("Hi"));
+    assert_eq!(from_char_code(&[]), js(""));
+    assert_eq!(from_char_code(&[65, 66, 67]), js("ABC"));
 }
 
 #[test]
 fn runtime_string_from_char_code_masks_to_sixteen_bits() {
     let codes = vec![0x1_F0001_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&codes), js("\u{0001}"));
+    assert_eq!(from_char_code(&codes), js("\u{0001}"));
     let codes = vec![0x1_FFFF_i64];
-    assert_eq!(__ts_aot_string_from_char_code(&codes), js("\u{FFFF}"));
+    assert_eq!(from_char_code(&codes), js("\u{FFFF}"));
 }
 
 #[test]
 fn runtime_string_from_char_code_preserves_lone_surrogates_as_raw_units() {
-    let high = __ts_aot_string_from_char_code(&[0xD83D_i64]);
-    assert_eq!(high, JsString::from_units(vec![0xD83D]));
-    let low = __ts_aot_string_from_char_code(&[0xDE00_i64]);
-    assert_eq!(low, JsString::from_units(vec![0xDE00]));
-    let split_pair = __ts_aot_string_from_char_code(&[0xD83D_i64, 0xD83D_i64]);
-    assert_eq!(split_pair, JsString::from_units(vec![0xD83D, 0xD83D]));
-    let valid_pair = __ts_aot_string_from_char_code(&[0xD83D_i64, 0xDE00_i64]);
+    let high = from_char_code(&[0xD83D_i64]);
+    assert_eq!(high, from_units(vec![0xD83D]));
+    let low = from_char_code(&[0xDE00_i64]);
+    assert_eq!(low, from_units(vec![0xDE00]));
+    let split_pair = from_char_code(&[0xD83D_i64, 0xD83D_i64]);
+    assert_eq!(split_pair, from_units(vec![0xD83D, 0xD83D]));
+    let valid_pair = from_char_code(&[0xD83D_i64, 0xDE00_i64]);
     assert_eq!(valid_pair, js("\u{1F600}"));
-    let mixed = __ts_aot_string_from_char_code(&[65_i64, 0xD83D, 66, 0xDE00]);
-    assert_eq!(mixed, JsString::from_units(vec![65, 0xD83D, 66, 0xDE00]));
+    let mixed = from_char_code(&[65_i64, 0xD83D, 66, 0xDE00]);
+    assert_eq!(mixed, from_units(vec![65, 0xD83D, 66, 0xDE00]));
 }
 
 #[test]
@@ -673,55 +762,49 @@ fn runtime_jsstring_to_string_lossy_returns_inner_string_for_valid() {
 
 #[test]
 fn runtime_jsstring_to_string_lossy_decodes_raw_via_from_utf16_lossy() {
-    let raw_valid_pair = JsString::from_units(vec![0xD83D, 0xDE00]);
+    let raw_valid_pair = from_units(vec![0xD83D, 0xDE00]);
     assert_eq!(raw_valid_pair.to_string_lossy(), "\u{1F600}");
-    let raw_lone_high = JsString::from_units(vec![0xD83D]);
+    let raw_lone_high = from_units(vec![0xD83D]);
     assert_eq!(raw_lone_high.to_string_lossy(), "\u{FFFD}");
-    let raw_lone_low = JsString::from_units(vec![0xDE00]);
+    let raw_lone_low = from_units(vec![0xDE00]);
     assert_eq!(raw_lone_low.to_string_lossy(), "\u{FFFD}");
-    let raw_bmp = JsString::from_units(vec![u16::from(b'a'), u16::from(b'b')]);
+    let raw_bmp = from_units(vec![u16::from(b'a'), u16::from(b'b')]);
     assert_eq!(raw_bmp.to_string_lossy(), "ab");
 }
 
 #[test]
 fn runtime_string_from_code_point_handles_bmp_and_astral() {
-    assert_eq!(__ts_aot_string_from_code_point(&[65, 66, 67]), js("ABC"));
-    assert_eq!(
-        __ts_aot_string_from_code_point(&[0x1_F600_i64]),
-        js("\u{1F600}")
-    );
-    assert_eq!(__ts_aot_string_from_code_point(&[]), js(""));
+    assert_eq!(from_code_point(&[65, 66, 67]), js("ABC"));
+    assert_eq!(from_code_point(&[0x1_F600_i64]), js("\u{1F600}"));
+    assert_eq!(from_code_point(&[]), js(""));
 }
 
 #[test]
 #[should_panic(expected = "RangeError")]
 fn runtime_string_from_code_point_throws_on_negative_code_point() {
-    let _ = __ts_aot_string_from_code_point(&[-1_i64, 65]);
+    let _ = from_code_point(&[-1_i64, 65]);
 }
 
 #[test]
 fn runtime_string_from_code_point_preserves_lone_surrogates_as_raw_units() {
-    let lone_high = __ts_aot_string_from_code_point(&[0xD800_i64]);
-    assert_eq!(lone_high, JsString::from_units(vec![0xD800]));
-    let lone_low = __ts_aot_string_from_code_point(&[0xDFFF_i64]);
-    assert_eq!(lone_low, JsString::from_units(vec![0xDFFF]));
-    let mixed = __ts_aot_string_from_code_point(&[0x41_i64, 0xD800, 0x42, 0xDFFF]);
-    assert_eq!(
-        mixed,
-        JsString::from_units(vec![0x41, 0xD800, 0x42, 0xDFFF])
-    );
+    let lone_high = from_code_point(&[0xD800_i64]);
+    assert_eq!(lone_high, from_units(vec![0xD800]));
+    let lone_low = from_code_point(&[0xDFFF_i64]);
+    assert_eq!(lone_low, from_units(vec![0xDFFF]));
+    let mixed = from_code_point(&[0x41_i64, 0xD800, 0x42, 0xDFFF]);
+    assert_eq!(mixed, from_units(vec![0x41, 0xD800, 0x42, 0xDFFF]));
 }
 
 #[test]
 fn runtime_string_from_code_point_preserves_valid_pair_among_surrogates() {
-    let r = __ts_aot_string_from_code_point(&[0xD83D, 0xDE00]);
+    let r = from_code_point(&[0xD83D, 0xDE00]);
     assert_eq!(r, js("\u{1F600}"));
 }
 
 #[test]
 #[should_panic(expected = "RangeError")]
 fn runtime_string_from_code_point_throws_on_code_point_above_max() {
-    let _ = __ts_aot_string_from_code_point(&[0x11_0000_i64]);
+    let _ = from_code_point(&[0x11_0000_i64]);
 }
 
 #[test]
@@ -746,63 +829,45 @@ fn runtime_string_index_of_uses_utf16_code_unit_indexing() {
 
 #[test]
 fn runtime_string_char_at_uses_utf16_code_unit_indexing() {
-    assert_eq!(
-        __ts_aot_string_char_at(&js("\u{1F600}"), 0),
-        JsString::from_units(vec![0xD83D])
-    );
-    assert_eq!(
-        __ts_aot_string_char_at(&js("\u{1F600}"), 1),
-        JsString::from_units(vec![0xDE00])
-    );
-    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 0), js("a"));
-    assert_eq!(
-        __ts_aot_string_char_at(&js("a\u{1F600}b"), 1),
-        JsString::from_units(vec![0xD83D])
-    );
-    assert_eq!(
-        __ts_aot_string_char_at(&js("a\u{1F600}b"), 2),
-        JsString::from_units(vec![0xDE00])
-    );
-    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 3), js("b"));
-    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), 4), js(""));
-    assert_eq!(__ts_aot_string_char_at(&js("a\u{1F600}b"), -1), js(""));
-    assert_eq!(__ts_aot_string_char_at(&js("café"), 3), js("é"));
-    assert_eq!(__ts_aot_string_char_at(&js("café"), 4), js(""));
+    assert_eq!(char_at(&js("\u{1F600}"), 0), from_units(vec![0xD83D]));
+    assert_eq!(char_at(&js("\u{1F600}"), 1), from_units(vec![0xDE00]));
+    assert_eq!(char_at(&js("a\u{1F600}b"), 0), js("a"));
+    assert_eq!(char_at(&js("a\u{1F600}b"), 1), from_units(vec![0xD83D]));
+    assert_eq!(char_at(&js("a\u{1F600}b"), 2), from_units(vec![0xDE00]));
+    assert_eq!(char_at(&js("a\u{1F600}b"), 3), js("b"));
+    assert_eq!(char_at(&js("a\u{1F600}b"), 4), js(""));
+    assert_eq!(char_at(&js("a\u{1F600}b"), -1), js(""));
+    assert_eq!(char_at(&js("café"), 3), js("é"));
+    assert_eq!(char_at(&js("café"), 4), js(""));
 }
 
 #[test]
 fn runtime_string_substring_utf16_uses_utf16_code_unit_indices() {
     let s = "é=value";
-    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 2, 7), js("value"));
-    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 0, 100), js(s));
-    assert_eq!(__ts_aot_string_substring_utf16(&js(s), -5, 3), js("é=v"));
-    assert_eq!(__ts_aot_string_substring_utf16(&js(s), 2, 2), js(""));
+    assert_eq!(substring_utf16(&js(s), 2, 7), js("value"));
+    assert_eq!(substring_utf16(&js(s), 0, 100), js(s));
+    assert_eq!(substring_utf16(&js(s), -5, 3), js("é=v"));
+    assert_eq!(substring_utf16(&js(s), 2, 2), js(""));
     let astral = "😀ab";
-    assert_eq!(__ts_aot_string_substring_utf16(&js(astral), 0, 2), js("😀"));
-    assert_eq!(__ts_aot_string_substring_utf16(&js(astral), 2, 4), js("ab"));
+    assert_eq!(substring_utf16(&js(astral), 0, 2), js("😀"));
+    assert_eq!(substring_utf16(&js(astral), 2, 4), js("ab"));
 }
 
 #[test]
 fn runtime_string_substring_utf16_preserves_lone_surrogates_as_raw_units() {
     let s = "\u{1F600}";
-    assert_eq!(
-        __ts_aot_string_substring_utf16(&js(s), 0, 1),
-        JsString::from_units(vec![0xD83D])
-    );
-    assert_eq!(
-        __ts_aot_string_substring_utf16(&js(s), 1, 2),
-        JsString::from_units(vec![0xDE00])
-    );
+    assert_eq!(substring_utf16(&js(s), 0, 1), from_units(vec![0xD83D]));
+    assert_eq!(substring_utf16(&js(s), 1, 2), from_units(vec![0xDE00]));
     let s2 = "a\u{1F600}b";
     assert_eq!(
-        __ts_aot_string_substring_utf16(&js(s2), 0, 2),
-        JsString::from_units(vec![0x61, 0xD83D])
+        substring_utf16(&js(s2), 0, 2),
+        from_units(vec![0x61, 0xD83D])
     );
     assert_eq!(
-        __ts_aot_string_substring_utf16(&js(s2), 2, 4),
-        JsString::from_units(vec![0xDE00, 0x62])
+        substring_utf16(&js(s2), 2, 4),
+        from_units(vec![0xDE00, 0x62])
     );
-    let s3 = JsString::from_units(vec![
+    let s3 = from_units(vec![
         u16::from(b'x'),
         0xD83D,
         u16::from(b'y'),
@@ -810,24 +875,27 @@ fn runtime_string_substring_utf16_preserves_lone_surrogates_as_raw_units() {
         u16::from(b'z'),
     ]);
     assert_eq!(
-        __ts_aot_string_substring_utf16(&s3, 0, 2),
-        JsString::from_units(vec![u16::from(b'x'), 0xD83D])
+        substring_utf16(&s3, 0, 2),
+        from_units(vec![u16::from(b'x'), 0xD83D])
     );
     assert_eq!(
-        __ts_aot_string_substring_utf16(&s3, 2, 4),
-        JsString::from_units(vec![u16::from(b'y'), 0xDE00])
+        substring_utf16(&s3, 2, 4),
+        from_units(vec![u16::from(b'y'), 0xDE00])
     );
 }
 
 #[test]
 fn runtime_string_index_of_and_char_at_compose_on_non_ascii() {
-    let haystack = js("é=value\u{1F600}");
-    let eq_idx = __ts_aot_string_index_of(&haystack, &js("="), 0);
-    assert_eq!(eq_idx, 1);
-    let value = __ts_aot_string_substring_utf16(&haystack, eq_idx + 1, haystack.len_code_units());
-    assert_eq!(value, js("value\u{1F600}"));
-    let emoji_idx = __ts_aot_string_index_of(&value, &js("\u{1F600}"), 0);
-    assert_eq!(emoji_idx, 5);
-    let next = __ts_aot_string_char_at(&value, emoji_idx);
-    assert_eq!(next, JsString::from_units(vec![0xD83D]));
+    with_ctx(|ctx| {
+        let haystack = js("é=value\u{1F600}");
+        let eq_idx = __ts_aot_string_index_of(&haystack, &js("="), 0);
+        assert_eq!(eq_idx, 1);
+        let value =
+            __ts_aot_string_substring_utf16(ctx, &haystack, eq_idx + 1, haystack.len_code_units());
+        assert_eq!(value, js("value\u{1F600}"));
+        let emoji_idx = __ts_aot_string_index_of(&value, &js("\u{1F600}"), 0);
+        assert_eq!(emoji_idx, 5);
+        let next = char_at(&value, emoji_idx);
+        assert_eq!(next, from_units(vec![0xD83D]));
+    });
 }

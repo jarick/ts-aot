@@ -617,10 +617,10 @@ impl SkeletonBuilder {
                     HirExpr::Float(..) => Some(senv.types.intern(&Type::F64)),
                     HirExpr::String(..) => Some(senv.types.intern(&Type::String)),
                     HirExpr::Bool(..) => Some(senv.types.intern(&Type::Bool)),
-                    _ => {
-                        let t = e.ty();
-                        (t != ts_aot_core::TypeId::from_raw(0)).then_some(t)
-                    }
+                    _ => e
+                        .has_static_type()
+                        .then(|| e.ty())
+                        .filter(|t| !matches!(senv.types.resolve(*t), None | Some(Type::Error))),
                 });
                 if let Some(t) = inferred {
                     ty = t;

@@ -82,10 +82,21 @@ impl ExprConverter {
         }
         match field {
             "call" => {
+                let param_tys = self.named_function_param_tys(fn_name);
                 let mir_args: Vec<MirExpr> = args[1..]
                     .iter()
-                    .map(|a| {
-                        self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let expected = param_tys.as_ref().and_then(|tys| tys.get(i).copied());
+                        self.convert_call_arg(
+                            a,
+                            expected,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        )
                     })
                     .collect();
                 Some(MirExpr::Call {
@@ -117,10 +128,21 @@ impl ExprConverter {
                     );
                     return Some(MirExpr::Unit);
                 };
+                let param_tys = self.named_function_param_tys(fn_name);
                 let mir_args: Vec<MirExpr> = elements
                     .iter()
-                    .map(|a| {
-                        self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let expected = param_tys.as_ref().and_then(|tys| tys.get(i).copied());
+                        self.convert_call_arg(
+                            a,
+                            expected,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        )
                     })
                     .collect();
                 Some(MirExpr::Call {

@@ -5,8 +5,24 @@ use ts_aot_runtime::{
     __ts_aot_date_get_milliseconds, __ts_aot_date_get_minutes, __ts_aot_date_get_month,
     __ts_aot_date_get_seconds, __ts_aot_date_get_time, __ts_aot_date_is_invalid,
     __ts_aot_date_new_from_ms, __ts_aot_date_now, __ts_aot_date_parse, __ts_aot_date_to_iso_string,
-    __ts_aot_date_value_of, JsString, MS_PER_DAY, parse_iso8601_to_ms,
+    __ts_aot_date_value_of, Ctx, Host, JsString, MS_PER_DAY, parse_iso8601_to_ms, run_in_arena,
 };
+
+fn with_ctx<R>(f: impl for<'a> FnOnce(&Ctx<'a>) -> R) -> R {
+    struct H;
+    impl Host for H {}
+    run_in_arena(&H, f)
+}
+
+fn iso(ms: i64) -> JsString<'static> {
+    with_ctx(|ctx| {
+        JsString::Valid(
+            __ts_aot_date_to_iso_string(ctx, ms)
+                .to_string_lossy()
+                .leak(),
+        )
+    })
+}
 
 #[test]
 fn parse_iso8601_basic() {
@@ -111,20 +127,20 @@ fn get_full_year_y2k() {
 
 #[test]
 fn to_iso_string_epoch() {
-    let s = __ts_aot_date_to_iso_string(0);
+    let s = iso(0);
     assert_eq!(s.to_string_lossy(), "1970-01-01T00:00:00.000Z");
 }
 
 #[test]
 fn to_iso_string_known() {
-    let s = __ts_aot_date_to_iso_string(946_684_800_000);
+    let s = iso(946_684_800_000);
     assert_eq!(s.to_string_lossy(), "2000-01-01T00:00:00.000Z");
 }
 
 #[test]
 fn parse_iso8601_expanded_year_positive() {
     let ms = parse_iso8601_to_ms("+010000-01-01T00:00:00.000Z").unwrap();
-    let formatted = __ts_aot_date_to_iso_string(ms).to_string_lossy();
+    let formatted = iso(ms).to_string_lossy();
     assert_eq!(
         formatted, "+010000-01-01T00:00:00.000Z",
         "round-trip expanded year +010000"
@@ -139,7 +155,7 @@ fn parse_iso8601_expanded_year_positive() {
 #[test]
 fn parse_iso8601_expanded_year_negative() {
     let ms = parse_iso8601_to_ms("-010000-01-01T00:00:00.000Z").unwrap();
-    let formatted = __ts_aot_date_to_iso_string(ms).to_string_lossy();
+    let formatted = iso(ms).to_string_lossy();
     assert_eq!(
         formatted, "-010000-01-01T00:00:00.000Z",
         "round-trip expanded year -010000"
@@ -150,7 +166,7 @@ fn parse_iso8601_expanded_year_negative() {
 #[test]
 fn parse_iso8601_bce_expanded_year_round_trip() {
     let ms = parse_iso8601_to_ms("-000001-01-01T00:00:00.000Z").unwrap();
-    let formatted = __ts_aot_date_to_iso_string(ms).to_string_lossy();
+    let formatted = iso(ms).to_string_lossy();
     assert_eq!(
         formatted, "-000001-01-01T00:00:00.000Z",
         "BCE year -000001 must round-trip exactly as six-digit expanded format"
@@ -161,7 +177,7 @@ fn parse_iso8601_bce_expanded_year_round_trip() {
 #[test]
 fn parse_iso8601_ecmascript_min_endpoint_round_trip() {
     let ms = parse_iso8601_to_ms("-271821-04-20T00:00:00.000Z").unwrap();
-    let formatted = __ts_aot_date_to_iso_string(ms).to_string_lossy();
+    let formatted = iso(ms).to_string_lossy();
     assert_eq!(
         formatted, "-271821-04-20T00:00:00.000Z",
         "ECMAScript min endpoint must round-trip exactly"
@@ -172,7 +188,7 @@ fn parse_iso8601_ecmascript_min_endpoint_round_trip() {
 #[test]
 fn parse_iso8601_ecmascript_max_endpoint_round_trip() {
     let ms = parse_iso8601_to_ms("+275760-09-13T00:00:00.000Z").unwrap();
-    let formatted = __ts_aot_date_to_iso_string(ms).to_string_lossy();
+    let formatted = iso(ms).to_string_lossy();
     assert_eq!(
         formatted, "+275760-09-13T00:00:00.000Z",
         "ECMAScript max endpoint must round-trip exactly"
@@ -202,10 +218,7 @@ fn tz_utc_only_mode_interprets_offset_free_as_utc() {
         ms, 1_577_880_000_000,
         "in tz-utc-only mode, offset-free DateTime parses as UTC 12:00"
     );
-    assert_eq!(
-        __ts_aot_date_to_iso_string(ms).to_string_lossy(),
-        "2020-01-01T12:00:00.000Z"
-    );
+    assert_eq!(iso(ms).to_string_lossy(), "2020-01-01T12:00:00.000Z");
     assert_eq!(
         __ts_aot_date_get_full_year(ms),
         2020,
@@ -262,7 +275,7 @@ fn invalid_sentinel_round_trips() {
     assert_eq!(__ts_aot_date_value_of(i64::MIN), i64::MIN);
     assert_eq!(__ts_aot_date_get_time(i64::MIN), i64::MIN);
     assert!(__ts_aot_date_is_invalid(i64::MIN));
-    assert_eq!(__ts_aot_date_to_iso_string(i64::MIN).to_string_lossy(), "");
+    assert_eq!(iso(i64::MIN).to_string_lossy(), "");
 }
 
 #[test]

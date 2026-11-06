@@ -1094,6 +1094,7 @@ dependencies = [
  "quote",
  "ts-aot-core",
  "ts-aot-ir-mir",
+ "ts-aot-test-support",
 ]
 
 [[package]]
@@ -1117,6 +1118,7 @@ dependencies = [
  "ts-aot-ir-hir",
  "ts-aot-ir-mir",
  "ts-aot-passes",
+ "ts-aot-test-support",
 ]
 
 [[package]]
@@ -1179,6 +1181,10 @@ dependencies = [
  "serde_json",
  "ts-aot-core",
 ]
+
+[[package]]
+name = "ts-aot-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "unarray"

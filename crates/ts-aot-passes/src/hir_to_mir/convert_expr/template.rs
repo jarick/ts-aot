@@ -40,8 +40,9 @@ impl ExprConverter {
                 ty,
             });
             for e in expressions.iter() {
-                call_args.push(self.convert_expr(
+                call_args.push(self.convert_call_arg(
                     e,
+                    None,
                     out,
                     shared_struct_ids,
                     shared_next_struct,

@@ -217,6 +217,18 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "boom")]
+    fn async_generator_caught_value_throw_rejects_with_message() {
+        let mut generator = __ts_aot_async_generator_new::<i64, _>(|_co| async move {
+            crate::host::__ts_aot_async_generator_throw(crate::caught::CaughtValue::from(
+                "boom".to_string(),
+            ))
+        });
+        let promise = generator.next();
+        let _ = __ts_aot_await_value(&promise);
+    }
+
+    #[test]
+    #[should_panic(expected = "boom")]
     fn async_generator_reraised_throw_rejects_next_promise() {
         let mut generator = __ts_aot_async_generator_new::<i64, _>(|_co| async move {
             let payload: Box<dyn std::any::Any + Send> = Box::new("boom".to_string());
@@ -371,9 +383,9 @@ mod tests {
         }));
         let payload = outcome.expect_err("awaiting a rejected promise must panic");
         let reason = payload
-            .downcast_ref::<crate::string::JsString>()
-            .expect("the raw await must throw the runtime string type so a catch can receive it");
-        assert_eq!(reason.to_string_lossy(), "boom");
+            .downcast_ref::<String>()
+            .expect("the raw await must throw an owned string so a catch can receive it");
+        assert_eq!(reason, "boom");
     }
 
     #[test]

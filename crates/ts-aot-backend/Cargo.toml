@@ -14,6 +14,7 @@ ts-aot-core = { path = "../ts-aot-core" }
 ts-aot-ir-mir = { path = "../ts-aot-ir-mir" }
 
 [dev-dependencies]
+ts-aot-test-support = { path = "../ts-aot-test-support" }
 
 [lints.rust]
 unsafe_code = "forbid"

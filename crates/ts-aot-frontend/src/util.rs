@@ -130,6 +130,20 @@ impl SkeletonBuilder {
         param: &FormalParameter<'_>,
         type_param_map: Option<&TypeParamMap>,
     ) -> TypeId {
+        if param.type_annotation.is_none() {
+            let subject = match binding_pattern_name(&param.pattern) {
+                Some(name) => format!("parameter `{name}`"),
+                None => "parameter".to_string(),
+            };
+            senv.diagnostics.push(Diagnostic::error(
+                "E0405",
+                format!(
+                    "{subject} has no type annotation; strict AOT mode requires an explicit type"
+                ),
+                core_span_from_oxc(param.span),
+            ));
+            return senv.error_ty();
+        }
         let ann = param.type_annotation.as_deref();
         match type_param_map {
             Some(map) => self.resolve_ts_type_from_annotation_with_params(senv, ann, Some(map)),

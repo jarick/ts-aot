@@ -368,7 +368,7 @@ fn function_expression_destructured_param_lowers_via_destructure() {
 #[test]
 fn function_expression_default_param_keeps_its_identifier_name() {
     let f = sole_function(
-        "function outer(): i32 { const g = function (x = 1): i32 { return x; }; return 0; }",
+        "function outer(): i32 { const g = function (x: i32 = 1): i32 { return x; }; return 0; }",
     );
     let params = f
         .body
@@ -809,6 +809,52 @@ fn e0401_returns_type_error_marker_not_warning() {
 }
 
 #[test]
+fn untyped_parameter_is_a_hard_error() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(u: i32, v) { return u; }",
+        &mut types,
+        false,
+    );
+    let d = output
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "E0405" && d.message.contains("has no type annotation"))
+        .expect("an untyped parameter must emit a hard E0405 error");
+    assert_eq!(d.severity, Severity::Error);
+    assert!(
+        output.diagnostics.has_errors(),
+        "an untyped parameter must block emission"
+    );
+}
+
+#[test]
+fn unannotated_local_copied_from_bool_param_is_typed_bool() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(b: boolean): boolean { const c = b; return c; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let HirDecl::Function(f) = &output.program.declarations[0] else {
+        panic!("expected a function declaration");
+    };
+    let HirStmt::Let { ty, .. } = &f.body[0] else {
+        panic!("expected a let statement, got {:?}", f.body[0]);
+    };
+    assert_eq!(
+        types.resolve(*ty),
+        Some(&Type::Bool),
+        "`const c = b` where `b: boolean` must keep the boolean type; the raw `TypeId(0)` guard \
+         rejects it because boolean happens to be the first interned type, and the local then \
+         emitted `()`"
+    );
+}
+
+#[test]
 fn generic_function_resolves_param_and_return_to_generic_param() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
@@ -1132,19 +1178,25 @@ fn assignment_expression_ty_is_rhs_type() {
 }
 
 #[test]
-fn missing_type_annotation_falls_back_to_full_source_span() {
+fn missing_param_annotation_is_a_hard_error() {
     let source = "function noAnnot(x): i32 { return 0; }";
     let output = FrontendPass::new().run("test.ts", source);
     let diag = output
         .diagnostics
         .iter()
-        .find(|d| d.code.as_str() == "E0400")
-        .expect("expected E0400 warning for missing annotation");
+        .find(|d| d.code.as_str() == "E0405")
+        .expect("expected E0405 hard error for missing parameter annotation");
+    assert_eq!(
+        diag.severity,
+        Severity::Error,
+        "a missing parameter annotation must be a hard error"
+    );
     assert_eq!(
         diag.span,
-        ts_aot_core::Span::new(0, u32::try_from(source.len()).unwrap()),
-        "ty == None path keeps the existing full-file fallback"
+        ts_aot_core::Span::new(17, 18),
+        "E0405 must point at the untyped parameter `x`, not the full file"
     );
+    assert!(output.diagnostics.has_errors());
 }
 
 #[test]
@@ -5409,7 +5461,14 @@ fn arrow_without_param_annotation_does_not_emit_e0502() {
         "an arrow parameter without a type annotation must not be rejected with E0502; got {:?}",
         output.diagnostics
     );
-    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0405"),
+        "an arrow parameter without a type annotation must now be rejected with E0405; got {:?}",
+        output.diagnostics
+    );
     let HirDecl::Function(f) = &output.program.declarations[0] else {
         panic!("expected a function declaration");
     };

@@ -107,7 +107,17 @@ impl ExprConverter {
         );
         let converted_args: Vec<MirExpr> = args
             .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .map(|a| {
+                self.convert_call_arg(
+                    a,
+                    None,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )
+            })
             .collect();
         let mut full_args = Vec::with_capacity(1 + max_arity);
         full_args.push(receiver_mir);

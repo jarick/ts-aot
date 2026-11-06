@@ -84,6 +84,7 @@ pub(crate) fn convert_function(
 ) -> MirFunctionDecl {
     let param_ids: Vec<LocalId> = f.params.iter().map(|p| p.id).collect();
     converter.reset_for_function(function_remap, &param_ids, namespace_path);
+    converter.set_return_ty(f.ret);
     for p in &f.params {
         converter.register_local_name(p.id, p.name.clone());
     }

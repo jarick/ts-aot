@@ -2211,7 +2211,8 @@ fn convert_block_dowhile_continue_cond_binary_uses_bool_ty() {
 fn convert_block_starts_struct_id_counter_at_one() {
     let mut c = ExprConverter::new();
     let mut cx = ctx();
-    let ty = TypeId::from_raw(42);
+    let mut types = TypeTable::new();
+    let ty = types.intern(&Type::I64);
     let block = HirBlock(vec![HirStmt::Let {
         id: LocalId::from_raw(0),
         name: Atom::new_inline("p"),
@@ -2223,7 +2224,7 @@ fn convert_block_starts_struct_id_counter_at_one() {
             span: Span::default(),
         }),
     }]);
-    let (mir_block, _locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
+    let (mir_block, _locals) = c.convert_block(&block, &mut types, &mut cx);
     assert!(
         !cx.has_errors(),
         "unexpected diagnostics: {:?}",

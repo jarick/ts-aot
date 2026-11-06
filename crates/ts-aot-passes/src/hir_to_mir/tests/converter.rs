@@ -191,6 +191,227 @@ fn global_decl_type_resolves_through_namespace_paths() {
 }
 
 #[test]
+fn value_static_ty_prefers_namespace_qualified_function() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let i64_ty = types.intern(&Type::I64);
+    let error_ty = types.intern(&Type::Error);
+
+    let root = HirFunction {
+        name: Atom::new_inline("g"),
+        ret: string_ty,
+        ..Default::default()
+    };
+    let inner = HirFunction {
+        name: Atom::new_inline("g"),
+        ret: i64_ty,
+        ..Default::default()
+    };
+
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Function(root));
+    prog.push_decl(HirDecl::Namespace {
+        name: Atom::new_inline("ns"),
+        members: vec![HirDecl::Function(inner)],
+    });
+
+    let call = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+            name: Atom::new_inline("g"),
+            ty: error_ty,
+            span: Span::new(0, 0),
+        })),
+        args: vec![],
+        type_args: vec![],
+        ty: error_ty,
+        span: Span::new(0, 0),
+    };
+
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    c.set_namespace_path(&["ns".to_owned()]);
+    assert_eq!(
+        c.value_static_ty(&call, &mut types),
+        Some(i64_ty),
+        "inside `ns` the call must resolve to the namespace function, not the top-level `g`"
+    );
+
+    c.set_namespace_path(&[]);
+    assert_eq!(
+        c.value_static_ty(&call, &mut types),
+        Some(string_ty),
+        "at the root the call must resolve to the top-level `g`"
+    );
+}
+
+#[test]
+fn expr_type_recovers_a_literal() {
+    let mut types = TypeTable::new();
+    let c = ExprConverter::new();
+    assert_eq!(
+        c.expr_type(&HirExpr::Int(1, Span::new(0, 0)), &mut types),
+        Some(types.intern(&Type::I64)),
+        "an integer literal must recover as i64"
+    );
+}
+
+#[test]
+fn expr_type_returns_none_for_unit() {
+    let mut types = TypeTable::new();
+    let c = ExprConverter::new();
+    assert_eq!(
+        c.expr_type(&HirExpr::Unit(Span::new(0, 0)), &mut types),
+        None
+    );
+}
+
+#[test]
+fn expr_type_does_not_recover_an_error_typed_local() {
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let c = ExprConverter::new();
+    let local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: error_ty,
+        span: Span::new(0, 0),
+    };
+    assert_eq!(
+        c.expr_type(&local, &mut types),
+        None,
+        "an Error-typed local must not be reported as a recovered type"
+    );
+}
+
+#[test]
+fn expr_type_recovers_a_type_id_zero_local_that_is_bool() {
+    let mut types = TypeTable::new();
+    let boolean_ty = types.intern(&Type::Bool);
+    assert_eq!(
+        boolean_ty,
+        TypeId::from_raw(0),
+        "precondition: bool interns first in a fresh table"
+    );
+    let c = ExprConverter::new();
+    let local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: boolean_ty,
+        span: Span::new(0, 0),
+    };
+    assert_eq!(
+        c.expr_type(&local, &mut types),
+        Some(boolean_ty),
+        "a local whose type is legitimately TypeId(0) must still recover; only the literal \
+         sentinel is excluded, and that only via has_static_type()"
+    );
+}
+
+#[test]
+fn expr_type_recovers_a_ternary_of_equal_branches() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: f64_ty,
+        err: None,
+    });
+    let lhs = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_ty,
+        span: Span::new(0, 0),
+    };
+    let rhs = HirExpr::Local {
+        id: LocalId::from_raw(1),
+        ty: promise_ty,
+        span: Span::new(0, 0),
+    };
+    let ternary = HirExpr::Ternary {
+        cond: Box::new(HirExpr::Bool(true, Span::new(0, 0))),
+        then_branch: Box::new(lhs),
+        else_branch: Box::new(rhs),
+        ty: types.intern(&Type::Error),
+        span: Span::new(0, 0),
+    };
+    let c = ExprConverter::new();
+    assert_eq!(c.expr_type(&ternary, &mut types), Some(promise_ty));
+}
+
+#[test]
+fn expr_type_joins_numeric_ternary_branches_to_f64() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let f64_ty = types.intern(&Type::F64);
+    assert_ne!(i64_ty, f64_ty);
+    let ternary = HirExpr::Ternary {
+        cond: Box::new(HirExpr::Bool(true, Span::new(0, 0))),
+        then_branch: Box::new(HirExpr::Int(1, Span::new(0, 0))),
+        else_branch: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: f64_ty,
+            span: Span::new(0, 0),
+        }),
+        ty: types.intern(&Type::Error),
+        span: Span::new(0, 0),
+    };
+    let c = ExprConverter::new();
+    assert_eq!(c.expr_type(&ternary, &mut types), Some(f64_ty));
+}
+
+#[test]
+fn expr_type_recovers_the_ok_type_of_an_awaited_promise() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: f64_ty,
+        err: None,
+    });
+    let awaited = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_ty,
+        span: Span::new(0, 0),
+    };
+    let await_expr = HirExpr::Await {
+        expr: Box::new(awaited),
+        ty: types.intern(&Type::Error),
+        span: Span::new(0, 0),
+    };
+    let c = ExprConverter::new();
+    assert_eq!(c.expr_type(&await_expr, &mut types), Some(f64_ty));
+}
+
+#[test]
+fn expr_type_recovers_a_promise_resolve_call_without_a_context() {
+    let mut types = TypeTable::new();
+    let error_ty = types.intern(&Type::Error);
+    let call = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Global {
+                name: Atom::new_inline("Promise"),
+                ty: error_ty,
+                span: Span::new(0, 0),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("resolve"),
+            ty: error_ty,
+            span: Span::new(0, 0),
+        })),
+        args: vec![HirExpr::Int(1, Span::new(0, 0))],
+        type_args: vec![],
+        ty: error_ty,
+        span: Span::new(0, 0),
+    };
+    let c = ExprConverter::new();
+    let i64_ty = types.intern(&Type::I64);
+    let expected = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    assert_eq!(
+        c.expr_type(&call, &mut types),
+        Some(expected),
+        "with no enclosing context, Promise.resolve(<int literal>) recovers the literal's type"
+    );
+}
+
+#[test]
 fn resolve_field_id_resolves_global_owner_from_declared_type() {
     let mut types = TypeTable::new();
     let error_ty = types.intern(&Type::Error);

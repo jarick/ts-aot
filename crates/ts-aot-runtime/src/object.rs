@@ -30,7 +30,7 @@ impl SameValue for f64 {
     }
 }
 
-impl SameValue for JsString {
+impl SameValue for JsString<'_> {
     fn same_value(&self, other: &Self) -> bool {
         self == other
     }
