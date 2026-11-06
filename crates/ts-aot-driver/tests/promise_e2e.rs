@@ -363,7 +363,7 @@ fn e2e_promise_then_with_captureless_arrow_handler_emits_instance_call() {
         "p.then(arrow) must emit a `fn __ts_aot_closure_<n>` definition; got:\n{rust}"
     );
     assert!(
-        rust.contains("(v : i32)"),
+        rust.contains("v : i32)"),
         "p.then(arrow) hoisted closure must declare the captured parameter typed i32; \
          got:\n{rust}"
     );

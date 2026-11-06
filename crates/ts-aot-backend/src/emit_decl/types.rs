@@ -33,7 +33,7 @@ pub(super) fn emit_type_id_with_ctx(id: TypeId, emit_env: &EmitEnv, ctx: &EmitCt
         if matches!(ty, Type::Fn { .. }) {
             if let Some(k) = ctx.fn_value_kind(id) {
                 let enum_name = EmitCtx::fn_value_ident(k);
-                return quote!(#enum_name);
+                return quote!(#enum_name<'a>);
             }
             return quote!(());
         }
@@ -66,14 +66,14 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
         Type::U64 => quote!(u64),
         Type::F32 => quote!(f32),
         Type::F64 => quote!(f64),
-        Type::String => quote!(ts_aot_runtime::JsString),
+        Type::String => quote!(ts_aot_runtime::JsString<'a>),
         Type::Optional { inner } => {
             let inner_tokens = emit_type_id_with_ctx(*inner, emit_env, ctx);
             quote!(Option<#inner_tokens>)
         }
         Type::Array { element } => {
             let element_tokens = emit_type_id_with_ctx(*element, emit_env, ctx);
-            quote!(Vec<#element_tokens>)
+            quote!(bumpalo::collections::Vec<'a, #element_tokens>)
         }
         Type::Struct { id } => {
             let ident = ctx.struct_ident(*id);

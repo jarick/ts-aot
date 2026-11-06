@@ -4,6 +4,7 @@ use jiff::Timestamp;
 use jiff::civil::{Date, DateTime};
 use jiff::tz::TimeZone;
 
+use crate::arena::Ctx;
 use crate::string::JsString;
 
 const INVALID_DATE_MS: i64 = i64::MIN;
@@ -370,11 +371,11 @@ pub fn __ts_aot_date_get_milliseconds(ms: i64) -> i64 {
 }
 
 #[must_use]
-pub fn __ts_aot_date_to_iso_string(ms: i64) -> JsString {
+pub fn __ts_aot_date_to_iso_string<'a>(ctx: &Ctx<'a>, ms: i64) -> JsString<'a> {
     if ms == INVALID_DATE_MS {
-        return JsString::Valid(String::new());
+        return JsString::Valid("");
     }
-    JsString::Valid(format_iso(ms))
+    JsString::Valid(ctx.arena.alloc_str(&format_iso(ms)))
 }
 
 #[must_use]

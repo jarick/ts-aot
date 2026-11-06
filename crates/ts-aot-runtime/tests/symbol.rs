@@ -4,8 +4,18 @@ use std::thread;
 
 use ts_aot_runtime::{
     __ts_aot_symbol_for, __ts_aot_symbol_key_for, __ts_aot_symbol_new, __ts_aot_symbol_new_desc,
-    JsString,
+    Ctx, Host, JsString, run_in_arena,
 };
+
+fn with_ctx<R>(f: impl for<'a> FnOnce(&Ctx<'a>) -> R) -> R {
+    struct H;
+    impl Host for H {}
+    run_in_arena(&H, f)
+}
+
+fn key_for(sym: i64) -> Option<String> {
+    with_ctx(|ctx| __ts_aot_symbol_key_for(ctx, sym).map(|s| s.to_string_lossy()))
+}
 
 #[test]
 fn symbol_new_returns_unique_ids_for_repeated_calls() {
@@ -41,14 +51,14 @@ fn symbol_for_returns_different_ids_for_different_keys() {
 #[test]
 fn symbol_key_for_returns_registered_key() {
     let sym = __ts_aot_symbol_for(&JsString::from("lookup"));
-    let key = __ts_aot_symbol_key_for(sym).expect("registered key must be Some");
-    assert_eq!(key.as_valid(), Some("lookup"));
+    let key = key_for(sym);
+    assert_eq!(key.as_deref(), Some("lookup"));
 }
 
 #[test]
 fn symbol_key_for_returns_none_for_unregistered_symbol() {
     let fresh = __ts_aot_symbol_new();
-    let key = __ts_aot_symbol_key_for(fresh);
+    let key = key_for(fresh);
     assert_eq!(
         key, None,
         "keyFor on a non-registered symbol (e.g. fresh Symbol()) must return None per ECMAScript spec"
@@ -58,10 +68,10 @@ fn symbol_key_for_returns_none_for_unregistered_symbol() {
 #[test]
 fn symbol_for_empty_key_is_registered_and_keyfor_returns_some_empty_string() {
     let sym = __ts_aot_symbol_for(&JsString::from(""));
-    let key = __ts_aot_symbol_key_for(sym);
+    let key = key_for(sym);
     assert_eq!(
-        key.as_ref().map(JsString::as_valid),
-        Some(Some("")),
+        key.as_deref(),
+        Some(""),
         "Symbol.for(\"\") must register the empty key; keyFor must return Some(\"\") — \
          not None, not Some(anything-else) — to distinguish from a non-registered symbol"
     );
@@ -84,7 +94,6 @@ fn symbol_for_concurrent_same_key_returns_same_id_and_consistent_reverse_map() {
     let mut handles = Vec::with_capacity(8);
     for _ in 0..8 {
         let barrier = Arc::clone(&barrier);
-        let key = key.clone();
         handles.push(thread::spawn(move || {
             barrier.wait();
             __ts_aot_symbol_for(&key)
@@ -102,17 +111,16 @@ fn symbol_for_concurrent_same_key_returns_same_id_and_consistent_reverse_map() {
          got {ids:?} (TOCTOU race: lookup-allocate-insert must be atomic under a single mutex)"
     );
     let only_id = *ids.iter().next().expect("set has one element");
-    let resolved = __ts_aot_symbol_key_for(only_id).expect("registered id must resolve");
+    let resolved = key_for(only_id).expect("registered id must resolve");
     assert_eq!(
-        resolved.as_valid(),
-        Some("concurrent-same-key-7"),
+        resolved, "concurrent-same-key-7",
         "keyFor on the only id must return the registered key (no orphaned ids in reverse map)"
     );
     for other_id in 0..only_id {
-        let other_key = __ts_aot_symbol_key_for(other_id);
+        let other_key = key_for(other_id);
         assert_ne!(
-            other_key.as_ref().map(JsString::as_valid),
-            Some(Some("concurrent-same-key-7")),
+            other_key.as_deref(),
+            Some("concurrent-same-key-7"),
             "id {other_id} must not alias to the same reverse key (would mean duplicate insert into reverse map)"
         );
     }

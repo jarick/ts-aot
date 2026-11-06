@@ -54,12 +54,17 @@ pub fn emit_decls_with_style(
     if !dispatch_entries.is_empty() {
         let vis = if lib_style { quote!(pub) } else { quote!() };
         tokens.extend(quote! {
-            #vis const __TS_AOT_DISPATCH_TABLE: &[(&str, fn(&[u64]) -> u64)] = &[
+            #vis const __TS_AOT_DISPATCH_TABLE: &[(&str, for<'a> fn(&ts_aot_runtime::Ctx<'a>, &[u64]) -> u64)] = &[
                 #(#dispatch_entries,)*
             ];
         });
     }
     tokens.extend(emit_fn_values(&ctx, &emit_env));
+    if lib_style {
+        tokens.extend(quote! {
+            pub use ts_aot_runtime::{Bump, Ctx, Host, run_in_arena};
+        });
+    }
     Ok(tokens)
 }
 
@@ -87,7 +92,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         let mut debug_arms: Vec<TokenStream> = Vec::new();
         for (fname, variant, is_throwing, is_async) in variants {
             let fident = ident_from(fname);
-            let mut call = quote!(#fident(#(#arg_names),*));
+            let mut call = quote!(#fident(__ctx, #(#arg_names),*));
             if *is_async {
                 call = quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call));
             }
@@ -114,7 +119,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             let fn_ident = format_ident!("__ts_closure_{}", id);
             if capture_types.is_empty() {
                 enum_variants.push(quote!(#variant));
-                arms.push(quote!(#enum_name::#variant => #fn_ident(#(#arg_names),*),));
+                arms.push(quote!(#enum_name::#variant => #fn_ident(__ctx, #(#arg_names),*),));
                 debug_arms.push(
                     quote!(#enum_name::#variant => f.write_str(stringify!(#enum_name::#variant)),),
                 );
@@ -134,7 +139,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                     .collect();
                 arms.push(quote! {
                     #enum_name::#variant { #(#cap_bindings),* } => {
-                        #fn_ident(#(#cap_names.clone(),)* #(#arg_names),*)
+                        #fn_ident(__ctx, #(#cap_names.clone(),)* #(#arg_names),*)
                     },
                 });
                 debug_arms.push(quote! {
@@ -149,22 +154,28 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             let placeholder = format_ident!("__Uninhabited");
             tokens.extend(quote! {
                 #[derive(Clone)]
-                pub enum #enum_name { #placeholder }
-                impl ::std::fmt::Debug for #enum_name {
+                pub enum #enum_name<'a> {
+                    #placeholder,
+                    __Phantom(::core::marker::PhantomData<&'a ()>),
+                }
+                impl ::std::fmt::Debug for #enum_name<'_> {
                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                         match self {
                             #enum_name::#placeholder => {
                                 f.write_str(stringify!(#enum_name::#placeholder))
                             }
+                            #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                         }
                     }
                 }
-                pub fn #helper(
-                    __f: &#enum_name,
+                pub fn #helper<'a>(
+                    __ctx: &ts_aot_runtime::Ctx<'a>,
+                    __f: &#enum_name<'a>,
                     #(#arg_names: #param_tys),*
                 ) -> #ret {
                     match __f {
                         #enum_name::#placeholder => unreachable!(),
+                        #enum_name::__Phantom(_) => unreachable!(),
                     }
                 }
             });
@@ -172,20 +183,26 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         }
         tokens.extend(quote! {
             #[derive(Clone)]
-            pub enum #enum_name { #(#enum_variants,)* }
-            impl ::std::fmt::Debug for #enum_name {
+            pub enum #enum_name<'a> {
+                #(#enum_variants,)*
+                __Phantom(::core::marker::PhantomData<&'a ()>),
+            }
+            impl ::std::fmt::Debug for #enum_name<'_> {
                 fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     match self {
                         #(#debug_arms)*
+                        #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                     }
                 }
             }
-            pub fn #helper(
-                __f: &#enum_name,
+            pub fn #helper<'a>(
+                __ctx: &ts_aot_runtime::Ctx<'a>,
+                __f: &#enum_name<'a>,
                 #(#arg_names: #param_tys),*
             ) -> #ret {
                 match __f {
                     #(#arms)*
+                    #enum_name::__Phantom(_) => unreachable!(),
                 }
             }
         });
@@ -311,8 +328,19 @@ fn emit_function_with_ctx(
     let self_token = self_param_token(&f.kind, &body_ctx);
     let body = emit_body(f, ctx, emit_env, &body_ctx)?;
 
+    let ctx_param = quote!(__ctx: &ts_aot_runtime::Ctx<'a>);
+    let generics = if matches!(
+        f.kind,
+        FunctionKind::Method { .. }
+            | FunctionKind::GeneratorMethod { .. }
+            | FunctionKind::Constructor { .. }
+    ) {
+        quote!()
+    } else {
+        quote!(<'a>)
+    };
     let fn_tokens = quote! {
-        #vis #asyncness fn #emitted_name(#self_token #(#params),*) -> #ret #body
+        #vis #asyncness fn #emitted_name #generics (#self_token #ctx_param, #(#params),*) -> #ret #body
     };
 
     let dispatch_entry = emit_dispatch_entry(f, emit_env, ctx);
@@ -354,7 +382,9 @@ fn emit_dispatch_entry(
     };
     let wrapper = ctx.dispatch_wrapper_ident(&name);
     let name_lit = Literal::string(f.name.as_str());
-    let entry = quote! { (#name_lit, #wrapper as fn(&[u64]) -> u64) };
+    let entry = quote! {
+        (#name_lit, #wrapper as for<'a> fn(&ts_aot_runtime::Ctx<'a>, &[u64]) -> u64)
+    };
     Some((wrapper, entry))
 }
 
@@ -437,9 +467,9 @@ fn build_dispatch_wrapper(
     let ret_ty = emit_type_id_with_ctx(f.ret, emit_env, ctx);
     let ret_expr = pack_return_stmt(f.ret, types)?;
     Ok(quote! {
-        pub fn #wrapper_name(_args: &[u64]) -> u64 {
+        pub fn #wrapper_name<'a>(__ctx: &ts_aot_runtime::Ctx<'a>, _args: &[u64]) -> u64 {
             #(#unpack_stmts)*
-            let __result: #ret_ty = #name(#(#call_args),*);
+            let __result: #ret_ty = #name(__ctx, #(#call_args),*);
             #ret_expr
         }
     })
@@ -525,17 +555,18 @@ fn emit_struct_with_ctx(
     }
     let tokens = quote! {
         #[derive(Clone, Debug)]
-        pub struct #name {
+        pub struct #name<'a> {
             #(#fields,)*
+            _marker: ::core::marker::PhantomData<&'a ()>,
         }
 
-        impl TsClassId for #name {
+        impl TsClassId for #name<'_> {
             fn class_id() -> u32 {
                 #class_id_raw
             }
         }
 
-        impl #name {
+        impl<'a> #name<'a> {
             #methods
         }
     };

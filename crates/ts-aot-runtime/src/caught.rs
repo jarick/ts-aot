@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt;
 
+use crate::arena::Ctx;
 use crate::promise::__ts_aot_panic_message;
 use crate::string::JsString;
 
@@ -10,7 +11,7 @@ pub enum CaughtValue {
     Null,
     Bool(bool),
     Number(f64),
-    Str(JsString),
+    Str(String),
 }
 
 impl CaughtValue {
@@ -31,13 +32,13 @@ impl CaughtValue {
             CaughtValue::Undefined | CaughtValue::Null => false,
             CaughtValue::Bool(b) => *b,
             CaughtValue::Number(n) => *n != 0.0 && !n.is_nan(),
-            CaughtValue::Str(s) => !s.to_string_lossy().is_empty(),
+            CaughtValue::Str(s) => !s.is_empty(),
         }
     }
 
     #[must_use]
-    pub fn to_js_string(&self) -> JsString {
-        JsString::from(self.to_string().as_str())
+    pub fn to_js_string<'a>(&self, ctx: &Ctx<'a>) -> JsString<'a> {
+        JsString::Valid(ctx.arena.alloc_str(&self.to_string()))
     }
 }
 
@@ -60,7 +61,7 @@ impl fmt::Display for CaughtValue {
                     write!(f, "{n}")
                 }
             }
-            CaughtValue::Str(s) => f.write_str(&s.to_string_lossy()),
+            CaughtValue::Str(s) => f.write_str(s),
         }
     }
 }
@@ -98,21 +99,21 @@ impl From<bool> for CaughtValue {
     }
 }
 
-impl From<JsString> for CaughtValue {
-    fn from(value: JsString) -> Self {
-        CaughtValue::Str(value)
+impl From<JsString<'_>> for CaughtValue {
+    fn from(value: JsString<'_>) -> Self {
+        CaughtValue::Str(value.to_string_lossy())
     }
 }
 
 impl From<&str> for CaughtValue {
     fn from(value: &str) -> Self {
-        CaughtValue::Str(JsString::from(value))
+        CaughtValue::Str(value.to_owned())
     }
 }
 
 impl From<String> for CaughtValue {
     fn from(value: String) -> Self {
-        CaughtValue::Str(JsString::from(value.as_str()))
+        CaughtValue::Str(value)
     }
 }
 
@@ -147,12 +148,10 @@ pub fn __ts_aot_caught_eq_dyn<T: 'static>(caught: &CaughtValue, other: &T) -> bo
         CaughtValue::Number(f64::from(*v))
     } else if let Some(v) = any.downcast_ref::<u8>() {
         CaughtValue::Number(f64::from(*v))
-    } else if let Some(v) = any.downcast_ref::<JsString>() {
-        CaughtValue::Str(v.clone())
     } else if let Some(v) = any.downcast_ref::<String>() {
-        CaughtValue::Str(JsString::from(v.as_str()))
+        CaughtValue::Str(v.clone())
     } else if let Some(v) = any.downcast_ref::<&str>() {
-        CaughtValue::Str(JsString::from(*v))
+        CaughtValue::Str((*v).to_owned())
     } else {
         return false;
     };
@@ -164,14 +163,11 @@ fn caught_from_payload(payload: &(dyn Any + Send)) -> Option<CaughtValue> {
     if let Some(c) = payload.downcast_ref::<CaughtValue>() {
         return Some(c.clone());
     }
-    if let Some(s) = payload.downcast_ref::<JsString>() {
+    if let Some(s) = payload.downcast_ref::<String>() {
         return Some(CaughtValue::Str(s.clone()));
     }
-    if let Some(s) = payload.downcast_ref::<String>() {
-        return Some(CaughtValue::Str(JsString::from(s.as_str())));
-    }
     if let Some(s) = payload.downcast_ref::<&str>() {
-        return Some(CaughtValue::Str(JsString::from(*s)));
+        return Some(CaughtValue::Str((*s).to_owned()));
     }
     if let Some(n) = payload.downcast_ref::<i64>() {
         return Some(CaughtValue::Number(n.to_f64().unwrap_or(f64::NAN)));
@@ -211,9 +207,8 @@ fn caught_from_payload(payload: &(dyn Any + Send)) -> Option<CaughtValue> {
 
 #[must_use]
 pub fn __ts_aot_catch_bind(payload: &(dyn Any + Send)) -> CaughtValue {
-    caught_from_payload(payload).unwrap_or_else(|| {
-        CaughtValue::Str(JsString::from(__ts_aot_panic_message(payload).as_str()))
-    })
+    caught_from_payload(payload)
+        .unwrap_or_else(|| CaughtValue::Str(__ts_aot_panic_message(payload)))
 }
 
 pub trait FromCaught: Sized {
@@ -258,12 +253,19 @@ impl FromCaught for bool {
     }
 }
 
-impl FromCaught for JsString {
-    fn from_caught(caught: &CaughtValue) -> Option<Self> {
-        match caught {
-            CaughtValue::Str(s) => Some(s.clone()),
-            _ => None,
-        }
+pub fn __ts_aot_catch_string<'a>(
+    ctx: &Ctx<'a>,
+    payload: Box<dyn Any + Send>,
+) -> Result<JsString<'a>, Box<dyn Any + Send>> {
+    match payload.downcast::<CaughtValue>() {
+        Ok(caught) => match &*caught {
+            CaughtValue::Str(s) => Ok(JsString::Valid(ctx.arena.alloc_str(s))),
+            _ => Err(caught),
+        },
+        Err(payload) => match caught_from_payload(&*payload) {
+            Some(CaughtValue::Str(s)) => Ok(JsString::Valid(ctx.arena.alloc_str(&s))),
+            _ => Err(payload),
+        },
     }
 }
 
@@ -295,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             __ts_aot_catch_bind(&"boom".to_owned()),
-            CaughtValue::Str(JsString::from("boom")),
+            CaughtValue::Str("boom".to_owned()),
             "a thrown string must stay a string"
         );
         assert_eq!(
@@ -365,6 +367,9 @@ mod tests {
         assert_eq!(__ts_aot_catch_bind(&5_u64), CaughtValue::Number(5.0));
     }
 
+    struct NoHost;
+    impl crate::arena::Host for NoHost {}
+
     #[test]
     fn catch_typed_recovers_from_caught_value() {
         let payload: Box<dyn Any + Send> = Box::new(CaughtValue::from(7_i64));
@@ -372,23 +377,26 @@ mod tests {
             __ts_aot_catch_typed::<i64>(payload).expect("number recovers as i64"),
             7
         );
-        let payload: Box<dyn Any + Send> = Box::new(CaughtValue::from(7_i64));
-        assert!(
-            __ts_aot_catch_typed::<JsString>(payload).is_err(),
-            "an incompatible typed catch must keep the mismatch (Err) behavior"
-        );
         let payload: Box<dyn Any + Send> = Box::new(42_i64);
         assert_eq!(
             __ts_aot_catch_typed::<i64>(payload).expect("a direct i64 payload still downcasts"),
             42
         );
-        let payload: Box<dyn Any + Send> = Box::new(CaughtValue::from("x"));
-        assert_eq!(
-            __ts_aot_catch_typed::<JsString>(payload)
-                .expect("string recovers as JsString")
-                .to_string_lossy(),
-            "x"
-        );
+        let host = NoHost;
+        crate::arena::run_in_arena(&host, |ctx| {
+            let payload: Box<dyn Any + Send> = Box::new(CaughtValue::from(7_i64));
+            assert!(
+                __ts_aot_catch_string(ctx, payload).is_err(),
+                "an incompatible typed catch must keep the mismatch (Err) behavior"
+            );
+            let payload: Box<dyn Any + Send> = Box::new(CaughtValue::from("x"));
+            assert_eq!(
+                __ts_aot_catch_string(ctx, payload)
+                    .expect("string recovers as JsString")
+                    .to_string_lossy(),
+                "x"
+            );
+        });
     }
 
     #[test]

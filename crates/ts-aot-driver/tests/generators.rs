@@ -255,7 +255,7 @@ fn for_of_over_generator_borrows_mutably() {
          (for-of body reassigns `sum`, so locals_mut must promote it to `mut`); got:\n{r}"
     );
     assert!(
-        r.contains("& mut (gen_ ())") || r.contains("& mut gen_ ()"),
+        r.contains("& mut (gen_ (__ctx))") || r.contains("& mut gen_ (__ctx)"),
         "for-of over gen must borrow mutably, got:\n{r}"
     );
     assert!(
@@ -356,7 +356,10 @@ fn generator_params_captured_by_producer() {
     );
     assert!(!out.has_errors(), "got: {:?}", out.diagnostics);
     let r = rust(&out);
-    assert!(r.contains("fn range (n : i64)"), "range fn sig, got:\n{r}");
+    assert!(
+        r.contains("fn range") && r.contains("n : i64"),
+        "range fn sig, got:\n{r}"
+    );
     assert!(r.contains("ts_aot_runtime::Generator<i64>"), "got:\n{r}");
     assert!(r.contains("yield_ (n)"), "yield n, got:\n{r}");
 }

@@ -371,9 +371,9 @@ mod tests {
         }));
         let payload = outcome.expect_err("awaiting a rejected promise must panic");
         let reason = payload
-            .downcast_ref::<crate::string::JsString>()
-            .expect("the raw await must throw the runtime string type so a catch can receive it");
-        assert_eq!(reason.to_string_lossy(), "boom");
+            .downcast_ref::<String>()
+            .expect("the raw await must throw an owned string so a catch can receive it");
+        assert_eq!(reason, "boom");
     }
 
     #[test]
