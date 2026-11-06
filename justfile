@@ -34,7 +34,13 @@ test262-deps:
 
 test262:
     cargo build --release --locked -p ts-aot-driver --bin ts-aot
-    {{python}} tests/test262_harness.py --max 0 --emit mir --workers 12
+    {{python}} tests/test262_harness.py --max 0 --emit rust --workers 12
+
+# End-to-end: rewrite the shim stubs into real asserts, compile each test to a
+# Rust crate, cargo-build it, and run it. A test passes only if it exits 0.
+test262-run max='200':
+    cargo build --release --locked -p ts-aot-driver --bin ts-aot
+    {{python}} tests/test262_run_harness.py --max {{max}} --workers 12
 
 crate-example:
     cargo run --locked -p ts-aot-driver --bin ts-aot -- compile examples/crate-output/add.ts --emit crate -o examples/crate-output/gen_ts_app

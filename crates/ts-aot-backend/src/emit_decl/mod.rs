@@ -475,7 +475,11 @@ fn unpack_arg_stmt(
             quote!(let #pname: #pty = <#pty>::from_bits(#slot);)
         }
         Type::Void => quote!(),
-        _ => return Err(BackendError::NotImplemented),
+        _ => {
+            return Err(BackendError::NotImplemented(
+                "dispatch arg type not u64-packable",
+            ));
+        }
     };
     Ok(quote! {
         #get
@@ -503,7 +507,11 @@ fn pack_return_stmt(ty: TypeId, types: &TypeTable) -> Result<TokenStream, Backen
         Type::F32 | Type::F64 => {
             quote!(__result.to_bits())
         }
-        _ => return Err(BackendError::NotImplemented),
+        _ => {
+            return Err(BackendError::NotImplemented(
+                "dispatch return type not u64-packable",
+            ));
+        }
     };
     Ok(stmt)
 }
@@ -529,7 +537,7 @@ fn emit_struct_with_ctx(
             #(#fields,)*
         }
 
-        impl TsClassId for #name {
+        impl ts_aot_runtime::TsClassId for #name {
             fn class_id() -> u32 {
                 #class_id_raw
             }

@@ -1317,9 +1317,9 @@ fn struct_decl_emits_ts_class_id_impl_with_struct_id() {
     let tokens = emit_decls(&prog, &TypeTable::new()).expect("decls should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("impl TsClassId for Animal"),
-        "struct must emit `impl TsClassId for <name>` so __ts_aot_op_instanceof \
-         trait bound is satisfied; got: {s}"
+        s.contains("impl ts_aot_runtime :: TsClassId for Animal"),
+        "struct must emit `impl ts_aot_runtime::TsClassId for <name>` so __ts_aot_op_instanceof \
+         trait bound is satisfied without a missing import; got: {s}"
     );
     assert!(
         s.contains("fn class_id () -> u32"),
@@ -1697,7 +1697,7 @@ fn global_with_non_const_init_returns_not_implemented() {
         &TypeTable::new(),
     )
     .expect_err("non-const global init must not emit invalid static initializer");
-    assert_eq!(err, BackendError::NotImplemented);
+    assert_eq!(err, BackendError::NotImplemented("const literal kind"));
 }
 
 #[test]
@@ -2181,7 +2181,10 @@ fn field_access_on_non_struct_returns_not_implemented() {
     prog.push_decl(MirDecl::Function(f));
 
     let err = emit_decls(&prog, &types).expect_err("field access on non-struct must fail");
-    assert_eq!(err, BackendError::NotImplemented);
+    assert_eq!(
+        err,
+        BackendError::NotImplemented("field access: base is not a struct")
+    );
 }
 
 #[test]
