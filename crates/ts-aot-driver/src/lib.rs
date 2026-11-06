@@ -8,7 +8,7 @@ mod tests;
 use std::fs;
 use std::path::Path;
 
-pub use ts_aot_core::{DiagnosticBag, Severity};
+pub use ts_aot_core::{DiagnosticBag, Severity, is_rust_keyword, sanitize_rust_ident};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum EmitStage {
@@ -16,6 +16,7 @@ pub enum EmitStage {
     Rust,
     Hir,
     Mir,
+    Crate,
 }
 
 impl EmitStage {
@@ -25,6 +26,7 @@ impl EmitStage {
             Self::Rust => "rust",
             Self::Hir => "hir",
             Self::Mir => "mir",
+            Self::Crate => "crate",
         }
     }
 }
@@ -68,7 +70,7 @@ impl DriverOutput {
     #[must_use]
     pub fn artifact(&self, stage: EmitStage) -> Option<&str> {
         match stage {
-            EmitStage::Rust => self.rust_source.as_deref(),
+            EmitStage::Rust | EmitStage::Crate => self.rust_source.as_deref(),
             EmitStage::Hir => self.hir_text.as_deref(),
             EmitStage::Mir => self.mir_text.as_deref(),
         }

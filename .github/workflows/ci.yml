@@ -33,6 +33,8 @@ jobs:
             crates/ts-aot-core -> target
 
       - uses: extractions/setup-just@v2
+        with:
+          just-version: "1.51.0"
 
       - name: just check
         run: just --shell bash check
@@ -61,6 +63,32 @@ jobs:
             crates/ts-aot-core -> target
 
       - uses: extractions/setup-just@v2
+        with:
+          just-version: "1.51.0"
 
       - name: just test
         run: just --shell bash test
+
+  crate-example:
+    name: crate output example
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: >-
+            .
+            crates/ts-aot-core -> target
+
+      - uses: extractions/setup-just@v2
+        with:
+          just-version: "1.51.0"
+
+      - name: build + run crate example
+        run: just --shell bash crate-example

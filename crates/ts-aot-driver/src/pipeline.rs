@@ -1,4 +1,4 @@
-use ts_aot_backend::compile_to_string_with_types;
+use ts_aot_backend::{compile_to_string_lib, compile_to_string_with_types};
 use ts_aot_core::{Diagnostic, Span, TypeTable};
 use ts_aot_frontend::FrontendPass;
 use ts_aot_passes::{
@@ -55,6 +55,13 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
             out.mir_text = Some(mir.dump_text());
         }
         EmitStage::Rust => match compile_to_string_with_types(&mir, &types) {
+            Ok(s) => out.rust_source = Some(s),
+            Err(e) => {
+                out.diagnostics
+                    .push(Diagnostic::error("E0300", e.to_string(), Span::new(0, 0)));
+            }
+        },
+        EmitStage::Crate => match compile_to_string_lib(&mir, &types) {
             Ok(s) => out.rust_source = Some(s),
             Err(e) => {
                 out.diagnostics

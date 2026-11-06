@@ -1,0 +1,9 @@
+[package]
+name = "crate-output-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+gen_ts_app = { path = "../gen_ts_app" }
+
+[workspace]

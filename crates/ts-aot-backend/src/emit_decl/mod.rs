@@ -25,6 +25,14 @@ use self::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
 
 pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream, BackendError> {
+    emit_decls_with_style(program, types, false)
+}
+
+pub fn emit_decls_with_style(
+    program: &MirProgram,
+    types: &TypeTable,
+    lib_style: bool,
+) -> Result<TokenStream, BackendError> {
     let ctx = EmitCtx::build(program, types);
     let emit_env = EmitEnv { types, program };
     let mut tokens = TokenStream::new();
@@ -34,14 +42,19 @@ pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream
         tokens.extend(decl_tokens);
         dispatch_entries.extend(entries);
     }
-    if program.tla_main_name.is_some() {
+    if lib_style {
+        if program.tla_main_name.is_some() {
+            tokens.extend(emit_tla_init_entry(program));
+        }
+    } else if program.tla_main_name.is_some() {
         tokens.extend(emit_tla_main_entry(program));
     } else if program.is_module {
         tokens.extend(emit_tla_main_noop_entry());
     }
     if !dispatch_entries.is_empty() {
+        let vis = if lib_style { quote!(pub) } else { quote!() };
         tokens.extend(quote! {
-            const __TS_AOT_DISPATCH_TABLE: &[(&str, fn(&[u64]) -> u64)] = &[
+            #vis const __TS_AOT_DISPATCH_TABLE: &[(&str, fn(&[u64]) -> u64)] = &[
                 #(#dispatch_entries,)*
             ];
         });
@@ -222,6 +235,22 @@ fn tla_main_is_async(program: &MirProgram) -> bool {
 fn emit_tla_main_noop_entry() -> TokenStream {
     quote! {
         fn main() {}
+    }
+}
+
+fn emit_tla_init_entry(program: &MirProgram) -> TokenStream {
+    if tla_main_is_async(program) {
+        quote! {
+            pub fn __ts_aot_init() {
+                ts_aot_runtime::__ts_aot_run_or_poll(__ts_aot_tla_main());
+            }
+        }
+    } else {
+        quote! {
+            pub fn __ts_aot_init() {
+                __ts_aot_tla_main();
+            }
+        }
     }
 }
 

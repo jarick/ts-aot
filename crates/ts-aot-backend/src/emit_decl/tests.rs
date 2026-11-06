@@ -1,6 +1,6 @@
 use super::ident::sanitize_ident;
 use super::types::emit_type_id;
-use super::{emit_decls, emit_function, emit_global};
+use super::{emit_decls, emit_decls_with_style, emit_function, emit_global};
 use crate::BackendError;
 use ts_aot_core::{
     Atom, FieldId, FunctionId, LocalId, ModuleId, StructId, Type, TypeId, TypeTable, Visibility,
@@ -47,6 +47,66 @@ fn empty_program_emits_no_decls() {
     let types = TypeTable::new();
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     assert!(tokens.is_empty());
+}
+
+#[test]
+fn lib_style_omits_main_and_publishes_dispatch_table() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("add");
+    f.ret = i64_ty;
+    f.params = vec![
+        MirParam {
+            id: LocalId::from_raw(0),
+            name: Atom::from("a"),
+            ty: i64_ty,
+        },
+        MirParam {
+            id: LocalId::from_raw(1),
+            name: Atom::from("b"),
+            ty: i64_ty,
+        },
+    ];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.is_module = true;
+    prog.push_decl(MirDecl::Function(f));
+
+    let s = emit_decls_with_style(&prog, &types, true)
+        .expect("lib-style emit should succeed")
+        .to_string();
+    assert!(
+        !s.contains("fn main ()"),
+        "lib style must not emit `fn main`, got:\n{s}"
+    );
+    assert!(
+        s.contains("pub const __TS_AOT_DISPATCH_TABLE"),
+        "lib style must publish the dispatch table, got:\n{s}"
+    );
+}
+
+#[test]
+fn lib_style_async_tla_init_uses_reentrant_runner() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let mut f = empty_func("__tla_main");
+    f.ret = i64_ty;
+    f.effects.is_async = true;
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.is_module = true;
+    prog.tla_main_name = Some(Atom::from("__tla_main"));
+    prog.push_decl(MirDecl::Function(f));
+
+    let s = emit_decls_with_style(&prog, &types, true)
+        .expect("lib-style emit should succeed")
+        .to_string();
+    assert!(
+        s.contains("__ts_aot_run_or_poll"),
+        "async TLA init must use the reentrant runner, got:\n{s}"
+    );
+    assert!(
+        !s.contains("__ts_aot_runtime_run"),
+        "async TLA init must not use the non-reentrant runner, got:\n{s}"
+    );
 }
 
 #[test]
