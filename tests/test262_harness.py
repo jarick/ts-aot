@@ -12,6 +12,12 @@ Failures are classified by the FIRST error-severity diagnostic code (warnings
 such as E0500 are printed first by the driver but do not fail compilation, so
 they are not used for classification).
 
+IMPORTANT: only `--emit rust` exercises the real Rust backend. `--emit hir` and
+`--emit mir` stop after the frontend/passes, so they "pass" for constructs the
+backend cannot emit at all (e.g. `new Map()` produces MIR but fails rust with
+E0300). The meaningful metric is therefore `--emit rust`; hir/mir numbers are
+frontend-only and must not be reported as the project's test262 pass rate.
+
 Defaults to a 500-file sample for fast feedback; pass --max 0 for the full set.
 
 Requires PyYAML (declared in tests/requirements.txt). Install the harness
@@ -30,6 +36,7 @@ before the first run; the harness exits with an error if it is missing or empty.
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -42,7 +49,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 HARNESS_DIR = ROOT / "harness-out"
-TS_AOT = ROOT.parent / "target" / "release" / "ts-aot.exe"
+TS_AOT = ROOT.parent / "target" / "release" / f"ts-aot{'.exe' if os.name == 'nt' else ''}"
 
 ERROR_RE = re.compile(r"\b([EPS]\d{4}): error:")
 PARSE_REJECT_CODES = frozenset({"E0100", "E0200"})

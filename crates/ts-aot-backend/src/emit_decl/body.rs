@@ -698,10 +698,14 @@ fn emit_place(
             Ok(quote!(#name))
         }
         MirPlace::Field { base, field, .. } => {
-            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
+            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
+                "field place: base type unresolved",
+            ))?;
             let struct_id = types
                 .struct_id(base_ty)
-                .ok_or(BackendError::NotImplemented)?;
+                .ok_or(BackendError::NotImplemented(
+                    "field place: base is not a struct",
+                ))?;
             let base = emit_place_base(base, ctx, emit_env, body_ctx)?;
             let field = ctx.struct_field_ident(struct_id, *field);
             Ok(quote!(#base.#field))
@@ -731,10 +735,14 @@ fn emit_place_base(
             Ok(quote!(#name))
         }
         MirPlaceBase::Field { base, field, .. } => {
-            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
+            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
+                "nested field place: base type unresolved",
+            ))?;
             let struct_id = types
                 .struct_id(base_ty)
-                .ok_or(BackendError::NotImplemented)?;
+                .ok_or(BackendError::NotImplemented(
+                    "nested field place: base is not a struct",
+                ))?;
             let base = emit_place_base(base, ctx, emit_env, body_ctx)?;
             let field = ctx.struct_field_ident(struct_id, *field);
             Ok(quote!(#base.#field))
@@ -779,6 +787,7 @@ fn value_ty(
                 _ => expr_base_ty(expr, body_ctx),
             }
         }
+        MirExpr::Global(name) => ctx.global_ty(name).or_else(|| expr_base_ty(expr, body_ctx)),
         _ => expr_base_ty(expr, body_ctx),
     }
 }
@@ -981,16 +990,26 @@ fn emit_optional_chain_assign(
     let inner_tokens = emit_expr(inner, ctx, emit_env, body_ctx)?;
     let inner_ty = match types.resolve(*ty) {
         Some(ts_aot_core::Type::Optional { inner }) => *inner,
-        _ => return Err(BackendError::NotImplemented),
+        _ => {
+            return Err(BackendError::NotImplemented(
+                "optional field assign: target not Optional",
+            ));
+        }
     };
     let field_ident = match types.resolve(inner_ty) {
         Some(_) => {
             let struct_id = types
                 .struct_id(inner_ty)
-                .ok_or(BackendError::NotImplemented)?;
+                .ok_or(BackendError::NotImplemented(
+                    "optional field assign: base is not a struct",
+                ))?;
             ctx.struct_field_ident(struct_id, *field)
         }
-        None => return Err(BackendError::NotImplemented),
+        None => {
+            return Err(BackendError::NotImplemented(
+                "optional field assign: inner type unresolved",
+            ));
+        }
     };
     let value = emit_expr(value, ctx, emit_env, body_ctx)?;
     Ok(Some(quote! {
@@ -1034,14 +1053,22 @@ fn emit_expr(
         }
         MirExpr::Field { base, field, .. } => {
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
-                let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
+                let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
+                    "optional-chain field: base type unresolved",
+                ))?;
                 let inner_ty = match types.resolve(base_ty) {
                     Some(ts_aot_core::Type::Optional { inner }) => *inner,
-                    _ => return Err(BackendError::NotImplemented),
+                    _ => {
+                        return Err(BackendError::NotImplemented(
+                            "optional-chain field: base not Optional",
+                        ));
+                    }
                 };
                 let struct_id = types
                     .struct_id(inner_ty)
-                    .ok_or(BackendError::NotImplemented)?;
+                    .ok_or(BackendError::NotImplemented(
+                        "optional-chain field: base is not a struct",
+                    ))?;
                 let field = ctx.struct_field_ident(struct_id, *field);
                 return Ok(quote!(#map.map(|o| o.#field)));
             }
@@ -1059,10 +1086,23 @@ fn emit_expr(
                 let base = emit_expr(base, ctx, emit_env, body_ctx)?;
                 return Ok(quote!(#base.#field_ident));
             }
-            let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented)?;
+            let base_ty = value_ty(base, ctx, emit_env, body_ctx).ok_or(
+                BackendError::NotImplemented(match base.as_ref() {
+                    MirExpr::Local(_) => "field base unresolved: local",
+                    MirExpr::Global(_) => "field base unresolved: global",
+                    MirExpr::Call { .. } => "field base unresolved: call",
+                    MirExpr::IndirectCall { .. } => "field base unresolved: indirect-call",
+                    MirExpr::Field { .. } => "field base unresolved: nested-field",
+                    MirExpr::Index { .. } => "field base unresolved: index",
+                    MirExpr::Cast { .. } => "field base unresolved: cast",
+                    _ => "field base unresolved: other",
+                }),
+            )?;
             let struct_id = types
                 .struct_id(base_ty)
-                .ok_or(BackendError::NotImplemented)?;
+                .ok_or(BackendError::NotImplemented(
+                    "field access: base is not a struct",
+                ))?;
             let field = ctx.struct_field_ident(struct_id, *field);
             if let MirExpr::Local(id) = base.as_ref()
                 && let Some(acc) = body_ctx.shared_access_for_local(*id)
@@ -1909,7 +1949,9 @@ fn emit_weakmap_key(
     key_expr: &MirExpr,
     body_ctx: &BodyCtx,
 ) -> Result<(TokenStream, Ident), BackendError> {
-    let key_root = root_local_id_of(key_expr).ok_or(BackendError::NotImplemented)?;
+    let key_root = root_local_id_of(key_expr).ok_or(BackendError::NotImplemented(
+        "weakmap key: not a local root",
+    ))?;
     let liveness = body_ctx.weakmap_liveness_for_key(key_root);
     let key_ptr = quote!(std::rc::Rc::as_ptr(&#liveness).cast::<()>());
     Ok((key_ptr, liveness))
@@ -1939,10 +1981,14 @@ fn weakmap_value_type_id(
     body_ctx: &BodyCtx,
     types: &TypeTable,
 ) -> Result<TypeId, BackendError> {
-    let handle_ty = expr_base_ty(handle_expr, body_ctx).ok_or(BackendError::NotImplemented)?;
+    let handle_ty = expr_base_ty(handle_expr, body_ctx).ok_or(BackendError::NotImplemented(
+        "weakmap: handle type unresolved",
+    ))?;
     match types.resolve(handle_ty) {
         Some(Type::WeakMap { value, .. }) => Ok(*value),
-        _ => Err(BackendError::NotImplemented),
+        _ => Err(BackendError::NotImplemented(
+            "weakmap: handle is not a WeakMap",
+        )),
     }
 }
 
@@ -2207,7 +2253,9 @@ fn emit_runtime_call(
                         let reason_ty =
                             expr_base_ty(&args[0], body_ctx).and_then(|ty| types.resolve(ty));
                         if !is_display_supported_reason(reason_ty) {
-                            return Err(BackendError::NotImplemented);
+                            return Err(BackendError::NotImplemented(
+                                "promise reject: unsupported reason type",
+                            ));
                         }
                         let inner = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
                         quote!(#inner.to_string())
