@@ -561,6 +561,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::MathMin => "math_min",
         RuntimeOp::MathRandom => "math_random",
         RuntimeOp::ObjectKeys => "object_keys",
+        RuntimeOp::ObjectIs => "object_is",
         RuntimeOp::ArrayIsArray => "array_is_array",
         RuntimeOp::ArrayIsArrayFalse => "array_is_array_false",
         RuntimeOp::DateNow => "date_now",

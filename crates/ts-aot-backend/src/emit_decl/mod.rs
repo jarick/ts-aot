@@ -43,6 +43,9 @@ pub fn emit_decls_with_style(
         dispatch_entries.extend(entries);
     }
     if lib_style {
+        tokens.extend(quote!(
+            use ts_aot_runtime::*;
+        ));
         if program.tla_main_name.is_some() {
             tokens.extend(emit_tla_init_entry(program));
         }
