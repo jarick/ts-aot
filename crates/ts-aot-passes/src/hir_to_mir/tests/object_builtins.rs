@@ -390,6 +390,82 @@ fn resolve_field_id_compound_update_owner_with_registered_ty_resolves_field() {
 }
 
 #[test]
+fn object_is_call_emits_object_is_runtime_op() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call_with_args(
+            "is",
+            vec![
+                HirExpr::Local {
+                    id: LocalId::from_raw(1),
+                    ty: unit_ty(),
+                    span: Span::default(),
+                },
+                HirExpr::Local {
+                    id: LocalId::from_raw(2),
+                    ty: unit_ty(),
+                    span: Span::default(),
+                },
+            ],
+        ),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "Object.is(a, b) must return a Local, got {mir:?}"
+    );
+    let has_object_is = out.iter().any(|s| {
+        matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_object_is,
+        "Object.is(a, b) must emit MirStmt::Runtime {{ op: ObjectIs, .. }}, got: {out:?}"
+    );
+}
+
+#[test]
+fn object_freeze_returns_target_without_runtime_call() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &object_method_call_with_arg(
+            "freeze",
+            HirExpr::Local {
+                id: LocalId::from_raw(7),
+                ty: unit_ty(),
+                span: Span::default(),
+            },
+        ),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut empty_types(),
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "Object.freeze(o) must return the target, got {mir:?}"
+    );
+    assert!(
+        !out.iter().any(|s| matches!(s, MirStmt::Runtime { .. })),
+        "Object.freeze must not emit a runtime call, got {out:?}"
+    );
+}
+
+#[test]
 fn object_keys_call_emits_object_keys_runtime_op() {
     let mut c = ExprConverter::new();
     let out = &mut Vec::new();

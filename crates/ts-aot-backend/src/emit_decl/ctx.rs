@@ -27,6 +27,7 @@ pub(super) struct EmitCtx {
     function_async: HashSet<FunctionId>,
     function_owner: HashMap<FunctionId, StructId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
+    struct_field_names: HashMap<StructId, Vec<Atom>>,
     mutable_globals: HashSet<Atom>,
     function_arity: HashMap<Atom, usize>,
     global_tys: HashMap<Atom, TypeId>,
@@ -62,6 +63,7 @@ impl EmitCtx {
         let mut function_async = HashSet::new();
         let mut function_owner = HashMap::new();
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
+        let mut struct_field_names: HashMap<StructId, Vec<Atom>> = HashMap::new();
         let mut mutable_globals = HashSet::new();
         let mut global_tys = HashMap::new();
         let mut function_arity = HashMap::new();
@@ -82,6 +84,8 @@ impl EmitCtx {
                     for field in &s.fields {
                         struct_fields.insert((s.id, field.id), ident_from(&field.name));
                     }
+                    struct_field_names
+                        .insert(s.id, s.fields.iter().map(|f| f.name.clone()).collect());
                     for method in &s.methods {
                         function_names.insert(method.id, ident_from(&method.name));
                         function_ret.insert(method.id, method.ret);
@@ -117,6 +121,7 @@ impl EmitCtx {
             function_async,
             function_owner,
             struct_fields,
+            struct_field_names,
             mutable_globals,
             global_tys,
             function_arity,
@@ -239,6 +244,10 @@ impl EmitCtx {
 
     pub(super) fn global_ty(&self, name: &Atom) -> Option<TypeId> {
         self.global_tys.get(name).copied()
+    }
+
+    pub(super) fn struct_field_names(&self, id: StructId) -> Option<&[Atom]> {
+        self.struct_field_names.get(&id).map(Vec::as_slice)
     }
 
     pub(super) fn function_arity(&self, name: &Atom) -> Option<usize> {

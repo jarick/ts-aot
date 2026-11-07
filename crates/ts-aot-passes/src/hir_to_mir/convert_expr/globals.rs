@@ -19,6 +19,10 @@ pub(super) fn is_global_string_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "String")
 }
 
+pub(super) fn is_global_reflect_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Reflect")
+}
+
 pub(super) fn is_global_date_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Date")
 }

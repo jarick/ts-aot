@@ -2078,8 +2078,22 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
         }
         RuntimeOp::ObjectKeys => {
+            if let Some(sid) = expr_base_ty(&args[0], body_ctx).and_then(|t| types.struct_id(t))
+                && let Some(fields) = ctx.struct_field_names(sid)
+            {
+                let lits = fields.iter().map(|name| {
+                    let lit = Literal::string(name.as_str());
+                    quote!(ts_aot_runtime::JsString::from(#lit))
+                });
+                return Ok(quote!(__ts_aot_array_create(vec![#(#lits),*])));
+            }
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_object_keys(&#map)))
+        }
+        RuntimeOp::ObjectIs => {
+            let a = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let b = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_object_is(&#a, &#b)))
         }
         RuntimeOp::DateParse => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;

@@ -11,8 +11,8 @@ use crate::lower_generators::GENERATOR_DIAG_DEFERRED_METHOD;
 
 use super::globals::{
     generator_inner_type, is_array_static_type, is_global_array_reference,
-    is_global_math_reference, is_global_object_reference, is_global_string_reference,
-    is_string_typed_source, type_label,
+    is_global_math_reference, is_global_object_reference, is_global_reflect_reference,
+    is_global_string_reference, is_string_typed_source, type_label,
 };
 
 impl ExprConverter {
@@ -37,7 +37,7 @@ impl ExprConverter {
             && is_global_object_reference(owner)
             && matches!(
                 field_name.as_str(),
-                "getPrototypeOf" | "keys" | "setPrototypeOf"
+                "getPrototypeOf" | "keys" | "getOwnPropertyNames" | "setPrototypeOf"
             )
         {
             if field_name.as_str() == "setPrototypeOf" {
@@ -98,16 +98,139 @@ impl ExprConverter {
                 );
                 return Some(MirExpr::Unit);
             }
+            let string_ty = types.intern(&Type::String);
+            let keys_ty = types.intern(&Type::Array { element: string_ty });
             let dest = self.fresh_local();
-            self.push_temp_local(dest, ty);
+            self.push_temp_local(dest, keys_ty);
             out.push(MirStmt::Runtime {
                 op: RuntimeOp::ObjectKeys,
                 args: mir_args,
                 dest: Some(dest),
-                ty,
+                ty: keys_ty,
                 target_ty: None,
             });
             return Some(MirExpr::Local(dest));
+        }
+        if let HirExpr::Field {
+            owner: is_owner,
+            field_name: is_field,
+            ..
+        } = inner.as_ref()
+            && is_global_object_reference(is_owner)
+            && is_field.as_str() == "is"
+        {
+            if mir_args.len() != 2 {
+                ctx.warning(
+                    "E0406",
+                    format!(
+                        "Object.is requires exactly 2 arguments; got {}",
+                        mir_args.len()
+                    ),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
+            let bool_ty = types.intern(&Type::Bool);
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, bool_ty);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                args: mir_args,
+                dest: Some(dest),
+                ty: bool_ty,
+                target_ty: None,
+            });
+            return Some(MirExpr::Local(dest));
+        }
+        if let HirExpr::Field {
+            owner: recv_owner,
+            field_name: recv_field,
+            ..
+        } = inner.as_ref()
+            && is_array_static_type(recv_owner, types)
+            && recv_field.as_str() == "push"
+        {
+            if mir_args.len() != 1 {
+                ctx.warning(
+                    "E0406",
+                    format!(
+                        "Array.prototype.push supports exactly 1 argument in AOT; got {}",
+                        mir_args.len()
+                    ),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
+            let recv_mir = self.convert_expr(
+                recv_owner,
+                out,
+                shared_struct_ids,
+                _shared_next_struct,
+                types,
+                ctx,
+            );
+            let mut call_args = vec![recv_mir];
+            call_args.extend(mir_args);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ArrayPush,
+                args: call_args,
+                dest: None,
+                ty: TypeId::from_raw(0),
+                target_ty: None,
+            });
+            return Some(MirExpr::Unit);
+        }
+        if let HirExpr::Field {
+            owner: freeze_owner,
+            field_name: freeze_field,
+            ..
+        } = inner.as_ref()
+            && is_global_object_reference(freeze_owner)
+            && matches!(
+                freeze_field.as_str(),
+                "freeze" | "seal" | "preventExtensions"
+            )
+        {
+            if mir_args.is_empty() {
+                return Some(MirExpr::Unit);
+            }
+            let mut iter = mir_args.into_iter();
+            let target = iter.next().expect("checked non-empty above");
+            for extra in iter {
+                if has_potential_side_effects(&extra) {
+                    out.push(MirStmt::Expr(extra));
+                }
+            }
+            return Some(target);
+        }
+        if let HirExpr::Field {
+            owner: degrade_owner,
+            field_name: degrade_field,
+            ..
+        } = inner.as_ref()
+            && (is_global_object_reference(degrade_owner)
+                || is_global_reflect_reference(degrade_owner))
+        {
+            let owner_name = if is_global_reflect_reference(degrade_owner) {
+                "Reflect"
+            } else {
+                "Object"
+            };
+            ctx.warning(
+                "E0406",
+                format!(
+                    "static `{owner_name}.{}` is not supported in this AOT target; the call is \
+                     lowered to `undefined`",
+                    degrade_field.as_str()
+                ),
+                Span::new(0, 0),
+            );
+            for arg in mir_args {
+                if has_potential_side_effects(&arg) {
+                    out.push(MirStmt::Expr(arg));
+                }
+            }
+            return Some(MirExpr::Unit);
         }
         if let HirExpr::Field {
             owner: array_owner,

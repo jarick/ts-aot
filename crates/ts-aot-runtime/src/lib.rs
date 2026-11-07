@@ -12,6 +12,7 @@ mod json;
 mod map;
 mod math;
 mod module;
+mod object;
 mod promise;
 mod regex;
 mod result;
@@ -70,6 +71,7 @@ pub use math::{
     __ts_aot_math_sin, __ts_aot_math_sqrt, __ts_aot_math_tan, __ts_aot_math_trunc,
 };
 pub use module::{__ts_aot_dynamic_import, __ts_aot_module_register, ModuleNamespace};
+pub use object::{__ts_aot_object_is, SameValue};
 pub use promise::{
     __ts_aot_await, __ts_aot_await_value, __ts_aot_await_value_gen, __ts_aot_await_value_raw,
     __ts_aot_enqueue_microtask, __ts_aot_promise_all, __ts_aot_promise_all_settled,

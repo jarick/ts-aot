@@ -69,6 +69,7 @@ pub(super) fn runtime_op_ident(op: RuntimeOp) -> Result<Ident, BackendError> {
         RuntimeOp::OpIn => format_ident!("__ts_aot_op_in"),
         RuntimeOp::OpInstanceof => format_ident!("__ts_aot_op_instanceof"),
         RuntimeOp::ObjectKeys => format_ident!("__ts_aot_object_keys"),
+        RuntimeOp::ObjectIs => format_ident!("__ts_aot_object_is"),
         RuntimeOp::ArrayIsArray => format_ident!("__ts_aot_array_is_array"),
         RuntimeOp::ArrayIsArrayFalse => format_ident!("__ts_aot_array_is_array_false"),
         RuntimeOp::DateNow => format_ident!("__ts_aot_date_now"),
