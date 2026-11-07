@@ -792,6 +792,62 @@ fn value_ty(
     }
 }
 
+fn is_same_value_able(types: &TypeTable, ty: TypeId) -> bool {
+    match types.resolve(ty) {
+        Some(
+            Type::Bool
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+            | Type::String
+            | Type::Symbol,
+        ) => true,
+        Some(Type::Optional { inner }) => is_same_value_able(types, *inner),
+        _ => false,
+    }
+}
+
+fn same_place(a: &MirExpr, b: &MirExpr) -> bool {
+    match (a, b) {
+        (MirExpr::Local(x), MirExpr::Local(y)) => x == y,
+        (
+            MirExpr::Field {
+                base: ba,
+                field: fa,
+                ..
+            },
+            MirExpr::Field {
+                base: bb,
+                field: fb,
+                ..
+            },
+        ) => fa == fb && same_place(ba, bb),
+        (
+            MirExpr::Index {
+                base: ba,
+                index: ia,
+                ..
+            },
+            MirExpr::Index {
+                base: bb,
+                index: ib,
+                ..
+            },
+        ) => same_place(ba, bb) && same_place(ia, ib),
+        (MirExpr::Int { value: x, .. }, MirExpr::Int { value: y, .. }) => x == y,
+        (MirExpr::Bool(x), MirExpr::Bool(y)) => x == y,
+        (MirExpr::String { id: x, .. }, MirExpr::String { id: y, .. }) => x == y,
+        _ => false,
+    }
+}
+
 fn is_copy_type(types: &TypeTable, ty: TypeId) -> bool {
     match types.resolve(ty) {
         Some(
@@ -2010,6 +2066,7 @@ fn emit_runtime_call(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let EmitEnv { types, .. } = emit_env;
+    ctx.mark_runtime_used();
     match op {
         RuntimeOp::TypedArrayNew => {
             let length = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2078,8 +2135,59 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
         }
         RuntimeOp::ObjectKeys => {
+            if let Some(sid) = expr_base_ty(&args[0], body_ctx).and_then(|t| types.struct_id(t))
+                && let Some(fields) = ctx.struct_field_names(sid)
+            {
+                let lits = fields.iter().map(|name| {
+                    let lit = Literal::string(name.as_str());
+                    quote!(ts_aot_runtime::JsString::from(#lit))
+                });
+                let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+                return Ok(quote!({
+                    let _ = &#arg;
+                    __ts_aot_array_create(vec![#(#lits),*])
+                }));
+            }
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_object_keys(&#map)))
+        }
+        RuntimeOp::ArrayOwnKeys => {
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let include_length = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_array_own_keys(&#arr, #include_length)))
+        }
+        RuntimeOp::ObjectIs => {
+            let a_ty = value_ty(&args[0], ctx, emit_env, body_ctx);
+            let b_ty = value_ty(&args[1], ctx, emit_env, body_ctx);
+            let a = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let b = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let both_unit = matches!((&args[0], &args[1]), (MirExpr::Unit, MirExpr::Unit));
+            let both_null = matches!(
+                (&args[0], &args[1]),
+                (MirExpr::Null { .. }, MirExpr::Null { .. })
+            );
+            if both_unit || both_null {
+                return Ok(quote!({
+                    let _ = (&#a, &#b);
+                    true
+                }));
+            }
+            match (a_ty, b_ty) {
+                (Some(x), Some(y)) if x == y && is_same_value_able(types, x) => {
+                    Ok(quote!(__ts_aot_object_is(&#a, &#b)))
+                }
+                (Some(x), Some(y)) if x == y => {
+                    let equal = same_place(&args[0], &args[1]);
+                    Ok(quote!({
+                        let _ = (&#a, &#b);
+                        #equal
+                    }))
+                }
+                _ => Ok(quote!({
+                    let _ = (&#a, &#b);
+                    false
+                })),
+            }
         }
         RuntimeOp::DateParse => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;

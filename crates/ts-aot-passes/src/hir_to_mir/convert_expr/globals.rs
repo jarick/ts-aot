@@ -19,6 +19,10 @@ pub(super) fn is_global_string_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "String")
 }
 
+pub(super) fn is_global_reflect_reference(owner: &HirExpr) -> bool {
+    matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Reflect")
+}
+
 pub(super) fn is_global_date_reference(owner: &HirExpr) -> bool {
     matches!(owner, HirExpr::Global { name, .. } if name.as_str() == "Date")
 }
@@ -71,6 +75,22 @@ pub(super) fn is_array_static_type(arg: &HirExpr, types: &TypeTable) -> bool {
         return false;
     };
     matches!(types.resolve(ty), Some(Type::Array { .. }))
+}
+
+pub(super) fn array_push_receiver<'a>(
+    inner: &'a HirExpr,
+    types: &TypeTable,
+) -> Option<&'a HirExpr> {
+    let HirExpr::Field {
+        owner, field_name, ..
+    } = inner
+    else {
+        return None;
+    };
+    if field_name.as_str() != "push" {
+        return None;
+    }
+    is_array_static_type(owner, types).then_some(owner.as_ref())
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]

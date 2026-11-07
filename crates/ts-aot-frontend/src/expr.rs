@@ -18,6 +18,19 @@ use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 use crate::util::core_span_from_oxc;
 
+fn declaration_defines(d: &HirDecl, name: &str) -> bool {
+    let declared = match d {
+        HirDecl::Function(f) => &f.name,
+        HirDecl::Class(c) => &c.name,
+        HirDecl::TypeAlias { name, .. }
+        | HirDecl::Enum { name, .. }
+        | HirDecl::Global { name, .. }
+        | HirDecl::Interface { name, .. }
+        | HirDecl::Namespace { name, .. } => name,
+    };
+    declared.as_str() == name
+}
+
 impl SkeletonEnv<'_> {
     pub(crate) fn ident_to_expr(&mut self, name: &str, scope: &BodyScope, span: Span) -> HirExpr {
         if name == "undefined" {
@@ -76,6 +89,11 @@ fn hir_is_string_valued(e: &HirExpr, types: &TypeTable) -> bool {
         _ => e.has_static_type() && matches!(types.resolve(e.ty()), Some(Type::String)),
     }
 }
+
+const ASSERT_SHIM_METHODS: &[(&str, &str)] = &[
+    ("sameValue", "assertSameValue"),
+    ("notSameValue", "assertNotSameValue"),
+];
 
 impl SkeletonBuilder {
     pub(crate) fn walk_expr(
@@ -922,7 +940,24 @@ impl SkeletonBuilder {
         } else {
             vec![]
         };
-        let ty = senv.error_ty();
+        let ty = match &callee_expr {
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let object_static = matches!(
+                    owner.as_ref(),
+                    HirExpr::Global { name, .. } if name.as_str() == "Object"
+                );
+                if object_static && matches!(field_name.as_str(), "keys" | "getOwnPropertyNames") {
+                    let string_ty = senv.types.intern(&ts_aot_core::Type::String);
+                    senv.types
+                        .intern(&ts_aot_core::Type::Array { element: string_ty })
+                } else {
+                    senv.error_ty()
+                }
+            }
+            _ => senv.error_ty(),
+        };
         HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(callee_expr)),
             args,
@@ -950,18 +985,11 @@ impl SkeletonBuilder {
                 }
             }
         }
-        let date_shadowed = senv.program.declarations.iter().any(|d| {
-            let name = match d {
-                HirDecl::Function(f) => &f.name,
-                HirDecl::Class(c) => &c.name,
-                HirDecl::TypeAlias { name, .. }
-                | HirDecl::Enum { name, .. }
-                | HirDecl::Global { name, .. }
-                | HirDecl::Interface { name, .. }
-                | HirDecl::Namespace { name, .. } => name,
-            };
-            name.as_str() == "Date"
-        });
+        let date_shadowed = senv
+            .program
+            .declarations
+            .iter()
+            .any(|d| declaration_defines(d, "Date"));
         let ty = match &new_expr.callee {
             Expression::Identifier(id)
                 if id.name.as_str() == "Date"
@@ -989,20 +1017,53 @@ impl SkeletonBuilder {
         use oxc_ast::ast::MemberExpression as ME;
         match m {
             ME::StaticMemberExpression(s) => {
+                if let Expression::Identifier(obj) = &s.object
+                    && obj.name.as_str() == "assert"
+                    && scope.lookup("assert").is_none()
+                {
+                    let target = ASSERT_SHIM_METHODS
+                        .iter()
+                        .find(|(method, _)| *method == s.property.name.as_str())
+                        .map(|(_, target)| *target);
+                    if let Some(target) = target {
+                        return HirExpr::Global {
+                            name: Atom::new_inline(target),
+                            ty: senv.error_ty(),
+                            span: core_span_from_oxc(s.span),
+                        };
+                    }
+                }
                 let owner = self.walk_expr(senv, &s.object, scope);
                 let owner = if s.optional {
                     Self::wrap_optional_chain(owner, core_span_from_oxc(s.object.span()))
                 } else {
                     owner
                 };
+                let prop = s.property.name.as_str();
                 let has_length = matches!(
                     senv.types.resolve(owner.ty()),
                     Some(ts_aot_core::Type::String | ts_aot_core::Type::Array { .. })
                 );
-                let ty = if s.property.name.as_str() == "length" && has_length {
+                let field_ty = if matches!(
+                    senv.types.resolve(owner.ty()),
+                    Some(ts_aot_core::Type::Struct { .. })
+                ) {
+                    let owner_ty = owner.ty();
+                    senv.program.declarations.iter().find_map(|d| match d {
+                        HirDecl::Class(c) if c.ty == owner_ty => c
+                            .fields
+                            .iter()
+                            .find(|f| f.name.as_str() == prop)
+                            .map(|f| f.ty),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+                let ty = if prop == "length" && has_length {
                     senv.types.intern(&ts_aot_core::Type::I64)
                 } else {
-                    senv.error_ty()
+                    field_ty.unwrap_or_else(|| senv.error_ty())
                 };
                 HirExpr::Field {
                     owner: Box::new(owner),

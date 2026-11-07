@@ -145,7 +145,11 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::MathMin
         | RuntimeOp::MathRandom => &[Math],
         RuntimeOp::OpIn | RuntimeOp::OpInstanceof => &[],
-        RuntimeOp::ObjectKeys | RuntimeOp::ArrayIsArray | RuntimeOp::ArrayIsArrayFalse => &[],
+        RuntimeOp::ObjectKeys
+        | RuntimeOp::ObjectIs
+        | RuntimeOp::ArrayOwnKeys
+        | RuntimeOp::ArrayIsArray
+        | RuntimeOp::ArrayIsArrayFalse => &[],
         RuntimeOp::TypeOf => {
             unreachable!("TypeOf is handled by MirExpr::TypeOf + emit_typeof, not MirStmt::Runtime")
         }

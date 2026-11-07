@@ -60,6 +60,11 @@ pub fn emit_decls_with_style(
         });
     }
     tokens.extend(emit_fn_values(&ctx, &emit_env));
+    if lib_style && ctx.runtime_used() {
+        tokens.extend(quote!(
+            use ts_aot_runtime::*;
+        ));
+    }
     Ok(tokens)
 }
 

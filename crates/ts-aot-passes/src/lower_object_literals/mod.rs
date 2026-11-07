@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, FieldId, LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{
+    Atom, FieldId, LocalId, Span, StructId, Type, TypeId, TypeTable, sanitize_rust_ident,
+};
 use ts_aot_ir_hir::{
     HirCallee, HirClass, HirDecl, HirExpr, HirField, HirProgram, HirStmt, ObjectLiteralField,
     VisitorMut, walk_expr_mut, walk_stmt_mut,
@@ -27,6 +29,13 @@ pub fn lower_object_literals(
         .collect();
     let fn_ret = collect_fn_ret(&program.declarations);
     let fn_params = collect_fn_params(&program.declarations);
+    let mut used_names = HashSet::new();
+    let mut used_sanitized_names = HashSet::new();
+    collect_decl_names(
+        &program.declarations,
+        &mut used_names,
+        &mut used_sanitized_names,
+    );
     let mut rewriter = ObjectLitRewriter {
         types,
         next_struct: program.next_class_struct_id,
@@ -39,6 +48,8 @@ pub fn lower_object_literals(
         fn_params,
         current_ret_ty: None,
         global_ty: HashMap::new(),
+        used_names,
+        used_sanitized_names,
     };
     let tla_main_name = program.tla_main_name.clone();
     let tla_main_index = program.declarations.iter().position(
@@ -128,6 +139,22 @@ fn collect_fn_params(decls: &[HirDecl]) -> HashMap<Atom, Vec<TypeId>> {
     map
 }
 
+fn collect_decl_names(decls: &[HirDecl], raw: &mut HashSet<Atom>, sanitized: &mut HashSet<String>) {
+    for decl in decls {
+        let name = match decl {
+            HirDecl::Function(f) => &f.name,
+            HirDecl::Class(c) => &c.name,
+            HirDecl::TypeAlias { name, .. }
+            | HirDecl::Enum { name, .. }
+            | HirDecl::Global { name, .. }
+            | HirDecl::Interface { name, .. } => name,
+            HirDecl::Namespace { .. } => continue,
+        };
+        raw.insert(name.clone());
+        sanitized.insert(sanitize_rust_ident(name.as_str()));
+    }
+}
+
 struct ObjectLitRewriter<'a> {
     types: &'a mut TypeTable,
     next_struct: u32,
@@ -140,6 +167,8 @@ struct ObjectLitRewriter<'a> {
     fn_params: HashMap<Atom, Vec<TypeId>>,
     current_ret_ty: Option<TypeId>,
     global_ty: HashMap<Atom, TypeId>,
+    used_names: HashSet<Atom>,
+    used_sanitized_names: HashSet<String>,
 }
 
 impl ObjectLitRewriter<'_> {
@@ -166,6 +195,25 @@ impl ObjectLitRewriter<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn fresh_synth_name(&mut self, base: &str) -> Atom {
+        let mut suffix = 0u32;
+        loop {
+            let candidate = if suffix == 0 {
+                base.to_owned()
+            } else {
+                format!("{base}_{suffix}")
+            };
+            let sanitized = sanitize_rust_ident(&candidate);
+            let atom = Atom::from(candidate.as_str());
+            if !self.used_names.contains(&atom) && !self.used_sanitized_names.contains(&sanitized) {
+                self.used_names.insert(atom.clone());
+                self.used_sanitized_names.insert(sanitized);
+                return atom;
+            }
+            suffix += 1;
         }
     }
 
@@ -252,7 +300,7 @@ impl ObjectLitRewriter<'_> {
             let struct_id = StructId::from_raw(self.next_struct);
             self.next_struct += 1;
             let ty = self.types.intern(&Type::Struct { id: struct_id });
-            let name = Atom::from(format!("__object_lit_{}", struct_id.raw()));
+            let name = self.fresh_synth_name(&format!("ObjectLit{}", struct_id.raw()));
             self.synth.push(HirDecl::Class(HirClass {
                 name,
                 ty,
@@ -458,4 +506,124 @@ fn is_array_from(callee: &HirCallee) -> bool {
     };
     matches!(owner.as_ref(), HirExpr::Global { name, .. } if name.as_str() == "Array")
         && field_name.as_str() == "from"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ts_aot_core::ModuleId;
+    use ts_aot_ir_hir::HirFunction;
+
+    #[test]
+    fn synthetic_object_lit_name_avoids_user_declaration_collision() {
+        let mut types = TypeTable::new();
+        let mut program = HirProgram::new(ModuleId::from_raw(0));
+        let user_ty = types.intern(&Type::Struct {
+            id: StructId::from_raw(100),
+        });
+        let error_ty = types.intern(&Type::Error);
+        program.push_decl(HirDecl::Class(HirClass {
+            name: Atom::from("ObjectLit0"),
+            ty: user_ty,
+            pre_pass_ty: None,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            extends: None,
+            type_params: Vec::new(),
+        }));
+        let lit = HirExpr::ObjectLiteral {
+            fields: vec![ObjectLiteralField::Property {
+                name: Atom::from("a"),
+                value: HirExpr::Int(1, Span::default()),
+            }],
+            ty: error_ty,
+            span: Span::default(),
+        };
+        program.push_decl(HirDecl::Function(HirFunction {
+            name: Atom::from("f"),
+            ret: error_ty,
+            body: vec![HirStmt::Return { value: Some(lit) }],
+            ..HirFunction::default()
+        }));
+        program.next_class_struct_id = 0;
+
+        let mut cx = PassContext::new();
+        lower_object_literals(&mut program, &mut types, &mut cx);
+
+        let class_names: Vec<String> = program
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                HirDecl::Class(c) => Some(c.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            class_names
+                .iter()
+                .filter(|n| n.as_str() == "ObjectLit0")
+                .count(),
+            1,
+            "the user-declared `ObjectLit0` must remain the only declaration with that name; got \
+             {class_names:?}"
+        );
+        assert!(
+            class_names.iter().any(|n| n == "ObjectLit0_1"),
+            "the synthetic object-literal class must sidestep the user `ObjectLit0` collision by \
+             picking `ObjectLit0_1`; got {class_names:?}"
+        );
+    }
+
+    #[test]
+    fn synthetic_object_lit_name_probes_suffixes_past_multiple_collisions() {
+        let mut types = TypeTable::new();
+        let mut program = HirProgram::new(ModuleId::from_raw(0));
+        let error_ty = types.intern(&Type::Error);
+        for (i, name) in ["ObjectLit0", "ObjectLit0_1"].iter().enumerate() {
+            let ty = types.intern(&Type::Struct {
+                id: StructId::from_raw(200 + i as u32),
+            });
+            program.push_decl(HirDecl::Class(HirClass {
+                name: Atom::from(*name),
+                ty,
+                pre_pass_ty: None,
+                fields: Vec::new(),
+                methods: Vec::new(),
+                extends: None,
+                type_params: Vec::new(),
+            }));
+        }
+        let lit = HirExpr::ObjectLiteral {
+            fields: vec![ObjectLiteralField::Property {
+                name: Atom::from("a"),
+                value: HirExpr::Int(1, Span::default()),
+            }],
+            ty: error_ty,
+            span: Span::default(),
+        };
+        program.push_decl(HirDecl::Function(HirFunction {
+            name: Atom::from("f"),
+            ret: error_ty,
+            body: vec![HirStmt::Return { value: Some(lit) }],
+            ..HirFunction::default()
+        }));
+        program.next_class_struct_id = 0;
+
+        let mut cx = PassContext::new();
+        lower_object_literals(&mut program, &mut types, &mut cx);
+
+        let class_names: Vec<String> = program
+            .declarations
+            .iter()
+            .filter_map(|d| match d {
+                HirDecl::Class(c) => Some(c.name.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            class_names.iter().any(|n| n == "ObjectLit0_2"),
+            "the synthetic class must probe past both `ObjectLit0` and `ObjectLit0_1` to \
+             `ObjectLit0_2`; got {class_names:?}"
+        );
+    }
 }

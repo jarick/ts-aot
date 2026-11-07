@@ -1683,6 +1683,267 @@ fn array_len_maps_over_optional_chain_receiver() {
     );
 }
 
+fn emit_object_is(args: Vec<MirExpr>) -> String {
+    let mut types = TypeTable::new();
+    let bool_ty = types.intern(&Type::Bool);
+    let temp = LocalId::from_raw(0);
+    let mut f = empty_func("is");
+    f.ret = bool_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: temp,
+            name: Atom::from(""),
+            ty: bool_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                args,
+                dest: Some(temp),
+                ty: bool_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    emit_decls(&prog, &types)
+        .expect("object-is emission should succeed")
+        .to_string()
+}
+
+#[test]
+fn object_is_same_nullish_literal_emits_true() {
+    for (a, b, label) in [
+        (MirExpr::Unit, MirExpr::Unit, "undefined"),
+        (
+            MirExpr::Null {
+                ty: TypeId::from_raw(0),
+            },
+            MirExpr::Null {
+                ty: TypeId::from_raw(0),
+            },
+            "null",
+        ),
+    ] {
+        let s = emit_object_is(vec![a, b]);
+        assert!(
+            !s.contains("__ts_aot_object_is"),
+            "Object.is({label}, {label}) must not call the runtime helper, got: {s}"
+        );
+        assert!(
+            s.contains("true") && !s.contains("false"),
+            "Object.is({label}, {label}) must lower to `true` and never `false`, got: {s}"
+        );
+    }
+}
+
+#[test]
+fn object_is_null_versus_undefined_emits_false() {
+    let s = emit_object_is(vec![
+        MirExpr::Null {
+            ty: TypeId::from_raw(0),
+        },
+        MirExpr::Unit,
+    ]);
+    assert!(
+        !s.contains("__ts_aot_object_is"),
+        "Object.is(null, undefined) must not call the runtime helper, got: {s}"
+    );
+    assert!(
+        s.contains("false") && !s.contains("true"),
+        "Object.is(null, undefined) must lower to `false` and never `true`, got: {s}"
+    );
+}
+
+#[test]
+fn object_is_struct_locals_compare_place_identity() {
+    for (lhs, rhs, expected, label) in [
+        (0u32, 0u32, "true", "the same local"),
+        (0u32, 1u32, "false", "two distinct locals"),
+    ] {
+        let mut types = TypeTable::new();
+        let struct_ty = types.intern(&Type::Named {
+            symbol: Atom::from("Point"),
+        });
+        let bool_ty = types.intern(&Type::Bool);
+        let temp = LocalId::from_raw(9);
+        let mut f = empty_func("is");
+        f.ret = bool_ty;
+        f.body = MirBody {
+            locals: vec![
+                MirLocalDecl {
+                    id: LocalId::from_raw(0),
+                    name: Atom::from("p"),
+                    ty: struct_ty,
+                    mutable: false,
+                },
+                MirLocalDecl {
+                    id: LocalId::from_raw(1),
+                    name: Atom::from("q"),
+                    ty: struct_ty,
+                    mutable: false,
+                },
+                MirLocalDecl {
+                    id: temp,
+                    name: Atom::from(""),
+                    ty: bool_ty,
+                    mutable: false,
+                },
+            ],
+            block: MirBlock {
+                stmts: vec![MirStmt::Runtime {
+                    op: RuntimeOp::ObjectIs,
+                    args: vec![
+                        MirExpr::Local(LocalId::from_raw(lhs)),
+                        MirExpr::Local(LocalId::from_raw(rhs)),
+                    ],
+                    dest: Some(temp),
+                    ty: bool_ty,
+                    target_ty: None,
+                }],
+            },
+        };
+        let mut prog = MirProgram::new(ModuleId::from_raw(0));
+        prog.push_decl(MirDecl::Function(f));
+        let s = emit_decls(&prog, &types)
+            .expect("struct object-is emission should succeed")
+            .to_string();
+        assert!(
+            !s.contains("__ts_aot_object_is"),
+            "Object.is on structs must not use the runtime helper, got: {s}"
+        );
+        assert!(
+            s.contains(expected),
+            "Object.is on structs must compare place identity ({label} -> {expected}), got: {s}"
+        );
+    }
+}
+
+#[test]
+fn object_is_struct_field_place_identity() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let bool_ty = types.intern(&Type::Bool);
+    let owner = StructId::from_raw(7);
+    let struct_ty = types.intern(&Type::Struct { id: owner });
+    let temp = LocalId::from_raw(9);
+    let base = LocalId::from_raw(0);
+    let field = FieldId::from_raw(0);
+    let field_expr = || MirExpr::Field {
+        base: Box::new(MirExpr::Local(base)),
+        field,
+        ty: arr_ty,
+    };
+    let mut f = empty_func("is");
+    f.ret = bool_ty;
+    f.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: base,
+                name: Atom::from("p"),
+                ty: struct_ty,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: temp,
+                name: Atom::from(""),
+                ty: bool_ty,
+                mutable: false,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                args: vec![field_expr(), field_expr()],
+                dest: Some(temp),
+                ty: bool_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: owner,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: field,
+            name: Atom::from("items"),
+            ty: arr_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Function(f));
+    let s = emit_decls(&prog, &types)
+        .expect("field object-is emission should succeed")
+        .to_string();
+    assert!(
+        !s.contains("__ts_aot_object_is"),
+        "Object.is(p.f, p.f) must not use the runtime helper, got: {s}"
+    );
+    assert!(
+        s.contains("true") && !s.contains("false"),
+        "Object.is(p.f, p.f) on the same field place must lower to `true`, got: {s}"
+    );
+}
+
+#[test]
+fn object_is_symbol_uses_runtime_helper() {
+    let mut types = TypeTable::new();
+    let symbol_ty = types.intern(&Type::Symbol);
+    let bool_ty = types.intern(&Type::Bool);
+    let temp = LocalId::from_raw(9);
+    let mut f = empty_func("is");
+    f.ret = bool_ty;
+    f.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: LocalId::from_raw(0),
+                name: Atom::from("s"),
+                ty: symbol_ty,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: LocalId::from_raw(1),
+                name: Atom::from("t"),
+                ty: symbol_ty,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: temp,
+                name: Atom::from(""),
+                ty: bool_ty,
+                mutable: false,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                args: vec![
+                    MirExpr::Local(LocalId::from_raw(0)),
+                    MirExpr::Local(LocalId::from_raw(1)),
+                ],
+                dest: Some(temp),
+                ty: bool_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let s = emit_decls(&prog, &types)
+        .expect("symbol object-is emission should succeed")
+        .to_string();
+    assert!(
+        s.contains("__ts_aot_object_is"),
+        "Object.is on symbols must use the runtime SameValue helper (symbols are i64 ids), got: {s}"
+    );
+}
+
 #[test]
 fn global_with_non_const_init_returns_not_implemented() {
     let err = emit_global(

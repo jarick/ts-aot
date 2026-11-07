@@ -12,6 +12,7 @@ mod json;
 mod map;
 mod math;
 mod module;
+mod object;
 mod promise;
 mod regex;
 mod result;
@@ -27,7 +28,8 @@ pub use array::{
     __ts_aot_array_from, __ts_aot_array_from_length_mapped, __ts_aot_array_from_mapped,
     __ts_aot_array_from_string, __ts_aot_array_get, __ts_aot_array_get_or_default,
     __ts_aot_array_hole, __ts_aot_array_is_array, __ts_aot_array_is_array_false,
-    __ts_aot_array_len, __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
+    __ts_aot_array_len, __ts_aot_array_own_keys, __ts_aot_array_push, __ts_aot_array_set, IsArray,
+    TsArrayMarker,
 };
 pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
 pub use bigint::{
@@ -70,6 +72,7 @@ pub use math::{
     __ts_aot_math_sin, __ts_aot_math_sqrt, __ts_aot_math_tan, __ts_aot_math_trunc,
 };
 pub use module::{__ts_aot_dynamic_import, __ts_aot_module_register, ModuleNamespace};
+pub use object::{__ts_aot_object_is, SameValue};
 pub use promise::{
     __ts_aot_await, __ts_aot_await_value, __ts_aot_await_value_gen, __ts_aot_await_value_raw,
     __ts_aot_enqueue_microtask, __ts_aot_promise_all, __ts_aot_promise_all_settled,
