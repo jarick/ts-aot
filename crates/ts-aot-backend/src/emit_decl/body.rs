@@ -2345,6 +2345,12 @@ fn emit_runtime_call(
             let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
         }
+        RuntimeOp::ArrayIndexOf | RuntimeOp::ArrayLastIndexOf | RuntimeOp::ArrayIncludes => {
+            let name = runtime_op_ident(op)?;
+            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let item = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(&#arr, &#item)))
+        }
         RuntimeOp::ArrayLen => {
             let name = runtime_op_ident(op)?;
             if let MirExpr::OptionalChain { base, ty: chain_ty } = &args[0]
@@ -2365,7 +2371,13 @@ fn emit_runtime_call(
         | RuntimeOp::StringEquals
         | RuntimeOp::StringLen
         | RuntimeOp::StringIndexOf
-        | RuntimeOp::StringCharAt => {
+        | RuntimeOp::StringCharAt
+        | RuntimeOp::StringIncludes
+        | RuntimeOp::StringStartsWith
+        | RuntimeOp::StringEndsWith
+        | RuntimeOp::StringToUpperCase
+        | RuntimeOp::StringToLowerCase
+        | RuntimeOp::StringTrim => {
             let string_arg_indices = string_op_string_arg_indices(op);
             let name = runtime_op_ident(op)?;
             let emitted: Vec<TokenStream> = args
@@ -2577,8 +2589,17 @@ fn emit_runtime_call(
 
 fn string_op_string_arg_indices(op: RuntimeOp) -> &'static [usize] {
     match op {
-        RuntimeOp::StringLen | RuntimeOp::StringCharAt => &[0],
-        RuntimeOp::StringConcat | RuntimeOp::StringEquals | RuntimeOp::StringIndexOf => &[0, 1],
+        RuntimeOp::StringLen
+        | RuntimeOp::StringCharAt
+        | RuntimeOp::StringToUpperCase
+        | RuntimeOp::StringToLowerCase
+        | RuntimeOp::StringTrim => &[0],
+        RuntimeOp::StringConcat
+        | RuntimeOp::StringEquals
+        | RuntimeOp::StringIndexOf
+        | RuntimeOp::StringIncludes
+        | RuntimeOp::StringStartsWith
+        | RuntimeOp::StringEndsWith => &[0, 1],
         _ => &[],
     }
 }

@@ -200,6 +200,52 @@ impl ExprConverter {
             return Some(MirExpr::Local(len_dest));
         }
         if let HirExpr::Field {
+            owner: arr_owner,
+            field_name: arr_field,
+            ..
+        } = inner.as_ref()
+            && is_array_static_type(arr_owner, types)
+            && let Some(op) = match arr_field.as_str() {
+                "indexOf" => Some(RuntimeOp::ArrayIndexOf),
+                "lastIndexOf" => Some(RuntimeOp::ArrayLastIndexOf),
+                "includes" => Some(RuntimeOp::ArrayIncludes),
+                _ => None,
+            }
+        {
+            if mir_args.len() != 1 {
+                ctx.warning(
+                    "E0406",
+                    format!(
+                        "Array.prototype.{} supports exactly 1 argument in AOT; got {}",
+                        arr_field.as_str(),
+                        mir_args.len()
+                    ),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
+            let recv_mir = self.convert_expr(
+                arr_owner,
+                out,
+                shared_struct_ids,
+                _shared_next_struct,
+                types,
+                ctx,
+            );
+            let mut full_args = vec![recv_mir];
+            full_args.extend(mir_args);
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, ty);
+            out.push(MirStmt::Runtime {
+                op,
+                args: full_args,
+                dest: Some(dest),
+                ty,
+                target_ty: None,
+            });
+            return Some(MirExpr::Local(dest));
+        }
+        if let HirExpr::Field {
             owner: freeze_owner,
             field_name: freeze_field,
             ..

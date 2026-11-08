@@ -378,9 +378,18 @@ impl SkeletonBuilder {
             }
             if d.type_annotation.is_none()
                 && let Some(HirExpr::New { ty: new_ty, .. }) = &init
-                && matches!(senv.types.resolve(*new_ty), Some(Type::Date))
             {
                 ty = *new_ty;
+            }
+            if d.type_annotation.is_none()
+                && matches!(senv.types.resolve(ty), None | Some(Type::Error))
+            {
+                let init_ty = init
+                    .as_ref()
+                    .map_or(ts_aot_core::TypeId::from_raw(0), HirExpr::ty);
+                if init_ty != ts_aot_core::TypeId::from_raw(0) {
+                    ty = init_ty;
+                }
             }
             if let Some(HirExpr::ArrayLiteral { ty: arr_ty, .. }) = init.as_mut()
                 && matches!(senv.types.resolve(ty), Some(Type::Array { .. }))

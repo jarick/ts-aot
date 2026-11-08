@@ -76,10 +76,22 @@ impl ExprConverter {
         let op = match method_field.as_str() {
             "indexOf" => Some(RuntimeOp::StringIndexOf),
             "charAt" => Some(RuntimeOp::StringCharAt),
+            "includes" => Some(RuntimeOp::StringIncludes),
+            "startsWith" => Some(RuntimeOp::StringStartsWith),
+            "endsWith" => Some(RuntimeOp::StringEndsWith),
+            "toUpperCase" => Some(RuntimeOp::StringToUpperCase),
+            "toLowerCase" => Some(RuntimeOp::StringToLowerCase),
+            "trim" => Some(RuntimeOp::StringTrim),
             _ => None,
         }?;
         let (min_arity, max_arity) = match op {
-            RuntimeOp::StringIndexOf => (1, 2),
+            RuntimeOp::StringIndexOf
+            | RuntimeOp::StringIncludes
+            | RuntimeOp::StringStartsWith
+            | RuntimeOp::StringEndsWith => (1, 2),
+            RuntimeOp::StringToUpperCase | RuntimeOp::StringToLowerCase | RuntimeOp::StringTrim => {
+                (0, 0)
+            }
             RuntimeOp::StringCharAt => (1, 1),
             _ => unreachable!("string method arity"),
         };
@@ -112,9 +124,21 @@ impl ExprConverter {
         let mut full_args = Vec::with_capacity(1 + max_arity);
         full_args.push(receiver_mir);
         full_args.extend(converted_args);
-        if op == RuntimeOp::StringIndexOf && full_args.len() == 2 {
+        if matches!(
+            op,
+            RuntimeOp::StringIndexOf
+                | RuntimeOp::StringIncludes
+                | RuntimeOp::StringStartsWith
+                | RuntimeOp::StringEndsWith
+        ) && full_args.len() == 2
+        {
+            let default_pos = if op == RuntimeOp::StringEndsWith {
+                -1
+            } else {
+                0
+            };
             full_args.push(MirExpr::Int {
-                value: 0,
+                value: default_pos,
                 ty: TypeId::from_raw(0),
             });
         }

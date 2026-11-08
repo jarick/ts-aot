@@ -27,9 +27,9 @@ pub use array::{
     __ts_aot_array_concat, __ts_aot_array_create, __ts_aot_array_create_with_len,
     __ts_aot_array_from, __ts_aot_array_from_length_mapped, __ts_aot_array_from_mapped,
     __ts_aot_array_from_string, __ts_aot_array_get, __ts_aot_array_get_or_default,
-    __ts_aot_array_hole, __ts_aot_array_is_array, __ts_aot_array_is_array_false,
-    __ts_aot_array_len, __ts_aot_array_own_keys, __ts_aot_array_push, __ts_aot_array_set, IsArray,
-    TsArrayMarker,
+    __ts_aot_array_hole, __ts_aot_array_includes, __ts_aot_array_index_of, __ts_aot_array_is_array,
+    __ts_aot_array_is_array_false, __ts_aot_array_last_index_of, __ts_aot_array_len,
+    __ts_aot_array_own_keys, __ts_aot_array_push, __ts_aot_array_set, IsArray, TsArrayMarker,
 };
 pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
 pub use bigint::{
@@ -86,9 +86,11 @@ pub use promise::{
 pub use regex::{__ts_aot_regex_new, RegExpHandle};
 pub use result::{__ts_aot_result_err, __ts_aot_result_ok, __ts_aot_result_unwrap_ok};
 pub use string::{
-    __ts_aot_string_char_at, __ts_aot_string_concat, __ts_aot_string_equals,
-    __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
-    __ts_aot_string_len, __ts_aot_string_substring_utf16, JsString,
+    __ts_aot_string_char_at, __ts_aot_string_concat, __ts_aot_string_ends_with,
+    __ts_aot_string_equals, __ts_aot_string_from_char_code, __ts_aot_string_from_code_point,
+    __ts_aot_string_includes, __ts_aot_string_index_of, __ts_aot_string_len,
+    __ts_aot_string_starts_with, __ts_aot_string_substring_utf16, __ts_aot_string_to_lower_case,
+    __ts_aot_string_to_upper_case, __ts_aot_string_trim, JsString,
 };
 pub use symbol::{
     __ts_aot_symbol_for, __ts_aot_symbol_key_for, __ts_aot_symbol_new, __ts_aot_symbol_new_desc,

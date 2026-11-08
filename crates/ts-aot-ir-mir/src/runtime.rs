@@ -98,6 +98,12 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::StringLen
         | RuntimeOp::StringIndexOf
         | RuntimeOp::StringCharAt
+        | RuntimeOp::StringIncludes
+        | RuntimeOp::StringStartsWith
+        | RuntimeOp::StringEndsWith
+        | RuntimeOp::StringToUpperCase
+        | RuntimeOp::StringToLowerCase
+        | RuntimeOp::StringTrim
         | RuntimeOp::StringFromCharCode
         | RuntimeOp::StringFromCodePoint => &[StringFeat],
         RuntimeOp::ArrayCreate
@@ -106,6 +112,9 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::ArraySet
         | RuntimeOp::ArrayLen
         | RuntimeOp::ArrayPush
+        | RuntimeOp::ArrayIndexOf
+        | RuntimeOp::ArrayLastIndexOf
+        | RuntimeOp::ArrayIncludes
         | RuntimeOp::ArrayFrom
         | RuntimeOp::ArrayFromString
         | RuntimeOp::ArrayFromMapped

@@ -122,6 +122,25 @@ pub fn __ts_aot_array_len<T>(arr: &[T]) -> i64 {
 }
 
 #[must_use]
+pub fn __ts_aot_array_index_of<T: PartialEq>(arr: &[T], item: &T) -> i64 {
+    arr.iter()
+        .position(|x| x == item)
+        .map_or(-1, |i| i64::try_from(i).unwrap_or(-1))
+}
+
+#[must_use]
+pub fn __ts_aot_array_last_index_of<T: PartialEq>(arr: &[T], item: &T) -> i64 {
+    arr.iter()
+        .rposition(|x| x == item)
+        .map_or(-1, |i| i64::try_from(i).unwrap_or(-1))
+}
+
+#[must_use]
+pub fn __ts_aot_array_includes<T: PartialEq>(arr: &[T], item: &T) -> bool {
+    arr.iter().any(|x| x == item)
+}
+
+#[must_use]
 pub fn __ts_aot_array_own_keys<T>(arr: &[T], include_length: bool) -> Vec<JsString> {
     let mut keys: Vec<JsString> = (0..arr.len())
         .map(|i| JsString::Valid(i.to_string()))

@@ -675,7 +675,31 @@ impl SkeletonBuilder {
                 }
             }
         }
-        let ty = senv.error_ty();
+        let element_ty = elements
+            .iter()
+            .find_map(|e| match e {
+                HirExpr::Int(..) => Some(senv.types.intern(&ts_aot_core::Type::I64)),
+                HirExpr::Float(..) => Some(senv.types.intern(&ts_aot_core::Type::F64)),
+                HirExpr::String(..) => Some(senv.types.intern(&ts_aot_core::Type::String)),
+                HirExpr::Bool(..) => Some(senv.types.intern(&ts_aot_core::Type::Bool)),
+                HirExpr::Local { ty, .. } | HirExpr::Global { ty, .. }
+                    if *ty != TypeId::from_raw(0) =>
+                {
+                    Some(*ty)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| senv.error_ty());
+        let ty = if matches!(
+            senv.types.resolve(element_ty),
+            Some(ts_aot_core::Type::Error)
+        ) {
+            senv.error_ty()
+        } else {
+            senv.types.intern(&ts_aot_core::Type::Array {
+                element: element_ty,
+            })
+        };
         HirExpr::ArrayLiteral {
             elements,
             ty,
@@ -952,6 +976,33 @@ impl SkeletonBuilder {
                     let string_ty = senv.types.intern(&ts_aot_core::Type::String);
                     senv.types
                         .intern(&ts_aot_core::Type::Array { element: string_ty })
+                } else if matches!(
+                    senv.types.resolve(owner.ty()),
+                    Some(ts_aot_core::Type::String)
+                ) {
+                    match field_name.as_str() {
+                        "includes" | "startsWith" | "endsWith" => {
+                            senv.types.intern(&ts_aot_core::Type::Bool)
+                        }
+                        "indexOf" | "lastIndexOf" | "charCodeAt" | "codePointAt" => {
+                            senv.types.intern(&ts_aot_core::Type::I64)
+                        }
+                        "charAt" | "at" | "slice" | "substring" | "substr" | "toUpperCase"
+                        | "toLowerCase" | "trim" | "trimStart" | "trimEnd" | "repeat"
+                        | "padStart" | "padEnd" | "concat" | "replace" | "normalize" => {
+                            senv.types.intern(&ts_aot_core::Type::String)
+                        }
+                        _ => senv.error_ty(),
+                    }
+                } else if matches!(
+                    senv.types.resolve(owner.ty()),
+                    Some(ts_aot_core::Type::Array { .. })
+                ) {
+                    match field_name.as_str() {
+                        "indexOf" | "lastIndexOf" => senv.types.intern(&ts_aot_core::Type::I64),
+                        "includes" => senv.types.intern(&ts_aot_core::Type::Bool),
+                        _ => senv.error_ty(),
+                    }
                 } else {
                     senv.error_ty()
                 }
@@ -997,6 +1048,12 @@ impl SkeletonBuilder {
                     && !date_shadowed =>
             {
                 senv.types.intern(&ts_aot_core::Type::Date)
+            }
+            Expression::Identifier(id) if scope.lookup(id.name.as_str()).is_none() => {
+                match self.class_types.get(id.name.as_str()) {
+                    Some(&class_ty) => class_ty,
+                    None => senv.error_ty(),
+                }
             }
             _ => senv.error_ty(),
         };

@@ -249,6 +249,44 @@ pub fn __ts_aot_string_char_at(s: &JsString, idx: i64) -> JsString {
 }
 
 #[must_use]
+pub fn __ts_aot_string_includes(haystack: &JsString, needle: &JsString, from_index: i64) -> bool {
+    __ts_aot_string_index_of(haystack, needle, from_index) != -1
+}
+
+#[must_use]
+pub fn __ts_aot_string_starts_with(haystack: &JsString, needle: &JsString, position: i64) -> bool {
+    let hay = haystack.to_units();
+    let needle_units = needle.to_units();
+    let start = if position <= 0 {
+        0
+    } else {
+        usize::try_from(position)
+            .unwrap_or(usize::MAX)
+            .min(hay.len())
+    };
+    hay.len() >= start + needle_units.len()
+        && hay[start..start + needle_units.len()] == needle_units[..]
+}
+
+#[must_use]
+pub fn __ts_aot_string_ends_with(
+    haystack: &JsString,
+    needle: &JsString,
+    end_position: i64,
+) -> bool {
+    let hay = haystack.to_units();
+    let needle_units = needle.to_units();
+    let end = if end_position < 0 {
+        hay.len()
+    } else {
+        usize::try_from(end_position)
+            .unwrap_or(usize::MAX)
+            .min(hay.len())
+    };
+    needle_units.len() <= end && hay[end - needle_units.len()..end] == needle_units[..]
+}
+
+#[must_use]
 pub fn __ts_aot_string_substring_utf16(s: &JsString, start: i64, end: i64) -> JsString {
     let units = s.to_units();
     let len = units.len();
@@ -257,6 +295,21 @@ pub fn __ts_aot_string_substring_utf16(s: &JsString, start: i64, end: i64) -> Js
     let hi = clamp(end);
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
     JsString::Raw(units[lo..hi].to_vec())
+}
+
+#[must_use]
+pub fn __ts_aot_string_to_upper_case(s: &JsString) -> JsString {
+    JsString::Valid(s.to_string_lossy().to_uppercase())
+}
+
+#[must_use]
+pub fn __ts_aot_string_to_lower_case(s: &JsString) -> JsString {
+    JsString::Valid(s.to_string_lossy().to_lowercase())
+}
+
+#[must_use]
+pub fn __ts_aot_string_trim(s: &JsString) -> JsString {
+    JsString::Valid(s.to_string_lossy().trim().to_owned())
 }
 
 #[must_use]
