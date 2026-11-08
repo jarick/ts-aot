@@ -62,9 +62,9 @@ fn end_to_end_typeof_int_literal_emits_runtime_typeof_call() {
         "typeof must emit a __ts_aot_typeof runtime call, got: {s}"
     );
     assert!(
-        s.contains("String :: from"),
-        "typeof with String return type must wrap __ts_aot_typeof result in String::from \
-         (runtime helper returns &'static str, function returns String), got: {s}"
+        s.contains("JsString :: from"),
+        "typeof with String return type must wrap __ts_aot_typeof result in JsString::from \
+         (runtime helper returns &'static str, function returns JsString), got: {s}"
     );
 }
 
@@ -73,8 +73,15 @@ fn typeof_emit_compile_pattern() {
     fn __ts_aot_typeof_stub(_v: &i64) -> &'static str {
         "number"
     }
+    struct JsString(String);
+    impl From<&str> for JsString {
+        fn from(s: &str) -> Self {
+            JsString(s.to_owned())
+        }
+    }
     let v: i64 = 42;
-    let _s: String = String::from(__ts_aot_typeof_stub(&v));
+    let s: JsString = JsString::from(__ts_aot_typeof_stub(&v));
+    assert_eq!(s.0, "number");
 }
 
 #[test]

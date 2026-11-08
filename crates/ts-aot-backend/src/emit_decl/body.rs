@@ -792,10 +792,23 @@ fn value_ty(
     }
 }
 
-fn is_same_value_able(types: &TypeTable, ty: TypeId) -> bool {
-    match types.resolve(ty) {
-        Some(
-            Type::Bool
+fn emit_same_value(
+    types: &TypeTable,
+    a_ty: &Type,
+    b_ty: &Type,
+    operands: (TokenStream, TokenStream),
+    same_place: bool,
+    depth: usize,
+) -> Result<TokenStream, BackendError> {
+    fn supported(types: &TypeTable, ty: &Type) -> bool {
+        match ty {
+            Type::Optional { inner } => types.resolve(*inner).is_some_and(|t| supported(types, t)),
+            Type::Void
+            | Type::Null
+            | Type::Struct { .. }
+            | Type::Named { .. }
+            | Type::Array { .. }
+            | Type::Bool
             | Type::I8
             | Type::I16
             | Type::I32
@@ -807,11 +820,73 @@ fn is_same_value_able(types: &TypeTable, ty: TypeId) -> bool {
             | Type::F32
             | Type::F64
             | Type::String
-            | Type::Symbol,
-        ) => true,
-        Some(Type::Optional { inner }) => is_same_value_able(types, *inner),
-        _ => false,
+            | Type::Symbol => true,
+            _ => false,
+        }
     }
+    let (a, b) = operands;
+    let unsupported = || BackendError::NotImplemented("Object.is: unsupported operand type");
+    if !supported(types, a_ty) || !supported(types, b_ty) {
+        return Err(unsupported());
+    }
+    let left = format_ident!("__ts_aot_left_{}", depth);
+    let right = format_ident!("__ts_aot_right_{}", depth);
+    match (a_ty, b_ty) {
+        (Type::Optional { inner: x }, Type::Optional { inner: y }) => {
+            let inner = emit_same_value(
+                types,
+                types.resolve(*x).ok_or_else(unsupported)?,
+                types.resolve(*y).ok_or_else(unsupported)?,
+                (quote!(#left), quote!(#right)),
+                same_place,
+                depth + 1,
+            )?;
+            Ok(quote!(match (#a, #b) {
+                (Some(#left), Some(#right)) => #inner,
+                (None, None) => true,
+                _ => false,
+            }))
+        }
+        (Type::Optional { inner }, _) => {
+            let comparison = emit_same_value(
+                types,
+                types.resolve(*inner).ok_or_else(unsupported)?,
+                b_ty,
+                (quote!(#left), b.clone()),
+                same_place,
+                depth + 1,
+            )?;
+            let absent = matches!(b_ty, Type::Void);
+            Ok(quote!(match #a { Some(#left) => #comparison, None => #absent }))
+        }
+        (_, Type::Optional { .. }) => {
+            emit_same_value(types, b_ty, a_ty, (b, a), same_place, depth + 1)
+        }
+        (Type::Void, Type::Void) | (Type::Null, Type::Null) => Ok(quote!(true)),
+        (Type::Struct { .. } | Type::Named { .. }, Type::Struct { .. } | Type::Named { .. })
+        | (Type::Array { .. }, Type::Array { .. }) => Ok(quote!(#same_place)),
+        _ if a_ty == b_ty => Ok(quote!(__ts_aot_object_is(#a, #b))),
+        _ if is_number_type(a_ty) && is_number_type(b_ty) => {
+            Ok(quote!(__ts_aot_object_is(&(*#a as f64), &(*#b as f64))))
+        }
+        _ => Ok(quote!(false)),
+    }
+}
+
+fn is_number_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+    )
 }
 
 fn same_place(a: &MirExpr, b: &MirExpr) -> bool {
@@ -1912,12 +1987,17 @@ fn emit_typeof(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    ctx.mark_runtime_used();
     match expr {
-        MirExpr::Unit => Ok(quote!(String::from(__ts_aot_typeof_unit()))),
-        MirExpr::Null { .. } => Ok(quote!(String::from(__ts_aot_typeof_null()))),
+        MirExpr::Unit => Ok(quote!(ts_aot_runtime::JsString::from(
+            __ts_aot_typeof_unit()
+        ))),
+        MirExpr::Null { .. } => Ok(quote!(ts_aot_runtime::JsString::from(
+            __ts_aot_typeof_null()
+        ))),
         _ => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
-            Ok(quote!(String::from(__ts_aot_typeof(&#inner))))
+            Ok(quote!(ts_aot_runtime::JsString::from(__ts_aot_typeof(&#inner))))
         }
     }
 }
@@ -2145,7 +2225,7 @@ fn emit_runtime_call(
                 let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
                 return Ok(quote!({
                     let _ = &#arg;
-                    __ts_aot_array_create(vec![#(#lits),*])
+                    __ts_aot_array_create::<ts_aot_runtime::JsString>(vec![#(#lits),*])
                 }));
             }
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2172,23 +2252,33 @@ fn emit_runtime_call(
                     true
                 }));
             }
-            match (a_ty, b_ty) {
-                (Some(x), Some(y)) if x == y && is_same_value_able(types, x) => {
-                    Ok(quote!(__ts_aot_object_is(&#a, &#b)))
-                }
-                (Some(x), Some(y)) if x == y => {
-                    let equal = same_place(&args[0], &args[1]);
-                    Ok(quote!({
-                        let _ = (&#a, &#b);
-                        #equal
-                    }))
-                }
-                _ => Ok(quote!({
-                    let _ = (&#a, &#b);
-                    false
-                })),
-            }
+            let resolve = |expr: &MirExpr, ty: Option<TypeId>| match expr {
+                MirExpr::Unit => Some(Type::Void),
+                MirExpr::Null { .. } => Some(Type::Null),
+                MirExpr::Bool(_) => Some(Type::Bool),
+                _ => ty.and_then(|id| types.resolve(id)).cloned(),
+            };
+            let a_ty = resolve(&args[0], a_ty).ok_or(BackendError::NotImplemented(
+                "Object.is: first operand type unresolved",
+            ))?;
+            let b_ty = resolve(&args[1], b_ty).ok_or(BackendError::NotImplemented(
+                "Object.is: second operand type unresolved",
+            ))?;
+            let comparison = emit_same_value(
+                types,
+                &a_ty,
+                &b_ty,
+                (quote!(__ts_aot_a), quote!(__ts_aot_b)),
+                same_place(&args[0], &args[1]),
+                0,
+            )?;
+            Ok(quote!({
+                let __ts_aot_a = &#a;
+                let __ts_aot_b = &#b;
+                #comparison
+            }))
         }
+
         RuntimeOp::DateParse => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_date_parse(#s)))
@@ -2392,13 +2482,11 @@ fn emit_runtime_call(
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let default_tokens = emit_default_for_weakmap_get(ty, emit_env, ctx);
             let value_ty_tokens = emit_type_id_with_ctx(ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_get::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_get::<#value_ty_tokens>(
                 &#handle,
                 &#liveness,
                 #key,
-            ).unwrap_or(#default_tokens)),
-            )
+            ).unwrap_or(#default_tokens)))
         }
         RuntimeOp::WeakMapSet => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2407,7 +2495,7 @@ fn emit_runtime_call(
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
             Ok(quote!({
-                let _ = ts_aot_runtime::__ts_aot_weak_map_set::<#value_ty_tokens>(
+                let _ = __ts_aot_weak_map_set::<#value_ty_tokens>(
                     &#handle,
                     &#liveness,
                     #key,
@@ -2421,22 +2509,18 @@ fn emit_runtime_call(
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_has::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_has::<#value_ty_tokens>(
                 &#handle, &#liveness, #key,
-            ) != 0),
-            )
+            ) != 0))
         }
         RuntimeOp::WeakMapDelete => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_delete::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_delete::<#value_ty_tokens>(
                 &#handle, &#liveness, #key,
-            ) != 0),
-            )
+            ) != 0))
         }
         RuntimeOp::WeakMapClear => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2863,4 +2947,41 @@ fn emit_try(
         }
         #replay_return
     }})
+}
+
+#[cfg(test)]
+mod same_value_tests {
+    use super::*;
+
+    #[test]
+    fn object_is_checks_both_operand_types() {
+        use quote::quote;
+        let mut types = TypeTable::new();
+        let number = types.intern(&Type::I64);
+        let optional = Type::Optional { inner: number };
+        let emit = |a: &Type, b: &Type| {
+            emit_same_value(&types, a, b, (quote!(a), quote!(b)), false, 0)
+                .map(|tokens| tokens.to_string())
+        };
+        assert!(emit(&Type::I64, &Type::F64).unwrap().contains("as f64"));
+        assert!(emit(&optional, &Type::I64).unwrap().contains("Some"));
+        assert!(emit(&Type::I64, &optional).unwrap().contains("Some"));
+        assert!(
+            emit(&optional, &optional)
+                .unwrap()
+                .contains("(None , None) => true")
+        );
+        assert!(
+            emit(&optional, &Type::Void)
+                .unwrap()
+                .contains("None => true")
+        );
+        assert_eq!(emit(&Type::Bool, &Type::I64).unwrap(), "false");
+        let array = Type::Array { element: number };
+        assert_eq!(emit(&array, &array).unwrap(), "false");
+        for unsupported in [Type::Error, Type::BigInt, Type::Tuple { elements: vec![] }] {
+            assert!(emit(&Type::I64, &unsupported).is_err());
+            assert!(emit(&unsupported, &Type::I64).is_err());
+        }
+    }
 }

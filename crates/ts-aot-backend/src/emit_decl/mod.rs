@@ -463,8 +463,10 @@ fn unpack_arg_stmt(
     let slot = format_ident!("__slot_{}", idx);
     let get = quote!(let #slot = _args[#idx];);
     let cast = match resolved {
-        Type::Bool
-        | Type::I8
+        Type::Bool => {
+            quote!(let #pname: #pty = #slot != 0;)
+        }
+        Type::I8
         | Type::I16
         | Type::I32
         | Type::I64

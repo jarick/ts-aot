@@ -147,6 +147,35 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
 }
 
 #[test]
+fn bool_param_function_emits_wrapper_unpacking_via_ne_zero() {
+    let mut types = TypeTable::new();
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = empty_func("negate");
+    f.ret = bool_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: bool_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("let x : bool = __slot_0 != 0 ;"),
+        "bool param must be unpacked via `__slot_0 != 0` (Rust rejects `u64 as bool`), got: {s}"
+    );
+    assert!(
+        !s.contains("__slot_0 as bool"),
+        "bool param must not be unpacked via `u64 as bool`, got: {s}"
+    );
+    assert!(
+        s.contains("__result as u64"),
+        "bool return must be packed via `as u64`, got: {s}"
+    );
+}
+
+#[test]
 fn f64_param_function_emits_wrapper_with_from_bits() {
     let mut types = TypeTable::new();
     let f64_ty = types.intern(&Type::F64);
