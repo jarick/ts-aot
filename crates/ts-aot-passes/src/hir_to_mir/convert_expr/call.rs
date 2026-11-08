@@ -8,7 +8,8 @@ use crate::PassContext;
 use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
 use crate::hir_to_mir::converter::ExprConverter;
 
-use super::globals::array_from_object_literal;
+use super::globals::{array_from_object_literal, array_push_receiver};
+use super::util::is_pure_place;
 
 fn types_compatible(declared: &TypeId, expected: &TypeId, types: &TypeTable) -> bool {
     if declared == expected {
@@ -419,6 +420,35 @@ impl ExprConverter {
             return mir;
         }
         let callee_id = self.resolve_callee(callee, ctx);
+        let recv = if callee_id == PLACEHOLDER_FUNCTION
+            && let HirCallee::Indirect(inner) = callee
+            && let Some(owner) = array_push_receiver(inner.as_ref(), types)
+        {
+            let recv_ty = owner.ty();
+            let recv_mir = self.convert_expr(
+                owner,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            if is_pure_place(&recv_mir) {
+                Some(recv_mir)
+            } else {
+                let tmp = self.fresh_local();
+                self.push_temp_local(tmp, recv_ty);
+                out.push(MirStmt::Let {
+                    local: tmp,
+                    ty: recv_ty,
+                    init: Some(recv_mir),
+                    mutable: true,
+                });
+                Some(MirExpr::Local(tmp))
+            }
+        } else {
+            None
+        };
         let mir_args: Vec<MirExpr> = args
             .iter()
             .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
@@ -429,6 +459,7 @@ impl ExprConverter {
             if let Some(mir) = self.try_known_indirect_dispatch(
                 callee,
                 args,
+                recv,
                 mir_args.clone(),
                 ty,
                 out,

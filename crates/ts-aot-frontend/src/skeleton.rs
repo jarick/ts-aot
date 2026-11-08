@@ -171,6 +171,7 @@ impl SkeletonBuilder {
         self.strict = self.module || crate::util::directives_have_use_strict(&program.directives);
         self.pre_register_class_types(senv, program);
         self.pre_resolve_all_aliases(senv, program);
+        self.pre_register_class_fields(senv, program);
         for stmt in &program.body {
             self.walk_top_level(senv, stmt);
         }

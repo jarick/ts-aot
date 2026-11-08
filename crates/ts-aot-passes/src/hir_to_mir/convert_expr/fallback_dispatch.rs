@@ -10,9 +10,9 @@ use crate::hir_to_mir::converter::ExprConverter;
 use crate::lower_generators::GENERATOR_DIAG_DEFERRED_METHOD;
 
 use super::globals::{
-    generator_inner_type, is_array_static_type, is_global_array_reference,
-    is_global_math_reference, is_global_object_reference, is_global_string_reference,
-    is_string_typed_source, type_label,
+    array_push_receiver, generator_inner_type, is_array_static_type, is_global_array_reference,
+    is_global_math_reference, is_global_object_reference, is_global_reflect_reference,
+    is_global_string_reference, is_string_typed_source, type_label,
 };
 
 impl ExprConverter {
@@ -20,6 +20,7 @@ impl ExprConverter {
         &mut self,
         callee: &HirCallee,
         args: &[HirExpr],
+        recv: Option<MirExpr>,
         mir_args: Vec<MirExpr>,
         ty: TypeId,
         out: &mut Vec<MirStmt>,
@@ -37,12 +38,12 @@ impl ExprConverter {
             && is_global_object_reference(owner)
             && matches!(
                 field_name.as_str(),
-                "getPrototypeOf" | "keys" | "setPrototypeOf"
+                "getPrototypeOf" | "keys" | "getOwnPropertyNames" | "setPrototypeOf"
             )
         {
             if field_name.as_str() == "setPrototypeOf" {
                 if mir_args.is_empty() {
-                    ctx.warning(
+                    ctx.error(
                         "E0406",
                         "Object.setPrototypeOf requires at least the receiver arg; got empty arg list",
                         Span::new(0, 0),
@@ -87,7 +88,7 @@ impl ExprConverter {
                 return Some(MirExpr::Unit);
             }
             if mir_args.len() != 1 {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     format!(
                         "Object.{} requires exactly 1 argument; got {}",
@@ -98,16 +99,157 @@ impl ExprConverter {
                 );
                 return Some(MirExpr::Unit);
             }
+            let string_ty = types.intern(&Type::String);
+            let keys_ty = types.intern(&Type::Array { element: string_ty });
+            if is_array_static_type(&args[0], types) {
+                let include_length = field_name.as_str() == "getOwnPropertyNames";
+                let mut own_args = mir_args;
+                own_args.push(MirExpr::Bool(include_length));
+                let dest = self.fresh_local();
+                self.push_temp_local(dest, keys_ty);
+                out.push(MirStmt::Runtime {
+                    op: RuntimeOp::ArrayOwnKeys,
+                    args: own_args,
+                    dest: Some(dest),
+                    ty: keys_ty,
+                    target_ty: None,
+                });
+                return Some(MirExpr::Local(dest));
+            }
             let dest = self.fresh_local();
-            self.push_temp_local(dest, ty);
+            self.push_temp_local(dest, keys_ty);
             out.push(MirStmt::Runtime {
                 op: RuntimeOp::ObjectKeys,
                 args: mir_args,
                 dest: Some(dest),
-                ty,
+                ty: keys_ty,
                 target_ty: None,
             });
             return Some(MirExpr::Local(dest));
+        }
+        if let HirExpr::Field {
+            owner: is_owner,
+            field_name: is_field,
+            ..
+        } = inner.as_ref()
+            && is_global_object_reference(is_owner)
+            && is_field.as_str() == "is"
+        {
+            if mir_args.len() != 2 {
+                ctx.error(
+                    "E0406",
+                    format!(
+                        "Object.is requires exactly 2 arguments; got {}",
+                        mir_args.len()
+                    ),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
+            let bool_ty = types.intern(&Type::Bool);
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, bool_ty);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ObjectIs,
+                args: mir_args,
+                dest: Some(dest),
+                ty: bool_ty,
+                target_ty: None,
+            });
+            return Some(MirExpr::Local(dest));
+        }
+        if let Some(recv_owner) = array_push_receiver(inner.as_ref(), types) {
+            debug_assert!(
+                recv.is_some(),
+                "convert_call must pre-evaluate the push receiver before converting arguments"
+            );
+            let recv_mir = recv.unwrap_or_else(|| {
+                self.convert_expr(
+                    recv_owner,
+                    out,
+                    shared_struct_ids,
+                    _shared_next_struct,
+                    types,
+                    ctx,
+                )
+            });
+            let len_ty = types.intern(&Type::I64);
+            let len_dest = self.fresh_local();
+            self.push_temp_local(len_dest, len_ty);
+            if mir_args.is_empty() {
+                out.push(MirStmt::Runtime {
+                    op: RuntimeOp::ArrayLen,
+                    args: vec![recv_mir],
+                    dest: Some(len_dest),
+                    ty: len_ty,
+                    target_ty: None,
+                });
+            } else {
+                let last = mir_args.len() - 1;
+                for (i, item) in mir_args.into_iter().enumerate() {
+                    let is_last = i == last;
+                    out.push(MirStmt::Runtime {
+                        op: RuntimeOp::ArrayPush,
+                        args: vec![recv_mir.clone(), item],
+                        dest: is_last.then_some(len_dest),
+                        ty: if is_last { len_ty } else { TypeId::from_raw(0) },
+                        target_ty: None,
+                    });
+                }
+            }
+            return Some(MirExpr::Local(len_dest));
+        }
+        if let HirExpr::Field {
+            owner: freeze_owner,
+            field_name: freeze_field,
+            ..
+        } = inner.as_ref()
+            && is_global_object_reference(freeze_owner)
+            && matches!(
+                freeze_field.as_str(),
+                "freeze" | "seal" | "preventExtensions"
+            )
+        {
+            if mir_args.is_empty() {
+                return Some(MirExpr::Unit);
+            }
+            let mut iter = mir_args.into_iter();
+            let target = iter.next().expect("checked non-empty above");
+            for extra in iter {
+                if has_potential_side_effects(&extra) {
+                    out.push(MirStmt::Expr(extra));
+                }
+            }
+            return Some(target);
+        }
+        if let HirExpr::Field {
+            owner: degrade_owner,
+            field_name: degrade_field,
+            ..
+        } = inner.as_ref()
+            && (is_global_object_reference(degrade_owner)
+                || is_global_reflect_reference(degrade_owner))
+        {
+            let owner_name = if is_global_reflect_reference(degrade_owner) {
+                "Reflect"
+            } else {
+                "Object"
+            };
+            ctx.warning(
+                "E0406",
+                format!(
+                    "static `{owner_name}.{}` is not supported in this AOT target; the call is \
+                     lowered to `undefined`",
+                    degrade_field.as_str()
+                ),
+                Span::new(0, 0),
+            );
+            for arg in mir_args {
+                if has_potential_side_effects(&arg) {
+                    out.push(MirStmt::Expr(arg));
+                }
+            }
+            return Some(MirExpr::Unit);
         }
         if let HirExpr::Field {
             owner: array_owner,
@@ -118,7 +260,7 @@ impl ExprConverter {
             && array_field.as_str() == "isArray"
         {
             if mir_args.len() != 1 {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     format!(
                         "Array.isArray requires exactly 1 argument; got {}",
@@ -154,7 +296,7 @@ impl ExprConverter {
             && array_from_field.as_str() == "from"
         {
             if mir_args.is_empty() || mir_args.len() > 3 {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     format!(
                         "Array.from in AOT supports 1 (source), 2 (source, mapFn) or \
@@ -197,7 +339,7 @@ impl ExprConverter {
                 return Some(MirExpr::Local(dest));
             }
             if mir_args.len() >= 2 && !matches!(&args[1], HirExpr::Global { .. }) {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     "Array.from(arr, mapFn[, thisArg]) in AOT requires mapFn to be a known global function reference \
                      (a top-level fn or a non-capturing closure lifted by `lower_closures`); \
@@ -207,7 +349,7 @@ impl ExprConverter {
                 return Some(MirExpr::Unit);
             }
             if mir_args.len() == 3 {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     "Array.from(arr, mapFn, thisArg) does not support thisArg in AOT \
                      (AOT closures have no `this` binding); use the 2-arg form Array.from(arr, mapFn)",
@@ -299,7 +441,7 @@ impl ExprConverter {
                     None => true,
                 };
                 if !arity_ok {
-                    ctx.warning(
+                    ctx.error(
                         "E0406",
                         format!(
                             "Math.{} requires exactly {} argument(s); got {}",
@@ -368,7 +510,7 @@ impl ExprConverter {
                     self.field_id_lookup.contains_key(&(sid, key)),
                 ));
             }
-            ctx.warning(
+            ctx.error(
                 "E0406",
                 "obj.hasOwnProperty() in AOT requires a literal string key when receiver is a struct; \
                  dynamic keys on struct receivers are not supported",
@@ -407,7 +549,7 @@ impl ExprConverter {
         match field_name.as_str() {
             "next" => {
                 if !args.is_empty() {
-                    ctx.warning(
+                    ctx.error(
                         "E0406",
                         format!(
                             "Generator.prototype.next() takes no arguments; got {}",
@@ -461,7 +603,7 @@ impl ExprConverter {
                 Some(MirExpr::Unit)
             }
             _ => {
-                ctx.warning(
+                ctx.error(
                     "E0406",
                     format!(
                         "method `{}` is not recognized on `Generator<{}>`; \

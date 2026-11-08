@@ -5,7 +5,6 @@ use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl, MirParam, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
 use crate::hir_to_mir::convert_expr::globals::is_string_typed_source;
 use crate::hir_to_mir::convert_expr::util::{
     has_potential_side_effects, is_numeric_type_for_array_len,
@@ -96,6 +95,26 @@ impl ExprConverter {
             out.push(MirStmt::Expr(callee_mir));
         }
         let struct_id = self.lookup_or_alloc_struct_id(ty, shared_struct_ids, shared_next_struct);
+        let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
+        let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
+            .program
+            .class_field_inits
+            .get(&ty)
+            .cloned()
+            .unwrap_or_default();
+        for (fname, init) in init_names {
+            if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
+                let value = self.convert_expr(
+                    &init,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                lit_fields.push((fid, value));
+            }
+        }
         let alloc_id = self.fresh_local();
         self.push_temp_local(alloc_id, ty);
         out.push(MirStmt::Let {
@@ -103,29 +122,25 @@ impl ExprConverter {
             ty,
             init: Some(MirExpr::StructLiteral {
                 struct_id,
-                fields: Vec::new(),
+                fields: lit_fields,
                 ty,
             }),
             mutable: true,
         });
-        let ctor_callee = PLACEHOLDER_FUNCTION;
-        let mut ctor_args: Vec<MirExpr> = Vec::with_capacity(args.len() + 1);
-        ctor_args.push(MirExpr::Local(alloc_id));
-        for a in args {
-            ctor_args.push(self.convert_expr(
-                a,
-                out,
-                shared_struct_ids,
-                shared_next_struct,
-                types,
-                ctx,
-            ));
+        if !args.is_empty() {
+            ctx.warning(
+                "E0406",
+                "constructor arguments are not supported for this `new`; the arguments are \
+                 evaluated for their side effects only and the constructor is not invoked",
+                ts_aot_core::Span::new(0, 0),
+            );
         }
-        out.push(MirStmt::Expr(MirExpr::Call {
-            callee: ctor_callee,
-            args: ctor_args,
-            ty,
-        }));
+        for a in args {
+            let arg = self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx);
+            if has_potential_side_effects(&arg) {
+                out.push(MirStmt::Expr(arg));
+            }
+        }
         MirExpr::Local(alloc_id)
     }
 

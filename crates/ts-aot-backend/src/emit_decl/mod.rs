@@ -10,7 +10,7 @@ mod types;
 use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::{format_ident, quote};
 
-use ts_aot_core::{Type, TypeId, TypeTable, Visibility};
+use ts_aot_core::{FieldId, StructId, Type, TypeId, TypeTable, Visibility};
 use ts_aot_ir_mir::{
     FunctionKind, MirDecl, MirFieldDecl, MirFunctionDecl, MirGlobalDecl, MirProgram, MirStructDecl,
 };
@@ -60,6 +60,11 @@ pub fn emit_decls_with_style(
         });
     }
     tokens.extend(emit_fn_values(&ctx, &emit_env));
+    if lib_style && ctx.runtime_used() {
+        tokens.extend(quote!(
+            use ts_aot_runtime::*;
+        ));
+    }
     Ok(tokens)
 }
 
@@ -458,8 +463,10 @@ fn unpack_arg_stmt(
     let slot = format_ident!("__slot_{}", idx);
     let get = quote!(let #slot = _args[#idx];);
     let cast = match resolved {
-        Type::Bool
-        | Type::I8
+        Type::Bool => {
+            quote!(let #pname: #pty = #slot != 0;)
+        }
+        Type::I8
         | Type::I16
         | Type::I32
         | Type::I64
@@ -570,6 +577,89 @@ fn emit_global(g: &MirGlobalDecl, types: &TypeTable) -> Result<TokenStream, Back
     Ok(emit_global_with_ctx(g, &ctx, &emit_env)?.0)
 }
 
+const CONST_DEFAULT_MAX_DEPTH: usize = 64;
+const CONST_DEFAULT_BUDGET: u32 = 8192;
+
+fn emit_struct_const_default(
+    id: StructId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    depth: usize,
+    budget: &mut u32,
+) -> Result<TokenStream, BackendError> {
+    let name = ctx.struct_ident(id);
+    let fields: Vec<(FieldId, TypeId)> = emit_env
+        .program
+        .declarations
+        .iter()
+        .find_map(|d| match d {
+            MirDecl::Struct(s) if s.id == id => {
+                Some(s.fields.iter().map(|f| (f.id, f.ty)).collect())
+            }
+            _ => None,
+        })
+        .ok_or(BackendError::NotImplemented(
+            "default initializer: struct has no declaration",
+        ))?;
+    let mut inits = Vec::with_capacity(fields.len());
+    for (fid, fty) in fields {
+        let fname = ctx.struct_field_ident(id, fid);
+        let fdef = emit_const_default(fty, ctx, emit_env, depth, budget)?;
+        inits.push(quote!(#fname: #fdef));
+    }
+    Ok(quote!(#name { #(#inits),* }))
+}
+
+fn emit_const_default(
+    ty: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    depth: usize,
+    budget: &mut u32,
+) -> Result<TokenStream, BackendError> {
+    if depth > CONST_DEFAULT_MAX_DEPTH || *budget == 0 {
+        return Err(BackendError::NotImplemented(
+            "default initializer: recursive or too large struct graph",
+        ));
+    }
+    *budget -= 1;
+    let EmitEnv { types, .. } = emit_env;
+    match types.resolve(ty) {
+        Some(Type::Bool) => Ok(quote!(false)),
+        Some(
+            Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::Symbol
+            | Type::Date,
+        ) => Ok(quote!(0)),
+        Some(Type::F32 | Type::F64) => Ok(quote!(0.0)),
+        Some(Type::String) => Ok(quote!(ts_aot_runtime::JsString::Valid(
+            ::std::string::String::new()
+        ))),
+        Some(Type::Array { .. }) => Ok(quote!(::std::vec::Vec::new())),
+        Some(Type::Optional { .. }) => Ok(quote!(::core::option::Option::None)),
+        Some(Type::Struct { id }) => {
+            emit_struct_const_default(*id, ctx, emit_env, depth + 1, budget)
+        }
+        Some(Type::Named { .. }) => match types.struct_id(ty) {
+            Some(id) => emit_struct_const_default(id, ctx, emit_env, depth + 1, budget),
+            None => Err(BackendError::NotImplemented(
+                "default initializer: named type is not a known struct",
+            )),
+        },
+        Some(Type::Error | Type::Void | Type::Null) | None => Ok(quote!(())),
+        _ => Err(BackendError::NotImplemented(
+            "default initializer: unsupported type",
+        )),
+    }
+}
+
 fn emit_global_with_ctx(
     g: &MirGlobalDecl,
     ctx: &EmitCtx,
@@ -582,7 +672,8 @@ fn emit_global_with_ctx(
     let init = if let Some(expr) = &g.init {
         emit_const_expr(expr)?
     } else {
-        quote!(Default::default())
+        let mut budget = CONST_DEFAULT_BUDGET;
+        emit_const_default(g.ty, ctx, emit_env, 0, &mut budget)?
     };
     Ok((
         quote! {

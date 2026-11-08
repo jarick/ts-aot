@@ -1063,11 +1063,11 @@ fn e2e_object_literal_lowers_to_anonymous_struct() {
     );
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("struct __object_lit_0"),
+        rust.contains("struct ObjectLit0"),
         "an object literal must lower to an anonymous struct, got:\n{rust}"
     );
     assert!(
-        rust.contains("__object_lit_0 { a : 1 , b : true }"),
+        rust.contains("ObjectLit0 { a : 1 , b : true }"),
         "the anonymous struct must be built with the literal's fields, got:\n{rust}"
     );
 }
@@ -1105,7 +1105,7 @@ fn e2e_object_literal_type_assertion_uses_target_struct() {
         "a type-asserted object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "a type-asserted object literal must not synthesize an anonymous struct, got:\n{rust}"
     );
 }
@@ -1122,7 +1122,7 @@ fn e2e_object_literal_typed_let_uses_target_struct() {
         "a typed `let` object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "a typed `let` object literal must not synthesize an anonymous struct, got:\n{rust}"
     );
 }
@@ -1139,7 +1139,7 @@ fn e2e_object_literal_assignment_uses_target_struct() {
         "an assigned object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "an assigned object literal must not synthesize an anonymous struct, got:\n{rust}"
     );
 }
@@ -1155,7 +1155,7 @@ fn e2e_object_literal_return_uses_function_return_type() {
         "a returned object literal must lower to the function's return struct, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "a returned object literal must not synthesize an anonymous struct, got:\n{rust}"
     );
 }
@@ -1174,7 +1174,7 @@ fn e2e_object_literal_call_argument_uses_param_type() {
         "an object-literal argument must lower to the parameter's struct, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "an object-literal argument must not synthesize an anonymous struct, got:\n{rust}"
     );
 }
@@ -1185,7 +1185,7 @@ fn e2e_nested_object_literal_field_type_is_inferred() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("pub a : __object_lit_"),
+        rust.contains("pub a : ObjectLit"),
         "the outer struct field must reference the inferred nested struct type, got:\n{rust}"
     );
 }
@@ -1203,7 +1203,7 @@ fn e2e_typed_nested_object_literal_uses_field_type() {
         "the nested literal must lower to the declared field struct `Inner`, got:\n{rust}"
     );
     assert!(
-        !rust.contains("__object_lit_"),
+        !rust.contains("ObjectLit"),
         "the nested literal must not synthesize an anonymous struct, got:\n{rust}"
     );
 }

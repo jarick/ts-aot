@@ -2235,3 +2235,368 @@ fn array_instance_len_call_on_optional_array_emits_array_len_runtime_op() {
         "the optional receiver must remain an OptionalChain (not unwrapped), got: {len_args:?}"
     );
 }
+
+#[test]
+fn array_push_evaluates_receiver_before_arguments() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let bool_ty = types.intern(&Type::Bool);
+    let recv_ty = types.intern(&Type::Array { element: i64_ty });
+    let arg_ty = types.intern(&Type::Array { element: bool_ty });
+
+    let receiver = HirExpr::ArrayLiteral {
+        elements: Vec::new(),
+        ty: recv_ty,
+        span: Span::default(),
+    };
+    let arg = HirExpr::ArrayLiteral {
+        elements: Vec::new(),
+        ty: arg_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(receiver),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("push"),
+            ty: unit_ty(),
+            span: Span::default(),
+        })),
+        args: vec![arg],
+        ty: unit_ty(),
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+
+    let recv_pos = out
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayCreate,
+                    ty,
+                    ..
+                } if *ty == recv_ty
+            )
+        })
+        .expect("the receiver array literal must emit ArrayCreate");
+    let arg_pos = out
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayCreate,
+                    ty,
+                    ..
+                } if *ty == arg_ty
+            )
+        })
+        .expect("the argument array literal must emit ArrayCreate");
+    assert!(
+        recv_pos < arg_pos,
+        "arr.push(arg) must evaluate the receiver before its arguments; got the receiver \
+         ArrayCreate at index {recv_pos} and the argument ArrayCreate at index {arg_pos}, \
+         full out: {out:?}"
+    );
+}
+
+#[test]
+fn array_push_evaluates_non_place_receiver_once() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let recv_ty = types.intern(&Type::Array { element: i64_ty });
+
+    let receiver = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: recv_ty,
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(receiver),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("push"),
+            ty: unit_ty(),
+            span: Span::default(),
+        })),
+        args: vec![HirExpr::Int(1, Span::default())],
+        ty: unit_ty(),
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+
+    let push_count = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayPush,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        push_count, 1,
+        "arr.push(x) must emit exactly one ArrayPush, got: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                ..
+            }
+        )),
+        "arr.push(x) must not emit a separate ArrayLen (it would re-evaluate the receiver), \
+         got: {out:?}"
+    );
+    let receiver_calls: usize = out.iter().map(|s| count_calls_in_stmt(s, 7)).sum();
+    assert_eq!(
+        receiver_calls, 1,
+        "a non-place receiver (e.g. `makeArr().push(x)`) must be evaluated exactly once, \
+         got {receiver_calls} calls; full out: {out:?}"
+    );
+}
+
+fn array_push_call(recv_ty: TypeId, args: Vec<HirExpr>) -> HirExpr {
+    HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: recv_ty,
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("push"),
+            ty: unit_ty(),
+            span: Span::default(),
+        })),
+        args,
+        ty: unit_ty(),
+        type_args: Vec::new(),
+        span: Span::default(),
+    }
+}
+
+#[test]
+fn array_push_zero_args_returns_current_length() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let recv_ty = types.intern(&Type::Array { element: i64_ty });
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &array_push_call(recv_ty, Vec::new()),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "a.push() must return the current length, got {mir:?}"
+    );
+    assert!(
+        !out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ArrayPush,
+                ..
+            }
+        )),
+        "a.push() must not emit ArrayPush, got: {out:?}"
+    );
+    assert!(
+        out.iter().any(|s| matches!(
+            s,
+            MirStmt::Runtime {
+                op: RuntimeOp::ArrayLen,
+                ..
+            }
+        )),
+        "a.push() must emit ArrayLen, got: {out:?}"
+    );
+    assert!(
+        !cx.has_errors(),
+        "a.push() must not error, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn array_push_multi_args_emits_one_push_per_arg() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let recv_ty = types.intern(&Type::Array { element: i64_ty });
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mir = c.convert_expr(
+        &array_push_call(
+            recv_ty,
+            vec![
+                HirExpr::Int(1, Span::default()),
+                HirExpr::Int(2, Span::default()),
+                HirExpr::Int(3, Span::default()),
+            ],
+        ),
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    let push_count = out
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayPush,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        push_count, 3,
+        "a.push(1, 2, 3) must emit one ArrayPush per argument, got: {out:?}"
+    );
+    let last_dest = out.iter().rev().find_map(|s| match s {
+        MirStmt::Runtime {
+            op: RuntimeOp::ArrayPush,
+            dest,
+            ..
+        } => Some(*dest),
+        _ => None,
+    });
+    assert!(
+        matches!(last_dest, Some(Some(_))),
+        "the last ArrayPush must capture the new length, got dest={last_dest:?}, out: {out:?}"
+    );
+    assert!(
+        matches!(mir, MirExpr::Local(_)),
+        "a.push(1, 2, 3) must return the new length, got {mir:?}"
+    );
+    assert!(
+        !cx.has_errors(),
+        "a.push(1, 2, 3) must not error, got {:?}",
+        cx.diagnostics()
+    );
+}
+
+#[test]
+fn array_push_evaluates_call_receiver_before_side_effecting_argument() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let bool_ty = types.intern(&Type::Bool);
+    let recv_ty = types.intern(&Type::Array { element: i64_ty });
+    let arg_ty = types.intern(&Type::Array { element: bool_ty });
+
+    let receiver = HirExpr::Call {
+        callee: HirCallee::Function(FunctionId::from_raw(7)),
+        args: Vec::new(),
+        ty: recv_ty,
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+    let arg = HirExpr::ArrayLiteral {
+        elements: Vec::new(),
+        ty: arg_ty,
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(receiver),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("push"),
+            ty: unit_ty(),
+            span: Span::default(),
+        })),
+        args: vec![arg],
+        ty: unit_ty(),
+        type_args: Vec::new(),
+        span: Span::default(),
+    };
+
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let _mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+
+    let recv_pos = out
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::Let {
+                    init: Some(MirExpr::Call { callee, .. }),
+                    ..
+                } if callee.raw() == 7
+            )
+        })
+        .expect("the receiver call must be spilled into a Let before the arguments");
+    let arg_pos = out
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayCreate,
+                    ty,
+                    ..
+                } if *ty == arg_ty
+            )
+        })
+        .expect("the argument array literal must emit ArrayCreate");
+    assert!(
+        recv_pos < arg_pos,
+        "the receiver call must be evaluated before the argument's side effect; got the \
+         receiver Let at index {recv_pos} and the argument ArrayCreate at index {arg_pos}, \
+         full out: {out:?}"
+    );
+    let receiver_calls: usize = out.iter().map(|s| count_calls_in_stmt(s, 7)).sum();
+    assert_eq!(
+        receiver_calls, 1,
+        "the receiver call must be evaluated exactly once, got {receiver_calls}; full out: {out:?}"
+    );
+}

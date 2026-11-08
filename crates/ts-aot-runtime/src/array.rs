@@ -44,8 +44,9 @@ pub fn __ts_aot_array_hole<T: Default>() -> Vec<T> {
     vec![T::default()]
 }
 
-pub fn __ts_aot_array_push<T>(arr: &mut Vec<T>, item: T) {
+pub fn __ts_aot_array_push<T>(arr: &mut Vec<T>, item: T) -> i64 {
     arr.push(item);
+    i64::try_from(arr.len()).unwrap_or(0)
 }
 
 #[must_use]
@@ -118,6 +119,17 @@ pub fn __ts_aot_array_set<T>(arr: &mut [T], idx: i64, value: T) -> bool {
 #[must_use]
 pub fn __ts_aot_array_len<T>(arr: &[T]) -> i64 {
     i64::try_from(arr.len()).unwrap_or(0)
+}
+
+#[must_use]
+pub fn __ts_aot_array_own_keys<T>(arr: &[T], include_length: bool) -> Vec<JsString> {
+    let mut keys: Vec<JsString> = (0..arr.len())
+        .map(|i| JsString::Valid(i.to_string()))
+        .collect();
+    if include_length {
+        keys.push(JsString::Valid("length".to_owned()));
+    }
+    keys
 }
 
 pub struct TsArrayMarker;
