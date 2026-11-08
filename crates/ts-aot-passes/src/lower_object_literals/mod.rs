@@ -148,7 +148,10 @@ fn collect_decl_names(decls: &[HirDecl], raw: &mut HashSet<Atom>, sanitized: &mu
             | HirDecl::Enum { name, .. }
             | HirDecl::Global { name, .. }
             | HirDecl::Interface { name, .. } => name,
-            HirDecl::Namespace { .. } => continue,
+            HirDecl::Namespace { members, .. } => {
+                collect_decl_names(members, raw, sanitized);
+                continue;
+            }
         };
         raw.insert(name.clone());
         sanitized.insert(sanitize_rust_ident(name.as_str()));
@@ -516,13 +519,27 @@ mod tests {
 
     #[test]
     fn synthetic_object_lit_name_avoids_user_declaration_collision() {
+        assert_synthetic_name_avoids_collision(0);
+    }
+
+    #[test]
+    fn synthetic_object_lit_name_avoids_namespace_member_collision() {
+        assert_synthetic_name_avoids_collision(1);
+    }
+
+    #[test]
+    fn synthetic_object_lit_name_avoids_nested_namespace_member_collision() {
+        assert_synthetic_name_avoids_collision(2);
+    }
+
+    fn assert_synthetic_name_avoids_collision(namespace_depth: usize) {
         let mut types = TypeTable::new();
         let mut program = HirProgram::new(ModuleId::from_raw(0));
         let user_ty = types.intern(&Type::Struct {
             id: StructId::from_raw(100),
         });
         let error_ty = types.intern(&Type::Error);
-        program.push_decl(HirDecl::Class(HirClass {
+        let mut user_decl = HirDecl::Class(HirClass {
             name: Atom::from("ObjectLit0"),
             ty: user_ty,
             pre_pass_ty: None,
@@ -530,7 +547,14 @@ mod tests {
             methods: Vec::new(),
             extends: None,
             type_params: Vec::new(),
-        }));
+        });
+        for _ in 0..namespace_depth {
+            user_decl = HirDecl::Namespace {
+                name: Atom::from("N"),
+                members: vec![user_decl],
+            };
+        }
+        program.push_decl(user_decl.clone());
         let lit = HirExpr::ObjectLiteral {
             fields: vec![ObjectLiteralField::Property {
                 name: Atom::from("a"),
@@ -550,6 +574,7 @@ mod tests {
         let mut cx = PassContext::new();
         lower_object_literals(&mut program, &mut types, &mut cx);
 
+        assert_eq!(program.declarations[0], user_decl);
         let class_names: Vec<String> = program
             .declarations
             .iter()
@@ -563,7 +588,7 @@ mod tests {
                 .iter()
                 .filter(|n| n.as_str() == "ObjectLit0")
                 .count(),
-            1,
+            usize::from(namespace_depth == 0),
             "the user-declared `ObjectLit0` must remain the only declaration with that name; got \
              {class_names:?}"
         );
