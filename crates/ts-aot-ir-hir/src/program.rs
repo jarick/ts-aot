@@ -1,6 +1,9 @@
-use ts_aot_core::{Atom, DiagnosticBag, ModuleId};
+use std::collections::HashMap;
 
-use crate::decl::{HirDecl, HirFunction};
+use ts_aot_core::{Atom, DiagnosticBag, ModuleId, TypeId};
+
+use crate::decl::{HirDecl, HirField, HirFunction};
+use crate::expr::HirExpr;
 
 #[must_use]
 pub fn qualified_name(namespace_path: &[String], leaf: &str) -> Atom {
@@ -45,6 +48,8 @@ pub struct HirProgram {
     pub is_module: bool,
     pub tla_main_name: Option<Atom>,
     pub next_class_struct_id: u32,
+    pub class_field_inits: HashMap<TypeId, Vec<(Atom, HirExpr)>>,
+    pub class_fields: HashMap<TypeId, Vec<HirField>>,
 }
 
 impl HirProgram {
@@ -59,6 +64,8 @@ impl HirProgram {
             is_module: false,
             tla_main_name: None,
             next_class_struct_id: 0,
+            class_field_inits: HashMap::new(),
+            class_fields: HashMap::new(),
         }
     }
 

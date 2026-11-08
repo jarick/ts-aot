@@ -18,6 +18,16 @@ use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 use crate::util::core_span_from_oxc;
 
+pub(crate) fn literal_hir_ty(types: &mut TypeTable, e: &HirExpr) -> Option<TypeId> {
+    Some(match e {
+        HirExpr::Int(..) => types.intern(&Type::I64),
+        HirExpr::Float(..) => types.intern(&Type::F64),
+        HirExpr::String(..) => types.intern(&Type::String),
+        HirExpr::Bool(..) => types.intern(&Type::Bool),
+        _ => return None,
+    })
+}
+
 fn declaration_defines(d: &HirDecl, name: &str) -> bool {
     let declared = match d {
         HirDecl::Function(f) => &f.name,
@@ -675,7 +685,47 @@ impl SkeletonBuilder {
                 }
             }
         }
-        let ty = senv.error_ty();
+        let mut inferred: Option<ts_aot_core::TypeId> = None;
+        let mut inconclusive = false;
+        for e in &elements {
+            let ty = match e {
+                HirExpr::Int(..) => Some(senv.types.intern(&ts_aot_core::Type::I64)),
+                HirExpr::Float(..) => Some(senv.types.intern(&ts_aot_core::Type::F64)),
+                HirExpr::String(..) => Some(senv.types.intern(&ts_aot_core::Type::String)),
+                HirExpr::Bool(..) => Some(senv.types.intern(&ts_aot_core::Type::Bool)),
+                _ => {
+                    let t = e.ty();
+                    (t != ts_aot_core::TypeId::from_raw(0)).then_some(t)
+                }
+            };
+            let Some(ty) = ty else {
+                inconclusive = true;
+                break;
+            };
+            match inferred {
+                None => inferred = Some(ty),
+                Some(prev) if prev == ty => {}
+                Some(_) => {
+                    inconclusive = true;
+                    break;
+                }
+            }
+        }
+        let element_ty = if inconclusive {
+            senv.error_ty()
+        } else {
+            inferred.unwrap_or_else(|| senv.error_ty())
+        };
+        let ty = if matches!(
+            senv.types.resolve(element_ty),
+            Some(ts_aot_core::Type::Error)
+        ) {
+            senv.error_ty()
+        } else {
+            senv.types.intern(&ts_aot_core::Type::Array {
+                element: element_ty,
+            })
+        };
         HirExpr::ArrayLiteral {
             elements,
             ty,
@@ -998,6 +1048,12 @@ impl SkeletonBuilder {
             {
                 senv.types.intern(&ts_aot_core::Type::Date)
             }
+            Expression::Identifier(id) if scope.lookup(id.name.as_str()).is_none() => {
+                match self.class_types.get(id.name.as_str()) {
+                    Some(&class_ty) => class_ty,
+                    None => senv.error_ty(),
+                }
+            }
             _ => senv.error_ty(),
         };
         HirExpr::New {
@@ -1049,14 +1105,25 @@ impl SkeletonBuilder {
                     Some(ts_aot_core::Type::Struct { .. })
                 ) {
                     let owner_ty = owner.ty();
-                    senv.program.declarations.iter().find_map(|d| match d {
-                        HirDecl::Class(c) if c.ty == owner_ty => c
-                            .fields
-                            .iter()
-                            .find(|f| f.name.as_str() == prop)
-                            .map(|f| f.ty),
-                        _ => None,
-                    })
+                    senv.program
+                        .declarations
+                        .iter()
+                        .find_map(|d| match d {
+                            HirDecl::Class(c) if c.ty == owner_ty => c
+                                .fields
+                                .iter()
+                                .find(|f| f.name.as_str() == prop)
+                                .map(|f| f.ty),
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            senv.program.class_fields.get(&owner_ty).and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find(|f| f.name.as_str() == prop)
+                                    .map(|f| f.ty)
+                            })
+                        })
                 } else {
                     None
                 };

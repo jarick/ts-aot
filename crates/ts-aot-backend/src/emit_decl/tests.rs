@@ -147,6 +147,35 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
 }
 
 #[test]
+fn bool_param_function_emits_wrapper_unpacking_via_ne_zero() {
+    let mut types = TypeTable::new();
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = empty_func("negate");
+    f.ret = bool_ty;
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: bool_ty,
+    }];
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("let x : bool = __slot_0 != 0 ;"),
+        "bool param must be unpacked via `__slot_0 != 0` (Rust rejects `u64 as bool`), got: {s}"
+    );
+    assert!(
+        !s.contains("__slot_0 as bool"),
+        "bool param must not be unpacked via `u64 as bool`, got: {s}"
+    );
+    assert!(
+        s.contains("__result as u64"),
+        "bool return must be packed via `as u64`, got: {s}"
+    );
+}
+
+#[test]
 fn f64_param_function_emits_wrapper_with_from_bits() {
     let mut types = TypeTable::new();
     let f64_ty = types.intern(&Type::F64);
@@ -1394,23 +1423,80 @@ fn struct_type_reference_uses_declared_struct_name() {
 }
 
 #[test]
-fn global_without_init_emits_default_initializer() {
+fn global_without_init_emits_const_default_initializer() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Global(MirGlobalDecl {
         name: Atom::from("counter"),
-        ty: TypeId::from_raw(0),
+        ty: i64_ty,
         mutable: false,
         visibility: Visibility::Public,
         export_name: None,
         init: None,
     }));
-    let tokens = emit_decls(&prog, &TypeTable::new())
-        .expect("uninitialized global must emit a default-initialized static");
+    let tokens = emit_decls(&prog, &types)
+        .expect("uninitialized global must emit a const-default-initialized static");
     let s = tokens.to_string();
     assert!(s.contains("static counter"), "expected static decl in: {s}");
     assert!(
-        s.contains("Default :: default ()"),
-        "expected Default::default() initializer in: {s}"
+        s.contains("= 0 ;"),
+        "uninitialized globals must use a const-capable default \
+         (Rust rejects `Default::default()` in a static initializer); got: {s}"
+    );
+    assert!(
+        !s.contains("Default :: default"),
+        "`Default::default()` is not allowed in a static initializer; got: {s}"
+    );
+}
+
+#[test]
+fn global_struct_without_init_emits_fieldwise_const_default() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let sid = StructId::from_raw(3);
+    let struct_ty = types.intern(&Type::Struct { id: sid });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: sid,
+        name: Atom::from("Point"),
+        fields: vec![
+            MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("x"),
+                ty: i64_ty,
+                mutable: true,
+                visibility: Visibility::Public,
+            },
+            MirFieldDecl {
+                id: FieldId::from_raw(1),
+                name: Atom::from("y"),
+                ty: i64_ty,
+                mutable: true,
+                visibility: Visibility::Public,
+            },
+        ],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("origin"),
+        ty: struct_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let s = emit_decls(&prog, &types)
+        .expect("struct global must emit")
+        .to_string();
+    assert!(
+        s.contains("static mut origin : Point = Point { x : 0 , y : 0 } ;"),
+        "a struct global without init must use a fieldwise const default \
+         (Rust rejects `Default::default()` in statics); got: {s}"
+    );
+    assert!(
+        !s.contains("Default :: default"),
+        "`Default::default()` must not appear for a struct global; got: {s}"
     );
 }
 

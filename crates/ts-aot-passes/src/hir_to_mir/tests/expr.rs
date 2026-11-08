@@ -1698,11 +1698,12 @@ fn convert_expr_new_lowers_callee_for_side_effects() {
         .collect();
     assert!(
         call_callees.contains(&callee_fn_id),
-        "callee's factory call must appear in output before placeholder ctor, got {call_callees:?}"
+        "callee's factory call must still be lowered for its side effects, got {call_callees:?}"
     );
     assert!(
-        call_callees.contains(&PLACEHOLDER_FUNCTION),
-        "placeholder ctor call must still appear, got {call_callees:?}"
+        !call_callees.contains(&PLACEHOLDER_FUNCTION),
+        "a `new` whose constructor cannot be resolved must not emit a placeholder ctor call, \
+         got {call_callees:?}"
     );
 }
 

@@ -1,10 +1,12 @@
 use proc_macro2::{Ident, Literal, Punct, Spacing, TokenStream};
 use quote::{format_ident, quote};
-use ts_aot_core::{Atom, LocalId, Type, TypeId, TypeTable};
+use std::collections::HashSet;
+
+use ts_aot_core::{Atom, FieldId, LocalId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, MirBlock, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam, MirPlace,
-    MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam,
+    MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
 use super::ctx::{
@@ -684,6 +686,84 @@ fn emit_stmt(
     }
 }
 
+fn emit_global_access(
+    name: &Atom,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    owned: bool,
+) -> TokenStream {
+    if let Some(read) = body_ctx.shared_read_for_name(name) {
+        return read;
+    }
+    if let Some((k, variant)) = ctx.fn_value_for_name(name) {
+        let enum_name = EmitCtx::fn_value_ident(k);
+        return quote!(#enum_name::#variant);
+    }
+    let ident = ident_from(name);
+    let non_copy = owned
+        && ctx
+            .global_ty(name)
+            .is_some_and(|t| !is_copy_type(emit_env.types, t));
+    let inner = if non_copy {
+        quote!(#ident.clone())
+    } else {
+        quote!(#ident)
+    };
+    if ctx.is_mutable_global(name) {
+        quote!(unsafe { #inner })
+    } else {
+        quote!(#inner)
+    }
+}
+
+fn emit_global_place_base(name: &Atom, body_ctx: &BodyCtx) -> TokenStream {
+    if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
+        return tokens;
+    }
+    let ident = ident_from(name);
+    quote!(#ident)
+}
+
+fn emit_place_expr(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Global(name) => Ok(emit_global_access(name, ctx, emit_env, body_ctx, false)),
+        _ => emit_expr(expr, ctx, emit_env, body_ctx),
+    }
+}
+
+fn emit_place_ref_expr(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
+        _ => emit_expr(expr, ctx, emit_env, body_ctx),
+    }
+}
+
+fn emit_mut_receiver(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<(TokenStream, bool), BackendError> {
+    if let MirExpr::Global(name) = expr
+        && ctx.is_mutable_global(name)
+        && body_ctx.shared_access_for_name(name).is_none()
+    {
+        return Ok((emit_place_ref_expr(expr, ctx, emit_env, body_ctx)?, true));
+    }
+    Ok((emit_place_expr(expr, ctx, emit_env, body_ctx)?, false))
+}
+
 fn emit_place(
     place: &MirPlace,
     ctx: &EmitCtx,
@@ -711,7 +791,7 @@ fn emit_place(
             Ok(quote!(#base.#field))
         }
         MirPlace::Index { base, index, .. } => {
-            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+            let base = emit_place_ref_expr(base, ctx, emit_env, body_ctx)?;
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
@@ -727,13 +807,7 @@ fn emit_place_base(
     let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
-        MirPlaceBase::Global(name) => {
-            if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
-                return Ok(tokens);
-            }
-            let name = ident_from(name);
-            Ok(quote!(#name))
-        }
+        MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
                 "nested field place: base type unresolved",
@@ -748,7 +822,7 @@ fn emit_place_base(
             Ok(quote!(#base.#field))
         }
         MirPlaceBase::Index { base, index, .. } => {
-            let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+            let base = emit_place_ref_expr(base, ctx, emit_env, body_ctx)?;
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index]))
         }
@@ -792,10 +866,23 @@ fn value_ty(
     }
 }
 
-fn is_same_value_able(types: &TypeTable, ty: TypeId) -> bool {
-    match types.resolve(ty) {
-        Some(
-            Type::Bool
+fn emit_same_value(
+    types: &TypeTable,
+    a_ty: &Type,
+    b_ty: &Type,
+    operands: (TokenStream, TokenStream),
+    same_place: bool,
+    depth: usize,
+) -> Result<TokenStream, BackendError> {
+    fn supported(types: &TypeTable, ty: &Type) -> bool {
+        match ty {
+            Type::Optional { inner } => types.resolve(*inner).is_some_and(|t| supported(types, t)),
+            Type::Void
+            | Type::Null
+            | Type::Struct { .. }
+            | Type::Named { .. }
+            | Type::Array { .. }
+            | Type::Bool
             | Type::I8
             | Type::I16
             | Type::I32
@@ -807,11 +894,73 @@ fn is_same_value_able(types: &TypeTable, ty: TypeId) -> bool {
             | Type::F32
             | Type::F64
             | Type::String
-            | Type::Symbol,
-        ) => true,
-        Some(Type::Optional { inner }) => is_same_value_able(types, *inner),
-        _ => false,
+            | Type::Symbol => true,
+            _ => false,
+        }
     }
+    let (a, b) = operands;
+    let unsupported = || BackendError::NotImplemented("Object.is: unsupported operand type");
+    if !supported(types, a_ty) || !supported(types, b_ty) {
+        return Err(unsupported());
+    }
+    let left = format_ident!("__ts_aot_left_{}", depth);
+    let right = format_ident!("__ts_aot_right_{}", depth);
+    match (a_ty, b_ty) {
+        (Type::Optional { inner: x }, Type::Optional { inner: y }) => {
+            let inner = emit_same_value(
+                types,
+                types.resolve(*x).ok_or_else(unsupported)?,
+                types.resolve(*y).ok_or_else(unsupported)?,
+                (quote!(#left), quote!(#right)),
+                same_place,
+                depth + 1,
+            )?;
+            Ok(quote!(match (#a, #b) {
+                (Some(#left), Some(#right)) => #inner,
+                (None, None) => true,
+                _ => false,
+            }))
+        }
+        (Type::Optional { inner }, _) => {
+            let comparison = emit_same_value(
+                types,
+                types.resolve(*inner).ok_or_else(unsupported)?,
+                b_ty,
+                (quote!(#left), b.clone()),
+                same_place,
+                depth + 1,
+            )?;
+            let absent = matches!(b_ty, Type::Void);
+            Ok(quote!(match #a { Some(#left) => #comparison, None => #absent }))
+        }
+        (_, Type::Optional { .. }) => {
+            emit_same_value(types, b_ty, a_ty, (b, a), same_place, depth + 1)
+        }
+        (Type::Void, Type::Void) | (Type::Null, Type::Null) => Ok(quote!(true)),
+        (Type::Struct { .. } | Type::Named { .. }, Type::Struct { .. } | Type::Named { .. })
+        | (Type::Array { .. }, Type::Array { .. }) => Ok(quote!(#same_place)),
+        _ if a_ty == b_ty => Ok(quote!(__ts_aot_object_is(#a, #b))),
+        _ if is_number_type(a_ty) && is_number_type(b_ty) => {
+            Ok(quote!(__ts_aot_object_is(&(*#a as f64), &(*#b as f64))))
+        }
+        _ => Ok(quote!(false)),
+    }
+}
+
+fn is_number_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64
+    )
 }
 
 fn same_place(a: &MirExpr, b: &MirExpr) -> bool {
@@ -870,12 +1019,7 @@ fn is_copy_type(types: &TypeTable, ty: TypeId) -> bool {
     }
 }
 
-fn is_non_copy_place(
-    expr: &MirExpr,
-    ctx: &EmitCtx,
-    emit_env: &EmitEnv,
-    body_ctx: &BodyCtx,
-) -> bool {
+fn is_non_copy_place(expr: &MirExpr, emit_env: &EmitEnv, body_ctx: &BodyCtx) -> bool {
     match expr {
         MirExpr::Local(id) => {
             if body_ctx.shared_access_for_local(*id).is_some() || body_ctx.is_move_safe(*id) {
@@ -884,12 +1028,6 @@ fn is_non_copy_place(
             body_ctx
                 .local_ty(*id)
                 .is_some_and(|t| !is_copy_type(emit_env.types, t))
-        }
-        MirExpr::Global(name) => {
-            body_ctx.shared_access_for_name(name).is_none()
-                && ctx
-                    .global_ty(name)
-                    .is_some_and(|t| !is_copy_type(emit_env.types, t))
         }
         MirExpr::Field { base, .. } => {
             if is_shared_local_base(base, body_ctx) {
@@ -929,7 +1067,7 @@ fn emit_owned_value(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let tokens = emit_value_expr(expr, ctx, emit_env, body_ctx)?;
-    if is_non_copy_place(expr, ctx, emit_env, body_ctx) {
+    if is_non_copy_place(expr, emit_env, body_ctx) {
         Ok(quote!(#tokens.clone()))
     } else {
         Ok(tokens)
@@ -1092,21 +1230,7 @@ fn emit_expr(
             Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
         MirExpr::Local(id) => Ok(body_ctx.local_read(*id)),
-        MirExpr::Global(name) => {
-            if let Some(read) = body_ctx.shared_read_for_name(name) {
-                return Ok(read);
-            }
-            if let Some((k, variant)) = ctx.fn_value_for_name(name) {
-                let enum_name = EmitCtx::fn_value_ident(k);
-                return Ok(quote!(#enum_name::#variant));
-            }
-            let ident = ident_from(name);
-            if ctx.is_mutable_global(name) {
-                Ok(quote!(unsafe { #ident }))
-            } else {
-                Ok(quote!(#ident))
-            }
-        }
+        MirExpr::Global(name) => Ok(emit_global_access(name, ctx, emit_env, body_ctx, true)),
         MirExpr::Field { base, field, .. } => {
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
                 let base_ty = expr_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
@@ -1227,15 +1351,34 @@ fn emit_expr(
             struct_id, fields, ..
         } => {
             let name = ctx.struct_ident(*struct_id);
-            let fields = fields
+            let mut emitted: Vec<TokenStream> = Vec::with_capacity(fields.len());
+            for (field_id, value) in fields {
+                let field = ctx.struct_field_ident(*struct_id, *field_id);
+                let value = emit_owned_value(value, ctx, emit_env, body_ctx)?;
+                emitted.push(quote!(#field: #value));
+            }
+            let listed: HashSet<FieldId> = fields.iter().map(|(id, _)| *id).collect();
+            let declared: Vec<(FieldId, TypeId)> = emit_env
+                .program
+                .declarations
                 .iter()
-                .map(|(field_id, value)| {
-                    let field = ctx.struct_field_ident(*struct_id, *field_id);
-                    let value = emit_owned_value(value, ctx, emit_env, body_ctx)?;
-                    Ok(quote!(#field: #value))
+                .find_map(|d| match d {
+                    MirDecl::Struct(s) if s.id == *struct_id => {
+                        Some(s.fields.iter().map(|f| (f.id, f.ty)).collect())
+                    }
+                    _ => None,
                 })
-                .collect::<Result<Vec<_>, BackendError>>()?;
-            Ok(quote!(#name { #(#fields),* }))
+                .unwrap_or_default();
+            let mut budget = super::CONST_DEFAULT_BUDGET;
+            for (fid, fty) in declared {
+                if listed.contains(&fid) {
+                    continue;
+                }
+                let fname = ctx.struct_field_ident(*struct_id, fid);
+                let fdef = super::emit_const_default(fty, ctx, emit_env, 0, &mut budget)?;
+                emitted.push(quote!(#fname: #fdef));
+            }
+            Ok(quote!(#name { #(#emitted),* }))
         }
         MirExpr::ResultOk { value, .. } => {
             let value = emit_expr(value, ctx, emit_env, body_ctx)?;
@@ -1912,12 +2055,17 @@ fn emit_typeof(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
+    ctx.mark_runtime_used();
     match expr {
-        MirExpr::Unit => Ok(quote!(String::from(__ts_aot_typeof_unit()))),
-        MirExpr::Null { .. } => Ok(quote!(String::from(__ts_aot_typeof_null()))),
+        MirExpr::Unit => Ok(quote!(ts_aot_runtime::JsString::from(
+            __ts_aot_typeof_unit()
+        ))),
+        MirExpr::Null { .. } => Ok(quote!(ts_aot_runtime::JsString::from(
+            __ts_aot_typeof_null()
+        ))),
         _ => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
-            Ok(quote!(String::from(__ts_aot_typeof(&#inner))))
+            Ok(quote!(ts_aot_runtime::JsString::from(__ts_aot_typeof(&#inner))))
         }
     }
 }
@@ -2135,17 +2283,23 @@ fn emit_runtime_call(
             Ok(quote!(__ts_aot_array_from_mapped(&#arr, #wrapper)))
         }
         RuntimeOp::ObjectKeys => {
-            if let Some(sid) = expr_base_ty(&args[0], body_ctx).and_then(|t| types.struct_id(t))
+            if let Some(sid) =
+                value_ty(&args[0], ctx, emit_env, body_ctx).and_then(|t| types.struct_id(t))
                 && let Some(fields) = ctx.struct_field_names(sid)
             {
                 let lits = fields.iter().map(|name| {
                     let lit = Literal::string(name.as_str());
                     quote!(ts_aot_runtime::JsString::from(#lit))
                 });
-                let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+                let eval = if matches!(&args[0], MirExpr::Global(_)) {
+                    TokenStream::new()
+                } else {
+                    let operand = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+                    quote!(let _ = &(#operand);)
+                };
                 return Ok(quote!({
-                    let _ = &#arg;
-                    __ts_aot_array_create(vec![#(#lits),*])
+                    #eval
+                    __ts_aot_array_create::<ts_aot_runtime::JsString>(vec![#(#lits),*])
                 }));
             }
             let map = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2172,23 +2326,33 @@ fn emit_runtime_call(
                     true
                 }));
             }
-            match (a_ty, b_ty) {
-                (Some(x), Some(y)) if x == y && is_same_value_able(types, x) => {
-                    Ok(quote!(__ts_aot_object_is(&#a, &#b)))
-                }
-                (Some(x), Some(y)) if x == y => {
-                    let equal = same_place(&args[0], &args[1]);
-                    Ok(quote!({
-                        let _ = (&#a, &#b);
-                        #equal
-                    }))
-                }
-                _ => Ok(quote!({
-                    let _ = (&#a, &#b);
-                    false
-                })),
-            }
+            let resolve = |expr: &MirExpr, ty: Option<TypeId>| match expr {
+                MirExpr::Unit => Some(Type::Void),
+                MirExpr::Null { .. } => Some(Type::Null),
+                MirExpr::Bool(_) => Some(Type::Bool),
+                _ => ty.and_then(|id| types.resolve(id)).cloned(),
+            };
+            let a_ty = resolve(&args[0], a_ty).ok_or(BackendError::NotImplemented(
+                "Object.is: first operand type unresolved",
+            ))?;
+            let b_ty = resolve(&args[1], b_ty).ok_or(BackendError::NotImplemented(
+                "Object.is: second operand type unresolved",
+            ))?;
+            let comparison = emit_same_value(
+                types,
+                &a_ty,
+                &b_ty,
+                (quote!(__ts_aot_a), quote!(__ts_aot_b)),
+                same_place(&args[0], &args[1]),
+                0,
+            )?;
+            Ok(quote!({
+                let __ts_aot_a = &#a;
+                let __ts_aot_b = &#b;
+                #comparison
+            }))
         }
+
         RuntimeOp::DateParse => {
             let s = emit_js_string_arg(&args[0], ctx, emit_env, body_ctx)?;
             Ok(quote!(__ts_aot_date_parse(#s)))
@@ -2245,15 +2409,25 @@ fn emit_runtime_call(
         }
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, emit_env, body_ctx),
         RuntimeOp::ArrayPush => {
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let item = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_array_push(&mut #arr, #item)))
+            let call = quote!(__ts_aot_array_push(&mut #arr, #item));
+            Ok(if needs_unsafe {
+                quote!(unsafe { #call })
+            } else {
+                call
+            })
         }
         RuntimeOp::ArraySet => {
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
-            Ok(quote!(__ts_aot_array_set(&mut #arr, #idx, #value)))
+            let call = quote!(__ts_aot_array_set(&mut #arr, #idx, #value));
+            Ok(if needs_unsafe {
+                quote!(unsafe { #call })
+            } else {
+                call
+            })
         }
         RuntimeOp::ArrayLen => {
             let name = runtime_op_ident(op)?;
@@ -2392,13 +2566,11 @@ fn emit_runtime_call(
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let default_tokens = emit_default_for_weakmap_get(ty, emit_env, ctx);
             let value_ty_tokens = emit_type_id_with_ctx(ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_get::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_get::<#value_ty_tokens>(
                 &#handle,
                 &#liveness,
                 #key,
-            ).unwrap_or(#default_tokens)),
-            )
+            ).unwrap_or(#default_tokens)))
         }
         RuntimeOp::WeakMapSet => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2407,7 +2579,7 @@ fn emit_runtime_call(
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
             Ok(quote!({
-                let _ = ts_aot_runtime::__ts_aot_weak_map_set::<#value_ty_tokens>(
+                let _ = __ts_aot_weak_map_set::<#value_ty_tokens>(
                     &#handle,
                     &#liveness,
                     #key,
@@ -2421,22 +2593,18 @@ fn emit_runtime_call(
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_has::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_has::<#value_ty_tokens>(
                 &#handle, &#liveness, #key,
-            ) != 0),
-            )
+            ) != 0))
         }
         RuntimeOp::WeakMapDelete => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
             let (key, liveness) = emit_weakmap_key(&args[1], body_ctx)?;
             let value_ty = weakmap_value_type_id(&args[0], body_ctx, types)?;
             let value_ty_tokens = emit_type_id_with_ctx(value_ty, emit_env, ctx);
-            Ok(
-                quote!(ts_aot_runtime::__ts_aot_weak_map_delete::<#value_ty_tokens>(
+            Ok(quote!(__ts_aot_weak_map_delete::<#value_ty_tokens>(
                 &#handle, &#liveness, #key,
-            ) != 0),
-            )
+            ) != 0))
         }
         RuntimeOp::WeakMapClear => {
             let handle = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -2863,4 +3031,41 @@ fn emit_try(
         }
         #replay_return
     }})
+}
+
+#[cfg(test)]
+mod same_value_tests {
+    use super::*;
+
+    #[test]
+    fn object_is_checks_both_operand_types() {
+        use quote::quote;
+        let mut types = TypeTable::new();
+        let number = types.intern(&Type::I64);
+        let optional = Type::Optional { inner: number };
+        let emit = |a: &Type, b: &Type| {
+            emit_same_value(&types, a, b, (quote!(a), quote!(b)), false, 0)
+                .map(|tokens| tokens.to_string())
+        };
+        assert!(emit(&Type::I64, &Type::F64).unwrap().contains("as f64"));
+        assert!(emit(&optional, &Type::I64).unwrap().contains("Some"));
+        assert!(emit(&Type::I64, &optional).unwrap().contains("Some"));
+        assert!(
+            emit(&optional, &optional)
+                .unwrap()
+                .contains("(None , None) => true")
+        );
+        assert!(
+            emit(&optional, &Type::Void)
+                .unwrap()
+                .contains("None => true")
+        );
+        assert_eq!(emit(&Type::Bool, &Type::I64).unwrap(), "false");
+        let array = Type::Array { element: number };
+        assert_eq!(emit(&array, &array).unwrap(), "false");
+        for unsupported in [Type::Error, Type::BigInt, Type::Tuple { elements: vec![] }] {
+            assert!(emit(&Type::I64, &unsupported).is_err());
+            assert!(emit(&unsupported, &Type::I64).is_err());
+        }
+    }
 }

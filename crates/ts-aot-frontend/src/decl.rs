@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind, TSType,
-    TSTypeName, match_member_expression,
+    Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind, Program,
+    TSType, TSTypeName, match_member_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{
@@ -290,29 +290,66 @@ impl SkeletonBuilder {
             class.type_parameters.as_deref(),
         );
 
-        let fields = class
-            .body
-            .body
-            .iter()
-            .filter_map(|m| match m {
-                oxc_ast::ast::ClassElement::PropertyDefinition(p) => {
-                    let field_name = p
-                        .key
-                        .static_name()
-                        .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
-                    let field_ty = self.resolve_ts_type_from_annotation_with_params(
-                        senv,
-                        p.type_annotation.as_deref(),
-                        Some(&class_type_param_map),
-                    );
-                    Some(HirField {
-                        name: field_name,
-                        ty: field_ty,
-                    })
+        let already_processed = senv.program.class_field_inits.contains_key(&ty);
+        let fields: Vec<HirField> =
+            if let Some(cached) = senv.program.class_fields.get(&ty).cloned() {
+                cached
+            } else {
+                let computed = self.collect_class_fields(senv, class, Some(&class_type_param_map));
+                senv.program.class_fields.insert(ty, computed.clone());
+                computed
+            };
+        let mut field_inits: Vec<(Atom, HirExpr)> = Vec::new();
+        for element in &class.body.body {
+            let oxc_ast::ast::ClassElement::PropertyDefinition(p) = element else {
+                continue;
+            };
+            let field_name = p
+                .key
+                .static_name()
+                .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
+            let Some(value) = &p.value else {
+                continue;
+            };
+            let span = core_span_from_oxc(value.span());
+            let field_ty = fields.iter().find(|f| f.name == field_name).map(|f| f.ty);
+            let init = match value {
+                Expression::NumericLiteral(n) => {
+                    if field_ty.is_some_and(|t| {
+                        matches!(senv.types.resolve(t), Some(Type::F64 | Type::F32))
+                    }) {
+                        Some(HirExpr::Float(n.value.to_bits(), span))
+                    } else {
+                        Some(crate::ops::number_to_hir(n.value, span))
+                    }
+                }
+                Expression::BooleanLiteral(b) => Some(HirExpr::Bool(b.value, span)),
+                Expression::StringLiteral(s) => {
+                    Some(HirExpr::String(Atom::from(s.value.as_str()), span))
                 }
                 _ => None,
-            })
-            .collect();
+            };
+            match init {
+                Some(init) => field_inits.push((field_name.clone(), init)),
+                None => {
+                    if !already_processed {
+                        senv.diagnostics.push(Diagnostic::warning(
+                            "E0406",
+                            format!(
+                                "class field initializer for `{}` is not supported in AOT \
+                                 (only literal number/string/bool initializers are); the \
+                                 field will default to its zero value",
+                                field_name.as_str()
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
+        }
+        if !already_processed {
+            senv.program.class_field_inits.insert(ty, field_inits);
+        }
 
         let mut methods = Vec::new();
         let mut accessor_names = HashSet::new();
@@ -367,6 +404,89 @@ impl SkeletonBuilder {
             methods,
             extends,
             type_params: class_type_param_ids,
+        }
+    }
+
+    fn collect_class_fields(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        class: &Class<'_>,
+        type_params: Option<&TypeParamMap>,
+    ) -> Vec<HirField> {
+        class
+            .body
+            .body
+            .iter()
+            .filter_map(|m| {
+                let oxc_ast::ast::ClassElement::PropertyDefinition(p) = m else {
+                    return None;
+                };
+                let name = p
+                    .key
+                    .static_name()
+                    .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
+                let mut ty = self.resolve_ts_type_from_annotation_with_params(
+                    senv,
+                    p.type_annotation.as_deref(),
+                    type_params,
+                );
+                if p.type_annotation.is_none()
+                    && matches!(senv.types.resolve(ty), None | Some(Type::Error))
+                    && let Some(value) = &p.value
+                    && let Some(init) = literal_value_hir(value, core_span_from_oxc(value.span()))
+                    && let Some(inferred) = crate::expr::literal_hir_ty(senv.types, &init)
+                {
+                    ty = inferred;
+                }
+                Some(HirField { name, ty })
+            })
+            .collect()
+    }
+
+    pub(crate) fn pre_register_class_fields(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        program: &Program<'_>,
+    ) {
+        for stmt in &program.body {
+            let class_opt: Option<&Class<'_>> = if let Some(decl) = stmt.as_declaration() {
+                if let Declaration::ClassDeclaration(c) = decl {
+                    Some(c)
+                } else {
+                    None
+                }
+            } else if let Some(m) = stmt.as_module_declaration() {
+                if let oxc_ast::ast::ModuleDeclaration::ExportNamedDeclaration(e) = m
+                    && let Some(Declaration::ClassDeclaration(c)) = e.declaration.as_ref()
+                {
+                    Some(c)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let Some(class) = class_opt else {
+                continue;
+            };
+            let Some(id) = class.id.as_ref() else {
+                continue;
+            };
+            if class
+                .type_parameters
+                .as_ref()
+                .is_some_and(|p| !p.params.is_empty())
+            {
+                continue;
+            }
+            let Some(ty) = self.class_types.get(id.name.as_str()).copied() else {
+                continue;
+            };
+            if senv.program.class_fields.contains_key(&ty) {
+                continue;
+            }
+            let fields = self.collect_class_fields(senv, class, None);
+            senv.program.class_fields.insert(ty, fields);
         }
     }
 
@@ -483,12 +603,29 @@ impl SkeletonBuilder {
                 continue;
             };
             let name = Atom::from(ident.as_str());
-            let ty =
+            let mut ty =
                 self.resolve_ts_type_from_annotation(senv, declarator.type_annotation.as_deref());
             let init = declarator
                 .init
                 .as_ref()
                 .map(|init_expr| self.walk_top_level_init(senv, init_expr));
+            if declarator.type_annotation.is_none()
+                && matches!(senv.types.resolve(ty), None | Some(Type::Error))
+            {
+                let inferred = init.as_ref().and_then(|e| match e {
+                    HirExpr::Int(..) => Some(senv.types.intern(&Type::I64)),
+                    HirExpr::Float(..) => Some(senv.types.intern(&Type::F64)),
+                    HirExpr::String(..) => Some(senv.types.intern(&Type::String)),
+                    HirExpr::Bool(..) => Some(senv.types.intern(&Type::Bool)),
+                    _ => {
+                        let t = e.ty();
+                        (t != ts_aot_core::TypeId::from_raw(0)).then_some(t)
+                    }
+                });
+                if let Some(t) = inferred {
+                    ty = t;
+                }
+            }
             self.emit_top_level_let(senv, name, ty, init, v.span);
         }
     }
@@ -610,6 +747,15 @@ impl SkeletonBuilder {
     ) -> TypeId {
         self.resolve_ts_type_with_params(senv, ann.map(|a| &a.type_annotation), type_params)
     }
+}
+
+fn literal_value_hir(value: &Expression<'_>, span: CoreSpan) -> Option<HirExpr> {
+    Some(match value {
+        Expression::NumericLiteral(n) => crate::ops::number_to_hir(n.value, span),
+        Expression::BooleanLiteral(b) => HirExpr::Bool(b.value, span),
+        Expression::StringLiteral(s) => HirExpr::String(Atom::from(s.value.as_str()), span),
+        _ => return None,
+    })
 }
 
 fn build_type_param_context(
