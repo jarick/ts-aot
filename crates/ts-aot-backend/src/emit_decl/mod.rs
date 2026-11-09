@@ -670,7 +670,7 @@ fn emit_global_with_ctx(
     let vis = visibility_token(g.visibility);
     let mutability = if g.mutable { quote!(mut) } else { quote!() };
     let init = if let Some(expr) = &g.init {
-        emit_const_expr(expr)?
+        emit_const_expr(expr, emit_env.types)?
     } else {
         let mut budget = CONST_DEFAULT_BUDGET;
         emit_const_default(g.ty, ctx, emit_env, 0, &mut budget)?

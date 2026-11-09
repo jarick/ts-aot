@@ -30,9 +30,9 @@ fn assert_f64_exact(actual: f64, expected: f64) {
 
 #[test]
 fn runtime_string_len_returns_utf16_code_unit_count() {
-    assert_eq!(__ts_aot_string_len(&js("hello")), 5);
-    assert_eq!(__ts_aot_string_len(&js("")), 0);
-    assert_eq!(__ts_aot_string_len(&js("café")), 4);
+    assert_f64_exact(__ts_aot_string_len(&js("hello")), 5.0);
+    assert_f64_exact(__ts_aot_string_len(&js("")), 0.0);
+    assert_f64_exact(__ts_aot_string_len(&js("café")), 4.0);
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn runtime_throw_helper_panics_with_string_payload() {
 #[test]
 fn runtime_array_get_set_and_len() {
     let mut arr: Vec<i64> = Vec::new();
-    assert_eq!(__ts_aot_array_len(&arr), 0);
+    assert_f64_exact(__ts_aot_array_len(&arr), 0.0);
     arr.push(0);
     arr.push(0);
     arr.push(0);
@@ -346,7 +346,7 @@ fn runtime_array_get_set_and_len() {
     assert!(wrote);
     let got = __ts_aot_array_get(&arr, 1);
     assert_eq!(got, Some(99));
-    assert_eq!(__ts_aot_array_len(&arr), 3);
+    assert_f64_exact(__ts_aot_array_len(&arr), 3.0);
 }
 
 #[test]
@@ -397,13 +397,13 @@ fn runtime_array_is_array_returns_false_for_non_vec() {
 fn runtime_array_create_with_len_zero_returns_empty_vec() {
     let v: Vec<i64> = __ts_aot_array_create_with_len(0);
     assert_eq!(v, [] as [i64; 0]);
-    assert_eq!(__ts_aot_array_len(&v), 0);
+    assert_f64_exact(__ts_aot_array_len(&v), 0.0);
 }
 
 #[test]
 fn runtime_array_create_with_len_fills_with_default() {
     let v: Vec<i64> = __ts_aot_array_create_with_len(3);
-    assert_eq!(__ts_aot_array_len(&v), 3);
+    assert_f64_exact(__ts_aot_array_len(&v), 3.0);
     assert_eq!(v, vec![0, 0, 0]);
     let s: Vec<String> = __ts_aot_array_create_with_len(2);
     assert_eq!(s, vec![String::new(), String::new()]);
@@ -450,8 +450,8 @@ fn runtime_array_from_clones_source_vec() {
     let src: Vec<i64> = vec![1, 2, 3];
     let dst: Vec<i64> = __ts_aot_array_from(&src);
     assert_eq!(dst, src);
-    assert_eq!(__ts_aot_array_len(&src), 3);
-    assert_eq!(__ts_aot_array_len(&dst), 3);
+    assert_f64_exact(__ts_aot_array_len(&src), 3.0);
+    assert_f64_exact(__ts_aot_array_len(&dst), 3.0);
     let str_vec: Vec<String> = vec!["a".to_owned(), "b".to_owned()];
     let str_dst: Vec<String> = __ts_aot_array_from(&str_vec);
     assert_eq!(str_dst, vec!["a".to_owned(), "b".to_owned()]);
@@ -824,8 +824,7 @@ fn runtime_string_index_of_and_char_at_compose_on_non_ascii() {
     let haystack = js("é=value\u{1F600}");
     let eq_idx = __ts_aot_string_index_of(&haystack, &js("="), 0);
     assert_eq!(eq_idx, 1);
-    let value =
-        __ts_aot_string_substring_utf16(&haystack, eq_idx + 1, __ts_aot_string_len(&haystack));
+    let value = __ts_aot_string_substring_utf16(&haystack, eq_idx + 1, haystack.len_code_units());
     assert_eq!(value, js("value\u{1F600}"));
     let emoji_idx = __ts_aot_string_index_of(&value, &js("\u{1F600}"), 0);
     assert_eq!(emoji_idx, 5);

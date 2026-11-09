@@ -9,14 +9,14 @@ use crate::hir_to_mir::converter::ExprConverter;
 
 use super::util::hir_expr_type_id;
 
-/// Result type of an array `length`/`len` access: `i64`, or `i64 | undefined`
+/// Result type of an array `length`/`len` access: `f64`, or `f64 | undefined`
 /// when the receiver is itself optional (`arr?.length`).
 fn array_len_result_ty(types: &mut TypeTable, is_optional: bool) -> TypeId {
-    let i64_ty = types.intern(&Type::I64);
+    let f64_ty = types.intern(&Type::F64);
     if is_optional {
-        types.intern(&Type::Optional { inner: i64_ty })
+        types.intern(&Type::Optional { inner: f64_ty })
     } else {
-        i64_ty
+        f64_ty
     }
 }
 

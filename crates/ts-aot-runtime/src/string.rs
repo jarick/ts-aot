@@ -302,8 +302,8 @@ pub fn __ts_aot_string_from_code_point(points: &[i64]) -> JsString {
 }
 
 #[must_use]
-pub fn __ts_aot_string_len(s: &JsString) -> i64 {
-    s.len_code_units()
+pub fn __ts_aot_string_len(s: &JsString) -> f64 {
+    f64::from(u32::try_from(s.len_code_units()).unwrap_or(u32::MAX))
 }
 
 fn i64_to_char_code_u16(c: i64) -> u16 {

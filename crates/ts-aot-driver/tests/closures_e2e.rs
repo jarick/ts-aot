@@ -132,8 +132,8 @@ fn shared_array_element_read_does_not_clone_container() {
         "a shared array element read must index the borrow instead of cloning the whole container; got:\n{source}"
     );
     assert!(
-        source.contains("[0] . clone ()") || source.contains("[0].clone()"),
-        "expected the element to be cloned after indexing; got:\n{source}"
+        source.contains("[0 as usize] . clone ()") || source.contains("[0 as usize].clone()"),
+        "expected the element to be cloned after indexing (with a usize cast); got:\n{source}"
     );
 }
 

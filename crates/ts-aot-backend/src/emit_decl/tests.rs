@@ -2815,7 +2815,7 @@ fn optional_chain_index_with_optional_base_emits_as_ref_map() {
     let tokens = emit_decls(&prog, &types).expect("OptionalChain index must emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("arr . as_ref () . map (| o | o [i])"),
+        s.contains("arr . as_ref () . map (| o | o [i as usize])"),
         "Optional base + Index must emit `arr.as_ref().map(|o| o[i])` — index must be inside \
          the Option::map closure, not on Option<&T> directly (which doesn't compile). \
          Got: {s}"
@@ -2861,7 +2861,7 @@ fn optional_chain_index_with_non_optional_base_falls_back_to_mvp() {
     let tokens = emit_decls(&prog, &types).expect("MVP fallback must emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("arr [i]") && !s.contains("as_ref"),
+        s.contains("arr [i as usize]") && !s.contains("as_ref"),
         "Non-Optional base + Index must fall back to MVP rr[i] (no Option machinery). Got: {s}"
     );
 }

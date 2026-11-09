@@ -24,6 +24,7 @@ pub(super) struct EmitCtx {
     struct_names: HashMap<StructId, Ident>,
     function_names: HashMap<FunctionId, Ident>,
     function_ret: HashMap<FunctionId, TypeId>,
+    function_params: HashMap<FunctionId, Vec<TypeId>>,
     function_async: HashSet<FunctionId>,
     function_owner: HashMap<FunctionId, StructId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
@@ -68,11 +69,13 @@ impl EmitCtx {
         let mut mutable_globals = HashSet::new();
         let mut global_tys = HashMap::new();
         let mut function_arity = HashMap::new();
+        let mut function_params: HashMap<FunctionId, Vec<TypeId>> = HashMap::new();
         for decl in &program.declarations {
             match decl {
                 MirDecl::Function(f) => {
                     function_names.insert(f.id, ident_from(&f.name));
                     function_ret.insert(f.id, f.ret);
+                    function_params.insert(f.id, f.params.iter().map(|p| p.ty).collect());
                     function_arity
                         .entry(f.name.clone())
                         .or_insert(f.params.len());
@@ -90,6 +93,8 @@ impl EmitCtx {
                     for method in &s.methods {
                         function_names.insert(method.id, ident_from(&method.name));
                         function_ret.insert(method.id, method.ret);
+                        function_params
+                            .insert(method.id, method.params.iter().map(|p| p.ty).collect());
                         if method.effects.is_async
                             && !matches!(
                                 method.kind,
@@ -119,6 +124,7 @@ impl EmitCtx {
             struct_names,
             function_names,
             function_ret,
+            function_params,
             function_async,
             function_owner,
             struct_fields,
@@ -280,6 +286,10 @@ impl EmitCtx {
 
     pub(super) fn function_ret(&self, id: FunctionId) -> Option<TypeId> {
         self.function_ret.get(&id).copied()
+    }
+
+    pub(super) fn function_params(&self, id: FunctionId) -> Option<&[TypeId]> {
+        self.function_params.get(&id).map(Vec::as_slice)
     }
 
     pub(super) fn function_is_async(&self, id: FunctionId) -> bool {

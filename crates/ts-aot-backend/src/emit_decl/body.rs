@@ -14,7 +14,7 @@ use super::ctx::{
     shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
 };
 use super::ident::ident_from;
-use super::literals::emit_whole_number_literal;
+use super::literals::{emit_float_from_int, emit_whole_number_literal};
 use super::runtime_op::runtime_op_ident;
 use super::types::emit_type_id_with_ctx;
 use crate::error::BackendError;
@@ -274,6 +274,8 @@ fn finalize_return_value(
         inner_tokens = quote!(#inner_tokens.to_js_string());
     }
 
+    inner_tokens = numeric_coerce(inner_expr, inner_tokens, scalar, ctx, emit_env, body_ctx);
+
     if let Some((promise_ty, promise_ok)) = promise
         && value_ty(inner_expr, ctx, emit_env, body_ctx) != Some(promise_ty)
     {
@@ -429,6 +431,8 @@ fn emit_stmt(
                 let init_tokens = emit_owned_value(init, ctx, emit_env, body_ctx)?;
                 let init_tokens =
                     dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
+                let init_tokens =
+                    numeric_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx);
                 Ok(quote!(let #mutability #name: #ty = #init_tokens;))
             } else {
                 Ok(quote!(let #mutability #name: #ty;))
@@ -793,7 +797,7 @@ fn emit_place(
         MirPlace::Index { base, index, .. } => {
             let base = emit_place_ref_expr(base, ctx, emit_env, body_ctx)?;
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#base[#index]))
+            Ok(quote!(#base[#index as usize]))
         }
     }
 }
@@ -824,7 +828,7 @@ fn emit_place_base(
         MirPlaceBase::Index { base, index, .. } => {
             let base = emit_place_ref_expr(base, ctx, emit_env, body_ctx)?;
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#base[#index]))
+            Ok(quote!(#base[#index as usize]))
         }
         MirPlaceBase::Chain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
     }
@@ -1086,6 +1090,26 @@ fn emit_owned_exprs(
         .collect()
 }
 
+fn emit_owned_exprs_coerced(
+    exprs: &[MirExpr],
+    param_tys: Option<&[TypeId]>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Vec<TokenStream>, BackendError> {
+    exprs
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let tokens = emit_owned_value(e, ctx, emit_env, body_ctx)?;
+            let Some(target) = param_tys.and_then(|tys| tys.get(i).copied()) else {
+                return Ok(tokens);
+            };
+            Ok(numeric_coerce(e, tokens, target, ctx, emit_env, body_ctx))
+        })
+        .collect()
+}
+
 fn indirect_callee_fn_kind(
     callee: &MirExpr,
     ctx: &EmitCtx,
@@ -1223,7 +1247,13 @@ fn emit_expr(
     match expr {
         MirExpr::Unit | MirExpr::Null { .. } => Ok(quote!(())),
         MirExpr::Bool(value) => Ok(quote!(#value)),
-        MirExpr::Int { value, .. } => Ok(emit_whole_number_literal(*value)),
+        MirExpr::Int { value, ty } => Ok(
+            if matches!(emit_env.types.resolve(*ty), Some(Type::F64 | Type::F32)) {
+                emit_float_from_int(*value)
+            } else {
+                emit_whole_number_literal(*value)
+            },
+        ),
         MirExpr::Float { value, .. } => Ok(emit_float(*value)),
         MirExpr::String { id, .. } => {
             let literal = Literal::string(id.as_str());
@@ -1304,28 +1334,36 @@ fn emit_expr(
             );
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
-                return Ok(quote!(#map.map(|o| o[#index])));
+                return Ok(quote!(#map.map(|o| o[#index as usize])));
+            }
+            if matches!(
+                value_ty(base, ctx, emit_env, body_ctx).and_then(|t| emit_env.types.resolve(t)),
+                Some(Type::String)
+            ) {
+                let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+                return Ok(quote!(ts_aot_runtime::__ts_aot_string_char_at(&#base, #index as i64)));
             }
             if simple_index
                 && let MirExpr::Local(id) = base.as_ref()
                 && let Some(acc) = body_ctx.shared_access_for_local(*id)
                 && let Some(borrowed) = shared_borrow_tokens(&acc)
             {
-                return Ok(quote!(#borrowed[#index].clone()));
+                return Ok(quote!(#borrowed[#index as usize].clone()));
             }
             let base = emit_expr(base, ctx, emit_env, body_ctx)?;
-            Ok(quote!(#base[#index]))
+            Ok(quote!(#base[#index as usize]))
         }
         MirExpr::Call { callee, args, .. } => {
             let is_async = ctx.function_is_async(*callee);
             let callee_ident = ctx.function_ident(*callee);
+            let param_tys = ctx.function_params(*callee);
             let callee = if let Some(owner) = ctx.function_owner(*callee) {
                 let owner_ident = ctx.struct_ident(owner);
                 quote!(#owner_ident::#callee_ident)
             } else {
                 quote!(#callee_ident)
             };
-            let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
+            let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
             let call = quote!(#callee(#(#args),*));
             if is_async {
                 Ok(quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call)))
@@ -1351,13 +1389,6 @@ fn emit_expr(
             struct_id, fields, ..
         } => {
             let name = ctx.struct_ident(*struct_id);
-            let mut emitted: Vec<TokenStream> = Vec::with_capacity(fields.len());
-            for (field_id, value) in fields {
-                let field = ctx.struct_field_ident(*struct_id, *field_id);
-                let value = emit_owned_value(value, ctx, emit_env, body_ctx)?;
-                emitted.push(quote!(#field: #value));
-            }
-            let listed: HashSet<FieldId> = fields.iter().map(|(id, _)| *id).collect();
             let declared: Vec<(FieldId, TypeId)> = emit_env
                 .program
                 .declarations
@@ -1369,6 +1400,19 @@ fn emit_expr(
                     _ => None,
                 })
                 .unwrap_or_default();
+            let field_tys: std::collections::HashMap<FieldId, TypeId> =
+                declared.iter().copied().collect();
+            let mut emitted: Vec<TokenStream> = Vec::with_capacity(fields.len());
+            for (field_id, value) in fields {
+                let field = ctx.struct_field_ident(*struct_id, *field_id);
+                let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
+                let value_tokens = match field_tys.get(field_id) {
+                    Some(fty) => numeric_coerce(value, value_tokens, *fty, ctx, emit_env, body_ctx),
+                    None => value_tokens,
+                };
+                emitted.push(quote!(#field: #value_tokens));
+            }
+            let listed: HashSet<FieldId> = fields.iter().map(|(id, _)| *id).collect();
             let mut budget = super::CONST_DEFAULT_BUDGET;
             for (fid, fty) in declared {
                 if listed.contains(&fid) {
@@ -1908,28 +1952,75 @@ fn emit_binary_expr(
     {
         return Ok(tokens);
     }
-    let left = emit_expr(left, ctx, emit_env, body_ctx)?;
-    let right = emit_expr(right, ctx, emit_env, body_ctx)?;
+    let target = if matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+    ) {
+        common_numeric_target(
+            value_ty(left, ctx, emit_env, body_ctx),
+            value_ty(right, ctx, emit_env, body_ctx),
+            emit_env,
+        )
+    } else {
+        None
+    };
+    let mut left_tokens = emit_expr(left, ctx, emit_env, body_ctx)?;
+    let mut right_tokens = emit_expr(right, ctx, emit_env, body_ctx)?;
+    if let Some(t) = target {
+        left_tokens = numeric_coerce(left, left_tokens, t, ctx, emit_env, body_ctx);
+        right_tokens = numeric_coerce(right, right_tokens, t, ctx, emit_env, body_ctx);
+    }
     Ok(match op {
-        BinaryOp::Add => quote!(#left + #right),
-        BinaryOp::Sub => quote!(#left - #right),
-        BinaryOp::Mul => quote!(#left * #right),
-        BinaryOp::Div => quote!(#left / #right),
-        BinaryOp::Mod => quote!(#left % #right),
-        BinaryOp::Eq => quote!(#left == #right),
-        BinaryOp::Ne => quote!(#left != #right),
-        BinaryOp::Lt => quote!(#left < #right),
-        BinaryOp::Le => quote!(#left <= #right),
-        BinaryOp::Gt => quote!(#left > #right),
-        BinaryOp::Ge => quote!(#left >= #right),
-        BinaryOp::And => quote!(#left && #right),
-        BinaryOp::Or => quote!(#left || #right),
-        BinaryOp::BitAnd => quote!(#left & #right),
-        BinaryOp::BitOr => quote!(#left | #right),
-        BinaryOp::BitXor => quote!(#left ^ #right),
-        BinaryOp::Shl => quote!(#left << #right),
-        BinaryOp::Shr => quote!(#left >> #right),
+        BinaryOp::Add => quote!(#left_tokens + #right_tokens),
+        BinaryOp::Sub => quote!(#left_tokens - #right_tokens),
+        BinaryOp::Mul => quote!(#left_tokens * #right_tokens),
+        BinaryOp::Div => quote!(#left_tokens / #right_tokens),
+        BinaryOp::Mod => quote!(#left_tokens % #right_tokens),
+        BinaryOp::Eq => quote!(#left_tokens == #right_tokens),
+        BinaryOp::Ne => quote!(#left_tokens != #right_tokens),
+        BinaryOp::Lt => quote!(#left_tokens < #right_tokens),
+        BinaryOp::Le => quote!(#left_tokens <= #right_tokens),
+        BinaryOp::Gt => quote!(#left_tokens > #right_tokens),
+        BinaryOp::Ge => quote!(#left_tokens >= #right_tokens),
+        BinaryOp::And => quote!(#left_tokens && #right_tokens),
+        BinaryOp::Or => quote!(#left_tokens || #right_tokens),
+        BinaryOp::BitAnd => quote!(#left_tokens & #right_tokens),
+        BinaryOp::BitOr => quote!(#left_tokens | #right_tokens),
+        BinaryOp::BitXor => quote!(#left_tokens ^ #right_tokens),
+        BinaryOp::Shl => quote!(#left_tokens << #right_tokens),
+        BinaryOp::Shr => quote!(#left_tokens >> #right_tokens),
     })
+}
+
+fn common_numeric_target(
+    left: Option<TypeId>,
+    right: Option<TypeId>,
+    emit_env: &EmitEnv,
+) -> Option<TypeId> {
+    let (left_id, left_ty) = (left?, emit_env.types.resolve(left?)?);
+    let (right_id, right_ty) = (right?, emit_env.types.resolve(right?)?);
+    let left_num = is_float_type(left_ty) || is_integer_type(left_ty);
+    let right_num = is_float_type(right_ty) || is_integer_type(right_ty);
+    if !left_num || !right_num {
+        return None;
+    }
+    if is_float_type(left_ty) && is_integer_type(right_ty) {
+        return Some(left_id);
+    }
+    if is_integer_type(left_ty) && is_float_type(right_ty) {
+        return Some(right_id);
+    }
+    None
 }
 
 fn is_dynamic_expr(expr: &MirExpr, body_ctx: &BodyCtx) -> bool {
@@ -1953,6 +2044,55 @@ fn dynamic_string_coerce(
         quote!(#tokens.to_js_string())
     } else {
         tokens
+    }
+}
+
+fn is_float_type(ty: &Type) -> bool {
+    matches!(ty, Type::F32 | Type::F64)
+}
+
+fn is_integer_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::U8 | Type::U16 | Type::U32 | Type::U64
+    )
+}
+
+fn numeric_coerce(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> TokenStream {
+    let dst = emit_env.types.resolve(target);
+    match expr {
+        MirExpr::Int { value, .. } => match dst {
+            Some(t) if is_float_type(t) => emit_float_from_int(*value),
+            Some(t) if is_integer_type(t) => emit_whole_number_literal(*value),
+            _ => tokens,
+        },
+        MirExpr::Float { .. } if matches!(dst, Some(t) if is_integer_type(t)) => {
+            let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
+            quote!(((#tokens) as #dst_tokens))
+        }
+        _ => {
+            let Some(src) = value_ty(expr, ctx, emit_env, body_ctx) else {
+                return tokens;
+            };
+            let (Some(src), Some(dst)) = (emit_env.types.resolve(src), dst) else {
+                return tokens;
+            };
+            let both_numeric = (is_float_type(src) || is_integer_type(src))
+                && (is_float_type(dst) || is_integer_type(dst));
+            if both_numeric && is_float_type(src) != is_float_type(dst) {
+                let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
+                quote!(((#tokens) as #dst_tokens))
+            } else {
+                tokens
+            }
+        }
     }
 }
 
@@ -2230,7 +2370,7 @@ fn emit_runtime_call(
             let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
             Ok(quote!(__ts_aot_array_get_or_default::<#element_ty>(
                 &#arr,
-                #idx
+                #idx as i64
             )))
         }
         RuntimeOp::ArrayIsArray => {
@@ -2422,7 +2562,7 @@ fn emit_runtime_call(
             let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
-            let call = quote!(__ts_aot_array_set(&mut #arr, #idx, #value));
+            let call = quote!(__ts_aot_array_set(&mut #arr, #idx as i64, #value));
             Ok(if needs_unsafe {
                 quote!(unsafe { #call })
             } else {
@@ -2683,7 +2823,17 @@ fn emit_array_op_with_element_type(
     let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
     let parts: Vec<TokenStream> = args
         .iter()
-        .map(|a| emit_owned_value(a, ctx, emit_env, body_ctx))
+        .map(|a| {
+            let tokens = emit_owned_value(a, ctx, emit_env, body_ctx)?;
+            Ok::<_, BackendError>(numeric_coerce(
+                a,
+                tokens,
+                element_ty_id,
+                ctx,
+                emit_env,
+                body_ctx,
+            ))
+        })
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
     Ok(quote!(#name::<#element_ty>(vec![#(#parts),*])))

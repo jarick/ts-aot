@@ -55,7 +55,8 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
     match s {
         "i8" => Some(Type::I8),
         "i16" => Some(Type::I16),
-        "i32" | "number" => Some(Type::I32),
+        "i32" => Some(Type::I32),
+        "number" => Some(Type::F64),
         "i64" => Some(Type::I64),
         "u8" => Some(Type::U8),
         "u16" => Some(Type::U16),
@@ -94,7 +95,7 @@ pub(crate) fn resolve_simple_type(
 ) -> Option<TypeId> {
     match ty? {
         TSType::TSNeverKeyword(_) => Some(types.intern(&Type::Never)),
-        TSType::TSNumberKeyword(_) => Some(types.intern(&Type::I32)),
+        TSType::TSNumberKeyword(_) => Some(types.intern(&Type::F64)),
         TSType::TSStringKeyword(_) => Some(types.intern(&Type::String)),
         TSType::TSBooleanKeyword(_) => Some(types.intern(&Type::Bool)),
         TSType::TSVoidKeyword(_) | TSType::TSUndefinedKeyword(_) => Some(types.intern(&Type::Void)),
@@ -171,6 +172,7 @@ mod tests {
         assert_eq!(type_from_ident("boolean"), Some(Type::Bool));
         assert_eq!(type_from_ident("void"), Some(Type::Void));
         assert_eq!(type_from_ident("f64"), Some(Type::F64));
+        assert_eq!(type_from_ident("number"), Some(Type::F64));
     }
 
     #[test]

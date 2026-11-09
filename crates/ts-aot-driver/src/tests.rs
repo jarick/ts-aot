@@ -68,7 +68,7 @@ fn rust_emit_uses_pipeline_typetable_not_fresh_empty() {
     assert!(!out.has_errors(), "{:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust source must be populated");
     assert!(
-        rust.contains("i32"),
+        rust.contains("f64"),
         "types from frontend/passes must reach backend; got:\n{rust}"
     );
     assert!(
@@ -439,7 +439,7 @@ fn compile_file_reads_source_from_disk() {
     let rust = out
         .rust_source
         .expect("rust_source must be populated after compile_file");
-    assert!(rust.contains("i32"));
+    assert!(rust.contains("f64"));
 
     let _ = std::fs::remove_file(&path);
 }

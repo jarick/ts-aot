@@ -129,7 +129,7 @@ fn e2e_promise_resolve_emits_runtime_call_with_value_ty() {
         "Promise.resolve must lower to __ts_aot_promise_resolve_value runtime call, got:\n{rust}"
     );
     assert!(
-        rust.contains("__ts_aot_promise_resolve_value::<i32>(42)"),
+        rust.contains("__ts_aot_promise_resolve_value::<f64>(42)"),
         "Promise.resolve must include the concrete numeric type as the first generic argument; \
          got:\n{rust}"
     );
@@ -175,11 +175,11 @@ fn e2e_promise_then_with_named_handler_emits_instance_call() {
         .expect("emit-rust must populate rust_source");
     let rust = common::normalize_rust(&rust);
     assert!(
-        rust.contains("ts_aot_runtime::Promise<i32>"),
+        rust.contains("ts_aot_runtime::Promise<f64>"),
         "p.then(handler) must reference the full Promise type in its dest binding; got:\n{rust}"
     );
     assert!(
-        rust.contains("__ts_aot_promise_then_value::<i32,"),
+        rust.contains("__ts_aot_promise_then_value::<f64,"),
         "p.then(handler) must lower to instance runtime call with the inner promise \
          element type as the turbofish; got:\n{rust}"
     );
@@ -254,8 +254,8 @@ fn e2e_promise_type_annotation_resolves_to_promise_emit_with_inner_type() {
         .expect("emit-rust must populate rust_source");
     let rust = common::normalize_rust(&rust);
     assert!(
-        rust.contains("ts_aot_runtime::Promise<i32>"),
-        "Promise<number> must lower to ts_aot_runtime::Promise<i32> (regression: \
+        rust.contains("ts_aot_runtime::Promise<f64>"),
+        "Promise<number> must lower to ts_aot_runtime::Promise<f64> (regression: \
          Promise<T> was missing from BUILTIN_GENERICS, so T-anon fell back to Type::Error \
          and emitted as `()`); got:\n{rust}"
     );
@@ -346,11 +346,11 @@ fn e2e_promise_then_with_captureless_arrow_handler_emits_instance_call() {
         .expect("emit-rust must populate rust_source");
     let rust = common::normalize_rust(&rust);
     assert!(
-        rust.contains("ts_aot_runtime::Promise<i32>"),
+        rust.contains("ts_aot_runtime::Promise<f64>"),
         "p.then(arrow) must reference the full Promise type in its dest binding; got:\n{rust}"
     );
     assert!(
-        rust.contains("__ts_aot_promise_then_value::<i32,"),
+        rust.contains("__ts_aot_promise_then_value::<f64,"),
         "p.then(arrow) must lower to instance runtime call with the inner promise element \
          type as the turbofish; got:\n{rust}"
     );
@@ -363,14 +363,14 @@ fn e2e_promise_then_with_captureless_arrow_handler_emits_instance_call() {
         "p.then(arrow) must emit a `fn __ts_aot_closure_<n>` definition; got:\n{rust}"
     );
     assert!(
-        rust.contains("(v : i32)"),
-        "p.then(arrow) hoisted closure must declare the captured parameter typed i32; \
+        rust.contains("(v : f64)"),
+        "p.then(arrow) hoisted closure must declare the captured parameter typed f64; \
          got:\n{rust}"
     );
     assert!(
-        rust.contains("->i32"),
+        rust.contains("->f64"),
         "p.then(arrow) hoist must set HirFunction.ret to the arrow's return type annotation \
-         (i32), not the closure's Type::Fn (regression: lower_closures was setting \
+         (f64), not the closure's Type::Fn (regression: lower_closures was setting \
          ret=Type::Fn which made handler_ret incompatible with Promise ok type); \
          got:\n{rust}"
     );

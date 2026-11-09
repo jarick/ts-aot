@@ -28,6 +28,20 @@ pub(crate) fn literal_hir_ty(types: &mut TypeTable, e: &HirExpr) -> Option<TypeI
     })
 }
 
+fn index_element_ty(senv: &mut SkeletonEnv, owner_ty: TypeId) -> TypeId {
+    let resolved = senv.types.resolve(owner_ty).cloned();
+    match resolved {
+        Some(Type::Array { element }) => element,
+        Some(Type::Optional { inner }) => match senv.types.resolve(inner).cloned() {
+            Some(Type::Array { element }) => element,
+            Some(Type::String) => senv.types.intern(&Type::String),
+            _ => senv.error_ty(),
+        },
+        Some(Type::String) => senv.types.intern(&Type::String),
+        _ => senv.error_ty(),
+    }
+}
+
 fn declaration_defines(d: &HirDecl, name: &str) -> bool {
     let declared = match d {
         HirDecl::Function(f) => &f.name,
@@ -1128,7 +1142,7 @@ impl SkeletonBuilder {
                     None
                 };
                 let ty = if prop == "length" && has_length {
-                    senv.types.intern(&ts_aot_core::Type::I64)
+                    senv.types.intern(&ts_aot_core::Type::F64)
                 } else {
                     field_ty.unwrap_or_else(|| senv.error_ty())
                 };
@@ -1148,7 +1162,7 @@ impl SkeletonBuilder {
                     owner
                 };
                 let index = self.walk_expr(senv, &computed.expression, scope);
-                let ty = senv.error_ty();
+                let ty = index_element_ty(senv, owner.ty());
                 HirExpr::Index {
                     owner: Box::new(owner),
                     index: Box::new(index),
@@ -1214,7 +1228,14 @@ impl SkeletonBuilder {
                 span: core_span_from_oxc(a.span),
             };
         }
-        let ty = senv.error_ty();
+        let ty = literal_hir_ty(senv.types, &rhs).unwrap_or_else(|| {
+            let t = rhs.ty();
+            if t == ts_aot_core::TypeId::from_raw(0) {
+                senv.error_ty()
+            } else {
+                t
+            }
+        });
         match compound_op(a.operator) {
             CompoundOp::Assign => HirExpr::Assignment {
                 target: Box::new(target),
