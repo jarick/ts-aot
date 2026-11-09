@@ -117,8 +117,8 @@ pub fn __ts_aot_array_set<T>(arr: &mut [T], idx: i64, value: T) -> bool {
 }
 
 #[must_use]
-pub fn __ts_aot_array_len<T>(arr: &[T]) -> i64 {
-    i64::try_from(arr.len()).unwrap_or(0)
+pub fn __ts_aot_array_len<T>(arr: &[T]) -> f64 {
+    f64::from(u32::try_from(arr.len()).unwrap_or(u32::MAX))
 }
 
 #[must_use]

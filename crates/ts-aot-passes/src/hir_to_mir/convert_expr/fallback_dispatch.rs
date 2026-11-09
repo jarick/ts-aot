@@ -173,10 +173,10 @@ impl ExprConverter {
                     ctx,
                 )
             });
-            let len_ty = types.intern(&Type::I64);
-            let len_dest = self.fresh_local();
-            self.push_temp_local(len_dest, len_ty);
             if mir_args.is_empty() {
+                let len_ty = types.intern(&Type::F64);
+                let len_dest = self.fresh_local();
+                self.push_temp_local(len_dest, len_ty);
                 out.push(MirStmt::Runtime {
                     op: RuntimeOp::ArrayLen,
                     args: vec![recv_mir],
@@ -184,18 +184,21 @@ impl ExprConverter {
                     ty: len_ty,
                     target_ty: None,
                 });
-            } else {
-                let last = mir_args.len() - 1;
-                for (i, item) in mir_args.into_iter().enumerate() {
-                    let is_last = i == last;
-                    out.push(MirStmt::Runtime {
-                        op: RuntimeOp::ArrayPush,
-                        args: vec![recv_mir.clone(), item],
-                        dest: is_last.then_some(len_dest),
-                        ty: if is_last { len_ty } else { TypeId::from_raw(0) },
-                        target_ty: None,
-                    });
-                }
+                return Some(MirExpr::Local(len_dest));
+            }
+            let len_ty = types.intern(&Type::I64);
+            let len_dest = self.fresh_local();
+            self.push_temp_local(len_dest, len_ty);
+            let last = mir_args.len() - 1;
+            for (i, item) in mir_args.into_iter().enumerate() {
+                let is_last = i == last;
+                out.push(MirStmt::Runtime {
+                    op: RuntimeOp::ArrayPush,
+                    args: vec![recv_mir.clone(), item],
+                    dest: is_last.then_some(len_dest),
+                    ty: if is_last { len_ty } else { TypeId::from_raw(0) },
+                    target_ty: None,
+                });
             }
             return Some(MirExpr::Local(len_dest));
         }

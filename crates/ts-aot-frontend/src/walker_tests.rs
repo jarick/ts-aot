@@ -981,6 +981,157 @@ fn exported_alias_target_visible_to_other_declarations_via_pre_scan_cache() {
 }
 
 #[test]
+fn untyped_integer_literal_local_infers_i64() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(): i64 { const x = 5; return 0; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => match &f.body[0] {
+            HirStmt::Let { ty, .. } => assert_eq!(
+                types.resolve(*ty),
+                Some(&Type::I64),
+                "an untyped integer literal local infers i64 (widened to f64 only in `number` contexts)"
+            ),
+            other => panic!("expected Let, got {other:?}"),
+        },
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_length_resolves_to_f64() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(s: string): f64 { return s.length; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => match &f.body[0] {
+            HirStmt::Return {
+                value: Some(HirExpr::Field { ty, .. }),
+            } => assert_eq!(
+                types.resolve(*ty),
+                Some(&Type::F64),
+                "string `.length` must resolve to f64 (JS number)"
+            ),
+            other => panic!("expected Return(Field), got {other:?}"),
+        },
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn number_keyword_resolves_to_f64() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(x: number): number { return x; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => {
+            assert_eq!(
+                types.resolve(f.params[0].ty),
+                Some(&Type::F64),
+                "`number` parameter must resolve to f64"
+            );
+            assert_eq!(
+                types.resolve(f.ret),
+                Some(&Type::F64),
+                "`number` return type must resolve to f64"
+            );
+        }
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn index_expression_resolves_element_type() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(xs: i64[]): i64 { return xs[0]; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => match &f.body[0] {
+            HirStmt::Return {
+                value: Some(HirExpr::Index { ty, .. }),
+            } => assert_eq!(
+                types.resolve(*ty),
+                Some(&Type::I64),
+                "an index expression must resolve to the array element type, not Error"
+            ),
+            other => panic!("expected Return(Index), got {other:?}"),
+        },
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_index_resolves_to_string() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(s: string): string { return s[0]; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => match &f.body[0] {
+            HirStmt::Return {
+                value: Some(HirExpr::Index { ty, .. }),
+            } => assert_eq!(
+                types.resolve(*ty),
+                Some(&Type::String),
+                "a string index `s[i]` must resolve to a 1-char string, not Error"
+            ),
+            other => panic!("expected Return(Index), got {other:?}"),
+        },
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn assignment_expression_ty_is_rhs_type() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(xs: i64[]): i64 { const y = (xs[0] = 7); return 0; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => match &f.body[0] {
+            HirStmt::Let { init, .. } => match init {
+                Some(HirExpr::Assignment { ty, .. }) => assert_eq!(
+                    types.resolve(*ty),
+                    Some(&Type::I64),
+                    "an assignment expression must take its RHS type, not Error"
+                ),
+                other => panic!("expected Let(Assignment), got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        },
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_type_annotation_falls_back_to_full_source_span() {
     let source = "function noAnnot(x): i32 { return 0; }";
     let output = FrontendPass::new().run("test.ts", source);

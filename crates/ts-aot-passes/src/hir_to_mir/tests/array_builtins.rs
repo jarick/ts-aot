@@ -2145,8 +2145,8 @@ fn array_instance_length_property_on_optional_array_emits_array_len_runtime_op()
         })
         .expect("arr?.length must lower to RuntimeOp::ArrayLen");
     assert!(
-        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::I64))),
-        "arr?.length must keep the result optional (`i64 | undefined`), got {:?}",
+        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::F64))),
+        "arr?.length must keep the result optional (`f64 | undefined`), got {:?}",
         types.resolve(len_ty)
     );
     assert!(
@@ -2224,8 +2224,8 @@ fn array_instance_len_call_on_optional_array_emits_array_len_runtime_op() {
         })
         .expect("arr?.len() must lower to RuntimeOp::ArrayLen");
     assert!(
-        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::I64))),
-        "arr?.len() must keep the result optional (`i64 | undefined`), got {:?}",
+        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::F64))),
+        "arr?.len() must keep the result optional (`f64 | undefined`), got {:?}",
         types.resolve(len_ty)
     );
     assert!(
