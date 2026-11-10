@@ -900,7 +900,7 @@ impl ExprConverter {
         if promise_ok_type(arg.ty(), types).is_some() {
             return true;
         }
-        let Some(value) = self.value_static_ty(arg, types) else {
+        let Some(value) = self.expr_type(arg, types) else {
             return false;
         };
         if matches!(types.resolve(value), Some(Type::Error)) {
@@ -983,7 +983,10 @@ impl ExprConverter {
         }
         let value_ty = args
             .first()
-            .and_then(|arg| self.value_static_ty(arg, types))
+            .and_then(|arg| {
+                self.value_static_ty(arg, types)
+                    .or_else(|| self.expr_type(arg, types))
+            })
             .filter(|value| !matches!(types.resolve(*value), Some(Type::Error)));
         let context_ok = self.expected_ty.and_then(|ret| promise_ok_type(ret, types));
         StaticOkRecovery::Ok(match (value_ty, context_ok) {
@@ -1016,9 +1019,12 @@ impl ExprConverter {
                             return Some(f.ret);
                         }
                     }
-                    self.program.find_function_by_name(name).map(|f| f.ret)
+                    self.program
+                        .find_function_by_name(name)
+                        .map(|f| f.ret)
+                        .or_else(|| self.recovered_static_ty(expr, types))
                 }
-                _ => None,
+                _ => self.recovered_static_ty(expr, types),
             },
             other if other.has_static_type() => Some(other.ty()),
             _ => None,
@@ -1106,7 +1112,11 @@ impl ExprConverter {
                                     StaticOkRecovery::Ok(ok)
                                         if !matches!(types.resolve(ok), Some(Type::Error)) =>
                                     {
-                                        Some(types.intern(&Type::Promise { ok, err: None }))
+                                        if promise_ok_type(ok, types).is_some() {
+                                            Some(ok)
+                                        } else {
+                                            Some(types.intern(&Type::Promise { ok, err: None }))
+                                        }
                                     }
                                     _ => None,
                                 };
@@ -1122,10 +1132,18 @@ impl ExprConverter {
                                 if let Some(f) =
                                     self.program.find_function_by_qualified_name(&probe)
                                 {
-                                    return Some(f.ret);
+                                    return match types.resolve(f.ret) {
+                                        None | Some(Type::Error) => None,
+                                        Some(_) => Some(f.ret),
+                                    };
                                 }
                             }
-                            return self.program.find_function_by_name(name).map(|f| f.ret);
+                            return self.program.find_function_by_name(name).and_then(
+                                |f| match types.resolve(f.ret) {
+                                    None | Some(Type::Error) => None,
+                                    Some(_) => Some(f.ret),
+                                },
+                            );
                         }
                         _ => {}
                     }

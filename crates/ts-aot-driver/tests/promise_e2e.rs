@@ -1048,3 +1048,24 @@ fn e2e_ternary_with_ununifiable_branch_types_is_a_hard_error() {
         out.diagnostics
     );
 }
+
+#[test]
+fn e2e_nested_promise_resolve_adopts_without_double_wrapping() {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f(n: number): Promise<number> { \
+            const p = Promise.resolve(Promise.resolve(Promise.resolve(n))); return p; }",
+        &CompileOptions {
+            module: false,
+            ..CompileOptions::default()
+        },
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let rust = out.rust_source.expect("rust_source");
+    assert_eq!(
+        rust.matches("__ts_aot_promise_resolve_value").count(),
+        1,
+        "{rust}"
+    );
+    check_generated_crate("nested_resolve_adoption", &rust);
+}

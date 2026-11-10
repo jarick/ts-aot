@@ -747,6 +747,11 @@ fn emit_global_with_ctx(
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&g.name);
     let durable_string = global_is_durable_string(g.ty, emit_env);
+    if !durable_string && ctx.type_needs_lifetime(g.ty, emit_env.types) {
+        return Err(BackendError::NotImplemented(
+            "global storage: this arena-backed type borrows the arena and cannot live in a static without a supported durable storage representation",
+        ));
+    }
     let ty = if durable_string {
         quote!(::std::string::String)
     } else {

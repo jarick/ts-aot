@@ -382,10 +382,17 @@ impl ExprConverter {
                 _ => None,
             })
             .collect();
-        let closure_ret_ty = types.resolve(*closure_ty).and_then(|t| match t {
-            ts_aot_core::Type::Fn { ret, .. } => Some(*ret),
-            _ => None,
-        });
+        let closure_ret_ty = [Some(*closure_ty), self.expected_ty]
+            .into_iter()
+            .flatten()
+            .find_map(|ty| match types.resolve(ty) {
+                Some(Type::Fn { ret, .. })
+                    if !matches!(types.resolve(*ret), None | Some(Type::Error)) =>
+                {
+                    Some(*ret)
+                }
+                _ => None,
+            });
         let ret_ty = closure_ret_ty.unwrap_or(ty);
         let mut mir_params: Vec<MirParam> = Vec::with_capacity(params.len());
         let param_ids: Vec<LocalId> = (0..params.len())
@@ -405,11 +412,8 @@ impl ExprConverter {
         }
         let saved_return_ty = self.current_return_ty;
         let saved_expected_ty = self.expected_ty;
-        if let Some(ret) = closure_ret_ty
-            && !matches!(types.resolve(ret), None | Some(ts_aot_core::Type::Error))
-        {
-            self.current_return_ty = Some(ret);
-        }
+        self.current_return_ty = closure_ret_ty
+            .filter(|ret| !matches!(types.resolve(*ret), None | Some(ts_aot_core::Type::Error)));
         self.expected_ty = None;
         let (mir_body, body_locals) = self.convert_block_with_shared_struct_ids(
             body,

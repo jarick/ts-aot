@@ -4499,3 +4499,65 @@ fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set
         "E0504 must report parameter-type mismatch (not arity); got: {diag:?}"
     );
 }
+
+#[test]
+fn unknown_closure_return_does_not_inherit_enclosing_promise_type() {
+    let mut types = TypeTable::new();
+    let error = types.intern(&Type::Error);
+    let number = types.intern(&Type::F64);
+    let promise = types.intern(&Type::Promise {
+        ok: number,
+        err: None,
+    });
+    let unknown_fn = types.intern(&Type::Fn {
+        params: vec![],
+        ret: error,
+        err: None,
+    });
+    for closure_ty in [error, unknown_fn] {
+        let mut c = ExprConverter::new();
+        c.set_return_ty(promise);
+        let resolve = HirExpr::Call {
+            callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                owner: Box::new(HirExpr::Global {
+                    name: Atom::from("Promise"),
+                    ty: error,
+                    span: Span::default(),
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::from("resolve"),
+                ty: error,
+                span: Span::default(),
+            })),
+            args: vec![],
+            type_args: vec![],
+            ty: error,
+            span: Span::default(),
+        };
+        let closure = HirExpr::Closure {
+            id: LocalId::from_raw(0),
+            params: vec![],
+            captures: vec![],
+            body: vec![HirStmt::Return {
+                value: Some(resolve),
+            }],
+            ty: closure_ty,
+            span: Span::default(),
+        };
+        let mut cx = ctx();
+        c.convert_expr(
+            &closure,
+            &mut vec![],
+            &mut empty_struct_ids(),
+            &mut empty_next_struct(),
+            &mut types,
+            &mut cx,
+        );
+        assert!(
+            !cx.has_errors(),
+            "unknown closure must not inherit Promise<number>: {:?}",
+            cx.diagnostics()
+        );
+        assert_eq!(c.current_return_ty, Some(promise));
+    }
+}

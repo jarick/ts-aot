@@ -157,3 +157,20 @@ fn mutable_string_global_survives_an_arena_reset_at_runtime() {
         "the generated crate must store a string global outside the arena; got stdout:\n{stdout}"
     );
 }
+
+#[test]
+fn optional_string_global_rejects_arena_borrowing_assignment() {
+    let out = compile_rust(
+        "let greeting: string | undefined; \
+         export function setGreeting(s: string): void { greeting = s; }",
+    );
+    assert!(out.has_errors(), "optional string storage must be rejected");
+    assert!(
+        out.diagnostics.iter().any(
+            |d| d.message.contains("global storage") && d.message.contains("borrows the arena")
+        ),
+        "expected backend lifetime diagnostic; got {:?}",
+        out.diagnostics
+    );
+    assert!(out.rust_source.is_none());
+}

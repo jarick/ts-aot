@@ -559,3 +559,82 @@ fn lookup_class_struct_by_name_walks_namespace_depths() {
         None
     );
 }
+
+#[test]
+fn value_static_ty_recovers_unresolved_indirect_calls() {
+    let mut types = TypeTable::new();
+    let number = types.intern(&Type::F64);
+    let error = types.intern(&Type::Error);
+    let c = ExprConverter::new();
+    for callee in [
+        HirExpr::Global {
+            name: Atom::new_inline("missing"),
+            ty: error,
+            span: Span::new(0, 0),
+        },
+        HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: error,
+            span: Span::new(0, 0),
+        },
+    ] {
+        for stored in [number, error, TypeId::from_raw(u32::MAX)] {
+            let call = HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(callee.clone())),
+                args: vec![],
+                type_args: vec![],
+                ty: stored,
+                span: Span::new(0, 0),
+            };
+            assert_eq!(
+                c.value_static_ty(&call, &mut types),
+                (stored == number).then_some(number)
+            );
+        }
+    }
+}
+
+#[test]
+fn expr_type_filters_unknown_function_returns_at_root_and_in_namespace() {
+    let mut types = TypeTable::new();
+    let number = types.intern(&Type::F64);
+    let error = types.intern(&Type::Error);
+    for ret in [number, error, TypeId::from_raw(u32::MAX)] {
+        for nested in [false, true] {
+            let mut prog = HirProgram::new(ModuleId::from_raw(0));
+            let function = HirDecl::Function(HirFunction {
+                name: Atom::new_inline("g"),
+                ret,
+                ..Default::default()
+            });
+            prog.push_decl(if nested {
+                HirDecl::Namespace {
+                    name: Atom::new_inline("other"),
+                    members: vec![function],
+                }
+            } else {
+                function
+            });
+            let mut c = ExprConverter::new();
+            c.set_program(Arc::new(prog));
+            if nested {
+                c.set_namespace_path(&["other".to_owned()]);
+            }
+            let call = HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    name: Atom::new_inline("g"),
+                    ty: error,
+                    span: Span::new(0, 0),
+                })),
+                args: vec![],
+                type_args: vec![],
+                ty: number,
+                span: Span::new(0, 0),
+            };
+            assert_eq!(
+                c.expr_type(&call, &mut types),
+                (ret == number).then_some(number)
+            );
+        }
+    }
+}

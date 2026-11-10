@@ -210,6 +210,10 @@ impl EmitCtx {
         self.used_runtime.get()
     }
 
+    pub(super) fn type_needs_lifetime(&self, ty: TypeId, types: &TypeTable) -> bool {
+        type_needs_lifetime(ty, types, &self.struct_lifetimes)
+    }
+
     pub(super) fn struct_needs_lifetime(&self, id: StructId) -> bool {
         self.struct_lifetimes.get(&id).copied().unwrap_or(true)
     }
