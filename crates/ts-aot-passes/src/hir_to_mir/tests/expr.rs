@@ -1470,6 +1470,7 @@ fn convert_expr_optional_chain_wraps_ty_as_optional_of_inner_ty() {
     assert!(matches!(base.as_ref(), MirExpr::Local(_)));
     let expected_opt_ty = types.intern(&ts_aot_core::Type::Optional {
         inner: TypeId::from_raw(0),
+        nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
     });
     assert_eq!(
         *ty, expected_opt_ty,
@@ -1551,7 +1552,10 @@ fn convert_expr_indirect_call_emits_indirect_call_arm_for_optional_chain_callee(
     let mut cx = ctx();
     let mut types = empty_types();
     let fn_ty = types.intern(&ts_aot_core::Type::I64);
-    let opt_fn_ty = types.intern(&ts_aot_core::Type::Optional { inner: fn_ty });
+    let opt_fn_ty = types.intern(&ts_aot_core::Type::Optional {
+        inner: fn_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let obj = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: opt_fn_ty,
@@ -1603,6 +1607,7 @@ fn convert_expr_indirect_call_with_function_typed_callee_emits_indirect_call() {
     let i64_ty = types.intern(&ts_aot_core::Type::I64);
     let fn_ty = types.intern(&ts_aot_core::Type::Fn {
         params: vec![i64_ty],
+        optional: vec![false],
         ret: i64_ty,
         err: None,
     });
@@ -1971,6 +1976,7 @@ fn ternary_preserves_short_circuit_branches_not_in_outer_block() {
         &mut empty_types(),
         &mut cx,
         &[],
+        &f.name,
     );
     let outer_stmts = &mir.body.block.stmts;
     let outer_has_call_directly = outer_stmts.iter().any(|s| {
@@ -2097,6 +2103,7 @@ fn sequence_preserves_side_effects_of_intermediate_expressions() {
         &mut empty_types(),
         &mut cx,
         &[],
+        &f.name,
     );
     let stmts = &mir.body.block.stmts;
     let first_call_pos = stmts.iter().position(|s| {
@@ -3458,7 +3465,10 @@ fn convert_expr_assignment_with_null_rhs_to_optional_target_emits_typed_none() {
     let mut cx = ctx();
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
-    let optional_i64_ty = types.intern(&Type::Optional { inner: i64_ty });
+    let optional_i64_ty = types.intern(&Type::Optional {
+        inner: i64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let target = HirExpr::Local {
         id: LocalId::from_raw(0),
         ty: optional_i64_ty,
@@ -4416,7 +4426,7 @@ fn convert_ternary_casts_a_narrower_numeric_branch_to_the_joined_dest_ty() {
 }
 
 #[test]
-fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set_program() {
+fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0509_via_set_program() {
     let mut c = ExprConverter::new();
     let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
         std::collections::HashMap::new();
@@ -4433,6 +4443,7 @@ fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("bad_handler"),
         params: vec![HirParam {
+            optional: false,
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("x"),
             ty: bool_ty,
@@ -4488,15 +4499,73 @@ fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set
     let diag = cx
         .diagnostics()
         .iter()
-        .find(|d| d.code.as_str() == "E0504")
-        .expect("expected E0504 diagnostic from validate_promise_handler_param_and_return");
+        .find(|d| d.code.as_str() == "E0509")
+        .expect("expected E0509 diagnostic from validate_promise_handler_param_and_return");
     assert!(
         diag.message.contains("bad_handler"),
-        "E0504 message must reference the offending handler name; got: {diag:?}"
+        "E0509 message must reference the offending handler name; got: {diag:?}"
     );
     assert!(
         diag.message.contains("parameter type is not"),
-        "E0504 must report parameter-type mismatch (not arity); got: {diag:?}"
+        "E0509 must report parameter-type mismatch (not arity); got: {diag:?}"
+    );
+}
+
+#[test]
+fn convert_expr_call_to_promise_then_with_unknown_handler_emits_e0508() {
+    let mut c = ExprConverter::new();
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_i64_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let promise_local = HirExpr::Local {
+        id: LocalId::from_raw(0),
+        ty: promise_i64_ty,
+        span: Span::default(),
+    };
+    let handler = HirExpr::Global {
+        name: Atom::new_inline("missing_handler"),
+        ty: TypeId::from_raw(0),
+        span: Span::default(),
+    };
+    let expr = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(promise_local),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("then"),
+            ty: promise_i64_ty,
+            span: Span::default(),
+        })),
+        args: vec![handler],
+        ty: promise_i64_ty,
+        type_args: vec![],
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        mir,
+        MirExpr::Unit,
+        "an unknown handler must short-circuit to Unit (not fall through to generic call)"
+    );
+    let diag = cx
+        .diagnostics()
+        .iter()
+        .find(|d| d.code.as_str() == "E0508")
+        .expect("expected E0508 when a Promise.prototype.then handler is not a known function");
+    assert!(
+        diag.message.contains("missing_handler"),
+        "E0508 message must reference the unknown handler name; got: {diag:?}"
     );
 }
 
@@ -4511,6 +4580,7 @@ fn unknown_closure_return_does_not_inherit_enclosing_promise_type() {
     });
     let unknown_fn = types.intern(&Type::Fn {
         params: vec![],
+        optional: vec![],
         ret: error,
         err: None,
     });

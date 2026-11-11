@@ -15,10 +15,11 @@ pub(super) fn resolve_function(
     if f.params.rest.is_some() {
         return Some(types.intern(&Type::Error));
     }
-    let params = resolve_function_params(&f.params.items, types, lookup, diagnostics);
+    let (params, optional) = resolve_function_params(&f.params.items, types, lookup, diagnostics);
     let ret = resolve_function_return(&f.return_type, types, lookup, diagnostics)?;
     Some(types.intern(&Type::Fn {
         params,
+        optional,
         ret,
         err: None,
     }))
@@ -58,18 +59,22 @@ fn resolve_function_params(
     types: &mut TypeTable,
     lookup: &TypeLookup<'_>,
     diagnostics: &mut Option<&mut DiagnosticBag>,
-) -> Vec<TypeId> {
+) -> (Vec<TypeId>, Vec<bool>) {
     let mut out: Vec<TypeId> = Vec::with_capacity(items.len());
+    // Positional, parallel to `out`: a `?`-parameter may be omitted by a caller.
+    // The flags live in the `Fn` type itself so that an indirect call can tell
+    // `(a: T, b?: U) => R` from `(a: T, b: U | undefined) => R`, which have the
+    // same ABI parameter types but differ in which arguments may be omitted.
+    let mut optional: Vec<bool> = Vec::with_capacity(items.len());
     for p in items {
-        if let Some(ann) = p.type_annotation.as_deref() {
-            let id = resolve_simple_type(
+        let declared = if let Some(ann) = p.type_annotation.as_deref() {
+            resolve_simple_type(
                 Some(&ann.type_annotation),
                 types,
                 lookup,
                 diagnostics.as_deref_mut(),
             )
-            .unwrap_or_else(|| types.intern(&Type::Error));
-            out.push(id);
+            .unwrap_or_else(|| types.intern(&Type::Error))
         } else {
             if let Some(diag) = diagnostics.as_deref_mut() {
                 diag.push(Diagnostic::warning(
@@ -78,10 +83,20 @@ fn resolve_function_params(
                     core_span_from_oxc(p.span),
                 ));
             }
-            out.push(types.intern(&Type::Error));
-        }
+            types.intern(&Type::Error)
+        };
+        // A parameter a caller may omit needs an ABI slot that can say "no
+        // argument", exactly like a `?`/defaulted parameter of a declaration:
+        // `Option<U>`. A *required* parameter keeps its declared type even when
+        // that type admits `undefined` (`b: U | undefined`).
+        out.push(if p.optional {
+            crate::util::wrap_optional_param(types, declared)
+        } else {
+            declared
+        });
+        optional.push(p.optional);
     }
-    out
+    (out, optional)
 }
 
 fn resolve_function_return(

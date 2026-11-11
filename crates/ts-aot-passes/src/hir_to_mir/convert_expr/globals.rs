@@ -165,7 +165,7 @@ pub(super) fn array_from_object_literal(
 pub(super) fn is_json_supported_target_type(types: &TypeTable, ty: TypeId) -> bool {
     match types.resolve(ty) {
         Some(Type::Bool | Type::I64 | Type::F64 | Type::String) => true,
-        Some(Type::Optional { inner }) => is_json_supported_target_type(types, *inner),
+        Some(Type::Optional { inner, .. }) => is_json_supported_target_type(types, *inner),
         Some(Type::Array { element }) => is_json_supported_target_type(types, *element),
         _ => false,
     }
@@ -178,7 +178,7 @@ pub(super) fn json_target_type_name(types: &TypeTable, ty: TypeId) -> String {
         Some(Type::F64) => "f64".to_string(),
         Some(Type::String) => "string".to_string(),
         Some(Type::Symbol) => "symbol".to_string(),
-        Some(Type::Optional { inner }) => {
+        Some(Type::Optional { inner, .. }) => {
             format!("Option<{}>", json_target_type_name(types, *inner))
         }
         Some(Type::Array { element }) => {
@@ -194,7 +194,6 @@ pub(super) fn type_label(types: &TypeTable, ty: TypeId) -> String {
     match types.resolve(ty) {
         Some(Type::Void) => "void".to_string(),
         Some(Type::Null) => "null".to_string(),
-        Some(Type::Never) => "never".to_string(),
         Some(Type::Error) => "<error>".to_string(),
         Some(Type::Symbol) => "symbol".to_string(),
         Some(Type::I8) => "i8".to_string(),
@@ -207,7 +206,7 @@ pub(super) fn type_label(types: &TypeTable, ty: TypeId) -> String {
         Some(Type::F32) => "f32".to_string(),
         Some(Type::Date) => "date".to_string(),
         Some(Type::ArrayBuffer) => "ArrayBuffer".to_string(),
-        Some(Type::Optional { inner }) => format!("Option<{}>", type_label(types, *inner)),
+        Some(Type::Optional { inner, .. }) => format!("Option<{}>", type_label(types, *inner)),
         Some(Type::Array { element }) => format!("Vec<{}>", type_label(types, *element)),
         Some(Type::Struct { id }) => format!("struct#{id:?}"),
         Some(Type::Named { symbol }) => symbol.as_str().to_string(),

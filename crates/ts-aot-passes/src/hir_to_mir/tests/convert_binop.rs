@@ -10,6 +10,14 @@ fn convert_binop_maps_all_variants() {
     assert_eq!(convert_binop(HirBinaryOp::Mod, &mut cx), BinaryOp::Mod);
     assert_eq!(convert_binop(HirBinaryOp::Eq, &mut cx), BinaryOp::Eq);
     assert_eq!(convert_binop(HirBinaryOp::Ne, &mut cx), BinaryOp::Ne);
+    assert_eq!(
+        convert_binop(HirBinaryOp::StrictEq, &mut cx),
+        BinaryOp::StrictEq
+    );
+    assert_eq!(
+        convert_binop(HirBinaryOp::StrictNe, &mut cx),
+        BinaryOp::StrictNe
+    );
     assert_eq!(convert_binop(HirBinaryOp::Lt, &mut cx), BinaryOp::Lt);
     assert_eq!(convert_binop(HirBinaryOp::Le, &mut cx), BinaryOp::Le);
     assert_eq!(convert_binop(HirBinaryOp::Gt, &mut cx), BinaryOp::Gt);

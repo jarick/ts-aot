@@ -56,8 +56,10 @@ pub(crate) fn map_binary_op(op: BinaryOperator) -> Option<HirBinaryOp> {
         BinaryOperator::Multiplication => HirBinaryOp::Mul,
         BinaryOperator::Division => HirBinaryOp::Div,
         BinaryOperator::Remainder => HirBinaryOp::Mod,
-        BinaryOperator::Equality | BinaryOperator::StrictEquality => HirBinaryOp::Eq,
-        BinaryOperator::Inequality | BinaryOperator::StrictInequality => HirBinaryOp::Ne,
+        BinaryOperator::Equality => HirBinaryOp::Eq,
+        BinaryOperator::Inequality => HirBinaryOp::Ne,
+        BinaryOperator::StrictEquality => HirBinaryOp::StrictEq,
+        BinaryOperator::StrictInequality => HirBinaryOp::StrictNe,
         BinaryOperator::LessThan => HirBinaryOp::Lt,
         BinaryOperator::LessEqualThan => HirBinaryOp::Le,
         BinaryOperator::GreaterThan => HirBinaryOp::Gt,
@@ -77,7 +79,8 @@ pub(crate) fn map_binary_op(op: BinaryOperator) -> Option<HirBinaryOp> {
 pub(crate) fn map_logical_op(op: LogicalOperator) -> HirBinaryOp {
     match op {
         LogicalOperator::And => HirBinaryOp::And,
-        LogicalOperator::Or | LogicalOperator::Coalesce => HirBinaryOp::Or,
+        LogicalOperator::Or => HirBinaryOp::Or,
+        LogicalOperator::Coalesce => HirBinaryOp::Coalesce,
     }
 }
 
@@ -114,9 +117,8 @@ pub(crate) fn compound_op(op: AssignmentOperator) -> CompoundOp {
         AssignmentOperator::BitwiseXOR => CompoundOp::Binary(HirBinaryOp::BitXor),
         AssignmentOperator::BitwiseAnd => CompoundOp::Binary(HirBinaryOp::BitAnd),
         AssignmentOperator::LogicalAnd => CompoundOp::Binary(HirBinaryOp::And),
-        AssignmentOperator::LogicalOr | AssignmentOperator::LogicalNullish => {
-            CompoundOp::Binary(HirBinaryOp::Or)
-        }
+        AssignmentOperator::LogicalOr => CompoundOp::Binary(HirBinaryOp::Or),
+        AssignmentOperator::LogicalNullish => CompoundOp::Binary(HirBinaryOp::Coalesce),
         AssignmentOperator::Exponential => CompoundOp::Unsupported,
     }
 }

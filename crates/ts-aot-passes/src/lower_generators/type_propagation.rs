@@ -273,7 +273,7 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
                                 }
                             } else {
                                 let recv_ty = match self.types.resolve(owner.ty()) {
-                                    Some(Type::Optional { inner }) => *inner,
+                                    Some(Type::Optional { inner, .. }) => *inner,
                                     _ => owner.ty(),
                                 };
                                 if let Some(gen_ty) = self

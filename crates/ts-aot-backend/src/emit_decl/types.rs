@@ -83,7 +83,6 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx, mode: LifetimeMode) -
         | Type::Union { .. }
         | Type::Intersection { .. }
         | Type::Tuple { .. } => quote!(()),
-        Type::Never => quote!(!),
         Type::Bool => quote!(bool),
         Type::I8 => quote!(i8),
         Type::I16 => quote!(i16),
@@ -100,7 +99,7 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx, mode: LifetimeMode) -
             let lt = mode.lifetime();
             quote!(ts_aot_runtime::JsString<#lt>)
         }
-        Type::Optional { inner } => {
+        Type::Optional { inner, .. } => {
             let inner_tokens = rec(*inner);
             quote!(Option<#inner_tokens>)
         }

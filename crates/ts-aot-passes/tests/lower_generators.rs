@@ -137,10 +137,14 @@ fn collect_in_expr(e: &MirExpr, out: &mut Vec<FunctionId>) {
             }
         }
         MirExpr::ResultOk { value, .. } => collect_in_expr(value, out),
+        MirExpr::Propagate { expr, .. } => collect_in_expr(expr, out),
         MirExpr::ResultErr { error, .. } => collect_in_expr(error, out),
         MirExpr::Binary { left, right, .. } => {
             collect_in_expr(left, out);
             collect_in_expr(right, out);
+        }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_in_expr(expr, out);
         }
         MirExpr::Unary { expr, .. } => collect_in_expr(expr, out),
         MirExpr::Await { expr, .. } => collect_in_expr(expr, out),
@@ -719,6 +723,7 @@ fn lower_generators_supports_params() {
     let f = HirFunction {
         name: Atom::from("gen"),
         params: vec![ts_aot_ir_hir::HirParam {
+            optional: false,
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("n"),
             ty: i64_ty,
@@ -760,6 +765,7 @@ fn lower_generators_accepts_throw_inside_nested_closure() {
     let throwing_closure = HirExpr::Closure {
         id: ts_aot_core::LocalId::from_raw(99),
         params: vec![HirParam {
+            optional: false,
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::from("__p"),
             ty: i64_ty,

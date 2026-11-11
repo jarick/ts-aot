@@ -29,6 +29,13 @@ fn has_e0407(diagnostics: &ts_aot_core::DiagnosticBag) -> bool {
         .any(|d| d.severity == ts_aot_core::Severity::Warning && d.code.as_str() == "E0407")
 }
 
+fn count_e0415(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| d.code.as_str() == "E0415")
+        .count()
+}
+
 fn count_e0400(diagnostics: &ts_aot_core::DiagnosticBag) -> usize {
     diagnostics
         .iter()
@@ -1050,6 +1057,268 @@ fn untyped_integer_literal_local_infers_i64() {
 }
 
 #[test]
+fn unannotated_function_infers_its_return_type_from_its_body() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f() { return 5; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => assert_eq!(
+            types.resolve(f.ret),
+            Some(&Type::I64),
+            "a function with no return annotation must infer its return type from its `return` \
+             statements"
+        ),
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_function_with_conflicting_returns_requires_an_annotation() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(b: boolean) { if (b) { return 1; } return \"x\"; }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0415(&output.diagnostics),
+        1,
+        "returns that cannot be unified must not be narrowed to one arbitrary branch type; the \
+         function needs an explicit annotation; got {:?}",
+        output.diagnostics
+    );
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => assert_eq!(
+            types.resolve(f.ret),
+            Some(&Type::Error),
+            "an un-inferable return type keeps the error marker (no Rust is emitted)"
+        ),
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_async_function_infers_its_promise_type() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "async function f() { return 1; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => {
+            let Some(Type::Promise { ok, .. }) = types.resolve(f.ret) else {
+                panic!(
+                    "expected Promise return type, got {:?}",
+                    types.resolve(f.ret)
+                );
+            };
+            assert_eq!(
+                types.resolve(*ok),
+                Some(&Type::I64),
+                "an unannotated async function must infer `Promise<T>` from its body"
+            );
+        }
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_async_function_without_returns_is_promise_void() {
+    let mut types = TypeTable::new();
+    let output =
+        FrontendPass::new().run_with_types("test.ts", "async function f() {}", &mut types, false);
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => {
+            let Some(Type::Promise { ok, .. }) = types.resolve(f.ret) else {
+                panic!(
+                    "expected Promise return type, got {:?}",
+                    types.resolve(f.ret)
+                );
+            };
+            assert_eq!(
+                types.resolve(*ok),
+                Some(&Type::Void),
+                "an async function without value returns is `Promise<void>`"
+            );
+        }
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_function_returning_an_unknown_value_requires_an_annotation() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f() { return Promise.resolve(1); }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0415(&output.diagnostics),
+        1,
+        "a return value whose own type is still unresolved must not be inferred; it is reported \
+         with the function's span; got {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unannotated_function_with_a_partial_return_requires_an_annotation() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(b: boolean) { if (b) { return 1; } }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0415(&output.diagnostics),
+        1,
+        "a function whose body can fall through must not infer a return type from only its \
+         explicit `return` statements; the fall-through path yields `undefined` in TS, so \
+         inferring `i64` would lower to a silent `unreachable!()` panic. An explicit annotation \
+         is required; got {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unannotated_function_returning_a_declared_call_infers_the_callee_type() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function g(): number { return 1; } function f() { return g(); }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[1] {
+        HirDecl::Function(f) => assert_eq!(
+            types.resolve(f.ret),
+            Some(&Type::F64),
+            "`return g()` must use the declared return type of an already-declared callee"
+        ),
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_function_without_returns_is_void() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f() { const x: number = 1; x; }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    assert_eq!(
+        count_e0400(&output.diagnostics),
+        0,
+        "a body without value returns is `void`; an absent annotation is not a resolution \
+         failure and must not warn; got {:?}",
+        output.diagnostics
+    );
+    match &output.program.declarations[0] {
+        HirDecl::Function(f) => assert_eq!(
+            types.resolve(f.ret),
+            Some(&Type::Void),
+            "a function that never returns a value is `void`"
+        ),
+        other => panic!("expected Function, got {other:?}"),
+    }
+}
+
+#[test]
+fn unannotated_function_does_not_warn_e0400_when_the_body_determines_the_return() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f() { return 5; }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0400(&output.diagnostics),
+        0,
+        "an absent return annotation is not a resolution failure and must not warn E0400 when \
+         the body determines the return type; got {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unannotated_function_reports_e0402_not_e0400_when_the_body_cannot_determine_the_return() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "function f(b: boolean) { if (b) { return 1; } }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0400(&output.diagnostics),
+        0,
+        "an absent annotation is not a resolution failure, so E0400 must not be used; got {:?}",
+        output.diagnostics
+    );
+    assert_eq!(
+        count_e0415(&output.diagnostics),
+        1,
+        "the un-inferable return type must be reported as E0402; got {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unannotated_async_function_does_not_warn_e0400() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "async function f() { return 1; }",
+        &mut types,
+        false,
+    );
+    assert_eq!(
+        count_e0400(&output.diagnostics),
+        0,
+        "an unannotated async function infers `Promise<T>`, so it must not warn E0400; got {:?}",
+        output.diagnostics
+    );
+}
+
+#[test]
+fn unannotated_method_infers_its_return_type_from_its_body() {
+    let mut types = TypeTable::new();
+    let output = FrontendPass::new().run_with_types(
+        "test.ts",
+        "class C { m() { return 5; } }",
+        &mut types,
+        false,
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    match &output.program.declarations[0] {
+        HirDecl::Class(c) => assert_eq!(
+            types.resolve(c.methods[0].ret),
+            Some(&Type::I64),
+            "an unannotated method must infer its return type from its body, like a free function"
+        ),
+        other => panic!("expected Class, got {other:?}"),
+    }
+}
+
+#[test]
 fn string_length_resolves_to_f64() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
@@ -1200,7 +1469,7 @@ fn missing_param_annotation_is_a_hard_error() {
 }
 
 #[test]
-fn never_keyword_annotation_resolves_to_type_never_not_error() {
+fn never_keyword_annotation_is_rejected_like_any_and_unknown() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
         "test.ts",
@@ -1208,24 +1477,39 @@ fn never_keyword_annotation_resolves_to_type_never_not_error() {
         &mut types,
         false,
     );
-    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let errors: Vec<_> = output
+        .diagnostics
+        .iter()
+        .filter(|d| d.code.as_str() == "E0401")
+        .collect();
+    assert!(
+        !errors.is_empty(),
+        "`never` is uninhabited and must be rejected like `any`/`unknown`; got {:?}",
+        output.diagnostics
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|d| d.severity == ts_aot_core::Severity::Error),
+        "every `never` annotation must be an error so the program is rejected; got {:?}",
+        output.diagnostics
+    );
     match &output.program.declarations[0] {
         HirDecl::Function(f) => {
             assert_eq!(
                 types.resolve(f.params[0].ty),
-                Some(&Type::Never),
-                "TSNeverKeyword must intern Type::Never, not Type::Error"
+                Some(&Type::Error),
+                "a `never` parameter must fall back to the unresolved (error) type"
             );
             assert_eq!(
                 types.resolve(f.ret),
-                Some(&Type::Never),
-                "TSNeverKeyword in return position must also intern Type::Never"
+                Some(&Type::Error),
+                "a `never` return type must fall back to the unresolved (error) type"
             );
         }
         other => panic!("expected Function, got {other:?}"),
     }
 }
-
 #[test]
 fn union_type_in_param_resolves_to_type_union_with_primitive_variants() {
     let mut types = TypeTable::new();
@@ -4467,6 +4751,7 @@ fn function_type_in_param_resolves_to_type_fn() {
         types.resolve(fn_decl.params[0].ty),
         Some(&Type::Fn {
             params: vec![i64_id],
+            optional: vec![false],
             ret: i64_id,
             err: None,
         }),
@@ -4498,6 +4783,7 @@ fn function_type_in_return_position_resolves_to_type_fn() {
         types.resolve(fn_decl.ret),
         Some(&Type::Fn {
             params: vec![i64_id],
+            optional: vec![false],
             ret: i64_id,
             err: None,
         }),
@@ -4529,6 +4815,7 @@ fn function_type_with_no_params_resolves_to_type_fn() {
         types.resolve(fn_decl.params[0].ty),
         Some(&Type::Fn {
             params: vec![],
+            optional: vec![],
             ret: i64_id,
             err: None,
         }),
@@ -4616,6 +4903,7 @@ fn function_type_with_nested_array_param_resolves_recursively() {
         types.resolve(fn_decl.params[0].ty),
         Some(&Type::Fn {
             params: vec![array_id],
+            optional: vec![false],
             ret: i64_id,
             err: None,
         }),
@@ -4684,6 +4972,7 @@ fn function_type_with_untyped_param_emits_e0404_and_resolves_param_to_type_error
         types.resolve(fn_decl.params[0].ty),
         Some(&Type::Fn {
             params: vec![error_id, error_id],
+            optional: vec![false, false],
             ret: i64_id,
             err: None,
         }),
@@ -4723,7 +5012,7 @@ fn function_type_with_rest_param_emits_e0404_and_resolves_to_type_error() {
 }
 
 #[test]
-fn conditional_type_in_param_annotation_emits_e0407_and_resolves_to_never() {
+fn conditional_type_in_param_annotation_emits_e0407_and_resolves_to_error() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
         "test.ts",
@@ -4756,13 +5045,14 @@ fn conditional_type_in_param_annotation_emits_e0407_and_resolves_to_never() {
         .expect("function should be present");
     assert_eq!(
         types.resolve(fn_decl.params[0].ty),
-        Some(&Type::Never),
-        "conditional type param annotation must resolve to Type::Never (per PR 4.7 plan: warning + never fallback)"
+        Some(&Type::Error),
+        "a conditional type is unsupported (E0407) and must resolve to the unresolved (error) \
+         type, not to `never`"
     );
 }
 
 #[test]
-fn conditional_type_in_alias_emits_e0407_and_resolves_to_never() {
+fn conditional_type_in_alias_emits_e0407_and_resolves_to_error() {
     let mut types = TypeTable::new();
     let output = FrontendPass::new().run_with_types(
         "test.ts",
@@ -4792,8 +5082,8 @@ fn conditional_type_in_alias_emits_e0407_and_resolves_to_never() {
         .expect("function should be present");
     assert_eq!(
         types.resolve(fn_decl.params[0].ty),
-        Some(&Type::Never),
-        "conditional type used via alias must resolve to Type::Never"
+        Some(&Type::Error),
+        "a conditional type used via an alias must resolve to the unresolved (error) type"
     );
 }
 
@@ -4836,8 +5126,8 @@ fn conditional_type_with_branch_resolving_to_type_error_emits_e0400_per_branch()
         .expect("function should be present");
     assert_eq!(
         types.resolve(fn_decl.params[0].ty),
-        Some(&Type::Never),
-        "conditional with Type::Error branch must still resolve to Type::Never"
+        Some(&Type::Error),
+        "a conditional with an unresolved branch must also resolve to the unresolved (error) type"
     );
 }
 
@@ -5051,7 +5341,7 @@ fn i64_or_null_resolves_to_optional_i64() {
             _ => None,
         })
         .expect("function should be present");
-    let Some(Type::Optional { inner }) = types.resolve(fn_decl.params[0].ty) else {
+    let Some(Type::Optional { inner, nullish }) = types.resolve(fn_decl.params[0].ty) else {
         panic!(
             "i64 | null param type must resolve to Type::Optional {{ inner: ... }}, got {:?}",
             types.resolve(fn_decl.params[0].ty)
@@ -5062,6 +5352,10 @@ fn i64_or_null_resolves_to_optional_i64() {
         Some(&Type::I64),
         "Optional inner must be i64, got {:?}",
         types.resolve(*inner)
+    );
+    assert!(
+        nullish.null && !nullish.undefined,
+        "`i64 | null` must be a null-only optional, got {nullish:?}"
     );
 }
 
@@ -5084,7 +5378,7 @@ fn i64_or_null_or_undefined_resolves_to_optional_i64() {
             _ => None,
         })
         .expect("function should be present");
-    let Some(Type::Optional { inner }) = types.resolve(fn_decl.params[0].ty) else {
+    let Some(Type::Optional { inner, nullish }) = types.resolve(fn_decl.params[0].ty) else {
         panic!(
             "i64 | null | undefined param type must resolve to Type::Optional {{ inner: ... }}, got {:?}",
             types.resolve(fn_decl.params[0].ty)
@@ -5095,6 +5389,10 @@ fn i64_or_null_or_undefined_resolves_to_optional_i64() {
         Some(&Type::I64),
         "Optional inner must be i64, got {:?}",
         types.resolve(*inner)
+    );
+    assert!(
+        nullish.null && nullish.undefined,
+        "`i64 | null | undefined` must be a both-kinds optional, got {nullish:?}"
     );
 }
 
@@ -5438,8 +5736,9 @@ fn arrow_without_return_annotation_does_not_emit_e0502() {
     };
     assert_eq!(
         types.resolve(*ret),
-        Some(&Type::Error),
-        "a missing return annotation must resolve to Type::Error, got {:?}",
+        Some(&Type::I64),
+        "an arrow with no return annotation must have its return type inferred from its body \
+         (`() => 1` yields `i64`), got {:?}",
         types.resolve(*ret)
     );
 }

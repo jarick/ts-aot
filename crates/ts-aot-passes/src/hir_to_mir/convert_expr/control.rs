@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{LocalId, NullishKinds, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirExpr};
 use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt};
 
@@ -10,6 +10,7 @@ use crate::hir_to_mir::convert_expr::util::{
     has_potential_side_effects, hir_expr_type_id, is_pure_place, mir_expr_ty,
 };
 use crate::hir_to_mir::converter::ExprConverter;
+use crate::hir_to_mir::nullish::{LOGICAL_DIAG, NULLISH_NARROWING_DIAG};
 use crate::hir_to_mir::ops::convert_binop;
 
 impl ExprConverter {
@@ -70,8 +71,17 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        let cond_mir =
-            self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
+        // The condition is a truthiness test on its own value: it may be an
+        // optional even when the conditional's result is not, so the enclosing
+        // expectation must not leak into it (`(x && y) ? a : b`).
+        let cond_mir = self.convert_without_expected(
+            cond,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
         let mut then_stmts: Vec<MirStmt> = Vec::new();
         let then_value = self.convert_expr(
             then_branch,
@@ -90,25 +100,19 @@ impl ExprConverter {
             types,
             ctx,
         );
-        let then_ty = self.expr_type(then_branch, types);
-        let else_ty = self.expr_type(else_branch, types);
+        // HIR does not type every expression (a call or a member read carries
+        // `Error` until the callee is lowered, and a *recursive* call is only
+        // resolvable through the declaration), but the converted branch value
+        // carries its own type - which is what makes `n <= 1 ? 1 : n * fact(n - 1)`
+        // work.
+        let then_ty = self
+            .expr_type(then_branch, types)
+            .or_else(|| self.mir_expr_static_ty(&then_value, types));
+        let else_ty = self
+            .expr_type(else_branch, types)
+            .or_else(|| self.mir_expr_static_ty(&else_value, types));
         let dest_ty = if matches!(types.resolve(ty), None | Some(Type::Error)) {
-            match (then_ty, else_ty) {
-                (Some(a), Some(b)) => match self.join_expr_types(a, b, types) {
-                    Some(joined) => joined,
-                    None => {
-                        ctx.error(
-                            "E0414",
-                            "cannot unify the branch types of this conditional expression; add \
-                             an explicit type annotation"
-                                .to_owned(),
-                            Span::new(0, 0),
-                        );
-                        ty
-                    }
-                },
-                _ => ty,
-            }
+            self.joined_branch_ty(then_branch, else_branch, then_ty, else_ty, ty, types, ctx)
         } else {
             ty
         };
@@ -134,6 +138,146 @@ impl ExprConverter {
             else_block: Some(MirBlock { stmts: else_stmts }),
         });
         MirExpr::Local(dest)
+    }
+
+    /// The result type of a conditional whose HIR node carries none, recovered
+    /// from its branches.
+    ///
+    /// A `null`/`undefined` branch has no type of its own: the AOT target stores
+    /// it in the `Option<T>` of the *other* branch, so `c ? x : undefined` is
+    /// `T | undefined`. The surrounding nullable annotation (a return type, a
+    /// parameter or a `let`) is preferred when there is one, so `c ? 1 :
+    /// undefined` typed `number | undefined` becomes `Option<f64>` rather than
+    /// `Option<i64>`.
+    #[allow(clippy::too_many_arguments)]
+    fn joined_branch_ty(
+        &self,
+        then_branch: &HirExpr,
+        else_branch: &HirExpr,
+        then_ty: Option<TypeId>,
+        else_ty: Option<TypeId>,
+        fallback: TypeId,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> TypeId {
+        if is_nullish_branch(then_branch) || is_nullish_branch(else_branch) {
+            let literal = if is_nullish_branch(then_branch) {
+                then_branch
+            } else {
+                else_branch
+            };
+            let other = if is_nullish_branch(then_branch) {
+                else_ty
+            } else {
+                then_ty
+            };
+            let candidate = other.map(|other| self.nullable_of(other, literal, types));
+            if let Some(expected) = self.expected_ty
+                && !matches!(types.resolve(expected), None | Some(Type::Error))
+                && is_nullable(types.resolve(expected), types)
+            {
+                // A union has no Rust representation of its own: keep the
+                // `Option<T>` recovered from the branches (`i64 | null |
+                // undefined` is still `Option<i64>`), which is also what the
+                // `join_expr_types` path produced before.
+                let union_expected = matches!(types.resolve(expected), Some(Type::Union { .. }));
+                if union_expected {
+                    if let Some(candidate) = candidate {
+                        if branch_matches_expected(expected, candidate, types) {
+                            return candidate;
+                        }
+                        ctx.error(
+                            "E0414",
+                            "cannot unify the branch types of this conditional expression with \
+                             the nullable union type it is written into; add an explicit type \
+                             annotation"
+                                .to_owned(),
+                            then_branch.span(),
+                        );
+                        return candidate;
+                    }
+                } else {
+                    if candidate
+                        .is_none_or(|candidate| branch_matches_expected(expected, candidate, types))
+                    {
+                        return expected;
+                    }
+                    ctx.error(
+                        "E0414",
+                        "cannot unify the branch types of this conditional expression with the \
+                         nullable type it is written into; add an explicit type annotation"
+                            .to_owned(),
+                        then_branch.span(),
+                    );
+                    return expected;
+                }
+            }
+            if let Some(candidate) = candidate {
+                return candidate;
+            }
+        }
+        match (then_ty, else_ty) {
+            (Some(a), Some(b)) => match self.join_expr_types(a, b, types) {
+                Some(joined) => joined,
+                None => {
+                    ctx.error(
+                        "E0414",
+                        "cannot unify the branch types of this conditional expression; add \
+                         an explicit type annotation"
+                            .to_owned(),
+                        Span::new(0, 0),
+                    );
+                    fallback
+                }
+            },
+            // Nothing could be recovered for a branch: without a type the
+            // temporary would be emitted as `()`, which only shows up as a
+            // confusing type error in the generated Rust.
+            _ => {
+                ctx.error(
+                    "E0414",
+                    "cannot determine the result type of this conditional expression from its \
+                     branches; add an explicit type annotation"
+                        .to_owned(),
+                    Span::new(0, 0),
+                );
+                fallback
+            }
+        }
+    }
+
+    /// The optional type that carries `other` plus the nullish kind of the
+    /// `null`/`undefined` literal branch. A branch that is already nullable
+    /// already represents the literal.
+    fn nullable_of(&self, other: TypeId, literal: &HirExpr, types: &mut TypeTable) -> TypeId {
+        let nullish = match literal {
+            HirExpr::Null(_) => NullishKinds::NULL_ONLY,
+            _ => NullishKinds::UNDEFINED_ONLY,
+        };
+        // Merge the literal's kind into an existing optional instead of dropping
+        // it: `c ? (x: T | undefined) : null` is `T | null | undefined`, and
+        // returning the branch type as-is would make a later `=== null` answer
+        // incorrectly.
+        if let Some(Type::Optional {
+            inner,
+            nullish: existing,
+        }) = types.resolve(other).cloned()
+        {
+            return types.intern(&Type::Optional {
+                inner,
+                nullish: NullishKinds {
+                    null: existing.null || nullish.null,
+                    undefined: existing.undefined || nullish.undefined,
+                },
+            });
+        }
+        if is_nullable(types.resolve(other), types) {
+            return other;
+        }
+        types.intern(&Type::Optional {
+            inner: other,
+            nullish,
+        })
     }
 
     pub(super) fn convert_sequence(
@@ -373,6 +517,66 @@ impl ExprConverter {
             mutable: false,
         });
 
+        // `x &&= v`, `x ||= v` and `x ??= v` are the assignment forms of the
+        // short-circuiting operators: they yield one of their operands and only
+        // conditionally evaluate `v`, so they must not go through `convert_binop`
+        // (that emitted Rust's `&&`/`||` for any operand type, and lowered `??`
+        // as an equality comparison). The target was already loaded once into
+        // `old_temp`, so the equivalent expression is `<old> <op> rhs`.
+        if !post
+            && matches!(
+                op,
+                HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or
+            )
+        {
+            // The target was already materialised into `old_temp`, which has no
+            // HIR node of its own: hand the loaded value to the MIR-level
+            // lowering instead of resolving a synthetic HIR local through the
+            // `LocalId` map, which would allocate a fresh (never declared) local
+            // for the reference.
+            let old_value = MirExpr::Local(old_temp);
+            let lhs_ty = self.mir_expr_static_ty(&old_value, types);
+            let lowered = match op {
+                HirBinaryOp::Coalesce => Some(self.convert_coalesce_operand(
+                    old_value,
+                    lhs_ty,
+                    target.span(),
+                    rhs,
+                    ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )),
+                _ => self.convert_operand_logical_lowered(
+                    op,
+                    old_value,
+                    None,
+                    lhs_ty,
+                    target.span(),
+                    rhs,
+                    self.expected_ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                ),
+            };
+            if let Some(lowered) = lowered {
+                let value = match lowered {
+                    MirExpr::Local(_) => lowered,
+                    other => MirExpr::Local(self.materialize_non_place(other, out)),
+                };
+                out.push(MirStmt::Assign {
+                    target: place,
+                    value: value.clone(),
+                });
+                return value;
+            }
+        }
+
         let rhs_mir =
             self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
 
@@ -516,6 +720,124 @@ impl ExprConverter {
             mutable: false,
         });
 
+        // `??=`, `&&=` and `||=` are not a Rust binary operator over the old value
+        // and the right-hand side: the right-hand side runs only when the short
+        // circuit reaches it, and the result is one of the two operands (never a
+        // `bool` - `convert_binop` maps `??` to equality, and Rust's `&&`/`||`
+        // demand `bool`s). The MIR-level lowering that already implements this for
+        // a materialised target takes the getter's value as its left operand, so
+        // the accessor path reuses it and hands only the lowered result to the
+        // setter.
+        if matches!(
+            op,
+            HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or
+        ) {
+            let operator = match op {
+                HirBinaryOp::Coalesce => "??=",
+                HirBinaryOp::And => "&&=",
+                _ => "||=",
+            };
+            let old_value = MirExpr::Local(old_temp);
+            let lhs_ty = self.mir_expr_static_ty(&old_value, types);
+            let lowered = match op {
+                HirBinaryOp::Coalesce => Some(self.convert_coalesce_operand(
+                    old_value,
+                    lhs_ty,
+                    target.span(),
+                    rhs,
+                    value_ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )),
+                _ => self.convert_operand_logical_lowered(
+                    op,
+                    old_value,
+                    None,
+                    lhs_ty,
+                    target.span(),
+                    rhs,
+                    Some(value_ty),
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                ),
+            };
+            let Some(lowered) = lowered else {
+                // Falling through to the plain binary expression would evaluate the
+                // right-hand side eagerly and store a comparison result, so report
+                // instead of emitting that.
+                ctx.error(
+                    LOGICAL_DIAG,
+                    format!(
+                        "the `{operator}` compound update of accessor `{field_name}` cannot be \
+                         lowered without evaluating its right-hand side eagerly"
+                    ),
+                    target.span(),
+                );
+                return Some(MirExpr::Unit);
+            };
+            let new_value = match lowered {
+                MirExpr::Local(_) => lowered,
+                other => MirExpr::Local(self.materialize_non_place(other, out)),
+            };
+            // The setter has its own value type: a lowering that met the operands
+            // in a wider numeric type is cast back to it, the way the arithmetic
+            // path casts its right-hand side.
+            let new_value = cast_numeric_branch_to_dest(
+                new_value.clone(),
+                self.mir_expr_static_ty(&new_value, types),
+                value_ty,
+                types,
+            );
+
+            // `obj.w &&= 3` over a `number | null` accessor pair keeps the nullish
+            // left operand, and a `number` setter cannot take it. The lowering
+            // reports a nullish result that a non-nullish expectation rejects, but
+            // only for the value it hands back: check what the setter would receive.
+            let setter_takes_nullish = matches!(
+                types.resolve(value_ty),
+                Some(Type::Null | Type::Void | Type::Optional { .. } | Type::Error)
+            );
+            let lowered_ty = self.mir_expr_static_ty(&new_value, types);
+            let lowered_is_nullish = matches!(
+                lowered_ty.and_then(|ty| types.resolve(ty)),
+                Some(Type::Null | Type::Void | Type::Optional { .. })
+            );
+            if !setter_takes_nullish && lowered_is_nullish {
+                ctx.error(
+                    NULLISH_NARROWING_DIAG,
+                    format!(
+                        "the `{operator}` compound update of accessor `{field_name}` can keep a \
+                         nullish value, which its setter does not accept"
+                    ),
+                    target.span(),
+                );
+                return Some(MirExpr::Unit);
+            }
+
+            let mut setter_args = Vec::new();
+            if let Some(recv) = receiver {
+                setter_args.push(recv);
+            }
+            setter_args.push(new_value.clone());
+            out.push(MirStmt::Expr(MirExpr::Call {
+                callee: setter_fid,
+                args: setter_args,
+                ty: types.intern(&Type::Void),
+            }));
+
+            return Some(if post {
+                MirExpr::Local(old_temp)
+            } else {
+                new_value
+            });
+        }
+
         let rhs_mir =
             self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
         let needs_rhs_cast = rhs_ty != value_ty
@@ -656,6 +978,65 @@ fn is_nullable(ty: Option<&Type>, types: &TypeTable) -> bool {
     }
 }
 
+/// Whether a branch of a conditional is the `null`/`undefined` literal itself
+/// (the value the optional representation absorbs).
+fn is_nullish_branch(expr: &HirExpr) -> bool {
+    matches!(
+        expr,
+        HirExpr::Null(_) | HirExpr::Undefined(_) | HirExpr::Unit(_)
+    )
+}
+
+/// Whether the nullable type recovered from the branches can be written into
+/// `expected` (the surrounding annotation): the same optional, or two optional
+/// numerics the backend coerces.
+///
+/// `expected` may be a union that carries the nullish variants directly
+/// (`i64 | null | undefined`): only its non-nullish, non-optional value types
+/// matter for the comparison.
+fn branch_matches_expected(expected: TypeId, candidate: TypeId, types: &TypeTable) -> bool {
+    if types.resolve(expected) == types.resolve(candidate) {
+        return true;
+    }
+    let Some(Type::Optional {
+        inner: candidate_inner,
+        ..
+    }) = types.resolve(candidate)
+    else {
+        return false;
+    };
+    let candidate_inner = *candidate_inner;
+    // A partially known optional (`T | undefined` whose `T` is still `Error`)
+    // cannot prove an incompatibility: trust the annotation.
+    if matches!(types.resolve(candidate_inner), None | Some(Type::Error)) {
+        return true;
+    }
+    expected_value_types(expected, types)
+        .into_iter()
+        .any(|value_ty| {
+            types.resolve(value_ty) == types.resolve(candidate_inner)
+                || (matches!(types.resolve(value_ty), Some(t) if is_primitive_cast_target(t))
+                    && matches!(types.resolve(candidate_inner), Some(t) if is_primitive_cast_target(t)))
+        })
+}
+
+/// The value types an expectation can hold: `T` for `T | null` (and every
+/// non-nullish variant of a union).
+fn expected_value_types(expected: TypeId, types: &TypeTable) -> Vec<TypeId> {
+    match types.resolve(expected) {
+        Some(Type::Optional { inner, .. }) => vec![*inner],
+        Some(Type::Union { variants }) => variants
+            .iter()
+            .flat_map(|variant| match types.resolve(*variant) {
+                Some(Type::Optional { inner, .. }) => vec![*inner],
+                Some(Type::Null | Type::Void) => Vec::new(),
+                _ => vec![*variant],
+            })
+            .collect(),
+        _ => vec![expected],
+    }
+}
+
 fn classify_hir(value: &HirExpr, value_ty: TypeId, types: &TypeTable) -> TypeCategory {
     match value {
         HirExpr::String(_, _) => TypeCategory::String,
@@ -687,7 +1068,13 @@ fn is_assignment_compatible(
 ) -> bool {
     let target_resolved = types.resolve(target_ty);
     let value_cat = classify_hir(value, value_ty, types);
-    if value_cat == TypeCategory::Void && !matches!(target_resolved, Some(Type::Void)) {
+    if value_cat == TypeCategory::Void
+        && !matches!(target_resolved, Some(Type::Void))
+        // `undefined` (Unit) is the natural representation of the nullish part
+        // of an optional target, so `let x: number | undefined = undefined` is
+        // not a Unit-to-value coercion.
+        && !is_nullable(target_resolved, types)
+    {
         return report_compat_warning(
             ctx,
             "E0409",
@@ -699,6 +1086,17 @@ fn is_assignment_compatible(
 
     if target_resolved.is_none() || matches!(target_resolved, Some(Type::Error)) {
         return true;
+    }
+    if !crate::hir_to_mir::nullish::check_nullish_write(
+        value,
+        target_ty,
+        types,
+        span,
+        ctx,
+        "the assignment target",
+        true,
+    ) {
+        return false;
     }
     let target_cat = classify(target_resolved);
 

@@ -2092,7 +2092,10 @@ fn array_instance_length_property_on_optional_array_emits_array_len_runtime_op()
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
     let arr_ty = types.intern(&Type::Array { element: i64_ty });
-    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
+    let opt_arr_ty = types.intern(&Type::Optional {
+        inner: arr_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let expr = HirExpr::Field {
         owner: Box::new(HirExpr::OptionalChain {
             base: Box::new(HirExpr::Local {
@@ -2145,7 +2148,7 @@ fn array_instance_length_property_on_optional_array_emits_array_len_runtime_op()
         })
         .expect("arr?.length must lower to RuntimeOp::ArrayLen");
     assert!(
-        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::F64))),
+        matches!(types.resolve(len_ty), Some(Type::Optional { inner, .. }) if matches!(types.resolve(*inner), Some(Type::F64))),
         "arr?.length must keep the result optional (`f64 | undefined`), got {:?}",
         types.resolve(len_ty)
     );
@@ -2165,7 +2168,10 @@ fn array_instance_len_call_on_optional_array_emits_array_len_runtime_op() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
     let arr_ty = types.intern(&Type::Array { element: i64_ty });
-    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
+    let opt_arr_ty = types.intern(&Type::Optional {
+        inner: arr_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let expr = HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(HirExpr::Field {
             owner: Box::new(HirExpr::OptionalChain {
@@ -2224,7 +2230,7 @@ fn array_instance_len_call_on_optional_array_emits_array_len_runtime_op() {
         })
         .expect("arr?.len() must lower to RuntimeOp::ArrayLen");
     assert!(
-        matches!(types.resolve(len_ty), Some(Type::Optional { inner }) if matches!(types.resolve(*inner), Some(Type::F64))),
+        matches!(types.resolve(len_ty), Some(Type::Optional { inner, .. }) if matches!(types.resolve(*inner), Some(Type::F64))),
         "arr?.len() must keep the result optional (`f64 | undefined`), got {:?}",
         types.resolve(len_ty)
     );

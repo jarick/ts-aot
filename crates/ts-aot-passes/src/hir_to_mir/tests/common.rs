@@ -14,6 +14,7 @@ pub use ts_aot_ir_mir::{
     MirStmt, RuntimeOp, UnaryOp,
 };
 
+pub(super) use super::super::converter::module_throws;
 #[cfg(test)]
 pub(crate) use super::super::is_local_reassigned;
 pub(crate) use super::super::ops::{convert_binop, convert_unaryop};
@@ -69,6 +70,7 @@ pub fn run_convert(
         &mut empty_types(),
         cx,
         &[],
+        &f.name,
     )
 }
 

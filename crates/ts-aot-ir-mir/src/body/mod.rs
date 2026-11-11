@@ -210,6 +210,8 @@ pub enum BinaryOp {
     Mod,
     Eq,
     Ne,
+    StrictEq,
+    StrictNe,
     Lt,
     Le,
     Gt,
@@ -284,6 +286,13 @@ pub enum MirExpr {
         error: Box<MirExpr>,
         ty: TypeId,
     },
+    /// `expr?`: the expression yields a `Result` (the call target declares a
+    /// `throws` type) and its error is propagated to the enclosing function,
+    /// which therefore returns a `Result` of the same error type.
+    Propagate {
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
     Binary {
         op: BinaryOp,
         left: Box<MirExpr>,
@@ -314,6 +323,22 @@ pub enum MirExpr {
     },
     OptionalChain {
         base: Box<MirExpr>,
+        ty: TypeId,
+    },
+    /// Whether an optional value holds a value (`Option::is_some`).
+    ///
+    /// The AOT representation of `T | null` is a plain `Option<T>`, and "is it
+    /// present?" is a *presence* question: it cannot be answered by comparing
+    /// against `null`/`undefined`, which is a question about the nullish *kind*
+    /// (an `undefined`-only optional is never `null`).
+    IsSome {
+        expr: Box<MirExpr>,
+        ty: TypeId,
+    },
+    /// The value inside an optional (`Option::unwrap`): the lowering of `x!` and
+    /// of the "present" arm of `??`.
+    UnwrapOptional {
+        expr: Box<MirExpr>,
         ty: TypeId,
     },
     TypeOf {
@@ -359,11 +384,14 @@ impl MirExpr {
             | MirExpr::StructLiteral { ty, .. }
             | MirExpr::ResultOk { ty, .. }
             | MirExpr::ResultErr { ty, .. }
+            | MirExpr::Propagate { ty, .. }
             | MirExpr::Binary { ty, .. }
             | MirExpr::Unary { ty, .. }
             | MirExpr::Await { ty, .. }
             | MirExpr::Yield { ty, .. }
             | MirExpr::OptionalChain { ty, .. }
+            | MirExpr::IsSome { ty, .. }
+            | MirExpr::UnwrapOptional { ty, .. }
             | MirExpr::TypeOf { ty, .. }
             | MirExpr::Cast { ty, .. }
             | MirExpr::TemplateStringsArray { ty, .. }

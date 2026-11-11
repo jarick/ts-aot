@@ -102,8 +102,8 @@ fn end_to_end_throwing_function_emits_result_in_rust_signature() {
         "emitted Rust signature must show Result<i32, ...>, got: {s}"
     );
     assert!(
-        s.contains("Err (7)"),
-        "Throw must be lowered to `Err(7)`, got: {s}"
+        s.contains("Err (7.0)"),
+        "Throw must be lowered to `Err(7.0)`, got: {s}"
     );
     assert!(
         !s.contains("-> ()"),
@@ -156,8 +156,8 @@ fn end_to_end_throwing_function_with_success_return_emits_ok() {
         "ret must be Result<i32, ...>, got: {s}"
     );
     assert!(
-        s.contains("Err (7)"),
-        "Throw must be lowered to `Err(7)`, got: {s}"
+        s.contains("Err (7.0)"),
+        "Throw must be lowered to `Err(7.0)`, got: {s}"
     );
     assert!(
         s.contains("Ok (42)"),
@@ -214,8 +214,8 @@ fn end_to_end_throwing_void_function_bare_return_emits_ok_unit() {
         "ret must be Result<(), ...>, got: {s}"
     );
     assert!(
-        s.contains("Err (7)"),
-        "Throw must be lowered to `Err(7)`, got: {s}"
+        s.contains("Err (7.0)"),
+        "Throw must be lowered to `Err(7.0)`, got: {s}"
     );
     assert!(
         s.contains("Ok (())"),

@@ -68,7 +68,6 @@ pub(crate) fn type_from_ident(s: &str) -> Option<Type> {
         "boolean" | "bool" => Some(Type::Bool),
         "void" | "undefined" => Some(Type::Void),
         "null" => Some(Type::Null),
-        "never" => Some(Type::Never),
         "Date" => Some(Type::Date),
         "bigint" => Some(Type::BigInt),
         "Symbol" => Some(Type::Symbol),
@@ -94,7 +93,20 @@ pub(crate) fn resolve_simple_type(
     mut diagnostics: Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     match ty? {
-        TSType::TSNeverKeyword(_) => Some(types.intern(&Type::Never)),
+        // `never` is uninhabited: no runtime value can exist, so it is rejected
+        // like `any`/`unknown` instead of mapping onto Rust's unstable `!` type.
+        TSType::TSNeverKeyword(k) => {
+            if let Some(diag) = diagnostics.as_deref_mut() {
+                diag.push(Diagnostic::error(
+                    "E0401",
+                    "the type `never` is not supported in strict AOT mode: no value of that type \
+                     exists, so nothing can be stored, passed or returned. Drop the annotation (a \
+                     function that always throws can return `void`) or use a concrete type.",
+                    core_span_from_oxc(k.span),
+                ));
+            }
+            Some(types.intern(&Type::Error))
+        }
         TSType::TSNumberKeyword(_) => Some(types.intern(&Type::F64)),
         TSType::TSStringKeyword(_) => Some(types.intern(&Type::String)),
         TSType::TSBooleanKeyword(_) => Some(types.intern(&Type::Bool)),

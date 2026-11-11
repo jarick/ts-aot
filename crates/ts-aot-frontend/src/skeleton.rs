@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{Declaration, Expression, Program, Statement, TSType, TSTypeName};
 use oxc_span::GetSpan;
-use ts_aot_core::{Atom, Diagnostic, DiagnosticBag, Span as CoreSpan, Type, TypeId, TypeTable};
+use ts_aot_core::{
+    Atom, Diagnostic, DiagnosticBag, LocalId, Span as CoreSpan, Type, TypeId, TypeTable,
+};
 use ts_aot_ir_hir::{
     HirDecl, HirExport, HirExpr, HirFunction, HirParam, HirProgram, HirStmt, Visitor, walk_expr,
 };
@@ -14,6 +16,21 @@ use crate::util::core_span_from_oxc;
 
 const ALIAS_CYCLE_CODE: &str = "E0401";
 const UNSUPPORTED_BODY_CODE: &str = "E0500";
+/// A compound update (`x += v`, `x++`) of a narrowed optional variable computes
+/// on the narrowed *copy*, so the new value has to reach the variable's storage.
+/// That is possible only when the update is the whole expression of a statement
+/// slot (an expression statement or a `let`/`const` initializer); anywhere else
+/// the storage would silently keep the old value, so it is a *blocking* error
+/// (see [`SkeletonEnv::report_narrowed_update`]).
+pub(crate) const NARROWED_UPDATE_MESSAGE: &str = "a compound update (`x += v`, `x++`) of a narrowed optional variable is only \
+     supported as the whole expression of a statement or of a `let`/`const` initializer: inside \
+     a larger expression the new value could not be written back to the variable's storage";
+/// A narrowed compound update whose new value still has to be copied back into
+/// the variable's storage once the statement that contains it has finished.
+pub(crate) struct NarrowedUpdate {
+    pub(crate) narrowed_id: LocalId,
+    pub(crate) span: oxc_span::Span,
+}
 const RESERVED_NAME_MAIN_CODE: &str = "E0510";
 const RESERVED_NAME_TLA_MAIN_CODE: &str = "E0511";
 const RESERVED_NAME_TLA_GENERATED_CODE: &str = "E0512";
@@ -75,6 +92,10 @@ fn body_contains_await(body: &[HirStmt]) -> bool {
     finder.found
 }
 
+// The walker tracks a handful of independent one-bit modes (static method,
+// module/strict mode, and whether the expression being walked *is* a statement's
+// own expression); a bool per mode is clearer than packing them into a bitfield.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SkeletonBuilder {
     pub(crate) source_len: u32,
     pub(crate) next_generic_param: u32,
@@ -92,6 +113,53 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) tla_main_name: Atom,
     pub(crate) tla_top_level_scope: BodyScope,
     pub(super) top_level_function_spans: HashMap<Atom, CoreSpan>,
+    /// Flow-sensitive narrowings of the function body being walked: the local
+    /// that holds a narrowed snapshot maps to the local that holds the
+    /// variable's *storage* (`Option<T>`) and its type, which an assignment to
+    /// the narrowed variable must keep up to date.
+    ///
+    /// The key is the narrowed [`LocalId`], not the name: a nested block may
+    /// legally declare a shadowing variable of the same name bound to its own
+    /// local, and the shadowing assignment must write *that* local, never the
+    /// outer variable's storage.
+    ///
+    /// An entry lives for the whole function body, even after the narrowing was
+    /// withdrawn: withdrawing only restores the *name* binding (see
+    /// [`BodyScope::widen`]), while the left-hand side of an assignment whose
+    /// right-hand side withdrew the narrowing was already walked and still has
+    /// to be redirected to the storage local.
+    pub(super) narrowed_stack: Vec<HashMap<LocalId, (LocalId, TypeId)>>,
+    /// The variables a closure created in the body being walked captures *and
+    /// writes, identified by the local that holds the variable's storage*. Such
+    /// a variable cannot stay narrowed across a call: the closure may write it
+    /// from a call site the walker cannot attribute, and its body was built
+    /// against the variable's own storage. A capture that is only *read* by the
+    /// closure cannot withdraw a narrowing and is not recorded.
+    pub(super) captured_stack: Vec<HashSet<LocalId>>,
+    /// Every name bound anywhere in the function body being walked (parameters,
+    /// `let`/`const`/`var`, function and class declarations, catch and loop
+    /// bindings), including nested blocks. A generated `_narrowed_N` binding
+    /// must avoid all of them: a declaration that comes *later* in a nested
+    /// block would shadow it in the generated Rust, and the collision check
+    /// against the names visible at the narrowing point cannot see it.
+    pub(super) declared_names_stack: Vec<HashSet<String>>,
+    /// Non-zero while walking a statement whose body does not open a scope frame
+    /// (a braceless `if`/`while`/`do` body): a narrowed binding emitted there
+    /// would be out of scope right after it. A `switch` case does *not* set this
+    /// any more - it narrows for the rest of the case, and `walk_switch` discards
+    /// those narrowings before the next case is walked.
+    pub(super) suppress_narrowing: u32,
+    /// True while walking the expression of an expression *statement*: the
+    /// statement path (`narrow_after_assignment`) handles the write-back of a
+    /// narrowed compound update there, so the expression lowering must not
+    /// report it as unsupported.
+    pub(super) own_statement_expr: bool,
+    /// The narrowed compound updates recorded while walking the expression of a
+    /// statement slot (an expression statement or a `let`/`const` initializer).
+    /// The one that *is* the whole expression is copied back into the storage
+    /// once the statement is finished; the nested ones have no copy back and are
+    /// reported instead of silently keeping the stale storage value.
+    pub(super) pending_narrowed_updates: Vec<NarrowedUpdate>,
 }
 
 pub(crate) struct SkeletonEnv<'b> {
@@ -134,6 +202,17 @@ impl SkeletonEnv<'_> {
             core_span_from_oxc(span),
         ));
     }
+
+    /// Reports a narrowed compound update that has no statement slot to copy the
+    /// new value back into the variable's storage from.
+    ///
+    /// Unlike [`SkeletonEnv::report_unwalked`] this is an **error**: the update
+    /// computes on the narrowed copy, so a warning would still emit a program
+    /// that compiles and keeps the old value in the storage, answering
+    /// differently from JavaScript.
+    pub(crate) fn report_narrowed_update(&mut self, span: oxc_span::Span) {
+        self.report_unsupported(UNSUPPORTED_BODY_CODE, NARROWED_UPDATE_MESSAGE, span);
+    }
 }
 
 pub(crate) enum TlaMainItem {
@@ -164,6 +243,12 @@ impl SkeletonBuilder {
             tla_main_name,
             tla_top_level_scope: BodyScope::new(0),
             top_level_function_spans: HashMap::new(),
+            narrowed_stack: Vec::new(),
+            captured_stack: Vec::new(),
+            declared_names_stack: Vec::new(),
+            suppress_narrowing: 0,
+            own_statement_expr: false,
+            pending_narrowed_updates: Vec::new(),
         }
     }
 
@@ -524,5 +609,21 @@ impl SkeletonBuilder {
             }
         }
         Some(merged)
+    }
+
+    /// The storage local and type of a narrowed local, if `narrowed` is one.
+    pub(super) fn narrowed_storage(&self, narrowed: LocalId) -> Option<(LocalId, TypeId)> {
+        self.narrowed_stack
+            .last()
+            .and_then(|frame| frame.get(&narrowed).copied())
+    }
+
+    /// Whether the function body being walked binds `name` anywhere (including
+    /// declarations that come later in a nested block), so that a generated
+    /// binding called `name` would be shadowed.
+    pub(super) fn declared_name_is_taken(&self, name: &str) -> bool {
+        self.declared_names_stack
+            .last()
+            .is_some_and(|names| names.contains(name))
     }
 }

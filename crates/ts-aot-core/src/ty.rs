@@ -9,10 +9,30 @@ pub enum MemoryKind {
     LinearMemoryValue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NullishKinds {
+    pub null: bool,
+    pub undefined: bool,
+}
+
+impl NullishKinds {
+    pub const NULL_ONLY: Self = Self {
+        null: true,
+        undefined: false,
+    };
+    pub const UNDEFINED_ONLY: Self = Self {
+        null: false,
+        undefined: true,
+    };
+    pub const BOTH: Self = Self {
+        null: true,
+        undefined: true,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Void,
-    Never,
     Bool,
     I8,
     I16,
@@ -28,6 +48,7 @@ pub enum Type {
     Null,
     Optional {
         inner: TypeId,
+        nullish: NullishKinds,
     },
     Struct {
         id: StructId,
@@ -37,6 +58,17 @@ pub enum Type {
     },
     Fn {
         params: Vec<TypeId>,
+        /// Positional "the caller may omit this argument" flags, parallel to
+        /// `params`: `true` for a `?`-optional parameter and for one with a
+        /// default value. The right to omit an argument is *declared* here and
+        /// is never inferred from the parameter's type - a required parameter
+        /// whose type happens to admit `undefined` (`x: T | undefined`, no `?`)
+        /// stays required. A `optional` vector shorter than `params` (including
+        /// the empty one) means "every remaining parameter is required".
+        ///
+        /// These flags take part in `Hash`/`Eq`, so two function types that
+        /// differ only in optionality intern to two distinct `TypeId`s.
+        optional: Vec<bool>,
         ret: TypeId,
         err: Option<TypeId>,
     },
@@ -93,6 +125,21 @@ pub enum Type {
     Error,
 }
 
+impl Type {
+    /// Whether parameter `index` of this function type may be omitted by a
+    /// caller. `true` only for a parameter whose `optional` flag is set; a
+    /// missing or short [`Type::Fn::optional`] vector means "required", so the
+    /// parameter's own type (`T | undefined`) never grants the right to omit an
+    /// argument.
+    #[must_use]
+    pub fn fn_param_optional(&self, index: usize) -> bool {
+        match self {
+            Type::Fn { optional, .. } => optional.get(index).copied().unwrap_or(false),
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,7 +152,7 @@ mod tests {
         assert_ne!(Type::F32, Type::F64);
         assert_ne!(Type::String, Type::Null);
         assert_ne!(Type::Bool, Type::I32);
-        assert_ne!(Type::Void, Type::Never);
+        assert_ne!(Type::Void, Type::Bool);
         assert_ne!(Type::Error, Type::Void);
     }
 
@@ -120,18 +167,26 @@ mod tests {
     }
 
     #[test]
-    fn optional_equality_depends_only_on_inner() {
+    fn optional_equality_depends_on_inner_and_nullish() {
         let a = Type::Optional {
             inner: TypeId::from_raw(7),
+            nullish: NullishKinds::NULL_ONLY,
         };
         let b = Type::Optional {
             inner: TypeId::from_raw(7),
+            nullish: NullishKinds::NULL_ONLY,
         };
         let c = Type::Optional {
             inner: TypeId::from_raw(8),
+            nullish: NullishKinds::NULL_ONLY,
+        };
+        let d = Type::Optional {
+            inner: TypeId::from_raw(7),
+            nullish: NullishKinds::UNDEFINED_ONLY,
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+        assert_ne!(a, d);
     }
 
     #[test]
@@ -157,6 +212,7 @@ mod tests {
         let err = TypeId::from_raw(4);
         let base = Type::Fn {
             params: vec![p1, p2],
+            optional: vec![false, true],
             ret,
             err: None,
         };
@@ -164,6 +220,7 @@ mod tests {
             base.clone(),
             Type::Fn {
                 params: vec![p1, p2],
+                optional: vec![false, true],
                 ret,
                 err: None
             }
@@ -172,6 +229,7 @@ mod tests {
             base.clone(),
             Type::Fn {
                 params: vec![p1, p2],
+                optional: vec![false, true],
                 ret,
                 err: Some(err)
             }
@@ -180,9 +238,78 @@ mod tests {
             base,
             Type::Fn {
                 params: vec![p2, p1],
+                optional: vec![false, true],
                 ret,
                 err: None
             }
+        );
+    }
+
+    #[test]
+    fn fn_equality_considers_optional_flags() {
+        let p1 = TypeId::from_raw(1);
+        let p2 = TypeId::from_raw(2);
+        let ret = TypeId::from_raw(3);
+        let required = Type::Fn {
+            params: vec![p1, p2],
+            optional: vec![false, false],
+            ret,
+            err: None,
+        };
+        let second_omittable = Type::Fn {
+            params: vec![p1, p2],
+            optional: vec![false, true],
+            ret,
+            err: None,
+        };
+        assert_ne!(
+            required, second_omittable,
+            "two function types that differ only in which parameters may be omitted must stay \
+             distinct: `(a, b)` and `(a, b?)` are not the same signature"
+        );
+        assert_ne!(
+            required,
+            Type::Fn {
+                params: vec![p1, p2],
+                optional: vec![],
+                ret,
+                err: None
+            },
+            "an all-`false` vector is not the same value as the empty one, even though both mean \
+             \"every parameter is required\""
+        );
+    }
+
+    #[test]
+    fn fn_param_optional_defaults_to_required() {
+        let required = Type::Fn {
+            params: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+            optional: vec![],
+            ret: TypeId::from_raw(3),
+            err: None,
+        };
+        assert!(!required.fn_param_optional(0));
+        assert!(!required.fn_param_optional(1));
+        assert!(
+            !required.fn_param_optional(7),
+            "an index past the end must be \"required\", never a panic"
+        );
+
+        let flagged = Type::Fn {
+            params: vec![TypeId::from_raw(1), TypeId::from_raw(2)],
+            optional: vec![true],
+            ret: TypeId::from_raw(3),
+            err: None,
+        };
+        assert!(flagged.fn_param_optional(0));
+        assert!(
+            !flagged.fn_param_optional(1),
+            "a short `optional` vector leaves the remaining parameters required"
+        );
+
+        assert!(
+            !Type::I64.fn_param_optional(0),
+            "a non-function type has no parameters"
         );
     }
 
@@ -305,8 +432,8 @@ mod tests {
         );
         assert_ne!(
             id_a,
-            types.intern(&Type::Never),
-            "empty Intersection must be distinct from `never` (oxc parser guards empty intersection source as E0100, but the type itself is a constructible API edge case)"
+            types.intern(&Type::Error),
+            "empty Intersection must be distinct from the unresolved (error) type"
         );
         assert_ne!(
             id_a,
@@ -402,15 +529,15 @@ mod tests {
         let mut types = TypeTable::new();
         let id_empty = types.intern(&Type::Tuple { elements: vec![] });
         let id_void = types.intern(&Type::Void);
-        let id_never = types.intern(&Type::Never);
+        let id_error = types.intern(&Type::Error);
         let id_again = types.intern(&Type::Tuple { elements: vec![] });
         assert_ne!(
             id_empty, id_void,
             "TypeScript `[]` (empty tuple) is semantically a zero-length tuple, not `void` (no value) — they must remain distinct TypeIds"
         );
         assert_ne!(
-            id_empty, id_never,
-            "empty tuple must also be distinct from `never`"
+            id_empty, id_error,
+            "empty tuple must also be distinct from the unresolved (error) type"
         );
         assert_eq!(
             id_empty, id_again,
@@ -501,6 +628,7 @@ mod tests {
         };
         let _ = Type::Optional {
             inner: TypeId::from_raw(2),
+            nullish: NullishKinds::BOTH,
         };
         let _ = FunctionId::from_raw(0);
         let _ = LocalId::from_raw(0);

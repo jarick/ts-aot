@@ -58,14 +58,14 @@ pub(crate) fn run(name: &str, source: &str, opts: &CompileOptions) -> DriverOutp
             Ok(s) => out.rust_source = Some(s),
             Err(e) => {
                 out.diagnostics
-                    .push(Diagnostic::error("E0300", e.to_string(), Span::new(0, 0)));
+                    .push(Diagnostic::error(e.code(), e.message(), Span::new(0, 0)));
             }
         },
         EmitStage::Crate => match compile_to_string_lib(&mir, &types) {
             Ok(s) => out.rust_source = Some(s),
             Err(e) => {
                 out.diagnostics
-                    .push(Diagnostic::error("E0300", e.to_string(), Span::new(0, 0)));
+                    .push(Diagnostic::error(e.code(), e.message(), Span::new(0, 0)));
             }
         },
     }

@@ -357,6 +357,7 @@ mod tests {
                 id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::new_inline("name"),
                 ty: TypeId::from_raw(1),
+                optional: false,
             }],
             ret: TypeId::from_raw(2),
             throws: None,
