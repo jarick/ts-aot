@@ -486,7 +486,9 @@ fn array_of_closures_compiles() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let source = out.rust_source.expect("rust_source");
     assert!(
-        source.contains("Vec < __TsFnValue0 >") || source.contains("Vec<__TsFnValue0>"),
+        source.contains(
+            "ts_aot_runtime :: bumpalo :: collections :: Vec < 'a , __TsFnValue0 < 'a > >"
+        ) || source.contains("ts_aot_runtime::bumpalo::collections::Vec<'a,__TsFnValue0<'a>>"),
         "an annotated array of closures must be typed as Vec<FnValue>; got:\n{source}"
     );
 }
@@ -498,7 +500,8 @@ fn annotated_int_array_literal_is_typed() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let source = out.rust_source.expect("rust_source");
     assert!(
-        source.contains("Vec < i64 >") || source.contains("Vec<i64>"),
+        source.contains("ts_aot_runtime :: bumpalo :: collections :: Vec < 'a , i64 >")
+            || source.contains("ts_aot_runtime::bumpalo::collections::Vec<'a,i64>"),
         "an annotated array literal must carry its element type; got:\n{source}"
     );
 }
@@ -518,5 +521,49 @@ fn function_value_passed_as_argument_compiles() {
     assert!(
         source.contains("__TsFnValue0"),
         "the parameter must be typed by the Fn-value enum; got:\n{source}"
+    );
+}
+
+#[test]
+fn shared_string_capture_env_declares_lifetime() {
+    let out = compile_rust(
+        "export function make(): () => string { const s: string = \"x\"; return (): string => s; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let source = out.rust_source.expect("rust_source");
+    let norm: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("struct__ScopeEnv0<'a>"),
+        "a scope env with a lifetime-bearing capture must declare the `'a` lifetime; got:\n{source}"
+    );
+    assert!(
+        norm.contains("RefCell<Option<ts_aot_runtime::JsString<'a>>>"),
+        "the captured string must be stored as JsString<'a>; got:\n{source}"
+    );
+    assert!(
+        norm.contains("Rc<__ScopeEnv0<'a>>"),
+        "the Rc env type must propagate the lifetime through closure params and fn-value variants; got:\n{source}"
+    );
+}
+
+#[test]
+fn shared_array_capture_env_declares_lifetime() {
+    let out = compile_rust(
+        "export function make(): () => i64[] { const xs: i64[] = [1, 2]; return (): i64[] => xs; }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let source = out.rust_source.expect("rust_source");
+    let norm: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("struct__ScopeEnv0<'a>"),
+        "a scope env with a lifetime-bearing capture must declare the `'a` lifetime; got:\n{source}"
+    );
+    assert!(
+        norm.contains("RefCell<Option<ts_aot_runtime::bumpalo::collections::Vec<'a,i64>>>"),
+        "the captured array must be stored as Vec<'a, i64>; got:\n{source}"
+    );
+    assert!(
+        norm.contains("Rc<__ScopeEnv0<'a>>"),
+        "the Rc env type must propagate the lifetime through closure params and fn-value variants; got:\n{source}"
     );
 }

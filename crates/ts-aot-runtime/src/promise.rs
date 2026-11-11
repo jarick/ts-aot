@@ -335,7 +335,9 @@ where
 
 #[must_use]
 pub(crate) fn __ts_aot_panic_message(payload: &(dyn Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<String>() {
+    if let Some(caught) = payload.downcast_ref::<crate::caught::CaughtValue>() {
+        caught.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()
@@ -350,7 +352,7 @@ pub(crate) fn __ts_aot_panic_message(payload: &(dyn Any + Send)) -> String {
     } else if let Some(b) = payload.downcast_ref::<bool>() {
         b.to_string()
     } else {
-        "uncaught error thrown from async generator".to_owned()
+        "uncaught error".to_owned()
     }
 }
 
@@ -671,9 +673,7 @@ pub fn __ts_aot_await_value_gen<T: Clone + 'static>(promise: &Promise<T>) -> T {
 
 #[must_use]
 pub fn __ts_aot_await_value_raw<T: Clone + 'static>(promise: &Promise<T>) -> T {
-    await_value_settle(promise, |e| {
-        crate::host::__ts_aot_throw(crate::string::JsString::from(e.as_str()))
-    })
+    await_value_settle(promise, |e| crate::host::__ts_aot_throw(e))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

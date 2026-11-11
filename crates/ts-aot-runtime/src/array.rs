@@ -1,5 +1,7 @@
+use bumpalo::collections::Vec as BumpVec;
 use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
+use crate::arena::Ctx;
 use crate::host::__ts_aot_throw;
 use crate::string::JsString;
 
@@ -14,79 +16,106 @@ fn validate_dense_len(len: i64, fn_name: &str) {
 }
 
 #[must_use]
-pub fn __ts_aot_array_create<T>(elements: Vec<T>) -> Vec<T> {
+pub fn __ts_aot_array_create<'a, T>(_ctx: &Ctx<'a>, elements: BumpVec<'a, T>) -> BumpVec<'a, T> {
     elements
 }
 
 #[must_use]
-pub fn __ts_aot_array_create_with_len<T: Default + Clone>(len: i64) -> Vec<T> {
+pub fn __ts_aot_array_create_with_len<'a, T: Default + Clone>(
+    ctx: &Ctx<'a>,
+    len: i64,
+) -> BumpVec<'a, T> {
     validate_dense_len(len, "__ts_aot_array_create_with_len");
-    vec![T::default(); usize::try_from(len).expect("checked above")]
+    let n = usize::try_from(len).expect("checked above");
+    let mut out = BumpVec::with_capacity_in(n, ctx.arena);
+    out.resize(n, T::default());
+    out
 }
 
 #[must_use]
-pub fn __ts_aot_array_concat<T>(parts: Vec<Vec<T>>) -> Vec<T> {
-    let total: usize = parts.iter().map(Vec::len).sum();
-    let mut out: Vec<T> = Vec::new();
-    if out.try_reserve_exact(total).is_err() {
+pub fn __ts_aot_array_concat<'a, T: Clone>(
+    ctx: &Ctx<'a>,
+    parts: BumpVec<'a, BumpVec<'a, T>>,
+) -> BumpVec<'a, T> {
+    let total: usize = parts.iter().map(BumpVec::len).sum();
+    let cap = usize::try_from(MAX_DENSE_ARRAY_LEN).unwrap_or(usize::MAX);
+    if total >= cap {
         __ts_aot_throw(format!(
             "RangeError: __ts_aot_array_concat allocation failed (out of memory) for {total} elements"
         ));
     }
+    let mut out = BumpVec::with_capacity_in(total, ctx.arena);
     for part in parts {
-        out.extend(part);
+        out.extend_from_slice(&part);
     }
     out
 }
 
 #[must_use]
-pub fn __ts_aot_array_hole<T: Default>() -> Vec<T> {
-    vec![T::default()]
+pub fn __ts_aot_array_hole<'a, T: Default>(ctx: &Ctx<'a>) -> BumpVec<'a, T> {
+    let mut out = BumpVec::with_capacity_in(1, ctx.arena);
+    out.push(T::default());
+    out
 }
 
-pub fn __ts_aot_array_push<T>(arr: &mut Vec<T>, item: T) -> i64 {
+pub fn __ts_aot_array_push<T>(arr: &mut BumpVec<'_, T>, item: T) -> i64 {
     arr.push(item);
     i64::try_from(arr.len()).unwrap_or(0)
 }
 
 #[must_use]
-pub fn __ts_aot_array_from<T: Clone>(arr: &[T]) -> Vec<T> {
-    arr.to_owned()
+pub fn __ts_aot_array_from<'a, T: Clone>(ctx: &Ctx<'a>, arr: &[T]) -> BumpVec<'a, T> {
+    BumpVec::from_iter_in(arr.iter().cloned(), ctx.arena)
 }
 
 #[must_use]
-pub fn __ts_aot_array_from_string(s: &JsString) -> Vec<JsString> {
-    char::decode_utf16(s.units_iter())
-        .map(|result| match result {
-            Ok(c) => JsString::Valid(c.to_string()),
-            Err(e) => JsString::from_units(vec![e.unpaired_surrogate()]),
-        })
-        .collect()
+pub fn __ts_aot_array_from_string<'a>(
+    ctx: &Ctx<'a>,
+    s: &JsString<'_>,
+) -> BumpVec<'a, JsString<'a>> {
+    BumpVec::from_iter_in(
+        char::decode_utf16(s.units_iter()).map(|result| match result {
+            Ok(c) => JsString::Valid(ctx.arena.alloc_str(&c.to_string())),
+            Err(e) => JsString::Raw(ctx.arena.alloc_slice_copy(&[e.unpaired_surrogate()])),
+        }),
+        ctx.arena,
+    )
 }
 
 #[must_use]
-pub fn __ts_aot_array_from_mapped<T, R, F>(arr: &[T], mut mapfn: F) -> Vec<R>
+pub fn __ts_aot_array_from_mapped<'a, T, R, F>(
+    ctx: &Ctx<'a>,
+    arr: &[T],
+    mut mapfn: F,
+) -> BumpVec<'a, R>
 where
     T: Clone,
     F: FnMut(T, i64) -> R,
 {
-    arr.iter()
-        .enumerate()
-        .map(|(i, x)| mapfn(x.clone(), i64::try_from(i).unwrap_or(0)))
-        .collect()
+    BumpVec::from_iter_in(
+        arr.iter()
+            .enumerate()
+            .map(|(i, x)| mapfn(x.clone(), i64::try_from(i).unwrap_or(0))),
+        ctx.arena,
+    )
 }
 
 #[must_use]
-pub fn __ts_aot_array_from_length_mapped<T, R, F>(len: i64, mut mapfn: F) -> Vec<R>
+pub fn __ts_aot_array_from_length_mapped<'a, T, R, F>(
+    ctx: &Ctx<'a>,
+    len: i64,
+    mut mapfn: F,
+) -> BumpVec<'a, R>
 where
     T: Default,
     F: FnMut(T, i64) -> R,
 {
     validate_dense_len(len, "__ts_aot_array_from_length_mapped");
     let n = usize::try_from(len).expect("checked above");
-    (0..n)
-        .map(|i| mapfn(T::default(), i64::try_from(i).unwrap_or(0)))
-        .collect()
+    BumpVec::from_iter_in(
+        (0..n).map(|i| mapfn(T::default(), i64::try_from(i).unwrap_or(0))),
+        ctx.arena,
+    )
 }
 
 #[must_use]
@@ -122,12 +151,17 @@ pub fn __ts_aot_array_len<T>(arr: &[T]) -> f64 {
 }
 
 #[must_use]
-pub fn __ts_aot_array_own_keys<T>(arr: &[T], include_length: bool) -> Vec<JsString> {
-    let mut keys: Vec<JsString> = (0..arr.len())
-        .map(|i| JsString::Valid(i.to_string()))
-        .collect();
+pub fn __ts_aot_array_own_keys<'a, T>(
+    ctx: &Ctx<'a>,
+    arr: &[T],
+    include_length: bool,
+) -> BumpVec<'a, JsString<'a>> {
+    let mut keys: BumpVec<'a, JsString<'a>> = BumpVec::from_iter_in(
+        (0..arr.len()).map(|i| JsString::Valid(ctx.arena.alloc_str(&i.to_string()))),
+        ctx.arena,
+    );
     if include_length {
-        keys.push(JsString::Valid("length".to_owned()));
+        keys.push(JsString::Valid("length"));
     }
     keys
 }
@@ -138,7 +172,7 @@ pub trait IsArray {
     fn is_array(&self) -> bool;
 }
 
-impl<T> IsArray for Vec<T> {
+impl<T> IsArray for BumpVec<'_, T> {
     fn is_array(&self) -> bool {
         true
     }

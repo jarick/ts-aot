@@ -386,8 +386,9 @@ impl SkeletonBuilder {
             {
                 let inferred = init.as_ref().and_then(|e| {
                     crate::expr::literal_hir_ty(senv.types, e).or_else(|| {
-                        let t = e.ty();
-                        (t != ts_aot_core::TypeId::from_raw(0)).then_some(t)
+                        e.has_static_type()
+                            .then(|| e.ty())
+                            .filter(|t| !matches!(senv.types.resolve(*t), None | Some(Type::Error)))
                     })
                 });
                 if let Some(t) = inferred {

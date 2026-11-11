@@ -54,8 +54,9 @@ impl ExprConverter {
             );
             return Some(MirExpr::Unit);
         }
-        let arg_mir = self.convert_expr(
+        let arg_mir = self.convert_call_arg(
             &args[0],
+            None,
             out,
             shared_struct_ids,
             shared_next_struct,
@@ -123,8 +124,9 @@ impl ExprConverter {
         );
         let mut runtime_args = vec![owner_mir];
         if args.len() == 1 {
-            let radix_mir = self.convert_expr(
+            let radix_mir = self.convert_call_arg(
                 &args[0],
+                None,
                 out,
                 shared_struct_ids,
                 shared_next_struct,
@@ -173,8 +175,9 @@ impl ExprConverter {
         if !matches!(types.resolve(arg_ty), Some(Type::BigInt)) {
             return None;
         }
-        let arg_mir = self.convert_expr(
+        let arg_mir = self.convert_call_arg(
             &args[0],
+            None,
             out,
             shared_struct_ids,
             shared_next_struct,

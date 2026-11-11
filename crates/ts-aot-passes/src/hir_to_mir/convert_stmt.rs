@@ -10,6 +10,41 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
+    fn recover_local_ty(
+        &self,
+        name: &str,
+        declared: TypeId,
+        init: Option<&HirExpr>,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> TypeId {
+        if !matches!(types.resolve(declared), None | Some(Type::Error)) {
+            return declared;
+        }
+        if let Some(init) = init {
+            if let Some(recovered) = self.expr_type(init, types)
+                && !matches!(types.resolve(recovered), None | Some(Type::Error))
+            {
+                return recovered;
+            }
+            let dynamic_place = match init {
+                HirExpr::Local { ty, .. } | HirExpr::Global { ty, .. } => {
+                    matches!(types.resolve(*ty), Some(Type::Error))
+                }
+                _ => false,
+            };
+            if dynamic_place {
+                return declared;
+            }
+        }
+        ctx.error(
+            "E0414",
+            format!("cannot infer the type of local `{name}`; add an explicit type annotation"),
+            Span::new(0, 0),
+        );
+        declared
+    }
+
     pub fn convert_block(
         &mut self,
         block: &[HirStmt],
@@ -150,18 +185,36 @@ impl ExprConverter {
                 let name = name.clone();
                 self.register_local_name(new_id, name.clone());
                 let mutable = mutable_locals.contains(id);
+                let effective_ty =
+                    self.recover_local_ty(name.as_str(), *ty, init.as_ref(), types, ctx);
                 final_locals.push(MirLocalDecl {
                     id: new_id,
                     name,
-                    ty: *ty,
+                    ty: effective_ty,
                     mutable,
                 });
+                let init_expected_ty = if matches!(types.resolve(*ty), None | Some(Type::Error)) {
+                    None
+                } else {
+                    Some(*ty)
+                };
                 let init_mir = init.as_ref().map(|e| {
-                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    let saved_expected_ty = self.expected_ty;
+                    self.expected_ty = init_expected_ty;
+                    let mir = self.convert_expr(
+                        e,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    self.expected_ty = saved_expected_ty;
+                    mir
                 });
                 out.push(MirStmt::Let {
                     local: new_id,
-                    ty: *ty,
+                    ty: effective_ty,
                     init: init_mir,
                     mutable,
                 });
@@ -621,7 +674,18 @@ impl ExprConverter {
             }
             HirStmt::Return { value } => {
                 let value_mir = value.as_ref().map(|e| {
-                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx)
+                    let saved_expected_ty = self.expected_ty;
+                    self.expected_ty = self.current_return_ty;
+                    let mir = self.convert_expr(
+                        e,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    self.expected_ty = saved_expected_ty;
+                    mir
                 });
                 out.push(MirStmt::Return(value_mir));
             }

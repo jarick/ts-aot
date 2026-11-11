@@ -28,23 +28,53 @@ pub(super) fn emit_type_id(id: TypeId, types: &TypeTable) -> TokenStream {
 }
 
 pub(super) fn emit_type_id_with_ctx(id: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
+    emit_type_id_impl(id, emit_env, ctx, LifetimeMode::Full)
+}
+
+pub(super) fn emit_static_type_id(id: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
+    emit_type_id_impl(id, emit_env, ctx, LifetimeMode::Static)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LifetimeMode {
+    Full,
+    Static,
+}
+
+impl LifetimeMode {
+    fn lifetime(self) -> TokenStream {
+        match self {
+            LifetimeMode::Full => quote!('a),
+            LifetimeMode::Static => quote!('static),
+        }
+    }
+}
+
+fn emit_type_id_impl(
+    id: TypeId,
+    emit_env: &EmitEnv,
+    ctx: &EmitCtx,
+    mode: LifetimeMode,
+) -> TokenStream {
     let EmitEnv { types, .. } = emit_env;
     if let Some(ty) = types.resolve(id) {
         if matches!(ty, Type::Fn { .. }) {
             if let Some(k) = ctx.fn_value_kind(id) {
                 let enum_name = EmitCtx::fn_value_ident(k);
-                return quote!(#enum_name);
+                let lt = mode.lifetime();
+                return quote!(#enum_name<#lt>);
             }
             return quote!(());
         }
-        emit_type(ty, emit_env, ctx)
+        emit_type(ty, emit_env, ctx, mode)
     } else {
         let ident = format_ident!("__ty{}", id.raw());
         quote!(#ident)
     }
 }
 
-fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
+fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx, mode: LifetimeMode) -> TokenStream {
+    let rec = |inner: TypeId| emit_type_id_impl(inner, emit_env, ctx, mode);
     match ty {
         Type::Void
         | Type::Null
@@ -66,31 +96,40 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
         Type::U64 => quote!(u64),
         Type::F32 => quote!(f32),
         Type::F64 => quote!(f64),
-        Type::String => quote!(ts_aot_runtime::JsString),
+        Type::String => {
+            let lt = mode.lifetime();
+            quote!(ts_aot_runtime::JsString<#lt>)
+        }
         Type::Optional { inner } => {
-            let inner_tokens = emit_type_id_with_ctx(*inner, emit_env, ctx);
+            let inner_tokens = rec(*inner);
             quote!(Option<#inner_tokens>)
         }
         Type::Array { element } => {
-            let element_tokens = emit_type_id_with_ctx(*element, emit_env, ctx);
-            quote!(Vec<#element_tokens>)
+            let element_tokens = rec(*element);
+            let lt = mode.lifetime();
+            quote!(ts_aot_runtime::bumpalo::collections::Vec<#lt, #element_tokens>)
         }
         Type::Struct { id } => {
             let ident = ctx.struct_ident(*id);
-            quote!(#ident)
+            if ctx.struct_needs_lifetime(*id) {
+                let lt = mode.lifetime();
+                quote!(#ident<#lt>)
+            } else {
+                quote!(#ident)
+            }
         }
         Type::Result { ok, err } => {
-            let ok_tokens = emit_type_id_with_ctx(*ok, emit_env, ctx);
-            let err_tokens = emit_type_id_with_ctx(*err, emit_env, ctx);
+            let ok_tokens = rec(*ok);
+            let err_tokens = rec(*err);
             quote!(Result<#ok_tokens, #err_tokens>)
         }
         Type::Promise { ok, err: _ } => {
-            let ok_tokens = emit_type_id_with_ctx(*ok, emit_env, ctx);
+            let ok_tokens = rec(*ok);
             quote!(ts_aot_runtime::Promise<#ok_tokens>)
         }
         Type::ArrayBuffer => quote!(ts_aot_runtime::ArrayBufferHandle),
         Type::WeakMap { value, .. } => {
-            let value_tokens = emit_type_id_with_ctx(*value, emit_env, ctx);
+            let value_tokens = rec(*value);
             quote!(ts_aot_runtime::WeakMapHandle<#value_tokens>)
         }
         Type::Int8Array
@@ -109,7 +148,7 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
             quote!(#ident)
         }
         Type::Generator { inner, is_async } => {
-            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
+            let inner = rec(*inner);
             if *is_async {
                 quote!(ts_aot_runtime::AsyncGenerator<#inner>)
             } else {
@@ -117,11 +156,11 @@ fn emit_type(ty: &Type, emit_env: &EmitEnv, ctx: &EmitCtx) -> TokenStream {
             }
         }
         Type::GeneratorResult { inner } => {
-            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
+            let inner = rec(*inner);
             quote!(ts_aot_runtime::GeneratorResult<#inner>)
         }
         Type::AsyncGenYield { inner } => {
-            let inner = emit_type_id_with_ctx(*inner, emit_env, ctx);
+            let inner = rec(*inner);
             quote!(ts_aot_runtime::AsyncGenYield<#inner>)
         }
         Type::GenericParam { id } => {

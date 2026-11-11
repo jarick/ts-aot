@@ -3,7 +3,7 @@ use std::panic::panic_any;
 
 use crate::string::JsString;
 
-pub fn __ts_aot_host_console_log(s: &JsString) {
+pub fn __ts_aot_host_console_log(s: &JsString<'_>) {
     println!("{}", s.to_string_lossy());
 }
 

@@ -118,7 +118,7 @@ fn parameter_default_value_is_reported_as_ignored() {
     let opts = CompileOptions::with_emit(EmitStage::Hir);
     let out = Driver::new().compile_source(
         "test.ts",
-        "export function f(x = 1): number { return x; }",
+        "export function f(x: number = 1): number { return x; }",
         &opts,
     );
     assert!(
@@ -173,7 +173,8 @@ fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
     let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
         "test.ts",
-        "function f(c: i64): never { throw c > 0 ? throwingFn() : 0; }",
+        "function f(c: i64): never { throw c > 0 ? throwingFn() : 0; } \
+         function throwingFn(): i64 { return 0; }",
         &opts,
     );
     assert!(
@@ -263,9 +264,10 @@ fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
         .rust_source
         .expect("emit-rust must populate rust_source for e2e tagged template Rust check");
     assert!(
-        rust.contains("vec ! [ts_aot_runtime :: JsString :: from (\"hi \") , ts_aot_runtime :: JsString :: from (\"!\")]")
-            || rust.contains("vec![ts_aot_runtime::JsString::from(\"hi \"), ts_aot_runtime::JsString::from(\"!\")]"),
-        "tag's first arg must be a typed vec![JsString::from(\"hi \"), JsString::from(\"!\")] (no TemplateStringsArray wrapper), got rust:\n{rust}"
+        rust.contains("ts_aot_runtime :: bumpalo :: vec ! [in __ctx . arena ;")
+            && rust.contains("JsString :: from (\"hi \")")
+            && rust.contains("JsString :: from (\"!\")"),
+        "tag's first arg must be a typed ts_aot_runtime::bumpalo vec of JsString (no TemplateStringsArray wrapper), got rust:\n{rust}"
     );
     let has_amp_slice_str = rust.contains("& [\"hi\"")
         || rust.contains("&[\"hi\"")
@@ -539,7 +541,7 @@ fn tla_module_mode_top_level_await_marks_main_async_and_drives_via_runtime_run()
         "top-level await must mark the synthetic TLA main as `async fn` so the future is awaited; got rust:\n{rust}"
     );
     assert!(
-        rust.contains("__ts_aot_runtime_run") && rust.contains("__ts_aot_tla_main ()"),
+        rust.contains("__ts_aot_runtime_run") && rust.contains("__ts_aot_tla_main"),
         "top-level await must drive the async TLA future through __ts_aot_runtime_run; got rust:\n{rust}"
     );
 }
@@ -1067,7 +1069,7 @@ fn e2e_object_literal_lowers_to_anonymous_struct() {
         "an object literal must lower to an anonymous struct, got:\n{rust}"
     );
     assert!(
-        rust.contains("ObjectLit0 { a : 1 , b : true }"),
+        rust.contains("ObjectLit0 { a : 1 , b : true"),
         "the anonymous struct must be built with the literal's fields, got:\n{rust}"
     );
 }
@@ -1101,7 +1103,7 @@ fn e2e_object_literal_type_assertion_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2 }"),
+        rust.contains("Point { x : 1 , y : 2"),
         "a type-asserted object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1118,7 +1120,7 @@ fn e2e_object_literal_typed_let_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2 }"),
+        rust.contains("Point { x : 1 , y : 2"),
         "a typed `let` object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1135,7 +1137,7 @@ fn e2e_object_literal_assignment_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2 }"),
+        rust.contains("Point { x : 1 , y : 2"),
         "an assigned object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1151,7 +1153,7 @@ fn e2e_object_literal_return_uses_function_return_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2 }"),
+        rust.contains("Point { x : 1 , y : 2"),
         "a returned object literal must lower to the function's return struct, got:\n{rust}"
     );
     assert!(
@@ -1170,7 +1172,7 @@ fn e2e_object_literal_call_argument_uses_param_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("g (Point { x : 1 , y : 2 })"),
+        rust.contains("g (__ctx , Point { x : 1 , y : 2"),
         "an object-literal argument must lower to the parameter's struct, got:\n{rust}"
     );
     assert!(
@@ -1199,7 +1201,7 @@ fn e2e_typed_nested_object_literal_uses_field_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Inner { a : 1 }"),
+        rust.contains("Inner { a : 1"),
         "the nested literal must lower to the declared field struct `Inner`, got:\n{rust}"
     );
     assert!(
@@ -1280,7 +1282,7 @@ fn e2e_object_literal_type_assertion_let_sets_local_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2 }"),
+        rust.contains("Point { x : 1 , y : 2"),
         "the asserted object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1401,12 +1403,12 @@ fn e2e_method_on_class_typed_global_resolves_via_declared_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__foo (obj . clone ())"),
+        rust.contains("C__foo (obj . clone () , __ctx)"),
         "a method call on a class-typed global must resolve via the declared global type and \
          clone the non-Copy static receiver (moving out of a static is E0507), got:\n{rust}"
     );
     assert!(
-        rust.contains("C__get_y (obj . clone ())"),
+        rust.contains("C__get_y (obj . clone () , __ctx)"),
         "an accessor read on a class-typed global must resolve via the declared global type and \
          clone the non-Copy static receiver, got:\n{rust}"
     );
@@ -1421,11 +1423,11 @@ fn e2e_static_accessor_dispatches_without_receiver() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__get_y ()"),
+        rust.contains("C__get_y (__ctx)"),
         "a static getter must dispatch without a receiver, got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (__tmp"),
+        rust.contains("C__set_y (__ctx , __tmp"),
         "a static setter must dispatch without a receiver (value only), got:\n{rust}"
     );
 }
@@ -1499,7 +1501,7 @@ fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__get_y (g . clone ())"),
+        rust.contains("C__get_y (g . clone () , __ctx)"),
         "a global receiver must be forwarded without an intermediate by-value temp (a direct \
          clone is used because moving out of a static is E0507), got:\n{rust}"
     );
@@ -1744,7 +1746,9 @@ fn e2e_array_from_borrows_source_and_types_array() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Vec < i64 > = __ts_aot_array_from (& src)"),
+        rust.contains(
+            "ts_aot_runtime :: bumpalo :: collections :: Vec < 'a , i64 > = __ts_aot_array_from (__ctx , & src)"
+        ),
         "`Array.from` must borrow its source and bind an array result, got:\n{rust}"
     );
 }
@@ -1757,7 +1761,7 @@ fn e2e_json_stringify_string_borrows_and_types_string() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("JsString = __ts_aot_json_stringify_string (& s)"),
+        rust.contains("JsString < 'a > = __ts_aot_json_stringify_string (__ctx , & s)"),
         "`JSON.stringify(str)` must borrow its argument and bind a `JsString` result, got:\n{rust}"
     );
 }

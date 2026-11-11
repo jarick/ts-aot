@@ -90,13 +90,23 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let then_ty = self.expr_type(then_branch, types);
+        let else_ty = self.expr_type(else_branch, types);
         let dest_ty = if matches!(types.resolve(ty), None | Some(Type::Error)) {
-            match (then_value.ty(), else_value.ty()) {
-                (Some(a), Some(b))
-                    if a == b && !matches!(types.resolve(a), None | Some(Type::Error)) =>
-                {
-                    a
-                }
+            match (then_ty, else_ty) {
+                (Some(a), Some(b)) => match self.join_expr_types(a, b, types) {
+                    Some(joined) => joined,
+                    None => {
+                        ctx.error(
+                            "E0414",
+                            "cannot unify the branch types of this conditional expression; add \
+                             an explicit type annotation"
+                                .to_owned(),
+                            Span::new(0, 0),
+                        );
+                        ty
+                    }
+                },
                 _ => ty,
             }
         } else {
@@ -112,11 +122,11 @@ impl ExprConverter {
         });
         then_stmts.push(MirStmt::Assign {
             target: MirPlace::Local { id: dest },
-            value: then_value,
+            value: cast_numeric_branch_to_dest(then_value, then_ty, dest_ty, types),
         });
         else_stmts.push(MirStmt::Assign {
             target: MirPlace::Local { id: dest },
-            value: else_value,
+            value: cast_numeric_branch_to_dest(else_value, else_ty, dest_ty, types),
         });
         out.push(MirStmt::If {
             cond: cond_mir,
@@ -562,6 +572,29 @@ impl ExprConverter {
             Some(MirExpr::Local(new_temp))
         }
     }
+}
+
+fn cast_numeric_branch_to_dest(
+    value: MirExpr,
+    branch_ty: Option<TypeId>,
+    dest_ty: TypeId,
+    types: &TypeTable,
+) -> MirExpr {
+    let Some(branch_ty) = branch_ty else {
+        return value;
+    };
+    if branch_ty == dest_ty {
+        return value;
+    }
+    if matches!(types.resolve(branch_ty), Some(t) if is_primitive_cast_target(t))
+        && matches!(types.resolve(dest_ty), Some(t) if is_primitive_cast_target(t))
+    {
+        return MirExpr::Cast {
+            expr: Box::new(value),
+            ty: dest_ty,
+        };
+    }
+    value
 }
 
 fn is_primitive_cast_target(ty: &Type) -> bool {

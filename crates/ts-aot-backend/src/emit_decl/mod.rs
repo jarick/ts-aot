@@ -21,7 +21,7 @@ use self::ctx::EmitCtx;
 use self::ctx::EmitEnv;
 use self::ident::ident_from;
 use self::literals::emit_const_expr;
-use self::types::emit_type_id_with_ctx;
+use self::types::{LifetimeMode, emit_static_type_id, emit_type_id_with_ctx};
 use crate::error::BackendError;
 
 pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream, BackendError> {
@@ -54,13 +54,17 @@ pub fn emit_decls_with_style(
     if !dispatch_entries.is_empty() {
         let vis = if lib_style { quote!(pub) } else { quote!() };
         tokens.extend(quote! {
-            #vis const __TS_AOT_DISPATCH_TABLE: &[(&str, fn(&[u64]) -> u64)] = &[
+            #vis const __TS_AOT_DISPATCH_TABLE: &[(&str, for<'a> fn(&ts_aot_runtime::Ctx<'a>, &[u64]) -> u64)] = &[
                 #(#dispatch_entries,)*
             ];
         });
     }
     tokens.extend(emit_fn_values(&ctx, &emit_env));
-    if lib_style && ctx.runtime_used() {
+    if lib_style {
+        tokens.extend(quote!(
+            pub use ts_aot_runtime::*;
+        ));
+    } else if ctx.runtime_used() {
         tokens.extend(quote!(
             use ts_aot_runtime::*;
         ));
@@ -92,7 +96,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         let mut debug_arms: Vec<TokenStream> = Vec::new();
         for (fname, variant, is_throwing, is_async) in variants {
             let fident = ident_from(fname);
-            let mut call = quote!(#fident(#(#arg_names),*));
+            let mut call = quote!(#fident(__ctx, #(#arg_names),*));
             if *is_async {
                 call = quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call));
             }
@@ -119,7 +123,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             let fn_ident = format_ident!("__ts_closure_{}", id);
             if capture_types.is_empty() {
                 enum_variants.push(quote!(#variant));
-                arms.push(quote!(#enum_name::#variant => #fn_ident(#(#arg_names),*),));
+                arms.push(quote!(#enum_name::#variant => #fn_ident(__ctx, #(#arg_names),*),));
                 debug_arms.push(
                     quote!(#enum_name::#variant => f.write_str(stringify!(#enum_name::#variant)),),
                 );
@@ -139,7 +143,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                     .collect();
                 arms.push(quote! {
                     #enum_name::#variant { #(#cap_bindings),* } => {
-                        #fn_ident(#(#cap_names.clone(),)* #(#arg_names),*)
+                        #fn_ident(__ctx, #(#cap_names.clone(),)* #(#arg_names),*)
                     },
                 });
                 debug_arms.push(quote! {
@@ -154,22 +158,28 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             let placeholder = format_ident!("__Uninhabited");
             tokens.extend(quote! {
                 #[derive(Clone)]
-                pub enum #enum_name { #placeholder }
-                impl ::std::fmt::Debug for #enum_name {
+                pub enum #enum_name<'a> {
+                    #placeholder,
+                    __Phantom(::core::marker::PhantomData<&'a ()>),
+                }
+                impl ::std::fmt::Debug for #enum_name<'_> {
                     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                         match self {
                             #enum_name::#placeholder => {
                                 f.write_str(stringify!(#enum_name::#placeholder))
                             }
+                            #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                         }
                     }
                 }
-                pub fn #helper(
-                    __f: &#enum_name,
+                pub fn #helper<'a>(
+                    __ctx: &ts_aot_runtime::Ctx<'a>,
+                    __f: &#enum_name<'a>,
                     #(#arg_names: #param_tys),*
                 ) -> #ret {
                     match __f {
                         #enum_name::#placeholder => unreachable!(),
+                        #enum_name::__Phantom(_) => unreachable!(),
                     }
                 }
             });
@@ -177,20 +187,26 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         }
         tokens.extend(quote! {
             #[derive(Clone)]
-            pub enum #enum_name { #(#enum_variants,)* }
-            impl ::std::fmt::Debug for #enum_name {
+            pub enum #enum_name<'a> {
+                #(#enum_variants,)*
+                __Phantom(::core::marker::PhantomData<&'a ()>),
+            }
+            impl ::std::fmt::Debug for #enum_name<'_> {
                 fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     match self {
                         #(#debug_arms)*
+                        #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                     }
                 }
             }
-            pub fn #helper(
-                __f: &#enum_name,
+            pub fn #helper<'a>(
+                __ctx: &ts_aot_runtime::Ctx<'a>,
+                __f: &#enum_name<'a>,
                 #(#arg_names: #param_tys),*
             ) -> #ret {
                 match __f {
                     #(#arms)*
+                    #enum_name::__Phantom(_) => unreachable!(),
                 }
             }
         });
@@ -211,18 +227,24 @@ fn tla_main_rust_name() -> Ident {
     Ident::new("__ts_aot_tla_main", Span::call_site())
 }
 
-fn emit_tla_main_entry(program: &MirProgram) -> TokenStream {
-    if tla_main_is_async(program) {
-        quote! {
-            fn main() {
-                ts_aot_runtime::__ts_aot_runtime_run(__ts_aot_tla_main());
-            }
-        }
+fn tla_run_body(program: &MirProgram, async_runner: &TokenStream) -> TokenStream {
+    let call = if tla_main_is_async(program) {
+        quote!(#async_runner(__ts_aot_tla_main(__ctx)))
     } else {
-        quote! {
-            fn main() {
-                __ts_aot_tla_main();
-            }
+        quote!(__ts_aot_tla_main(__ctx))
+    };
+    quote! {
+        struct __TsAotHost;
+        impl ts_aot_runtime::Host for __TsAotHost {}
+        ts_aot_runtime::run_in_arena(&__TsAotHost, |__ctx| #call);
+    }
+}
+
+fn emit_tla_main_entry(program: &MirProgram) -> TokenStream {
+    let run = tla_run_body(program, &quote!(ts_aot_runtime::__ts_aot_runtime_run));
+    quote! {
+        fn main() {
+            #run
         }
     }
 }
@@ -244,17 +266,10 @@ fn emit_tla_main_noop_entry() -> TokenStream {
 }
 
 fn emit_tla_init_entry(program: &MirProgram) -> TokenStream {
-    if tla_main_is_async(program) {
-        quote! {
-            pub fn __ts_aot_init() {
-                ts_aot_runtime::__ts_aot_run_or_poll(__ts_aot_tla_main());
-            }
-        }
-    } else {
-        quote! {
-            pub fn __ts_aot_init() {
-                __ts_aot_tla_main();
-            }
+    let run = tla_run_body(program, &quote!(ts_aot_runtime::__ts_aot_run_or_poll));
+    quote! {
+        pub fn __ts_aot_init() {
+            #run
         }
     }
 }
@@ -265,7 +280,7 @@ fn emit_decl(
     emit_env: &EmitEnv,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     match decl {
-        MirDecl::Function(f) => emit_function_with_ctx(f, ctx, emit_env),
+        MirDecl::Function(f) => emit_function_with_ctx(f, ctx, emit_env, None),
         MirDecl::Struct(s) => emit_struct_with_ctx(s, ctx, emit_env),
         MirDecl::Global(g) => emit_global_with_ctx(g, ctx, emit_env),
     }
@@ -282,13 +297,14 @@ fn emit_function(f: &MirFunctionDecl, types: &TypeTable) -> Result<TokenStream, 
         types,
         program: &empty_program,
     };
-    Ok(emit_function_with_ctx(f, &ctx, &emit_env)?.0)
+    Ok(emit_function_with_ctx(f, &ctx, &emit_env, None)?.0)
 }
 
 fn emit_function_with_ctx(
     f: &MirFunctionDecl,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
+    enclosing: Option<StructId>,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let EmitEnv { types, program } = emit_env;
     let is_tla_main = is_generated_tla_main(f, program);
@@ -316,8 +332,17 @@ fn emit_function_with_ctx(
     let self_token = self_param_token(&f.kind, &body_ctx);
     let body = emit_body(f, ctx, emit_env, &body_ctx)?;
 
+    let ctx_param = quote!(__ctx: &ts_aot_runtime::Ctx<'a>);
+    let impl_declares_lifetime = enclosing
+        .or_else(|| ctx.function_owner(f.id))
+        .is_some_and(|owner| ctx.struct_needs_lifetime(owner));
+    let generics = if impl_declares_lifetime {
+        quote!()
+    } else {
+        quote!(<'a>)
+    };
     let fn_tokens = quote! {
-        #vis #asyncness fn #emitted_name(#self_token #(#params),*) -> #ret #body
+        #vis #asyncness fn #emitted_name #generics (#self_token #ctx_param, #(#params),*) -> #ret #body
     };
 
     let dispatch_entry = emit_dispatch_entry(f, emit_env, ctx);
@@ -359,7 +384,9 @@ fn emit_dispatch_entry(
     };
     let wrapper = ctx.dispatch_wrapper_ident(&name);
     let name_lit = Literal::string(f.name.as_str());
-    let entry = quote! { (#name_lit, #wrapper as fn(&[u64]) -> u64) };
+    let entry = quote! {
+        (#name_lit, #wrapper as for<'a> fn(&ts_aot_runtime::Ctx<'a>, &[u64]) -> u64)
+    };
     Some((wrapper, entry))
 }
 
@@ -442,9 +469,9 @@ fn build_dispatch_wrapper(
     let ret_ty = emit_type_id_with_ctx(f.ret, emit_env, ctx);
     let ret_expr = pack_return_stmt(f.ret, types)?;
     Ok(quote! {
-        pub fn #wrapper_name(_args: &[u64]) -> u64 {
+        pub fn #wrapper_name<'a>(__ctx: &ts_aot_runtime::Ctx<'a>, _args: &[u64]) -> u64 {
             #(#unpack_stmts)*
-            let __result: #ret_ty = #name(#(#call_args),*);
+            let __result: #ret_ty = #name(__ctx, #(#call_args),*);
             #ret_expr
         }
     })
@@ -530,31 +557,63 @@ fn emit_struct_with_ctx(
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ctx.struct_ident(s.id);
     let class_id_raw: u32 = s.id.raw();
-    let fields = s.fields.iter().map(|f| emit_field(f, ctx, emit_env));
+    let fields: Vec<TokenStream> = s
+        .fields
+        .iter()
+        .map(|f| emit_field(f, ctx, emit_env))
+        .collect();
     let mut methods = TokenStream::new();
+    let mut free_fns = TokenStream::new();
     let mut dispatch_entries: Vec<TokenStream> = Vec::new();
     for m in &s.methods {
-        let (m_tokens, m_entries) = emit_function_with_ctx(m, ctx, emit_env)?;
-        methods.extend(m_tokens);
+        let is_static = matches!(m.kind, FunctionKind::Plain | FunctionKind::Generator);
+        let enclosing = if is_static { None } else { Some(s.id) };
+        let (m_tokens, m_entries) = emit_function_with_ctx(m, ctx, emit_env, enclosing)?;
+        if is_static {
+            free_fns.extend(m_tokens);
+        } else {
+            methods.extend(m_tokens);
+        }
         dispatch_entries.extend(m_entries);
     }
-    let tokens = quote! {
-        #[derive(Clone, Debug)]
-        pub struct #name {
-            #(#fields,)*
-        }
-
-        impl ts_aot_runtime::TsClassId for #name {
-            fn class_id() -> u32 {
-                #class_id_raw
-            }
-        }
-
-        impl #name {
-            #methods
+    let class_id_fn = quote! {
+        fn class_id() -> u32 {
+            #class_id_raw
         }
     };
-    Ok((tokens, dispatch_entries))
+    let tokens = if ctx.struct_needs_lifetime(s.id) {
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #name<'a> {
+                #(#fields,)*
+                _marker: ::core::marker::PhantomData<&'a ()>,
+            }
+
+            impl ts_aot_runtime::TsClassId for #name<'_> {
+                #class_id_fn
+            }
+
+            impl<'a> #name<'a> {
+                #methods
+            }
+        }
+    } else {
+        quote! {
+            #[derive(Clone, Debug)]
+            pub struct #name {
+                #(#fields,)*
+            }
+
+            impl ts_aot_runtime::TsClassId for #name {
+                #class_id_fn
+            }
+
+            impl #name {
+                #methods
+            }
+        }
+    };
+    Ok((quote! { #tokens #free_fns }, dispatch_entries))
 }
 
 fn emit_field(field: &MirFieldDecl, ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
@@ -586,6 +645,7 @@ fn emit_struct_const_default(
     emit_env: &EmitEnv,
     depth: usize,
     budget: &mut u32,
+    mode: LifetimeMode,
 ) -> Result<TokenStream, BackendError> {
     let name = ctx.struct_ident(id);
     let fields: Vec<(FieldId, TypeId)> = emit_env
@@ -604,10 +664,17 @@ fn emit_struct_const_default(
     let mut inits = Vec::with_capacity(fields.len());
     for (fid, fty) in fields {
         let fname = ctx.struct_field_ident(id, fid);
-        let fdef = emit_const_default(fty, ctx, emit_env, depth, budget)?;
+        let fdef = emit_const_default(fty, ctx, emit_env, depth, budget, mode)?;
         inits.push(quote!(#fname: #fdef));
     }
-    Ok(quote!(#name { #(#inits),* }))
+    if ctx.struct_needs_lifetime(id) {
+        Ok(quote!(#name {
+            #(#inits,)*
+            _marker: ::core::marker::PhantomData,
+        }))
+    } else {
+        Ok(quote!(#name { #(#inits),* }))
+    }
 }
 
 fn emit_const_default(
@@ -616,6 +683,7 @@ fn emit_const_default(
     emit_env: &EmitEnv,
     depth: usize,
     budget: &mut u32,
+    mode: LifetimeMode,
 ) -> Result<TokenStream, BackendError> {
     if depth > CONST_DEFAULT_MAX_DEPTH || *budget == 0 {
         return Err(BackendError::NotImplemented(
@@ -639,16 +707,24 @@ fn emit_const_default(
             | Type::Date,
         ) => Ok(quote!(0)),
         Some(Type::F32 | Type::F64) => Ok(quote!(0.0)),
-        Some(Type::String) => Ok(quote!(ts_aot_runtime::JsString::Valid(
-            ::std::string::String::new()
-        ))),
-        Some(Type::Array { .. }) => Ok(quote!(::std::vec::Vec::new())),
+        Some(Type::String) => Ok(quote!(ts_aot_runtime::JsString::Valid(""))),
+        Some(Type::Array { .. }) => match mode {
+            LifetimeMode::Full => Ok(quote!(ts_aot_runtime::bumpalo::collections::Vec::new_in(
+                __ctx.arena
+            ))),
+            LifetimeMode::Static => Err(BackendError::NotImplemented(
+                "global/static initializer: an array-typed value cannot live in a `static` \
+                 because the AOT array is an arena-backed `bumpalo::collections::Vec` that \
+                 needs a `Ctx<'a>` to allocate; keep the array inside a function, or make the \
+                 global a scalar (number, bool, or string)",
+            )),
+        },
         Some(Type::Optional { .. }) => Ok(quote!(::core::option::Option::None)),
         Some(Type::Struct { id }) => {
-            emit_struct_const_default(*id, ctx, emit_env, depth + 1, budget)
+            emit_struct_const_default(*id, ctx, emit_env, depth + 1, budget, mode)
         }
         Some(Type::Named { .. }) => match types.struct_id(ty) {
-            Some(id) => emit_struct_const_default(id, ctx, emit_env, depth + 1, budget),
+            Some(id) => emit_struct_const_default(id, ctx, emit_env, depth + 1, budget, mode),
             None => Err(BackendError::NotImplemented(
                 "default initializer: named type is not a known struct",
             )),
@@ -660,20 +736,36 @@ fn emit_const_default(
     }
 }
 
+fn global_is_durable_string(ty: TypeId, emit_env: &EmitEnv) -> bool {
+    matches!(emit_env.types.resolve(ty), Some(Type::String))
+}
+
 fn emit_global_with_ctx(
     g: &MirGlobalDecl,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&g.name);
-    let ty = emit_type_id_with_ctx(g.ty, emit_env, ctx);
+    let durable_string = global_is_durable_string(g.ty, emit_env);
+    if !durable_string && ctx.type_needs_lifetime(g.ty, emit_env.types) {
+        return Err(BackendError::NotImplemented(
+            "global storage: this arena-backed type borrows the arena and cannot live in a static without a supported durable storage representation",
+        ));
+    }
+    let ty = if durable_string {
+        quote!(::std::string::String)
+    } else {
+        emit_static_type_id(g.ty, emit_env, ctx)
+    };
     let vis = visibility_token(g.visibility);
     let mutability = if g.mutable { quote!(mut) } else { quote!() };
     let init = if let Some(expr) = &g.init {
         emit_const_expr(expr, emit_env.types)?
+    } else if durable_string {
+        quote!(::std::string::String::new())
     } else {
         let mut budget = CONST_DEFAULT_BUDGET;
-        emit_const_default(g.ty, ctx, emit_env, 0, &mut budget)?
+        emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
     };
     Ok((
         quote! {

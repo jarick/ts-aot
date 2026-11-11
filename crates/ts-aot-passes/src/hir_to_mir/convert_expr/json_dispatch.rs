@@ -147,7 +147,17 @@ impl ExprConverter {
         };
         let mir_args: Vec<MirExpr> = args
             .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .map(|a| {
+                self.convert_call_arg(
+                    a,
+                    None,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )
+            })
             .collect();
         let result_ty = match op_kind {
             JsonOpKind::Parse => target_ty,

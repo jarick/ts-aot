@@ -614,14 +614,18 @@ fn convert_expr_call_to_promise_then_with_global_handler_lowers_to_instance_runt
         &mut types,
         &mut cx,
     );
-    let op = out
-        .iter()
-        .find_map(|s| match s {
-            MirStmt::Runtime { op, .. } => Some(*op),
-            _ => None,
-        })
-        .expect("expected Runtime stmt from Promise.then dispatch");
-    assert_eq!(op, RuntimeOp::PromiseThenInstance);
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "E0507"),
+        "Promise.prototype.then must be rejected with a hard E0507 until P3; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        out.iter().all(|s| !matches!(
+            s,
+            MirStmt::Runtime { op, .. } if *op == RuntimeOp::PromiseThenInstance
+        )),
+        "no PromiseThenInstance runtime op may be emitted until P3; got {out:?}"
+    );
 }
 
 #[test]
@@ -670,14 +674,18 @@ fn convert_expr_call_to_promise_catch_with_global_handler_lowers_to_instance_run
         &mut types,
         &mut cx,
     );
-    let op = out
-        .iter()
-        .find_map(|s| match s {
-            MirStmt::Runtime { op, .. } => Some(*op),
-            _ => None,
-        })
-        .expect("expected Runtime stmt from Promise.catch dispatch");
-    assert_eq!(op, RuntimeOp::PromiseCatchInstance);
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "E0507"),
+        "Promise.prototype.catch must be rejected with a hard E0507 until P3; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        out.iter().all(|s| !matches!(
+            s,
+            MirStmt::Runtime { op, .. } if *op == RuntimeOp::PromiseCatchInstance
+        )),
+        "no PromiseCatchInstance runtime op may be emitted until P3; got {out:?}"
+    );
 }
 
 #[test]
@@ -726,14 +734,18 @@ fn convert_expr_call_to_promise_finally_with_global_handler_lowers_to_instance_r
         &mut types,
         &mut cx,
     );
-    let op = out
-        .iter()
-        .find_map(|s| match s {
-            MirStmt::Runtime { op, .. } => Some(*op),
-            _ => None,
-        })
-        .expect("expected Runtime stmt from Promise.finally dispatch");
-    assert_eq!(op, RuntimeOp::PromiseFinallyInstance);
+    assert!(
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "E0507"),
+        "Promise.prototype.finally must be rejected with a hard E0507 until P3; got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        out.iter().all(|s| !matches!(
+            s,
+            MirStmt::Runtime { op, .. } if *op == RuntimeOp::PromiseFinallyInstance
+        )),
+        "no PromiseFinallyInstance runtime op may be emitted until P3; got {out:?}"
+    );
 }
 
 #[test]
@@ -782,18 +794,18 @@ fn convert_expr_call_to_promise_then_with_closure_handler_lowers_to_runtime_op()
         &mut cx,
     );
     assert!(
-        !cx.has_errors(),
-        "closure handler must not produce diagnostics, got: {:?}",
+        cx.diagnostics().iter().any(|d| d.code.as_str() == "E0507"),
+        "Promise.prototype.then with a closure handler must be rejected with a hard E0507 \
+         until P3; got {:?}",
         cx.diagnostics()
     );
-    let op = out
-        .iter()
-        .find_map(|s| match s {
-            MirStmt::Runtime { op, .. } => Some(*op),
-            _ => None,
-        })
-        .expect("expected Runtime stmt from Promise.then with closure handler");
-    assert_eq!(op, RuntimeOp::PromiseThenInstance);
+    assert!(
+        out.iter().all(|s| !matches!(
+            s,
+            MirStmt::Runtime { op, .. } if *op == RuntimeOp::PromiseThenInstance
+        )),
+        "no PromiseThenInstance runtime op may be emitted until P3; got {out:?}"
+    );
 }
 
 #[test]
@@ -4348,6 +4360,62 @@ fn convert_expr_assignment_casts_i64_local_to_f32() {
 }
 
 #[test]
+fn convert_ternary_casts_a_narrower_numeric_branch_to_the_joined_dest_ty() {
+    let mut c = ExprConverter::new();
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let f64_ty = types.intern(&Type::F64);
+    let expr = HirExpr::Ternary {
+        cond: Box::new(HirExpr::Bool(true, Span::default())),
+        then_branch: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: i32_ty,
+            span: Span::default(),
+        }),
+        else_branch: Box::new(HirExpr::Float(1.5f64.to_bits(), Span::default())),
+        ty: f64_ty,
+        span: Span::default(),
+    };
+    let _ = c.convert_expr(
+        &expr,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert!(!cx.has_errors());
+
+    let then_block = out
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        })
+        .expect("a Ternary must lower to a MirStmt::If");
+    let then_value = then_block
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::Assign { value, .. } => Some(value),
+            _ => None,
+        })
+        .expect("the then branch must assign the branch value to the dest temp");
+    assert!(
+        matches!(
+            then_value,
+            MirExpr::Cast { expr, ty }
+                if *ty == f64_ty && matches!(expr.as_ref(), MirExpr::Local(_))
+        ),
+        "an i32 branch of an f64 conditional must be cast to f64 before being assigned to the \
+         f64 dest; without the cast the emitted Rust assigns an i32 into an f64 local and \
+         `cargo check` fails with E0308; got {then_value:?}"
+    );
+}
+
+#[test]
 fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set_program() {
     let mut c = ExprConverter::new();
     let mut name_to_function: std::collections::HashMap<Atom, FunctionId> =
@@ -4430,4 +4498,66 @@ fn convert_expr_call_to_promise_then_with_mismatched_handler_emits_e0504_via_set
         diag.message.contains("parameter type is not"),
         "E0504 must report parameter-type mismatch (not arity); got: {diag:?}"
     );
+}
+
+#[test]
+fn unknown_closure_return_does_not_inherit_enclosing_promise_type() {
+    let mut types = TypeTable::new();
+    let error = types.intern(&Type::Error);
+    let number = types.intern(&Type::F64);
+    let promise = types.intern(&Type::Promise {
+        ok: number,
+        err: None,
+    });
+    let unknown_fn = types.intern(&Type::Fn {
+        params: vec![],
+        ret: error,
+        err: None,
+    });
+    for closure_ty in [error, unknown_fn] {
+        let mut c = ExprConverter::new();
+        c.set_return_ty(promise);
+        let resolve = HirExpr::Call {
+            callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                owner: Box::new(HirExpr::Global {
+                    name: Atom::from("Promise"),
+                    ty: error,
+                    span: Span::default(),
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::from("resolve"),
+                ty: error,
+                span: Span::default(),
+            })),
+            args: vec![],
+            type_args: vec![],
+            ty: error,
+            span: Span::default(),
+        };
+        let closure = HirExpr::Closure {
+            id: LocalId::from_raw(0),
+            params: vec![],
+            captures: vec![],
+            body: vec![HirStmt::Return {
+                value: Some(resolve),
+            }],
+            ty: closure_ty,
+            span: Span::default(),
+        };
+        let mut cx = ctx();
+        c.convert_expr(
+            &closure,
+            &mut vec![],
+            &mut empty_struct_ids(),
+            &mut empty_next_struct(),
+            &mut types,
+            &mut cx,
+        );
+        assert!(
+            !cx.has_errors(),
+            "unknown closure must not inherit Promise<number>: {:?}",
+            cx.diagnostics()
+        );
+        assert_eq!(c.current_return_ty, Some(promise));
+    }
 }

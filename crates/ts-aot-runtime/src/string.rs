@@ -1,13 +1,14 @@
 use std::hash::{Hash, Hasher};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
+use crate::arena::Ctx;
 use crate::host::__ts_aot_throw;
 
-#[derive(Debug, Clone)]
-pub enum JsString {
-    Valid(String),
-    Raw(Vec<u16>),
+#[derive(Debug, Clone, Copy)]
+pub enum JsString<'a> {
+    Valid(&'a str),
+    Raw(&'a [u16]),
 }
 
 pub(crate) enum JsStringUnits<'a> {
@@ -25,13 +26,13 @@ impl Iterator for JsStringUnits<'_> {
     }
 }
 
-impl Default for JsString {
+impl Default for JsString<'_> {
     fn default() -> Self {
-        JsString::Valid(String::new())
+        JsString::Valid("")
     }
 }
 
-impl JsString {
+impl JsString<'_> {
     pub(crate) fn units_iter(&self) -> JsStringUnits<'_> {
         match self {
             JsString::Valid(s) => JsStringUnits::Valid(s.encode_utf16()),
@@ -42,13 +43,13 @@ impl JsString {
     #[must_use]
     pub fn to_string_lossy(&self) -> String {
         match self {
-            JsString::Valid(s) => s.clone(),
+            JsString::Valid(s) => (*s).to_owned(),
             JsString::Raw(units) => String::from_utf16_lossy(units),
         }
     }
 }
 
-impl PartialEq for JsString {
+impl PartialEq for JsString<'_> {
     fn eq(&self, other: &Self) -> bool {
         let a = self.units_iter();
         let mut b = other.units_iter();
@@ -56,9 +57,9 @@ impl PartialEq for JsString {
     }
 }
 
-impl Eq for JsString {}
+impl Eq for JsString<'_> {}
 
-impl Hash for JsString {
+impl Hash for JsString<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         for cu in self.units_iter() {
             cu.hash(state);
@@ -66,15 +67,15 @@ impl Hash for JsString {
     }
 }
 
-impl From<&str> for JsString {
-    fn from(s: &str) -> Self {
-        JsString::Valid(s.to_owned())
+impl<'a> From<&'a str> for JsString<'a> {
+    fn from(s: &'a str) -> Self {
+        JsString::Valid(s)
     }
 }
 
-impl JsString {
+impl<'a> JsString<'a> {
     #[must_use]
-    pub fn from_units(units: Vec<u16>) -> Self {
+    pub fn from_units(units: &'a [u16]) -> Self {
         JsString::Raw(units)
     }
 
@@ -90,7 +91,7 @@ impl JsString {
     pub fn to_units(&self) -> Vec<u16> {
         match self {
             JsString::Valid(s) => s.encode_utf16().collect(),
-            JsString::Raw(units) => units.clone(),
+            JsString::Raw(units) => units.to_vec(),
         }
     }
 
@@ -108,7 +109,7 @@ impl JsString {
     }
 }
 
-impl Serialize for JsString {
+impl Serialize for JsString<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             JsString::Valid(s) => serializer.serialize_str(s),
@@ -120,19 +121,7 @@ impl Serialize for JsString {
     }
 }
 
-impl<'de> Deserialize<'de> for JsString {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        let lossy = bytes_to_utf16_lossy(s.as_bytes());
-        let lossless: Vec<u16> = s.encode_utf16().collect();
-        if lossy == lossless {
-            Ok(JsString::Valid(s))
-        } else {
-            Ok(JsString::Raw(lossy))
-        }
-    }
-}
-
+#[cfg(test)]
 pub(crate) fn bytes_to_utf16_lossy(bytes: &[u8]) -> Vec<u16> {
     let mut units = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -199,10 +188,10 @@ pub(crate) fn bytes_to_utf16_lossy(bytes: &[u8]) -> Vec<u16> {
 }
 
 #[must_use]
-pub fn __ts_aot_string_concat(a: &JsString, b: &JsString) -> JsString {
+pub fn __ts_aot_string_concat<'a>(ctx: &Ctx<'a>, a: &JsString, b: &JsString) -> JsString<'a> {
     let mut units = a.to_units();
     units.extend(b.to_units());
-    JsString::Raw(units)
+    JsString::Raw(ctx.arena.alloc_slice_copy(&units))
 }
 
 #[must_use]
@@ -234,39 +223,44 @@ pub fn __ts_aot_string_index_of(haystack: &JsString, needle: &JsString, from_ind
 }
 
 #[must_use]
-pub fn __ts_aot_string_char_at(s: &JsString, idx: i64) -> JsString {
+pub fn __ts_aot_string_char_at<'a>(ctx: &Ctx<'a>, s: &JsString, idx: i64) -> JsString<'a> {
     if idx < 0 {
-        return JsString::Valid(String::new());
+        return JsString::Valid("");
     }
     let Ok(i) = usize::try_from(idx) else {
-        return JsString::Valid(String::new());
+        return JsString::Valid("");
     };
     let units = s.to_units();
     match units.get(i) {
-        Some(&code) => JsString::Raw(vec![code]),
-        None => JsString::Valid(String::new()),
+        Some(&code) => JsString::Raw(ctx.arena.alloc_slice_copy(&[code])),
+        None => JsString::Valid(""),
     }
 }
 
 #[must_use]
-pub fn __ts_aot_string_substring_utf16(s: &JsString, start: i64, end: i64) -> JsString {
+pub fn __ts_aot_string_substring_utf16<'a>(
+    ctx: &Ctx<'a>,
+    s: &JsString,
+    start: i64,
+    end: i64,
+) -> JsString<'a> {
     let units = s.to_units();
     let len = units.len();
     let clamp = |n: i64| -> usize { usize::try_from(n.max(0)).unwrap_or(len).min(len) };
     let lo = clamp(start);
     let hi = clamp(end);
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-    JsString::Raw(units[lo..hi].to_vec())
+    JsString::Raw(ctx.arena.alloc_slice_copy(&units[lo..hi]))
 }
 
 #[must_use]
-pub fn __ts_aot_string_from_char_code(codes: &[i64]) -> JsString {
+pub fn __ts_aot_string_from_char_code<'a>(ctx: &Ctx<'a>, codes: &[i64]) -> JsString<'a> {
     let units: Vec<u16> = codes.iter().map(|&c| i64_to_char_code_u16(c)).collect();
-    JsString::Raw(units)
+    JsString::Raw(ctx.arena.alloc_slice_copy(&units))
 }
 
 #[must_use]
-pub fn __ts_aot_string_from_code_point(points: &[i64]) -> JsString {
+pub fn __ts_aot_string_from_code_point<'a>(ctx: &Ctx<'a>, points: &[i64]) -> JsString<'a> {
     let mut has_surrogate = false;
     for &p in points {
         if !(0..=0x10_FFFF).contains(&p) {
@@ -289,7 +283,7 @@ pub fn __ts_aot_string_from_code_point(points: &[i64]) -> JsString {
                 units.extend_from_slice(encoded);
             }
         }
-        JsString::Raw(units)
+        JsString::Raw(ctx.arena.alloc_slice_copy(&units))
     } else {
         let mut s = String::new();
         for &p in points {
@@ -297,7 +291,7 @@ pub fn __ts_aot_string_from_code_point(points: &[i64]) -> JsString {
             let c = char::from_u32(as_u32).expect("validated non-surrogate above");
             s.push(c);
         }
-        JsString::Valid(s)
+        JsString::Valid(ctx.arena.alloc_str(&s))
     }
 }
 

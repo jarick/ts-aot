@@ -1,3 +1,4 @@
+use super::ctx::{EmitCtx, EmitEnv};
 use super::ident::sanitize_ident;
 use super::types::emit_type_id;
 use super::{emit_decls, emit_decls_with_style, emit_function, emit_global};
@@ -10,6 +11,7 @@ use ts_aot_ir_mir::{
     MirFieldDecl, MirFunctionDecl, MirGlobalDecl, MirLocalDecl, MirParam, MirPlace, MirPlaceBase,
     MirProgram, MirStmt, MirStructDecl, RuntimeOp, SwitchCase,
 };
+use ts_aot_test_support::check_generated_crate;
 
 fn empty_func(name: &str) -> MirFunctionDecl {
     MirFunctionDecl {
@@ -26,14 +28,19 @@ fn empty_func(name: &str) -> MirFunctionDecl {
 }
 
 fn signature_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
-    s.split(&format!("fn {fn_name} ("))
-        .nth(1)
-        .and_then(|rest| rest.split('{').next())
-        .unwrap_or("")
+    let after_fn = s.split(&format!("fn {fn_name}")).nth(1).unwrap_or("");
+    let after_generics = if let Some(rest) = after_fn.trim_start().strip_prefix('<') {
+        rest.split_once('>').map_or(rest, |(_, r)| r)
+    } else {
+        after_fn
+    };
+    let trimmed = after_generics.trim_start();
+    let after_paren = trimmed.strip_prefix('(').unwrap_or(trimmed);
+    after_paren.split('{').next().unwrap_or("")
 }
 
 fn for_header_fragment<'a>(s: &'a str, fn_name: &str) -> &'a str {
-    let after_fn = s.split(&format!("fn {fn_name} (")).nth(1).unwrap_or("");
+    let after_fn = s.split(&format!("fn {fn_name}")).nth(1).unwrap_or("");
     after_fn
         .split(" for ")
         .nth(1)
@@ -125,7 +132,9 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("pub fn __ts_aot_dispatch_add (_args : & [u64]) -> u64"),
+        s.contains(
+            "pub fn __ts_aot_dispatch_add < 'a > (__ctx : & ts_aot_runtime :: Ctx < 'a > , _args : & [u64]) -> u64"
+        ),
         "dispatch wrapper must be emitted for i64-typed plain function, got: {s}"
     );
     assert!(
@@ -141,7 +150,9 @@ fn dispatchable_i64_function_emits_wrapper_and_table_entry() {
         "dispatch table constant must be emitted when any dispatchable function exists, got: {s}"
     );
     assert!(
-        s.contains("(\"add\" , __ts_aot_dispatch_add as fn (& [u64]) -> u64)"),
+        s.contains(
+            "(\"add\" , __ts_aot_dispatch_add as for < 'a > fn (& ts_aot_runtime :: Ctx < 'a > , & [u64]) -> u64)"
+        ),
         "table entry must reference the wrapper with original function name as string, got: {s}"
     );
 }
@@ -699,8 +710,8 @@ fn array_typed_return_emits_vec_placeholder() {
     let sig = signature_fragment(&s, "make_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("->Vec<i64>"),
-        "return type `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+        sig_norm.contains("->ts_aot_runtime::bumpalo::collections::Vec<'a,i64>"),
+        "return type `i64[]` must emit as `ts_aot_runtime::bumpalo::collections::Vec<'a, i64>` in the signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
     );
 }
 
@@ -725,8 +736,8 @@ fn array_typed_param_emits_vec_placeholder() {
     let sig = signature_fragment(&s, "take_array");
     let sig_norm: String = sig.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        sig_norm.contains("v:Vec<i64>"),
-        "param typed `i64[]` must emit as `Vec<i64>` in the function signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
+        sig_norm.contains("v:ts_aot_runtime::bumpalo::collections::Vec<'a,i64>"),
+        "param typed `i64[]` must emit as `ts_aot_runtime::bumpalo::collections::Vec<'a, i64>` in the signature. \n         Whitespace-insensitive. Got signature fragment: `{sig}`"
     );
 }
 
@@ -1489,8 +1500,9 @@ fn global_struct_without_init_emits_fieldwise_const_default() {
     let s = emit_decls(&prog, &types)
         .expect("struct global must emit")
         .to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        s.contains("static mut origin : Point = Point { x : 0 , y : 0 } ;"),
+        norm.contains("staticmutorigin:Point=Point{x:0,y:0}"),
         "a struct global without init must use a fieldwise const default \
          (Rust rejects `Default::default()` in statics); got: {s}"
     );
@@ -1575,6 +1587,118 @@ fn read_of_mutable_global_is_wrapped_in_unsafe() {
     assert!(
         s.contains("unsafe { counter }"),
         "read of a mutable static must be wrapped in `unsafe`, got: {s}"
+    );
+}
+
+#[test]
+fn string_global_uses_owned_string_storage() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: string_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let tokens = emit_decls(&prog, &types).expect("string global must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("pubstaticmutgreeting:::std::string::String"),
+        "a string global must be stored as an owned `String` so the value stays valid after \
+         the per-call arena resets; got: {s}"
+    );
+    assert!(
+        norm.contains("::std::string::String::new()"),
+        "an uninitialized string global must default to `String::new()` (a `const fn` usable \
+         in a static initializer); got: {s}"
+    );
+    assert!(
+        !s.contains("'static"),
+        "a string global must not borrow the arena as `'static`; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_to_string_global_converts_to_owned_string() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: string_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("setGreeting");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("greeting")),
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{greeting=") && norm.contains(".to_string_lossy()"),
+        "assigning a borrowed `JsString` to a `String`-backed global must convert through \
+         `to_string_lossy` inside the `unsafe` write; got: {s}"
+    );
+}
+
+#[test]
+fn read_of_string_global_reallocates_in_arena() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: string_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("getGreeting");
+    f.ret = string_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Global(Atom::from(
+                "greeting",
+            ))))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("read must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("JsString::Valid(__ctx.arena.alloc_str("),
+        "reading a `String`-backed global must reallocate a `JsString` in the current arena; \
+         got: {s}"
+    );
+    assert!(
+        norm.contains("addr_of!(greeting)"),
+        "reading a mutable `String`-backed global must not form a `static_mut_refs` borrowed \
+         reference, it must go through `addr_of!`; got: {s}"
     );
 }
 
@@ -2203,7 +2327,10 @@ fn emit_type_array_resolves_element_via_table() {
     let str_id = types.intern(&Type::String);
     let arr_id = types.intern(&Type::Array { element: str_id });
     let tokens = emit_type_id(arr_id, &types);
-    assert_eq!(tokens.to_string(), "Vec < ts_aot_runtime :: JsString >");
+    assert_eq!(
+        tokens.to_string(),
+        "ts_aot_runtime :: bumpalo :: collections :: Vec < 'a , ts_aot_runtime :: JsString < 'a > >"
+    );
 }
 
 #[test]
@@ -2218,7 +2345,7 @@ fn emit_type_result_resolves_ok_and_err_via_table() {
     let tokens = emit_type_id(res_id, &types);
     assert_eq!(
         tokens.to_string(),
-        "Result < i32 , ts_aot_runtime :: JsString >"
+        "Result < i32 , ts_aot_runtime :: JsString < 'a > >"
     );
 }
 
@@ -2287,7 +2414,7 @@ fn function_returning_result_emits_result_type_with_ok_and_err_stmts() {
     let tokens = emit_function(&f, &types).expect("function should emit");
     let s = tokens.to_string();
     assert!(
-        s.contains("-> Result < i32 , ts_aot_runtime :: JsString >"),
+        s.contains("-> Result < i32 , ts_aot_runtime :: JsString < 'a > >"),
         "ret type must be Result<i32, JsString>, got: {s}"
     );
     assert!(
@@ -3294,7 +3421,7 @@ fn async_generator_nested_finally_throw_uses_raw_path_for_outer_catch() {
         .to_string();
     let normalized: String = s.split_whitespace().collect();
     assert!(
-        normalized.contains("__ts_aot_catch_typed"),
+        normalized.contains("__ts_aot_catch_string"),
         "the enclosing catch must be emitted so it can run for the nested-finally throw, got:\n{s}"
     );
     assert!(
@@ -3708,6 +3835,161 @@ fn primitive_typed_catch_uses_catch_typed_helper() {
     assert!(
         !s.contains("__ts_aot_catch_bind"),
         "a primitive-typed catch must not use the untyped catch-all binding, got:\n{s}"
+    );
+}
+
+#[test]
+fn array_throw_inside_try_is_rejected() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_ty = types.intern(&Type::Array { element: i64_ty });
+    let xs = LocalId::from_raw(0);
+    let mut f = empty_func("f");
+    f.ret = i64_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: xs,
+            name: Atom::from("xs"),
+            ty: array_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Try {
+                body: MirBlock {
+                    stmts: vec![MirStmt::Throw {
+                        error: MirExpr::Local(xs),
+                        error_ty: array_ty,
+                    }],
+                },
+                catch_param: None,
+                catch: Some(MirBlock::new()),
+                finally: None,
+            }],
+        },
+    };
+    let err = emit_function(&f, &types).expect_err(
+        "a thrown arena-backed array must be rejected: the runtime cannot recover its payload",
+    );
+    assert!(
+        err.to_string().contains("panic boundary"),
+        "the array-throw rejection must explain the `'static` panic boundary, got: {err}"
+    );
+}
+
+#[test]
+fn promise_combinator_is_rejected() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: i64_ty,
+        err: None,
+    });
+    let array_ty = types.intern(&Type::Array {
+        element: promise_ty,
+    });
+    let promises = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
+    let mut f = empty_func("f");
+    f.ret = promise_ty;
+    f.params = vec![MirParam {
+        id: promises,
+        name: Atom::from("promises"),
+        ty: array_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseRace,
+                    args: vec![MirExpr::Local(promises)],
+                    dest: Some(dest),
+                    ty: promise_ty,
+                    target_ty: Some(i64_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(dest))),
+            ],
+        },
+    };
+    let err = emit_function(&f, &types)
+        .expect_err("promise combinators cannot be reconciled with arena-backed arrays");
+    assert!(
+        err.to_string().contains("promise combinator"),
+        "the rejection must name the promise combinator, got: {err}"
+    );
+}
+
+#[test]
+fn promise_resolving_to_arena_array_is_rejected() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_ty = types.intern(&Type::Array { element: i64_ty });
+    let promise_ty = types.intern(&Type::Promise {
+        ok: array_ty,
+        err: None,
+    });
+    let arr = LocalId::from_raw(0);
+    let mut f = empty_func("f");
+    f.ret = promise_ty;
+    f.params = vec![MirParam {
+        id: arr,
+        name: Atom::from("arr"),
+        ty: array_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(arr)))],
+        },
+    };
+    let err = emit_function(&f, &types).expect_err(
+        "resolving an arena-backed array into a promise cannot satisfy the `'static` bound",
+    );
+    assert!(
+        err.to_string().contains("borrows the arena"),
+        "the rejection must explain that the resolved value borrows the arena, got: {err}"
+    );
+}
+
+#[test]
+fn promise_passthrough_of_arena_array_is_allowed() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let array_ty = types.intern(&Type::Array { element: i64_ty });
+    let promise_ty = types.intern(&Type::Promise {
+        ok: array_ty,
+        err: None,
+    });
+    let p = LocalId::from_raw(0);
+    let mut f = empty_func("f");
+    f.ret = promise_ty;
+    f.params = vec![MirParam {
+        id: p,
+        name: Atom::from("p"),
+        ty: promise_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(p)))],
+        },
+    };
+    let s = emit_function(&f, &types)
+        .expect("returning an existing promise unchanged never resolves an arena value")
+        .to_string();
+    let normalized: String = s.split_whitespace().collect();
+    assert!(
+        normalized.contains("Promise<ts_aot_runtime::bumpalo::collections::Vec<'a,i64>>"),
+        "the promise type must keep the arena-backed element type in the signature, got:\n{s}"
+    );
+    assert!(
+        !normalized.contains("__ts_aot_promise_resolve_value"),
+        "a passthrough must not resolve the value into a new promise, got:\n{s}"
     );
 }
 
@@ -5494,7 +5776,7 @@ fn dispatch_wrapper_renames_underscore_param_to_usable_ident() {
          `{wrapper_body}`"
     );
     assert!(
-        wrapper_body.contains("dispatchable (__tmp0)"),
+        wrapper_body.contains("dispatchable (__ctx , __tmp0)"),
         "dispatch wrapper must call the inner function with the renamed `__tmp0` arg, got: \
          `{wrapper_body}`"
     );
@@ -6438,7 +6720,7 @@ fn weakmap_liveness_reset_on_reassignment_emits_fresh_token() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     let fn_body = normalize_token_whitespace(
-        s.split("fn reassign_key (")
+        s.split("fn reassign_key")
             .nth(1)
             .and_then(|rest| rest.split("return").next())
             .unwrap_or(""),
@@ -6568,7 +6850,7 @@ fn weakmap_liveness_unaffected_by_field_assignment_on_key_local() {
     let tokens = emit_decls(&prog, &types).expect("decls should emit");
     let s = tokens.to_string();
     let fn_body = normalize_token_whitespace(
-        s.split("fn field_assign_key (")
+        s.split("fn field_assign_key")
             .nth(1)
             .and_then(|rest| rest.split("return").next())
             .unwrap_or(""),
@@ -6581,4 +6863,854 @@ fn weakmap_liveness_unaffected_by_field_assignment_on_key_local() {
         !fn_body.contains("__wm_liveness_0 = std :: rc :: Rc :: new (()) ;"),
         "field assignment on the key local must NOT refresh the liveness (the local identity is unchanged); got body fragment: {fn_body}"
     );
+}
+
+#[test]
+fn struct_typed_field_emits_struct_lifetime() {
+    let mut types = TypeTable::new();
+    let inner_id = StructId::from_raw(0);
+    let outer_id = StructId::from_raw(1);
+    let string_ty = types.intern(&Type::String);
+    let inner_ty = types.intern(&Type::Struct { id: inner_id });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: inner_id,
+        name: Atom::from("Inner"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("s"),
+            ty: string_ty,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: outer_id,
+        name: Atom::from("Outer"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("inner"),
+            ty: inner_ty,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let norm: String = tokens
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        norm.contains("pubinner:Inner<'a>"),
+        "a struct-typed field must carry the generated struct's lifetime (`inner: Inner<'a>`) \
+         instead of relying on elision; got: {norm}"
+    );
+}
+
+#[test]
+fn struct_typed_return_emits_struct_lifetime() {
+    let mut types = TypeTable::new();
+    let point_id = StructId::from_raw(0);
+    let string_ty = types.intern(&Type::String);
+    let point_ty = types.intern(&Type::Struct { id: point_id });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point_id,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("s"),
+            ty: string_ty,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let mut f = empty_func("make_point");
+    f.ret = point_ty;
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let norm: String = tokens
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        norm.contains("->Point<'a>"),
+        "a struct-typed return must carry the generated struct's lifetime (`-> Point<'a>`) \
+         instead of relying on elision; got: {norm}"
+    );
+}
+
+#[test]
+fn const_default_array_in_function_context_uses_arena_vec() {
+    let mut types = TypeTable::new();
+    let elem = types.intern(&Type::I64);
+    let arr = types.intern(&Type::Array { element: elem });
+    let prog = MirProgram::new(ModuleId::from_raw(0));
+    let ctx = EmitCtx::build(&prog, &types);
+    let emit_env = EmitEnv {
+        types: &types,
+        program: &prog,
+    };
+    let mut budget = 64;
+    let tokens = super::emit_const_default(
+        arr,
+        &ctx,
+        &emit_env,
+        0,
+        &mut budget,
+        super::types::LifetimeMode::Full,
+    )
+    .expect("arena array const default must emit");
+    let norm: String = tokens
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        norm.contains("ts_aot_runtime::bumpalo::collections::Vec::new_in(__ctx.arena)"),
+        "an array const default in a function context must allocate in the arena \
+         (`ts_aot_runtime::bumpalo::collections::Vec::new_in(__ctx.arena)`), not a std Vec; got: {norm}"
+    );
+    let source = format!(
+        "pub fn array_default<'a>(__ctx: &ts_aot_runtime::Ctx<'a>) \
+         -> ts_aot_runtime::bumpalo::collections::Vec<'a, i64> {{ {tokens} }}"
+    );
+    check_generated_crate("generated_check_const_default", &source);
+}
+
+#[test]
+fn array_typed_global_is_rejected() {
+    let mut types = TypeTable::new();
+    let elem = types.intern(&Type::I64);
+    let arr = types.intern(&Type::Array { element: elem });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("xs"),
+        ty: arr,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let err = emit_decls(&prog, &types).expect_err(
+        "array-typed globals must be rejected: a `static` cannot hold an arena-backed Vec",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("arena-backed") && msg.contains("static"),
+        "the array-typed-global rejection must explain that an arena-backed array cannot live \
+         in a `static`; got: {msg}"
+    );
+}
+
+#[test]
+fn promise_resolve_and_reject_emit_compilable_crate() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let string_ty = types.intern(&Type::String);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: f64_ty,
+        err: None,
+    });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+
+    let resolved = LocalId::from_raw(0);
+    let mut resolve = empty_func("resolve_value");
+    resolve.export_name = Some("resolve_value".to_owned());
+    resolve.ret = promise_ty;
+    resolve.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: resolved,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseResolveStatic,
+                    args: vec![MirExpr::Int {
+                        value: 42,
+                        ty: f64_ty,
+                    }],
+                    dest: Some(resolved),
+                    ty: promise_ty,
+                    target_ty: Some(f64_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(resolved))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(resolve));
+
+    let rejected = LocalId::from_raw(0);
+    let mut reject = empty_func("reject_value");
+    reject.export_name = Some("reject_value".to_owned());
+    reject.ret = promise_ty;
+    reject.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: rejected,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseRejectStatic,
+                    args: vec![MirExpr::String {
+                        id: Atom::from("boom"),
+                        ty: string_ty,
+                    }],
+                    dest: Some(rejected),
+                    ty: promise_ty,
+                    target_ty: Some(f64_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(rejected))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(reject));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("resolve/reject must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("__ts_aot_promise_resolve_value::<f64>(42.0)"),
+        "Promise.resolve must coerce the integer literal to the f64 value type, got:\n{rust}"
+    );
+    assert!(
+        compact.contains("__ts_aot_promise_reject_value::<f64>("),
+        "Promise.reject must use the promise's ok type as the turbofish, got:\n{rust}"
+    );
+    assert!(
+        !compact.contains("into_owned"),
+        "`JsString::to_string_lossy` already returns `String`; `.into_owned()` does not compile, \
+         got:\n{rust}"
+    );
+    assert!(
+        compact.contains(":ts_aot_runtime::Promise<f64>=__ts_aot_promise"),
+        "the resolve/reject temp must be annotated with the concrete promise type, not `()`, \
+         got:\n{rust}"
+    );
+    check_generated_crate("generated_check_promise_resolve_reject", &rust);
+}
+
+#[test]
+fn promise_instances_of_arena_promise_are_rejected() {
+    let mut types = ts_aot_core::TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let arr_ty = types.intern(&Type::Array { element: i64_ty });
+    let promise_ty = types.intern(&Type::Promise {
+        ok: arr_ty,
+        err: None,
+    });
+    let p = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
+    let mut f = empty_func("f");
+    f.ret = promise_ty;
+    f.params = vec![MirParam {
+        id: p,
+        name: Atom::from("p"),
+        ty: promise_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseThenInstance,
+                    args: vec![MirExpr::Local(p), MirExpr::Unit],
+                    dest: Some(dest),
+                    ty: promise_ty,
+                    target_ty: Some(arr_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(dest))),
+            ],
+        },
+    };
+    let err = emit_function(&f, &types).expect_err(
+        "a promise whose value borrows the arena cannot use the `'static`-bound instance helpers",
+    );
+    assert!(
+        err.to_string().contains("borrows the arena"),
+        "the rejection must explain that the resolved value borrows the arena, got: {err}"
+    );
+}
+
+#[test]
+fn generated_arena_crate_passes_cargo_check() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let point_id = StructId::from_raw(0);
+    let point_ty = types.intern(&Type::Struct { id: point_id });
+    let str_arr_ty = types.intern(&Type::Array { element: string_ty });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point_id,
+        name: Atom::from("Point"),
+        fields: vec![
+            MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("name"),
+                ty: string_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            },
+            MirFieldDecl {
+                id: FieldId::from_raw(1),
+                name: Atom::from("tag"),
+                ty: string_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            },
+        ],
+        methods: Vec::new(),
+    }));
+
+    let xs = LocalId::from_raw(0);
+    let mut copy = empty_func("copy_strings");
+    copy.export_name = Some("copy_strings".to_owned());
+    copy.ret = str_arr_ty;
+    copy.params = vec![MirParam {
+        id: xs,
+        name: Atom::from("xs"),
+        ty: str_arr_ty,
+    }];
+    copy.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(xs)))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(copy));
+
+    let p = LocalId::from_raw(0);
+    let keys = LocalId::from_raw(1);
+    let mut keys_of = empty_func("keys_of");
+    keys_of.export_name = Some("keys_of".to_owned());
+    keys_of.ret = str_arr_ty;
+    keys_of.params = vec![MirParam {
+        id: p,
+        name: Atom::from("p"),
+        ty: point_ty,
+    }];
+    keys_of.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: keys,
+            name: Atom::from("keys"),
+            ty: str_arr_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::ObjectKeys,
+                    args: vec![MirExpr::Local(p)],
+                    dest: Some(keys),
+                    ty: str_arr_ty,
+                    target_ty: None,
+                },
+                MirStmt::Return(Some(MirExpr::Local(keys))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(keys_of));
+
+    let mut tagged = empty_func("tagged");
+    tagged.export_name = Some("tagged".to_owned());
+    tagged.ret = str_arr_ty;
+    tagged.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::TemplateStringsArray {
+                cooked: vec![Atom::from("hi "), Atom::from("!")],
+                ty: str_arr_ty,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(tagged));
+
+    let json_arg = LocalId::from_raw(0);
+    let json_out = LocalId::from_raw(1);
+    let mut parse_strings = empty_func("parse_strings");
+    parse_strings.export_name = Some("parse_strings".to_owned());
+    parse_strings.ret = str_arr_ty;
+    parse_strings.params = vec![MirParam {
+        id: json_arg,
+        name: Atom::from("j"),
+        ty: string_ty,
+    }];
+    parse_strings.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: json_out,
+            name: Atom::from("out"),
+            ty: str_arr_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::JsonParse,
+                    args: vec![MirExpr::Local(json_arg)],
+                    dest: Some(json_out),
+                    ty: str_arr_ty,
+                    target_ty: Some(str_arr_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(json_out))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(parse_strings));
+
+    let caught = LocalId::from_raw(0);
+    let mut caught_to_string = empty_func("caught_to_string");
+    caught_to_string.export_name = Some("caught_to_string".to_owned());
+    caught_to_string.ret = string_ty;
+    caught_to_string.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: caught,
+            name: Atom::from("e"),
+            ty: types.intern(&Type::Error),
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Try {
+                    body: MirBlock {
+                        stmts: vec![MirStmt::Throw {
+                            error: MirExpr::String {
+                                id: Atom::from("boom"),
+                                ty: string_ty,
+                            },
+                            error_ty: string_ty,
+                        }],
+                    },
+                    catch_param: Some(caught),
+                    catch: Some(MirBlock {
+                        stmts: vec![MirStmt::Return(Some(MirExpr::Local(caught)))],
+                    }),
+                    finally: None,
+                },
+                MirStmt::Return(Some(MirExpr::String {
+                    id: Atom::from(""),
+                    ty: string_ty,
+                })),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(caught_to_string));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("the arena program must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("ts_aot_runtime::bumpalo::collections::Vec"),
+        "array types must be qualified through the runtime crate so consumers need no direct \
+         bumpalo dependency; got:\n{rust}"
+    );
+    assert!(
+        compact.contains("to_js_string(__ctx)"),
+        "an untyped catch binding coerced to a string must call `to_js_string(__ctx)` so the \
+         generated crate compiles against the arena-aware runtime; got:\n{rust}"
+    );
+    assert!(
+        compact.contains("ts_aot_runtime::bumpalo::vec!"),
+        "vec literals must be qualified through the runtime crate so consumers need no direct \
+         bumpalo dependency; got:\n{rust}"
+    );
+    assert!(
+        !compact
+            .replace("ts_aot_runtime::bumpalo", "")
+            .contains("bumpalo"),
+        "no emitted path may reach bumpalo except through ts_aot_runtime; got:\n{rust}"
+    );
+    check_generated_crate("generated_check_full", &rust);
+
+    let mut min_types = TypeTable::new();
+    let min_string = min_types.intern(&Type::String);
+    let min_arr = min_types.intern(&Type::Array {
+        element: min_string,
+    });
+    let arg = LocalId::from_raw(0);
+    let mut min_copy = empty_func("copy_strings");
+    min_copy.export_name = Some("copy_strings".to_owned());
+    min_copy.ret = min_arr;
+    min_copy.params = vec![MirParam {
+        id: arg,
+        name: Atom::from("xs"),
+        ty: min_arr,
+    }];
+    min_copy.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(arg)))],
+        },
+    };
+    let mut min_prog = MirProgram::new(ModuleId::from_raw(0));
+    min_prog.push_decl(MirDecl::Function(min_copy));
+    let min_rust = emit_decls(&min_prog, &min_types)
+        .expect("the minimal array program must emit")
+        .to_string();
+    assert!(
+        !min_rust.contains("use ts_aot_runtime"),
+        "the minimal program must not import the runtime glob, otherwise a bare `bumpalo` path \
+         would resolve through the runtime re-export and the `cargo check` below would not \
+         discriminate; got:\n{min_rust}"
+    );
+    check_generated_crate("generated_check_min", &min_rust);
+}
+
+#[test]
+fn string_index_passes_ctx_to_char_at() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let i64_ty = types.intern(&Type::I64);
+    let param = LocalId::from_raw(0);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let mut f = empty_func("at");
+    f.ret = string_ty;
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Index {
+                base: Box::new(MirExpr::Local(param)),
+                index: Box::new(MirExpr::Int {
+                    value: 0,
+                    ty: i64_ty,
+                }),
+                ty: string_ty,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("string indexing must emit");
+    let norm: String = tokens
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        norm.contains("__ts_aot_string_char_at(__ctx,&s,0asi64"),
+        "string indexing must pass `__ctx` as the first argument, matching the runtime \
+         helper signature `__ts_aot_string_char_at(ctx, s, idx)` and the \
+         RuntimeOp::StringCharAt path; got: {norm}"
+    );
+}
+
+#[test]
+fn object_keys_struct_literal_emits_arena_array_with_ctx() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let string_ty = types.intern(&Type::String);
+    let struct_id = StructId::from_raw(0);
+    let struct_ty = types.intern(&Type::Struct { id: struct_id });
+    let keys_ty = types.intern(&Type::Array { element: string_ty });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: struct_id,
+        name: Atom::from("Point"),
+        fields: vec![
+            MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("x"),
+                ty: i64_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            },
+            MirFieldDecl {
+                id: FieldId::from_raw(1),
+                name: Atom::from("y"),
+                ty: i64_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            },
+        ],
+        methods: Vec::new(),
+    }));
+
+    let param = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
+    let mut f = empty_func("keys_of");
+    f.ret = keys_ty;
+    f.params = vec![MirParam {
+        id: param,
+        name: Atom::from("p"),
+        ty: struct_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from("keys"),
+            ty: keys_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ObjectKeys,
+                args: vec![MirExpr::Local(param)],
+                dest: Some(dest),
+                ty: keys_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let tokens = emit_decls(&prog, &types).expect("Object.keys on a struct literal must emit");
+    let norm: String = tokens
+        .to_string()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        norm.contains(
+            "__ts_aot_array_create::<ts_aot_runtime::JsString>(__ctx,ts_aot_runtime::bumpalo::vec![in__ctx.arena;"
+        ),
+        "Object.keys over a struct literal must build the keys array with `__ctx` and an \
+         arena-allocated `ts_aot_runtime::bumpalo::vec![in __ctx.arena; ...]`, matching the canonical \
+         ArrayCreate emitter (not a std `vec!`); got: {norm}"
+    );
+}
+
+#[test]
+fn promise_resolve_widens_integer_width_to_target() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let i32_ty = types.intern(&Type::I32);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: i32_ty,
+        err: None,
+    });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let src = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
+    let mut f = empty_func("f");
+    f.export_name = Some("f".to_owned());
+    f.ret = promise_ty;
+    f.params = vec![MirParam {
+        id: src,
+        name: Atom::from("src"),
+        ty: i64_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseResolveStatic,
+                    args: vec![MirExpr::Local(src)],
+                    dest: Some(dest),
+                    ty: promise_ty,
+                    target_ty: Some(i32_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(dest))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("resolve must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("asi32"),
+        "resolving an i64 into a Promise<i32> must cast with `as i32`, got:\n{rust}"
+    );
+    check_generated_crate("generated_check_promise_resolve_int_width", &rust);
+}
+
+#[test]
+fn promise_resolve_int_literal_into_i32_target_compiles() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let i32_ty = types.intern(&Type::I32);
+    let promise_ty = types.intern(&Type::Promise {
+        ok: i32_ty,
+        err: None,
+    });
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let dest = LocalId::from_raw(0);
+    let mut f = empty_func("f");
+    f.export_name = Some("f".to_owned());
+    f.ret = promise_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from(""),
+            ty: promise_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::PromiseResolveStatic,
+                    args: vec![MirExpr::Int {
+                        value: 7,
+                        ty: i64_ty,
+                    }],
+                    dest: Some(dest),
+                    ty: promise_ty,
+                    target_ty: Some(i32_ty),
+                },
+                MirStmt::Return(Some(MirExpr::Local(dest))),
+            ],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("resolve must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("__ts_aot_promise_resolve_value::<i32>(7)"),
+        "an int literal resolved into a Promise<i32> must stay a bare literal, got:\n{rust}"
+    );
+    check_generated_crate("generated_check_promise_resolve_int_literal", &rust);
+}
+
+#[test]
+fn static_method_of_lifetime_struct_is_emitted_as_a_free_function() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let box_id = StructId::from_raw(0);
+
+    let param = LocalId::from_raw(0);
+    let mut describe = empty_func("Box__describe");
+    describe.ret = string_ty;
+    describe.params = vec![MirParam {
+        id: param,
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    describe.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Local(param)))],
+        },
+    };
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: box_id,
+        name: Atom::from("Box"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("label"),
+            ty: string_ty,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: vec![describe],
+    }));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("a struct carrying a static method must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("impl<'a>Box<'a>{}"),
+        "a static method has no receiver, so it must NOT live in the struct's `impl`; the impl \
+         block must stay empty, got:\n{rust}"
+    );
+    assert!(
+        compact.contains("fnBox__describe<'a>(__ctx:&ts_aot_runtime::Ctx<'a>,"),
+        "a static method must be emitted as a top-level free function declaring its own `'a`; \
+         emitting it inside `impl<'a> Box<'a>` would shadow the impl lifetime and Rust rejects \
+         the crate with E0496, got:\n{rust}"
+    );
+    check_generated_crate("static_method_free_function_lifetime", &rust);
+}
+
+#[test]
+fn called_static_method_resolves_as_a_free_function() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+
+    let mut zero = empty_func("Counter__zero");
+    zero.id = FunctionId::from_raw(0);
+    zero.ret = f64_ty;
+    zero.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Float {
+                value: 0.0,
+                ty: f64_ty,
+            }))],
+        },
+    };
+
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: StructId::from_raw(0),
+        name: Atom::from("Counter"),
+        fields: Vec::new(),
+        methods: vec![zero],
+    }));
+
+    let mut call = empty_func("f");
+    call.id = FunctionId::from_raw(1);
+    call.export_name = Some("f".to_owned());
+    call.ret = f64_ty;
+    call.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Call {
+                callee: FunctionId::from_raw(0),
+                args: Vec::new(),
+                ty: f64_ty,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(call));
+
+    let rust = emit_decls(&prog, &types)
+        .expect("a program calling a static method must emit")
+        .to_string();
+    let compact: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("fnCounter__zero<'a>(__ctx:&ts_aot_runtime::Ctx<'a>,"),
+        "a static method must be a top-level free function so that a call site can name it \
+         without a `Counter::` qualifier, got:\n{rust}"
+    );
+    assert!(
+        compact.contains("returnCounter__zero(__ctx);"),
+        "a call to a static method must stay an unqualified call into the emitted free function, \
+         got:\n{rust}"
+    );
+    check_generated_crate("called_static_method", &rust);
 }

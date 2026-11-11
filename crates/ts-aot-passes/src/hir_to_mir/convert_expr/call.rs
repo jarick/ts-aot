@@ -5,8 +5,8 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::PLACEHOLDER_FUNCTION;
 use crate::hir_to_mir::converter::ExprConverter;
+use crate::hir_to_mir::{PLACEHOLDER_FUNCTION, qualified_name};
 
 use super::globals::{array_from_object_literal, array_push_receiver};
 use super::util::is_pure_place;
@@ -24,35 +24,49 @@ fn types_compatible(declared: &TypeId, expected: &TypeId, types: &TypeTable) -> 
     }
 }
 
-fn compute_promise_target_ty(
-    op: RuntimeOp,
-    args: &[HirExpr],
-    ty: TypeId,
-    types: &TypeTable,
-) -> Option<TypeId> {
-    match op {
-        RuntimeOp::PromiseAll
-        | RuntimeOp::PromiseRace
-        | RuntimeOp::PromiseAllSettled
-        | RuntimeOp::PromiseAny => args.first().and_then(|a| {
-            let t = a.ty();
-            types.resolve(t).and_then(|t| match t {
-                Type::Array { element } => types.resolve(*element).and_then(|p| match p {
-                    Type::Promise { ok, .. } => Some(*ok),
-                    _ => None,
-                }),
-                _ => None,
-            })
-        }),
-        RuntimeOp::PromiseResolveStatic => types
-            .resolve(ty)
-            .and_then(|t| match t {
+fn combinator_target_ty(args: &[HirExpr], types: &TypeTable) -> Option<TypeId> {
+    args.first().and_then(|a| {
+        let t = a.ty();
+        types.resolve(t).and_then(|t| match t {
+            Type::Array { element } => types.resolve(*element).and_then(|p| match p {
                 Type::Promise { ok, .. } => Some(*ok),
                 _ => None,
-            })
-            .or_else(|| args.first().map(|a| a.ty())),
+            }),
+            _ => None,
+        })
+    })
+}
+
+fn promise_ok_type(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
+    match types.resolve(ty)? {
+        Type::Promise { ok, .. } => Some(*ok),
+        Type::Result { ok, .. } => promise_ok_type(*ok, types),
         _ => None,
     }
+}
+
+fn is_numeric_type(ty: TypeId, types: &TypeTable) -> bool {
+    matches!(
+        types.resolve(ty),
+        Some(
+            Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::F32
+                | Type::F64
+        )
+    )
+}
+
+enum StaticOkRecovery {
+    Ok(TypeId),
+    VoidMismatch(TypeId),
+    NullMismatch(TypeId),
 }
 
 impl ExprConverter {
@@ -449,9 +463,22 @@ impl ExprConverter {
         } else {
             None
         };
+        let arg_tys = self.callee_param_tys(callee);
         let mir_args: Vec<MirExpr> = args
             .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .enumerate()
+            .map(|(i, a)| {
+                let expected = arg_tys.as_ref().and_then(|tys| tys.get(i).copied());
+                self.convert_call_arg(
+                    a,
+                    expected,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )
+            })
             .collect();
         if callee_id == PLACEHOLDER_FUNCTION
             && let HirCallee::Indirect(inner) = callee
@@ -511,7 +538,7 @@ impl ExprConverter {
         else {
             return None;
         };
-        let owner_ty = owner.ty();
+        let owner_ty = self.expr_type(owner, types)?;
         let op = match field_name.as_str() {
             "then" => RuntimeOp::PromiseThenInstance,
             "catch" => RuntimeOp::PromiseCatchInstance,
@@ -601,6 +628,18 @@ impl ExprConverter {
         } else {
             None
         };
+        if matches!(field_name.as_str(), "then" | "catch" | "finally") {
+            ctx.error(
+                "E0507",
+                format!(
+                    "Promise.prototype.{method} cannot be lowered yet: the generated Rust cannot \
+                     satisfy the runtime handler bound, so this call is rejected instead of \
+                     emitting code that does not compile (planned for P3)"
+                ),
+                Span::new(0, 0),
+            );
+            return Some(MirExpr::Unit);
+        }
         let promise_mir = self.convert_expr(
             owner,
             out,
@@ -746,45 +785,373 @@ impl ExprConverter {
             "reject" => RuntimeOp::PromiseRejectStatic,
             _ => return None,
         };
-        let expected_arity = 1usize;
-        if args.len() != expected_arity {
-            ctx.warning(
-                "E0406",
-                format!(
-                    "Promise.{method} requires exactly {expected_arity} argument(s); got {}",
-                    args.len()
-                ),
-                Span::new(0, 0),
-            );
-            return Some(MirExpr::Unit);
+        let is_void_resolve = matches!(op, RuntimeOp::PromiseResolveStatic)
+            && (args.is_empty()
+                || matches!(args.first(), Some(HirExpr::Undefined(_) | HirExpr::Unit(_))));
+        let skip_arity = matches!(op, RuntimeOp::PromiseResolveStatic) && args.is_empty();
+        if !skip_arity {
+            let expected_arity = 1usize;
+            if args.len() != expected_arity {
+                ctx.warning(
+                    "E0406",
+                    format!(
+                        "Promise.{method} requires exactly {expected_arity} argument(s); got {}",
+                        args.len()
+                    ),
+                    Span::new(0, 0),
+                );
+                return Some(MirExpr::Unit);
+            }
         }
-        let mir_args: Vec<MirExpr> = args
-            .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
-            .collect();
-        let target_ty = if matches!(op, RuntimeOp::PromiseRejectStatic) {
-            Some(
-                types
-                    .resolve(ty)
-                    .and_then(|t| match t {
-                        Type::Promise { ok, .. } => Some(*ok),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| types.intern(&Type::Error)),
-            )
+        let mir_args: Vec<MirExpr> = if args.is_empty() {
+            vec![MirExpr::Unit]
         } else {
-            compute_promise_target_ty(op, args, ty, types)
+            args.iter()
+                .map(|a| {
+                    self.convert_call_arg(
+                        a,
+                        None,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    )
+                })
+                .collect()
         };
+        if matches!(op, RuntimeOp::PromiseResolveStatic)
+            && !is_void_resolve
+            && args
+                .first()
+                .is_some_and(|arg| self.arg_adopts_promise(arg, types))
+        {
+            return mir_args.into_iter().next();
+        }
+        let ok_ty = if matches!(op, RuntimeOp::PromiseRejectStatic) {
+            self.expected_ty
+                .and_then(|ret| promise_ok_type(ret, types))
+                .or_else(|| promise_ok_type(ty, types))
+                .unwrap_or_else(|| types.intern(&Type::Error))
+        } else if matches!(op, RuntimeOp::PromiseResolveStatic) {
+            match self.resolve_static_ok_ty(args, ty, types, ctx) {
+                Some(ok) => ok,
+                None => return Some(MirExpr::Unit),
+            }
+        } else {
+            combinator_target_ty(args, types).unwrap_or_else(|| types.intern(&Type::Error))
+        };
+        let result_ty = types.intern(&Type::Promise {
+            ok: ok_ty,
+            err: None,
+        });
         let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
+        self.push_temp_local(dest, result_ty);
         out.push(MirStmt::Runtime {
             op,
             args: mir_args,
             dest: Some(dest),
-            ty,
-            target_ty,
+            ty: result_ty,
+            target_ty: Some(ok_ty),
         });
         Some(MirExpr::Local(dest))
+    }
+
+    fn callee_param_tys(&self, callee: &HirCallee) -> Option<Vec<TypeId>> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Global { name, .. } = inner.as_ref() else {
+            return None;
+        };
+        self.named_function_param_tys(name)
+    }
+
+    pub(super) fn named_function_param_tys(&self, name: &Atom) -> Option<Vec<TypeId>> {
+        for depth in (0..=self.namespace_path.len()).rev() {
+            let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+            if let Some(f) = self.program.find_function_by_qualified_name(&probe) {
+                return Some(f.params.iter().map(|p| p.ty).collect());
+            }
+        }
+        self.program
+            .find_function_by_name(name)
+            .map(|f| f.params.iter().map(|p| p.ty).collect())
+    }
+
+    pub(super) fn convert_call_arg(
+        &mut self,
+        arg: &HirExpr,
+        expected: Option<TypeId>,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let saved = self.expected_ty;
+        self.expected_ty = expected;
+        let mir = self.convert_expr(arg, out, shared_struct_ids, shared_next_struct, types, ctx);
+        self.expected_ty = saved;
+        mir
+    }
+
+    fn arg_adopts_promise(&self, arg: &HirExpr, types: &mut TypeTable) -> bool {
+        if promise_ok_type(arg.ty(), types).is_some() {
+            return true;
+        }
+        let Some(value) = self.expr_type(arg, types) else {
+            return false;
+        };
+        if matches!(types.resolve(value), Some(Type::Error)) {
+            return false;
+        }
+        promise_ok_type(value, types).is_some()
+    }
+
+    fn resolve_static_ok_ty(
+        &self,
+        args: &[HirExpr],
+        ty: TypeId,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> Option<TypeId> {
+        match self.static_ok_ty_quiet(args, ty, types) {
+            StaticOkRecovery::Ok(ok) => Some(ok),
+            StaticOkRecovery::VoidMismatch(ok) => {
+                ctx.error(
+                    "E0506",
+                    format!(
+                        "Promise.resolve() resolves to Promise<void>, but the expected type is \
+                         Promise<{}>; a void promise cannot satisfy it",
+                        ok.raw()
+                    ),
+                    Span::new(0, 0),
+                );
+                None
+            }
+            StaticOkRecovery::NullMismatch(ok) => {
+                ctx.error(
+                    "E0506",
+                    format!(
+                        "Promise.resolve(null) resolves to Promise<null>, but the expected type is \
+                         Promise<{}>; a null promise cannot satisfy it",
+                        ok.raw()
+                    ),
+                    Span::new(0, 0),
+                );
+                None
+            }
+        }
+    }
+
+    fn static_ok_ty_quiet(
+        &self,
+        args: &[HirExpr],
+        ty: TypeId,
+        types: &mut TypeTable,
+    ) -> StaticOkRecovery {
+        if let Some(ok) = promise_ok_type(ty, types) {
+            return StaticOkRecovery::Ok(ok);
+        }
+        if args.is_empty() || matches!(args.first(), Some(HirExpr::Unit(_) | HirExpr::Undefined(_)))
+        {
+            let context_ok = self.expected_ty.and_then(|ret| promise_ok_type(ret, types));
+            if let Some(ok) = context_ok
+                && !matches!(
+                    types.resolve(ok),
+                    Some(Type::Void) | Some(Type::Error) | None
+                )
+            {
+                return StaticOkRecovery::VoidMismatch(ok);
+            }
+            return StaticOkRecovery::Ok(types.intern(&Type::Void));
+        }
+        if matches!(args.first(), Some(HirExpr::Null(_))) {
+            let produced = types.intern(&Type::Null);
+            let context_ok = self.expected_ty.and_then(|ret| promise_ok_type(ret, types));
+            if let Some(ok) = context_ok
+                && ok != produced
+                && !matches!(
+                    types.resolve(ok),
+                    Some(Type::Void) | Some(Type::Error) | None
+                )
+            {
+                return StaticOkRecovery::NullMismatch(ok);
+            }
+            return StaticOkRecovery::Ok(produced);
+        }
+        let value_ty = args
+            .first()
+            .and_then(|arg| {
+                self.value_static_ty(arg, types)
+                    .or_else(|| self.expr_type(arg, types))
+            })
+            .filter(|value| !matches!(types.resolve(*value), Some(Type::Error)));
+        let context_ok = self.expected_ty.and_then(|ret| promise_ok_type(ret, types));
+        StaticOkRecovery::Ok(match (value_ty, context_ok) {
+            (Some(value), Some(ok))
+                if is_numeric_type(value, types) && is_numeric_type(ok, types) =>
+            {
+                ok
+            }
+            (Some(value), _) => value,
+            (None, Some(ok)) => ok,
+            (None, None) => types.intern(&Type::Error),
+        })
+    }
+
+    pub(crate) fn value_static_ty(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
+        match expr {
+            HirExpr::Bool(..) => Some(types.intern(&Type::Bool)),
+            HirExpr::Int(..) => Some(types.intern(&Type::I64)),
+            HirExpr::Float(..) => Some(types.intern(&Type::F64)),
+            HirExpr::String(..) => Some(types.intern(&Type::String)),
+            HirExpr::Unit(_) | HirExpr::Null(_) | HirExpr::Undefined(_) => None,
+            HirExpr::Call {
+                callee: HirCallee::Indirect(inner),
+                ..
+            } => match inner.as_ref() {
+                HirExpr::Global { name, .. } => {
+                    for depth in (0..=self.namespace_path.len()).rev() {
+                        let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+                        if let Some(f) = self.program.find_function_by_qualified_name(&probe) {
+                            return Some(f.ret);
+                        }
+                    }
+                    self.program
+                        .find_function_by_name(name)
+                        .map(|f| f.ret)
+                        .or_else(|| self.recovered_static_ty(expr, types))
+                }
+                _ => self.recovered_static_ty(expr, types),
+            },
+            other if other.has_static_type() => Some(other.ty()),
+            _ => None,
+        }
+    }
+
+    fn recovered_static_ty(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
+        if !expr.has_static_type() {
+            return None;
+        }
+        let ty = expr.ty();
+        match types.resolve(ty) {
+            None | Some(Type::Error) => None,
+            Some(_) => Some(ty),
+        }
+    }
+
+    pub(super) fn join_expr_types(
+        &self,
+        a: TypeId,
+        b: TypeId,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        if a == b {
+            return Some(a);
+        }
+        let rank = |t: TypeId| -> Option<u8> {
+            match types.resolve(t) {
+                Some(Type::F32 | Type::F64) => Some(4),
+                Some(Type::I64 | Type::U64) => Some(3),
+                Some(Type::I32 | Type::U32) => Some(2),
+                Some(Type::I16 | Type::U16) => Some(1),
+                Some(Type::I8 | Type::U8) => Some(0),
+                _ => None,
+            }
+        };
+        match (rank(a), rank(b)) {
+            (Some(ra), Some(rb)) => Some(if ra >= rb { a } else { b }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn expr_type(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
+        let this = expr;
+        match this {
+            HirExpr::Bool(..) => Some(types.intern(&Type::Bool)),
+            HirExpr::Int(..) => Some(types.intern(&Type::I64)),
+            HirExpr::Float(..) => Some(types.intern(&Type::F64)),
+            HirExpr::String(..) => Some(types.intern(&Type::String)),
+            HirExpr::Unit(_) | HirExpr::Null(_) | HirExpr::Undefined(_) => None,
+            HirExpr::Await { expr, .. } => {
+                let inner = self.expr_type(expr, types)?;
+                promise_ok_type(inner, types)
+            }
+            HirExpr::Ternary {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let a = self.expr_type(then_branch, types)?;
+                let b = self.expr_type(else_branch, types)?;
+                self.join_expr_types(a, b, types)
+            }
+            HirExpr::Call {
+                callee, args, ty, ..
+            } => {
+                if let HirCallee::Indirect(inner) = callee {
+                    match inner.as_ref() {
+                        HirExpr::Field {
+                            owner, field_name, ..
+                        } => {
+                            if let HirExpr::Global { name, .. } = owner.as_ref()
+                                && name.as_str() == "Promise"
+                                && matches!(field_name.as_str(), "resolve" | "reject")
+                            {
+                                if field_name.as_str() == "reject" {
+                                    let ok = self
+                                        .expected_ty
+                                        .and_then(|ret| promise_ok_type(ret, types))
+                                        .or_else(|| promise_ok_type(*ty, types))
+                                        .unwrap_or_else(|| types.intern(&Type::Error));
+                                    return Some(types.intern(&Type::Promise { ok, err: None }));
+                                }
+                                return match self.static_ok_ty_quiet(args, *ty, types) {
+                                    StaticOkRecovery::Ok(ok)
+                                        if !matches!(types.resolve(ok), Some(Type::Error)) =>
+                                    {
+                                        if promise_ok_type(ok, types).is_some() {
+                                            Some(ok)
+                                        } else {
+                                            Some(types.intern(&Type::Promise { ok, err: None }))
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                            }
+                            if matches!(field_name.as_str(), "then" | "catch" | "finally") {
+                                return None;
+                            }
+                        }
+                        HirExpr::Global { name, .. } => {
+                            for depth in (0..=self.namespace_path.len()).rev() {
+                                let probe =
+                                    qualified_name(&self.namespace_path[..depth], name.as_str());
+                                if let Some(f) =
+                                    self.program.find_function_by_qualified_name(&probe)
+                                {
+                                    return match types.resolve(f.ret) {
+                                        None | Some(Type::Error) => None,
+                                        Some(_) => Some(f.ret),
+                                    };
+                                }
+                            }
+                            return self.program.find_function_by_name(name).and_then(
+                                |f| match types.resolve(f.ret) {
+                                    None | Some(Type::Error) => None,
+                                    Some(_) => Some(f.ret),
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                self.recovered_static_ty(this, types)
+            }
+            other => self.recovered_static_ty(other, types),
+        }
     }
 
     fn convert_runtime_call(
@@ -809,7 +1176,17 @@ impl ExprConverter {
         let op = builtin.op();
         let mir_args: Vec<MirExpr> = args
             .iter()
-            .map(|a| self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .map(|a| {
+                self.convert_call_arg(
+                    a,
+                    None,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )
+            })
             .collect();
         let dest = self.fresh_local();
         self.push_temp_local(dest, ty);
@@ -857,6 +1234,8 @@ impl ExprConverter {
         let key = (sid, field_name.clone(), is_static);
         let fid = *self.method_map.get(&key)?;
         let call_ty = self.method_ret.get(&key).copied().unwrap_or(ty);
+        let param_tys = self.method_param_tys.get(&key).cloned();
+        let receiver_offset = usize::from(!is_static);
         let mut mir_args = Vec::with_capacity(args.len() + 1);
         if !is_static {
             mir_args.push(self.convert_expr(
@@ -868,9 +1247,13 @@ impl ExprConverter {
                 ctx,
             ));
         }
-        for a in args {
-            mir_args.push(self.convert_expr(
+        for (i, a) in args.iter().enumerate() {
+            let expected = param_tys
+                .as_ref()
+                .and_then(|tys| tys.get(i + receiver_offset).copied());
+            mir_args.push(self.convert_call_arg(
                 a,
+                expected,
                 out,
                 shared_struct_ids,
                 shared_next_struct,
