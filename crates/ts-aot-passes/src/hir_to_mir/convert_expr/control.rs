@@ -10,7 +10,7 @@ use crate::hir_to_mir::convert_expr::util::{
     has_potential_side_effects, hir_expr_type_id, is_pure_place, mir_expr_ty,
 };
 use crate::hir_to_mir::converter::ExprConverter;
-use crate::hir_to_mir::nullish::{LOGICAL_DIAG, NULLISH_NARROWING_DIAG};
+use crate::hir_to_mir::nullish::LOGICAL_DIAG;
 use crate::hir_to_mir::ops::convert_binop;
 
 impl ExprConverter {
@@ -548,6 +548,7 @@ impl ExprConverter {
                     shared_next_struct,
                     types,
                     ctx,
+                    None,
                 )),
                 _ => self.convert_operand_logical_lowered(
                     op,
@@ -562,6 +563,7 @@ impl ExprConverter {
                     shared_next_struct,
                     types,
                     ctx,
+                    None,
                 ),
             };
             if let Some(lowered) = lowered {
@@ -726,8 +728,7 @@ impl ExprConverter {
         // `bool` - `convert_binop` maps `??` to equality, and Rust's `&&`/`||`
         // demand `bool`s). The MIR-level lowering that already implements this for
         // a materialised target takes the getter's value as its left operand, so
-        // the accessor path reuses it and hands only the lowered result to the
-        // setter.
+        // the accessor path reuses it with a setter call inside the RHS branch.
         if matches!(
             op,
             HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or
@@ -751,6 +752,7 @@ impl ExprConverter {
                     shared_next_struct,
                     types,
                     ctx,
+                    Some((setter_fid, receiver.clone().into_iter().collect(), value_ty)),
                 )),
                 _ => self.convert_operand_logical_lowered(
                     op,
@@ -765,6 +767,7 @@ impl ExprConverter {
                     shared_next_struct,
                     types,
                     ctx,
+                    Some((setter_fid, receiver.clone().into_iter().collect(), value_ty)),
                 ),
             };
             let Some(lowered) = lowered else {
@@ -781,60 +784,10 @@ impl ExprConverter {
                 );
                 return Some(MirExpr::Unit);
             };
-            let new_value = match lowered {
-                MirExpr::Local(_) => lowered,
-                other => MirExpr::Local(self.materialize_non_place(other, out)),
-            };
-            // The setter has its own value type: a lowering that met the operands
-            // in a wider numeric type is cast back to it, the way the arithmetic
-            // path casts its right-hand side.
-            let new_value = cast_numeric_branch_to_dest(
-                new_value.clone(),
-                self.mir_expr_static_ty(&new_value, types),
-                value_ty,
-                types,
-            );
-
-            // `obj.w &&= 3` over a `number | null` accessor pair keeps the nullish
-            // left operand, and a `number` setter cannot take it. The lowering
-            // reports a nullish result that a non-nullish expectation rejects, but
-            // only for the value it hands back: check what the setter would receive.
-            let setter_takes_nullish = matches!(
-                types.resolve(value_ty),
-                Some(Type::Null | Type::Void | Type::Optional { .. } | Type::Error)
-            );
-            let lowered_ty = self.mir_expr_static_ty(&new_value, types);
-            let lowered_is_nullish = matches!(
-                lowered_ty.and_then(|ty| types.resolve(ty)),
-                Some(Type::Null | Type::Void | Type::Optional { .. })
-            );
-            if !setter_takes_nullish && lowered_is_nullish {
-                ctx.error(
-                    NULLISH_NARROWING_DIAG,
-                    format!(
-                        "the `{operator}` compound update of accessor `{field_name}` can keep a \
-                         nullish value, which its setter does not accept"
-                    ),
-                    target.span(),
-                );
-                return Some(MirExpr::Unit);
-            }
-
-            let mut setter_args = Vec::new();
-            if let Some(recv) = receiver {
-                setter_args.push(recv);
-            }
-            setter_args.push(new_value.clone());
-            out.push(MirStmt::Expr(MirExpr::Call {
-                callee: setter_fid,
-                args: setter_args,
-                ty: types.intern(&Type::Void),
-            }));
-
             return Some(if post {
                 MirExpr::Local(old_temp)
             } else {
-                new_value
+                lowered
             });
         }
 
@@ -1058,7 +1011,7 @@ fn report_compat_warning(ctx: &mut PassContext, code: &str, message: &str, span:
     true
 }
 
-fn is_assignment_compatible(
+pub(super) fn is_assignment_compatible(
     value: &HirExpr,
     value_ty: TypeId,
     target_ty: TypeId,

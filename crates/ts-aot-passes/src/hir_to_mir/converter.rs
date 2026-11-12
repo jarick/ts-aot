@@ -61,7 +61,26 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
         namespace_path: &'a [String],
     }
     impl Visitor for Callees<'_> {
+        fn visit_stmt(&mut self, stmt: &ts_aot_ir_hir::HirStmt) {
+            if let ts_aot_ir_hir::HirStmt::Try { catch, finally, .. } = stmt {
+                if let Some(catch) = catch {
+                    self.visit_stmt(&catch.body);
+                }
+                if let Some(finally) = finally {
+                    self.visit_stmt(finally);
+                }
+            } else {
+                ts_aot_ir_hir::walk_stmt(self, stmt);
+            }
+        }
+
         fn visit_expr(&mut self, expr: &HirExpr) {
+            if let HirExpr::Closure { captures, .. } = expr {
+                for capture in captures {
+                    self.visit_expr(capture);
+                }
+                return;
+            }
             if let HirExpr::New { ty, .. } = expr
                 && let Some(class) = self.class_keys.get(&unwrap_optional_ty(*ty, self.types))
             {
@@ -1053,5 +1072,86 @@ pub(crate) fn class_at_path(declarations: &[HirDecl], path: ClassPath) -> Option
     match current {
         HirDecl::Class(c) => Some(c),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod call_graph_tests {
+    use super::*;
+    use ts_aot_ir_hir::{HirFunction, HirStmt};
+
+    #[test]
+    fn excludes_try_and_closure_bodies_but_records_finally_and_normal_calls() {
+        let mut types = TypeTable::new();
+        let number = types.intern(&Type::F64);
+        let call = || HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    name: Atom::from("boom"),
+                    ty: number,
+                    span: Span::default(),
+                })),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                ty: number,
+                span: Span::default(),
+            },
+        };
+        let function = |name: &str, body, throws| {
+            HirDecl::Function(HirFunction {
+                name: Atom::from(name),
+                params: Vec::new(),
+                ret: number,
+                throws,
+                body,
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            })
+        };
+        let mut program = HirProgram::new(ModuleId::from_raw(0));
+        program.declarations = vec![
+            function("boom", Vec::new(), Some(number)),
+            function(
+                "in_try",
+                vec![HirStmt::Try {
+                    body: Box::new(call()),
+                    catch: None,
+                    finally: None,
+                }],
+                None,
+            ),
+            function(
+                "in_closure",
+                vec![HirStmt::Expr {
+                    expr: HirExpr::Closure {
+                        id: LocalId::from_raw(0),
+                        params: Vec::new(),
+                        captures: Vec::new(),
+                        body: vec![call()],
+                        ty: number,
+                        span: Span::default(),
+                    },
+                }],
+                None,
+            ),
+            function(
+                "in_finally",
+                vec![HirStmt::Try {
+                    body: Box::new(HirStmt::Block(Vec::new())),
+                    catch: None,
+                    finally: Some(Box::new(call())),
+                }],
+                None,
+            ),
+            function("normal", vec![call()], None),
+        ];
+        let throws = module_throws(&program, &mut types);
+        assert!(!throws.contains_key(&Atom::from("in_try")));
+        assert!(!throws.contains_key(&Atom::from("in_closure")));
+        assert_eq!(throws.get(&Atom::from("in_finally")), Some(&number));
+        assert_eq!(throws.get(&Atom::from("normal")), Some(&number));
     }
 }

@@ -692,11 +692,9 @@ export function g(): void { S.fill(); }
     check_generated_crate("accessor_static_compound", &static_rust);
 }
 
-/// A logical compound update whose result cannot fill the setter is reported
-/// instead of being lowered: `obj.w &&= 3` over a `number | null` accessor pair
-/// keeps the nullish left operand, which a `number` setter cannot take.
+/// A skipped assignment never passes the nullable getter value to the setter.
 #[test]
-fn an_accessor_logical_update_that_cannot_fill_its_setter_is_reported() {
+fn an_accessor_logical_update_checks_only_the_rhs_against_its_setter() {
     const NULLISH_RESULT: &str = r"
 class Box {
   v: number | null = null;
@@ -716,8 +714,8 @@ class Maybe {
 ";
     let diagnostics = codes(NULLISH_RESULT);
     assert!(
-        diagnostics.iter().any(|code| code == "P0018"),
-        "the nullish `&&=` result cannot fill the setter; got {diagnostics:?}"
+        !diagnostics.iter().any(|code| code == "P0018"),
+        "the skipped nullish branch does not call the setter; got {diagnostics:?}"
     );
 
     let diagnostics = codes(NULLABLE_SETTER);

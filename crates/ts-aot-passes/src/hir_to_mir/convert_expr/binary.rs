@@ -1184,6 +1184,7 @@ impl ExprConverter {
             shared_next_struct,
             types,
             ctx,
+            None,
         )
     }
 
@@ -1207,6 +1208,7 @@ impl ExprConverter {
         shared_next_struct: &mut u32,
         types: &mut TypeTable,
         ctx: &mut PassContext,
+        setter: Option<(ts_aot_core::FunctionId, Vec<MirExpr>, TypeId)>,
     ) -> MirExpr {
         // The enclosing expectation of the *result*, read after the left operand
         // was converted (that conversion restores it).
@@ -1226,14 +1228,9 @@ impl ExprConverter {
                 if has_potential_side_effects(&left_mir) {
                     out.push(MirStmt::Expr(left_mir));
                 }
-                return self.convert_expr(
-                    rhs,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    types,
-                    ctx,
-                );
+                let right_mir =
+                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                return self.logical_setter_value(right_mir, setter, out, types, rhs, ctx);
             }
             Some(Type::Error) | None | Some(Type::GenericParam { .. }) => {
                 ctx.error(
@@ -1274,6 +1271,8 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let right_mir =
+            self.logical_setter_value(right_mir, setter.clone(), &mut else_stmts, types, rhs, ctx);
         // A literal has no type of its own in HIR (it is typed by the slot it
         // fills), while a call or a member read is typed by its converted value
         // and, failing that, by the callee's declaration. Both are recovered
@@ -1544,6 +1543,7 @@ impl ExprConverter {
             shared_next_struct,
             types,
             ctx,
+            None,
         )
     }
 
@@ -1643,6 +1643,7 @@ impl ExprConverter {
         shared_next_struct: &mut u32,
         types: &mut TypeTable,
         ctx: &mut PassContext,
+        setter: Option<(ts_aot_core::FunctionId, Vec<MirExpr>, TypeId)>,
     ) -> Option<MirExpr> {
         let rhs_hir_ty = self.operand_static_ty(rhs, types);
         let lhs_bool = lhs_hir_ty.is_some_and(|t| matches!(types.resolve(t), Some(Type::Bool)))
@@ -1666,6 +1667,14 @@ impl ExprConverter {
                 shared_struct_ids,
                 shared_next_struct,
                 types,
+                ctx,
+            );
+            let right_mir = self.logical_setter_value(
+                right_mir,
+                setter.clone(),
+                &mut rhs_stmts,
+                types,
+                rhs,
                 ctx,
             );
             if rhs_stmts.is_empty() {
@@ -1707,6 +1716,7 @@ impl ExprConverter {
                 shared_next_struct,
                 types,
                 ctx,
+                setter.clone(),
             ));
         }
         let Some(lhs_ty) = self
@@ -1733,6 +1743,7 @@ impl ExprConverter {
                 shared_next_struct,
                 types,
                 ctx,
+                setter.clone(),
             ));
         }
         let (left_place, mut left_stmts) = self.bind_to_temp(left_mir, lhs_ty);
@@ -1777,6 +1788,8 @@ impl ExprConverter {
                 types,
                 ctx,
             );
+            let right_mir =
+                self.logical_setter_value(right_mir, setter.clone(), out, types, rhs, ctx);
             return Some(right_mir);
         }
         let mut rhs_stmts: Vec<MirStmt> = Vec::new();
@@ -1788,6 +1801,8 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let right_mir =
+            self.logical_setter_value(right_mir, setter.clone(), &mut rhs_stmts, types, rhs, ctx);
         // A `null`/`undefined` right operand is always nullish: `a || null` is a
         // valid `a | null`, and the literal has to be stored as `Option::None`
         // rather than coerced into a plain-value temporary (`let tmp: f64 = ();`
@@ -1894,6 +1909,7 @@ impl ExprConverter {
         shared_next_struct: &mut u32,
         types: &mut TypeTable,
         ctx: &mut PassContext,
+        setter: Option<(ts_aot_core::FunctionId, Vec<MirExpr>, TypeId)>,
     ) -> MirExpr {
         let bool_ty = types.intern(&Type::Bool);
         let expected_ty = self.expected_ty;
@@ -1908,6 +1924,8 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let right_mir =
+            self.logical_setter_value(right_mir, setter.clone(), &mut rhs_stmts, types, rhs, ctx);
         let rhs_hir_ty = self.operand_static_ty(rhs, types);
         let rhs_static =
             literal_free_ty(rhs, rhs_hir_ty).or_else(|| self.mir_expr_static_ty(&right_mir, types));
@@ -2086,6 +2104,48 @@ impl ExprConverter {
         });
         MirExpr::Local(dest)
     }
+    /// Materialize the RHS once and assign it while still in its short-circuit
+    /// branch. The old getter value never reaches the setter.
+    fn logical_setter_value(
+        &mut self,
+        value: MirExpr,
+        setter: Option<(ts_aot_core::FunctionId, Vec<MirExpr>, TypeId)>,
+        out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+        rhs: &HirExpr,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let Some((callee, mut args, ty)) = setter else {
+            return value;
+        };
+        let source_ty = self.mir_expr_static_ty(&value, types).unwrap_or(ty);
+        if !super::control::is_assignment_compatible(rhs, source_ty, ty, types, rhs.span(), ctx) {
+            return MirExpr::Unit;
+        }
+        let kinds = if is_nullish_hir_literal(rhs) {
+            kinds_of_hir(rhs, types)
+        } else {
+            kinds_of_ty(source_ty, types)
+        };
+        crate::hir_to_mir::nullish::check_nullish_write_kinds(
+            kinds,
+            ty,
+            types,
+            rhs.span(),
+            ctx,
+            "the accessor assignment value",
+        );
+        let (value, mut stmts) = self.bind_to_temp(value, ty);
+        out.append(&mut stmts);
+        args.push(value.clone());
+        out.push(MirStmt::Expr(MirExpr::Call {
+            callee,
+            args,
+            ty: types.intern(&Type::Void),
+        }));
+        value
+    }
+
     /// JavaScript truthiness of `value` as a MIR condition.
     ///
     /// Returns `None` when the truthiness cannot be expressed: a union may hold

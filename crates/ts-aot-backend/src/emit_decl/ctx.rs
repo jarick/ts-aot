@@ -455,12 +455,15 @@ impl EmitCtx {
     }
 }
 
+// These flags describe independent emission properties of a function.
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct BodyCtx {
     locals: HashMap<LocalId, Ident>,
     locals_ty: HashMap<LocalId, TypeId>,
     locals_mut: HashMap<LocalId, bool>,
     reserved_idents: HashSet<Ident>,
     self_param: Option<LocalId>,
+    self_is_borrowed: bool,
     is_generator: bool,
     is_async_generator: bool,
     gen_co: Option<Ident>,
@@ -630,6 +633,8 @@ impl BodyCtx {
             FunctionKind::Constructor { .. } => Some(LocalId::from_raw(0)),
             _ => None,
         };
+        let self_is_borrowed = matches!(f.kind, FunctionKind::Constructor { .. })
+            || (matches!(f.kind, FunctionKind::Method { .. }) && mutating_methods.contains(&f.id));
         let is_generator = matches!(
             f.kind,
             FunctionKind::Generator | FunctionKind::GeneratorMethod { .. }
@@ -747,6 +752,7 @@ impl BodyCtx {
             locals_mut,
             reserved_idents,
             self_param,
+            self_is_borrowed,
             is_generator,
             is_async_generator,
             gen_co,
@@ -798,6 +804,7 @@ impl BodyCtx {
             locals_mut: HashMap::new(),
             reserved_idents: HashSet::new(),
             self_param: None,
+            self_is_borrowed: false,
             is_generator: false,
             is_async_generator: false,
             gen_co: None,
@@ -938,7 +945,7 @@ impl BodyCtx {
         if Some(id) == self.self_param {
             // A mutating method holds `&mut self`, so an owned read has to clone:
             // `return this` must not move out of the borrow.
-            return if self.local_mut(id) {
+            return if self.self_is_borrowed {
                 quote!(self.clone())
             } else {
                 quote!(self)
@@ -1055,6 +1062,10 @@ impl BodyCtx {
             Some(ident) => ident.clone(),
             None => format_ident!("__local{}", id.raw()),
         }
+    }
+
+    pub(super) fn self_is_borrowed(&self) -> bool {
+        self.self_is_borrowed
     }
 
     pub(super) fn self_param(&self) -> Option<LocalId> {

@@ -330,7 +330,7 @@ fn finalize_return_value(
         emit_env,
         body_ctx,
         false,
-    );
+    )?;
 
     if let Some((promise_ty, promise_ok)) = promise
         && value_ty(inner_expr, ctx, emit_env, body_ctx) != Some(promise_ty)
@@ -483,7 +483,7 @@ fn shared_write_capture(
         {
             let tokens = dynamic_string_coerce(value, tokens, declared_ty, emit_env, body_ctx);
             let tokens =
-                optional_coerce(value, tokens, declared_ty, ctx, emit_env, body_ctx, false);
+                optional_coerce(value, tokens, declared_ty, ctx, emit_env, body_ctx, false)?;
             numeric_coerce(value, tokens, declared_ty, ctx, emit_env, body_ctx)
         }
         _ => tokens,
@@ -532,7 +532,7 @@ fn emit_stmt(
                 let init_tokens =
                     dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
                 let init_tokens =
-                    optional_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx, false);
+                    optional_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx, false)?;
                 let init_tokens =
                     numeric_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx);
                 Ok(quote!(let #mutability #name: #ty = #init_tokens;))
@@ -592,7 +592,7 @@ fn emit_stmt(
                         );
                         let coerced = optional_coerce(
                             value, coerced, target_ty, ctx, emit_env, body_ctx, false,
-                        );
+                        )?;
                         numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
                     }
                     None => value_tokens,
@@ -613,7 +613,7 @@ fn emit_stmt(
                         target_ty,
                         target_ty.and_then(|ty| global_durable_kind(ty, emit_env)),
                     ) {
-                        optional_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx, true)
+                        optional_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx, true)?
                     } else {
                         quote!(#coerced.to_string_lossy())
                     }
@@ -628,7 +628,7 @@ fn emit_stmt(
                             emit_env,
                             body_ctx,
                             false,
-                        );
+                        )?;
                         numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
                     } else {
                         value_tokens
@@ -638,7 +638,7 @@ fn emit_stmt(
                     let coerced =
                         dynamic_string_coerce(value, value_tokens, *ty, emit_env, body_ctx);
                     let coerced =
-                        optional_coerce(value, coerced, *ty, ctx, emit_env, body_ctx, false);
+                        optional_coerce(value, coerced, *ty, ctx, emit_env, body_ctx, false)?;
                     numeric_coerce(value, coerced, *ty, ctx, emit_env, body_ctx)
                 }
             };
@@ -680,7 +680,7 @@ fn emit_stmt(
                 // (`throw 1` in a function that throws `f64`).
                 let ty = *err_ty;
                 let tokens = dynamic_string_coerce(error, tokens, ty, emit_env, body_ctx);
-                let tokens = optional_coerce(error, tokens, ty, ctx, emit_env, body_ctx, false);
+                let tokens = optional_coerce(error, tokens, ty, ctx, emit_env, body_ctx, false)?;
                 let tokens = numeric_coerce(error, tokens, ty, ctx, emit_env, body_ctx);
                 Ok(quote!(return Err(#tokens);))
             }
@@ -1492,7 +1492,7 @@ fn emit_owned_exprs_coerced(
             let Some(target) = param_tys.and_then(|tys| tys.get(i).copied()) else {
                 return Ok(tokens);
             };
-            let tokens = optional_coerce(e, tokens, target, ctx, emit_env, body_ctx, false);
+            let tokens = optional_coerce(e, tokens, target, ctx, emit_env, body_ctx, false)?;
             Ok(numeric_coerce(e, tokens, target, ctx, emit_env, body_ctx))
         })
         .collect()
@@ -1836,19 +1836,32 @@ fn emit_expr(
                 && let Some(owner_ident) = owner_ident.clone()
                 && matches!(emit_env.types.resolve(*ty), Some(Type::Optional { .. }))
             {
-                let receiver = emit_expr(base, ctx, emit_env, body_ctx)?;
+                let receiver = if is_mutating_method {
+                    match base.as_ref() {
+                        MirExpr::Local(id) => body_ctx.local_ref(*id),
+                        other => emit_expr(other, ctx, emit_env, body_ctx)?,
+                    }
+                } else {
+                    emit_expr(base, ctx, emit_env, body_ctx)?
+                };
                 let rest = &args[1..];
                 let rest_param_tys = param_tys.map(|tys| &tys[1..]);
                 let rest = emit_owned_exprs_coerced(rest, rest_param_tys, ctx, emit_env, body_ctx)?;
-                let call = quote!(
-                    #owner_ident::#callee_ident(__ts_recv.clone(), __ctx, #(#rest),*)
-                );
+                let call = if is_mutating_method {
+                    quote!(#owner_ident::#callee_ident(__ts_recv, __ctx, #(#rest),*))
+                } else {
+                    quote!(#owner_ident::#callee_ident(__ts_recv.clone(), __ctx, #(#rest),*))
+                };
                 let call = if is_async {
                     quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call))
                 } else {
                     call
                 };
-                return Ok(quote!(#receiver.as_ref().map(|__ts_recv| #call)));
+                return Ok(if is_mutating_method {
+                    quote!(#receiver.as_mut().map(|__ts_recv| #call))
+                } else {
+                    quote!(#receiver.as_ref().map(|__ts_recv| #call))
+                });
             }
             let callee = if let Some(owner_ident) = owner_ident {
                 quote!(#owner_ident::#callee_ident)
@@ -1870,7 +1883,13 @@ fn emit_expr(
                     // Inside a mutating method `self` is already a `&mut` binding, so
                     // the place is a reborrow (`&mut (*self)`); `&mut (self)` would
                     // borrow the binding, which needs `mut self`.
-                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => Ok(quote!((*self))),
+                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => {
+                        Ok(if body_ctx.self_is_borrowed() {
+                            quote!((*self))
+                        } else {
+                            quote!((self))
+                        })
+                    }
                     // A captured (shared) local lives in the closure environment, so
                     // it has no ident to borrow: it keeps the by-value form.
                     MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
@@ -1973,7 +1992,7 @@ fn emit_expr(
                     Some(fty) => {
                         let coerced =
                             numeric_coerce(value, value_tokens, *fty, ctx, emit_env, body_ctx);
-                        optional_coerce(value, coerced, *fty, ctx, emit_env, body_ctx, false)
+                        optional_coerce(value, coerced, *fty, ctx, emit_env, body_ctx, false)?
                     }
                     None => value_tokens,
                 };
@@ -2755,9 +2774,9 @@ fn optional_coerce(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
     owned: bool,
-) -> TokenStream {
+) -> Result<TokenStream, BackendError> {
     let Some(Type::Optional { inner, .. }) = emit_env.types.resolve(target) else {
-        return tokens;
+        return Ok(tokens);
     };
     let inner = *inner;
     // A parameter that has a default *and* a nullable declared type is emitted
@@ -2773,19 +2792,23 @@ fn optional_coerce(
         // trailing slots with it, and an explicit `undefined` lowers to the same
         // node): the outer `None` is what asks the callee for its default.
         if matches!(expr, MirExpr::Unit) {
-            return quote!(::core::option::Option::None);
+            return Ok(quote!(::core::option::Option::None));
         }
         // `null` is *not* a missing argument in JavaScript.
         if matches!(expr, MirExpr::Null { .. }) {
-            return quote!(::core::option::Option::Some(::core::option::Option::None));
+            return Ok(quote!(::core::option::Option::Some(
+                ::core::option::Option::None
+            )));
         }
         // The same distinction for a *call* declared `null`/`void`: it supplies a
         // nullish argument, and `undefined` (`void`) asks for the default.
         match source_nullish_kind(expr, ctx, emit_env, body_ctx) {
             Some(SourceNullish::Null) => {
-                return quote!(::core::option::Option::Some(::core::option::Option::None));
+                return Ok(quote!(::core::option::Option::Some(
+                    ::core::option::Option::None
+                )));
             }
-            Some(SourceNullish::Undefined) => return quote!(::core::option::Option::None),
+            Some(SourceNullish::Undefined) => return Ok(quote!(::core::option::Option::None)),
             None => {}
         }
         // A source that already has the nested shape needs no extra wrapping.
@@ -2794,19 +2817,32 @@ fn optional_coerce(
             Some(Type::Optional { inner: value, .. })
                 if matches!(emit_env.types.resolve(*value), Some(Type::Optional { .. }))
         ) {
-            return tokens;
+            return Ok(tokens);
         }
-        let value = optional_coerce(expr, tokens, inner, ctx, emit_env, body_ctx, owned);
-        return quote!(::core::option::Option::Some(#value));
+        if let Some(kinds) = optional_operand_kinds(expr, ctx, emit_env, body_ctx) {
+            if kinds.null && kinds.undefined {
+                return Err(BackendError::NotImplemented(
+                    "a null-or-undefined optional argument cannot select a nullable parameter default unambiguously",
+                ));
+            }
+            if kinds.undefined {
+                let value = optional_coerce(expr, tokens, inner, ctx, emit_env, body_ctx, owned)?;
+                return Ok(quote!((#value).map(::core::option::Option::Some)));
+            }
+        }
+        let value = optional_coerce(expr, tokens, inner, ctx, emit_env, body_ctx, owned)?;
+        return Ok(quote!(::core::option::Option::Some(#value)));
     }
     if matches!(emit_env.types.resolve(inner), Some(Type::String)) {
-        return optional_string_coerce(expr, tokens, target, ctx, emit_env, body_ctx, owned);
+        return Ok(optional_string_coerce(
+            expr, tokens, target, ctx, emit_env, body_ctx, owned,
+        ));
     }
     // A nullish *type* (`void`/`null`) is as nullish as the literal syntax: a call
     // declared `void` yields `undefined`, so it has to become `None` and not
     // `Some(())`, which is not an `Option<T>` at all.
     if is_nullish_literal(expr) || source_nullish_kind(expr, ctx, emit_env, body_ctx).is_some() {
-        return quote!(::core::option::Option::None);
+        return Ok(quote!(::core::option::Option::None));
     }
     let source_is_optional = matches!(
         value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)),
@@ -2828,16 +2864,16 @@ fn optional_coerce(
                 _ => None,
             });
         let Some(source_inner) = source_inner else {
-            return tokens;
+            return Ok(tokens);
         };
         if !numeric_requires_cast(source_inner, inner, emit_env) {
-            return tokens;
+            return Ok(tokens);
         }
         let dst_tokens = emit_type_id_with_ctx(inner, emit_env, ctx);
-        return quote!((#tokens).map(|__value| ((__value) as #dst_tokens)));
+        return Ok(quote!((#tokens).map(|__value| ((__value) as #dst_tokens))));
     }
     let inner = numeric_coerce(expr, tokens, inner, ctx, emit_env, body_ctx);
-    quote!(::core::option::Option::Some(#inner))
+    Ok(quote!(::core::option::Option::Some(#inner)))
 }
 
 fn is_float_type(ty: &Type) -> bool {
@@ -3962,7 +3998,7 @@ fn emit_runtime_call(
             let item = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
                 Some(element) => {
                     let item = numeric_coerce(&args[1], item, element, ctx, emit_env, body_ctx);
-                    optional_coerce(&args[1], item, element, ctx, emit_env, body_ctx, false)
+                    optional_coerce(&args[1], item, element, ctx, emit_env, body_ctx, false)?
                 }
                 None => item,
             };
@@ -3980,7 +4016,7 @@ fn emit_runtime_call(
             let value = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
                 Some(element) => {
                     let value = numeric_coerce(&args[2], value, element, ctx, emit_env, body_ctx);
-                    optional_coerce(&args[2], value, element, ctx, emit_env, body_ctx, false)
+                    optional_coerce(&args[2], value, element, ctx, emit_env, body_ctx, false)?
                 }
                 None => value,
             };
@@ -4332,7 +4368,7 @@ fn emit_array_op_with_element_type(
                 // Array literal elements are values of the element type; a
                 // non-optional one needs `Some(..)` and a `null`/`undefined`
                 // element needs `None`.
-                optional_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx, false)
+                optional_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx, false)?
             } else {
                 tokens
             })
