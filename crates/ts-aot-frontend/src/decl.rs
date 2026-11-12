@@ -8,7 +8,9 @@ use oxc_span::GetSpan;
 use ts_aot_core::{
     Atom, Diagnostic, GenericParamId, LocalId, Span as CoreSpan, Type, TypeId, TypeTable,
 };
-use ts_aot_ir_hir::{HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam};
+use ts_aot_ir_hir::{
+    HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam, HirStmt,
+};
 
 use crate::body::FunctionBodyInput;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv, TlaMainItem};
@@ -17,6 +19,10 @@ use crate::type_resolver::{TypeParamMap, resolve_simple_type};
 use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 const TYPE_RESOLUTION_FAILURE_CODE: &str = "E0400";
+
+/// A function/method without a return type annotation whose body does not
+/// determine the return type.
+pub(crate) const RETURN_TYPE_INFERENCE_CODE: &str = "E0415";
 const UNSUPPORTED_DECL_CODE: &str = "E0300";
 
 impl SkeletonEnv<'_> {
@@ -229,11 +235,24 @@ impl SkeletonBuilder {
         let (params, extra_locals) =
             self.build_params_and_locals(senv, &func.params.items, 0, Some(&type_param_map));
 
-        let ret = self.resolve_ts_type_from_annotation_with_params(
-            senv,
-            func.return_type.as_deref(),
-            Some(&type_param_map),
-        );
+        let ret = if func.return_type.is_some() {
+            if func.generator {
+                self.resolve_generator_ret_ty(
+                    senv,
+                    func.return_type.as_deref(),
+                    Some(&type_param_map),
+                    func.r#async,
+                )
+            } else {
+                self.resolve_ts_type_from_annotation_with_params(
+                    senv,
+                    func.return_type.as_deref(),
+                    Some(&type_param_map),
+                )
+            }
+        } else {
+            senv.error_ty()
+        };
 
         self.type_param_stack.push(type_param_map.clone());
         let (body, _) = self.walk_function_body(
@@ -242,6 +261,8 @@ impl SkeletonBuilder {
                 body: func.body.as_deref(),
                 params: &params,
                 extra_locals: &extra_locals,
+                items: &func.params.items,
+                item_offset: 0,
                 param_base: 0,
             },
             func.generator,
@@ -249,6 +270,18 @@ impl SkeletonBuilder {
         );
         self.type_param_stack.pop();
         self.strict = prev_strict;
+
+        let ret = if func.return_type.is_none() {
+            Self::infer_or_report_return_ty(
+                &body,
+                core_span_from_oxc(func.span()),
+                func.r#async,
+                func.generator,
+                senv,
+            )
+        } else {
+            ret
+        };
 
         HirFunction {
             name,
@@ -538,14 +571,28 @@ impl SkeletonBuilder {
                 id: LocalId::from_raw(0),
                 name: Atom::from("this"),
                 ty: class_ty,
+                optional: false,
             });
         }
         params.extend(method_params);
-        let ret = self.resolve_ts_type_from_annotation_with_params(
-            senv,
-            value.return_type.as_deref(),
-            Some(&combined_map),
-        );
+        let ret = if value.return_type.is_some() {
+            if value.generator {
+                self.resolve_generator_ret_ty(
+                    senv,
+                    value.return_type.as_deref(),
+                    Some(&combined_map),
+                    value.r#async,
+                )
+            } else {
+                self.resolve_ts_type_from_annotation_with_params(
+                    senv,
+                    value.return_type.as_deref(),
+                    Some(&combined_map),
+                )
+            }
+        } else {
+            senv.error_ty()
+        };
         self.type_param_stack.push(combined_map.clone());
         let saved_static = self.in_static_method;
         self.in_static_method = md.r#static;
@@ -555,6 +602,8 @@ impl SkeletonBuilder {
                 body: value.body.as_deref(),
                 params: &params,
                 extra_locals: &extra_locals,
+                items: &value.params.items,
+                item_offset: usize::from(needs_synthetic_this),
                 param_base: 0,
             },
             value.generator,
@@ -563,6 +612,19 @@ impl SkeletonBuilder {
         self.in_static_method = saved_static;
         self.type_param_stack.pop();
         self.strict = prev_strict;
+
+        let ret = if value.return_type.is_none() {
+            Self::infer_or_report_return_ty(
+                &body,
+                core_span_from_oxc(value.span()),
+                value.r#async,
+                value.generator,
+                senv,
+            )
+        } else {
+            ret
+        };
+
         HirFunction {
             name: method_name,
             params,
@@ -603,8 +665,11 @@ impl SkeletonBuilder {
                 continue;
             };
             let name = Atom::from(ident.as_str());
-            let mut ty =
-                self.resolve_ts_type_from_annotation(senv, declarator.type_annotation.as_deref());
+            let mut ty = if declarator.type_annotation.is_some() {
+                self.resolve_ts_type_from_annotation(senv, declarator.type_annotation.as_deref())
+            } else {
+                senv.error_ty()
+            };
             let init = declarator
                 .init
                 .as_ref()
@@ -696,6 +761,30 @@ impl SkeletonBuilder {
         self.resolve_ts_type(senv, ann.map(|a| &a.type_annotation))
     }
 
+    /// A generator's annotation is its **yield** type in this dialect
+    /// (`function* g(): i64 { yield 1; }`), but the standard TypeScript
+    /// spellings `Generator<T>` / `IterableIterator<T>` / `Iterator<T>` (and
+    /// the `Async*` variants) are accepted and unwrapped to `T` - otherwise the
+    /// annotation resolves to an unknown type and the generator is lowered with
+    /// an error yield type.
+    fn resolve_generator_ret_ty(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        ann: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+        type_params: Option<&TypeParamMap>,
+        is_async: bool,
+    ) -> TypeId {
+        let inner = ann.map(|a| &a.type_annotation);
+        if let Some(TSType::TSTypeReference(reference)) = inner
+            && let TSTypeName::IdentifierReference(id) = &reference.type_name
+            && is_generator_wrapper(id.name.as_str(), is_async)
+            && let Some(arguments) = &reference.type_arguments
+            && let Some(yield_ty) = arguments.params.first()
+        {
+            return self.resolve_ts_type_with_params(senv, Some(yield_ty), type_params);
+        }
+        self.resolve_ts_type_with_params(senv, inner, type_params)
+    }
     pub(crate) fn resolve_ts_type_with_params(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -706,12 +795,19 @@ impl SkeletonBuilder {
             && let Some(name) = banned_type_name(ts_type)
         {
             let span = core_span_from_oxc(ts_type.span());
+            // `never` is uninhabited (no runtime value can exist), which is a
+            // different reason from the "no `any`/`unknown`" rule and worth
+            // spelling out.
+            let detail = if name == "never" {
+                ": no value of that type exists, so nothing can be stored, passed or returned. \
+                 Drop the annotation (a function that always throws can return `void`) or use a \
+                 concrete type."
+            } else {
+                ". Use explicit types like `i64`, `string`, or a named struct instead."
+            };
             senv.diagnostics.push(Diagnostic::error(
                 "E0401",
-                format!(
-                    "the type `{name}` is not supported in strict AOT mode. \
-                     Use explicit types like `i64`, `string`, or a named struct instead.",
-                ),
+                format!("the type `{name}` is not supported in strict AOT mode{detail}"),
                 span,
             ));
             return senv.types.intern(&Type::Error);
@@ -749,6 +845,76 @@ impl SkeletonBuilder {
     }
 }
 
+impl SkeletonBuilder {
+    /// Return type for a declaration that has no return type annotation.
+    ///
+    /// The body determines the type when every value-returning path agrees on
+    /// one statically known type and the body cannot fall through; a body that
+    /// never returns a value is `void`, and an `async` body wraps the inferred
+    /// type (or `void`) in `Promise`, mirroring the annotated form. Anything
+    /// else - calls or aggregates whose static type the skeleton does not know,
+    /// mixed returns, generators - needs an explicit annotation, which is
+    /// reported here with the declaration's span instead of failing later in the
+    /// backend without a source location.
+    fn infer_or_report_return_ty(
+        body: &[HirStmt],
+        span: CoreSpan,
+        is_async: bool,
+        is_generator: bool,
+        senv: &mut SkeletonEnv,
+    ) -> TypeId {
+        use crate::util::ReturnInference;
+
+        if is_async && is_generator {
+            senv.diagnostics.push(Diagnostic::warning(
+                RETURN_TYPE_INFERENCE_CODE,
+                "an async generator has no return type annotation, so its element type cannot be \
+                 inferred from the body; annotate the return type explicitly",
+                span,
+            ));
+            return senv.error_ty();
+        }
+        match crate::util::infer_function_return_ty(body, senv.types, senv.program) {
+            ReturnInference::Void if is_async => {
+                let ok = senv.types.intern(&Type::Void);
+                senv.types.intern(&Type::Promise { ok, err: None })
+            }
+            ReturnInference::Inferred(ty) if is_async => {
+                // An async function's result is the *awaited* value, so an
+                // inferred `Promise<T>` (`async function f() { return p; }` with
+                // `p: Promise<T>`) is unwrapped once instead of being wrapped
+                // again into `Promise<Promise<T>>`. Non-Promise results keep
+                // being wrapped as before.
+                let ok = match senv.types.resolve(ty).cloned() {
+                    Some(Type::Promise { ok, .. }) => ok,
+                    _ => ty,
+                };
+                senv.types.intern(&Type::Promise { ok, err: None })
+            }
+            ReturnInference::Inferred(ty) if !is_generator => ty,
+            ReturnInference::Void if !is_generator => senv.types.intern(&Type::Void),
+            ReturnInference::Void | ReturnInference::Inferred(_) => {
+                senv.diagnostics.push(Diagnostic::warning(
+                    RETURN_TYPE_INFERENCE_CODE,
+                    "a generator has no return type annotation, so its element type cannot be \
+                     inferred from the body; annotate the return type explicitly",
+                    span,
+                ));
+                senv.error_ty()
+            }
+            ReturnInference::Unknown => {
+                senv.diagnostics.push(Diagnostic::error(
+                    RETURN_TYPE_INFERENCE_CODE,
+                    "this function has no return type annotation and its return type cannot be \
+                     inferred from the body; add an explicit return type annotation (the AOT \
+                     target does not guess a type it cannot see)",
+                    span,
+                ));
+                senv.error_ty()
+            }
+        }
+    }
+}
 fn literal_value_hir(value: &Expression<'_>, span: CoreSpan) -> Option<HirExpr> {
     Some(match value {
         Expression::NumericLiteral(n) => crate::ops::number_to_hir(n.value, span),
@@ -782,6 +948,7 @@ fn banned_type_name(ty: &TSType<'_>) -> Option<&'static str> {
     match ty {
         TSType::TSAnyKeyword(_) => Some("any"),
         TSType::TSUnknownKeyword(_) => Some("unknown"),
+        TSType::TSNeverKeyword(_) => Some("never"),
         TSType::TSTypeReference(r) => {
             if let TSTypeName::IdentifierReference(id) = &r.type_name
                 && id.name.as_str() == "Object"
@@ -797,6 +964,15 @@ fn banned_type_name(ty: &TSType<'_>) -> Option<&'static str> {
     }
 }
 
+/// The TypeScript generator wrapper names whose single type argument is the
+/// yielded type.
+fn is_generator_wrapper(name: &str, is_async: bool) -> bool {
+    match name {
+        "Generator" | "IterableIterator" | "Iterator" => !is_async,
+        "AsyncGenerator" | "AsyncIterableIterator" | "AsyncIterator" => is_async,
+        _ => false,
+    }
+}
 fn is_const_initializer(expr: &HirExpr) -> bool {
     matches!(
         expr,

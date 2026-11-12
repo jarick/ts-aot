@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use ts_aot_core::{Atom, LocalId, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirCallee, HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase,
 };
@@ -10,16 +10,73 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
+    /// The statically known type of a converted value, for the places that must
+    /// declare a local or check a `return` against what the backend will emit.
+    ///
+    /// The HIR type of a node is often absent (`Error`) or stale - a call keeps
+    /// `Error`, and `a || b` keeps the left operand's optional type even when the
+    /// lowered value is the non-optional result - so the MIR node's own type is
+    /// consulted first (`Local`/`Global` are resolved through the declared local
+    /// and the module's globals, exactly like `mir_expr_static_ty` does for the
+    /// operator lowerings).
+    fn mir_value_static_ty(
+        &self,
+        expr: &MirExpr,
+        locals: &[MirLocalDecl],
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let ty = match expr {
+            MirExpr::Local(id) => locals
+                .iter()
+                .rev()
+                .find(|decl| decl.id == *id)
+                .or_else(|| self.temp_locals.iter().rev().find(|decl| decl.id == *id))
+                .map(|decl| decl.ty),
+            MirExpr::Global(name) => self.global_decl_type(name),
+            MirExpr::Unit | MirExpr::Bool(_) => None,
+            other => other.ty(),
+        };
+        ty.filter(|ty| !matches!(types.resolve(*ty), None | Some(Type::Error)))
+    }
+
     fn recover_local_ty(
         &self,
         name: &str,
         declared: TypeId,
         init: Option<&HirExpr>,
+        init_mir: Option<&MirExpr>,
+        locals: &[MirLocalDecl],
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> TypeId {
-        if !matches!(types.resolve(declared), None | Some(Type::Error)) {
+        let declared_known = !matches!(types.resolve(declared), None | Some(Type::Error));
+        // A `??` over a nullish literal lowers to an optional value, but the
+        // frontend types the expression - and so an unannotated binding's
+        // "declared" type - as the left operand's non-optional inner type:
+        // `const r = a ?? null` over `a: number | undefined` arrives as `number`,
+        // not `number | null`. The converted initializer is authoritative there,
+        // because declaring the stale type emits `let r: f64 = <Option<f64>>`,
+        // which `cargo check` rejects. An optional declaration keeps its own type
+        // (it already accepts the value), as does every other initializer.
+        if declared_known
+            && !matches!(types.resolve(declared), Some(Type::Optional { .. }))
+            && let Some(init) = init
+            && is_nullish_coalesce(init)
+            && let Some(init_mir) = init_mir
+            && let Some(recovered) = self.mir_value_static_ty(init_mir, locals, types)
+            && matches!(types.resolve(recovered), Some(Type::Optional { .. }))
+        {
+            return recovered;
+        }
+        if declared_known {
             return declared;
+        }
+        // The converted initializer is authoritative: `let r = g() || 5` holds an
+        // `f64` even though the HIR `||` node is typed `number | undefined`.
+        if let Some(init_mir) = init_mir
+            && let Some(recovered) = self.mir_value_static_ty(init_mir, locals, types)
+        {
+            return recovered;
         }
         if let Some(init) = init {
             if let Some(recovered) = self.expr_type(init, types)
@@ -185,32 +242,58 @@ impl ExprConverter {
                 let name = name.clone();
                 self.register_local_name(new_id, name.clone());
                 let mutable = mutable_locals.contains(id);
-                let effective_ty =
-                    self.recover_local_ty(name.as_str(), *ty, init.as_ref(), types, ctx);
+                let declared_known = !matches!(types.resolve(*ty), None | Some(Type::Error));
+                let init_compatible = match init.as_ref() {
+                    Some(init_expr) if declared_known => {
+                        crate::hir_to_mir::nullish::check_nullish_write(
+                            init_expr,
+                            *ty,
+                            types,
+                            init_expr.span(),
+                            ctx,
+                            &format!("the annotation of `{}`", name.as_str()),
+                            false,
+                        )
+                    }
+                    _ => true,
+                };
+                let init_expected_ty = declared_known.then_some(*ty);
+                // The initializer is converted before the local's type is fixed:
+                // the MIR value carries the type the backend will emit, while the
+                // HIR node can be stale (`let r = g() || 5` used to be declared
+                // `Option<f64>` while holding an `f64`).
+                let init_mir = if init_compatible {
+                    init.as_ref().map(|e| {
+                        let saved_expected_ty = self.expected_ty;
+                        self.expected_ty = init_expected_ty;
+                        let mir = self.convert_expr(
+                            e,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
+                        self.expected_ty = saved_expected_ty;
+                        mir
+                    })
+                } else {
+                    None
+                };
+                let effective_ty = self.recover_local_ty(
+                    name.as_str(),
+                    *ty,
+                    init.as_ref(),
+                    init_mir.as_ref(),
+                    final_locals,
+                    types,
+                    ctx,
+                );
                 final_locals.push(MirLocalDecl {
                     id: new_id,
                     name,
                     ty: effective_ty,
                     mutable,
-                });
-                let init_expected_ty = if matches!(types.resolve(*ty), None | Some(Type::Error)) {
-                    None
-                } else {
-                    Some(*ty)
-                };
-                let init_mir = init.as_ref().map(|e| {
-                    let saved_expected_ty = self.expected_ty;
-                    self.expected_ty = init_expected_ty;
-                    let mir = self.convert_expr(
-                        e,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    self.expected_ty = saved_expected_ty;
-                    mir
                 });
                 out.push(MirStmt::Let {
                     local: new_id,
@@ -673,21 +756,78 @@ impl ExprConverter {
                 });
             }
             HirStmt::Return { value } => {
-                let value_mir = value.as_ref().map(|e| {
-                    let saved_expected_ty = self.expected_ty;
-                    self.expected_ty = self.current_return_ty;
-                    let mir = self.convert_expr(
-                        e,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    );
-                    self.expected_ty = saved_expected_ty;
-                    mir
-                });
-                out.push(MirStmt::Return(value_mir));
+                let return_compatible = match (value.as_ref(), self.current_return_ty) {
+                    (Some(expr), Some(return_ty)) => {
+                        crate::hir_to_mir::nullish::check_nullish_write(
+                            expr,
+                            return_ty,
+                            types,
+                            expr.span(),
+                            ctx,
+                            "the declared return type of this function",
+                            false,
+                        )
+                    }
+                    _ => true,
+                };
+                let value_mir = if return_compatible {
+                    value.as_ref().map(|e| {
+                        let saved_expected_ty = self.expected_ty;
+                        self.expected_ty = self.current_return_ty;
+                        let mir = self.convert_expr(
+                            e,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
+                        self.expected_ty = saved_expected_ty;
+                        mir
+                    })
+                } else {
+                    None
+                };
+                // The HIR type of a local is often `Error`, so the check above
+                // sees nothing for `const r = g(); return r;`. Re-check against
+                // the *user-declared* local's type instead of emitting `return
+                // Option<T>` inside a `-> T` function without a diagnostic.
+                // Lowering temps are not checked yet: several intrinsics are
+                // *declared* wider than the value their runtime call yields
+                // (`Symbol.keyFor` is `string | undefined` while the emitted call
+                // returns the value), and checking them here reports a false
+                // mismatch. Fixing those declarations comes first.
+                let mir_compatible =
+                    match (value_mir.as_ref(), value.as_ref(), self.current_return_ty) {
+                        (Some(MirExpr::Local(id)), Some(expr), Some(return_ty)) => {
+                            match final_locals
+                                .iter()
+                                .rev()
+                                .find(|decl| decl.id == *id)
+                                .map(|decl| decl.ty)
+                                .filter(|ty| {
+                                    !matches!(types.resolve(*ty), None | Some(Type::Error))
+                                }) {
+                                Some(value_ty) if value_ty != return_ty => {
+                                    crate::hir_to_mir::nullish::check_nullish_write_kinds(
+                                        crate::hir_to_mir::nullish::kinds_of_ty(value_ty, types),
+                                        return_ty,
+                                        types,
+                                        expr.span(),
+                                        ctx,
+                                        "the declared return type of this function",
+                                    )
+                                }
+                                _ => true,
+                            }
+                        }
+                        _ => true,
+                    };
+                out.push(MirStmt::Return(if mir_compatible {
+                    value_mir
+                } else {
+                    None
+                }));
             }
             HirStmt::Break { .. } => out.push(MirStmt::Break),
             HirStmt::Continue { .. } => out.push(MirStmt::Continue),
@@ -705,6 +845,10 @@ impl ExprConverter {
                 catch,
                 finally,
             } => {
+                // A callee's error cannot be caught by this AOT target (only the
+                // function's own `throw`s are), so a throwing call inside the
+                // `try` body is reported instead of silently escaping the catch.
+                self.try_depth = self.try_depth.saturating_add(1);
                 let (mir_body, body_locals) = self.convert_single_stmt_with_shared_struct_ids(
                     body,
                     mutable_locals,
@@ -714,6 +858,9 @@ impl ExprConverter {
                     ctx,
                 );
                 final_locals.extend(body_locals);
+                // The `catch` body is wrapped in `catch_unwind` by the backend, so
+                // a `?` there cannot leave the enclosing function: it is *inside*
+                // the protected region as far as throw propagation is concerned.
                 let (catch_param, mir_catch) = if let Some(c) = catch {
                     let param = c.binding.as_ref().map(|binding| {
                         let new_id = self.map_local_id(binding.id);
@@ -740,6 +887,10 @@ impl ExprConverter {
                 } else {
                     (None, None)
                 };
+                // The `finally` body is emitted *outside* the `catch_unwind`
+                // closure, so a throwing call there propagates normally: a `?` is
+                // valid again and must not be reported as an un-catchable error.
+                self.try_depth = self.try_depth.saturating_sub(1);
                 let mir_finally = if let Some(fin) = finally {
                     let (fbody, flocals) = self.convert_single_stmt_with_shared_struct_ids(
                         fin,
@@ -788,6 +939,23 @@ impl ExprConverter {
         );
         (out, final_locals)
     }
+}
+
+/// Whether the expression is `left ?? <nullish literal>`.
+///
+/// Only this shape is affected by the frontend inference described on
+/// `recover_local_ty`: a `null`/`undefined` literal carries no type of its own,
+/// so the operator - and an unannotated binding taking its type - is typed as
+/// the left operand's non-optional inner type while the lowering stays optional.
+fn is_nullish_coalesce(init: &HirExpr) -> bool {
+    matches!(
+        init,
+        HirExpr::Binary {
+            op: HirBinaryOp::Coalesce,
+            rhs,
+            ..
+        } if crate::hir_to_mir::nullish::is_nullish_literal(rhs)
+    )
 }
 
 #[cfg(test)]

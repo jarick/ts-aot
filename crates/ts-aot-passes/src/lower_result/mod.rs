@@ -1,14 +1,29 @@
 use ts_aot_core::{Type, TypeId, TypeTable};
-use ts_aot_ir_mir::{MirBlock, MirDecl, MirExpr, MirProgram, MirStmt};
+use ts_aot_ir_mir::{MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirProgram, MirStmt};
 
 #[cfg(test)]
 mod tests;
 
 pub fn lower_result(program: &mut MirProgram, types: &mut TypeTable) {
     for decl in &mut program.declarations {
-        if let MirDecl::Function(f) = decl
-            && let Some(throws_ty) = f.throws
-        {
+        match decl {
+            MirDecl::Function(f) => lower_result_function(f, types),
+            // Methods are nested in the struct declaration: a `throw` in a method
+            // used to be lowered to `return Err(...)` inside a signature that was
+            // never wrapped into `Result`, i.e. code that cannot compile.
+            MirDecl::Struct(s) => {
+                for m in &mut s.methods {
+                    lower_result_function(m, types);
+                }
+            }
+            MirDecl::Global(_) => {}
+        }
+    }
+}
+
+fn lower_result_function(f: &mut MirFunctionDecl, types: &mut TypeTable) {
+    {
+        if let Some(throws_ty) = f.throws {
             let (result_ty, err_ty) = if is_already_result(f.ret, types) {
                 let Type::Result { err, .. } =
                     types.resolve(f.ret).expect("checked by is_already_result")

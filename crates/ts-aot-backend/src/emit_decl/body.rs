@@ -2,7 +2,7 @@ use proc_macro2::{Ident, Literal, Punct, Spacing, TokenStream};
 use quote::{format_ident, quote};
 use std::collections::HashSet;
 
-use ts_aot_core::{Atom, FieldId, LocalId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, FieldId, LocalId, NullishKinds, StructId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
     BinaryOp, ConstValue, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam,
@@ -10,14 +10,14 @@ use ts_aot_ir_mir::{
 };
 
 use super::ctx::{
-    BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedStorage, place_root_global_name,
-    shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
+    BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedAccess, SharedStorage,
+    place_root_global_name, shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
 };
-use super::global_is_durable_string;
 use super::ident::ident_from;
 use super::literals::{emit_float_from_int, emit_whole_number_literal};
 use super::runtime_op::runtime_op_ident;
 use super::types::emit_type_id_with_ctx;
+use super::{DurableGlobal, global_durable_kind};
 use crate::error::BackendError;
 
 fn loop_label(ident: &Ident) -> TokenStream {
@@ -44,8 +44,14 @@ pub(super) fn emit_body(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    if f.body.block.is_empty() {
-        return Ok(quote!({ unimplemented!() }));
+    if !body_ctx.is_generator()
+        && matches!(emit_env.types.resolve(f.ret), Some(Type::Error))
+        && mir_block_has_value_return(&f.body.block)
+    {
+        return Err(BackendError::NotImplemented(
+            "a function returns a value but its return type could not be determined; \
+             add an explicit return type annotation",
+        ));
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
     if block_contains_try(&f.body.block) {
@@ -126,6 +132,46 @@ fn return_signal_enum() -> TokenStream {
 
 fn block_contains_try(block: &MirBlock) -> bool {
     block.stmts.iter().any(stmt_contains_try)
+}
+
+fn mir_block_has_value_return(block: &MirBlock) -> bool {
+    block.stmts.iter().any(mir_stmt_has_value_return)
+}
+
+fn mir_stmt_has_value_return(stmt: &MirStmt) -> bool {
+    match stmt {
+        MirStmt::Return(Some(expr)) => !is_nullish_literal(expr),
+        MirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            mir_block_has_value_return(then_block)
+                || else_block.as_ref().is_some_and(mir_block_has_value_return)
+        }
+        MirStmt::While { body, .. }
+        | MirStmt::DoWhile { body, .. }
+        | MirStmt::ForOf { body, .. }
+        | MirStmt::ForAwaitOf { body, .. }
+        | MirStmt::ForIn { body, .. } => mir_block_has_value_return(body),
+        MirStmt::Switch { cases, default, .. } => {
+            cases
+                .iter()
+                .any(|case| mir_block_has_value_return(&case.body))
+                || default.as_ref().is_some_and(mir_block_has_value_return)
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            mir_block_has_value_return(body)
+                || catch.as_ref().is_some_and(mir_block_has_value_return)
+                || finally.as_ref().is_some_and(mir_block_has_value_return)
+        }
+        _ => false,
+    }
 }
 
 fn mir_block_terminates(block: &MirBlock) -> bool {
@@ -276,6 +322,15 @@ fn finalize_return_value(
     }
 
     inner_tokens = numeric_coerce(inner_expr, inner_tokens, scalar, ctx, emit_env, body_ctx);
+    inner_tokens = optional_coerce(
+        inner_expr,
+        inner_tokens,
+        scalar,
+        ctx,
+        emit_env,
+        body_ctx,
+        false,
+    )?;
 
     if let Some((promise_ty, promise_ok)) = promise
         && value_ty(inner_expr, ctx, emit_env, body_ctx) != Some(promise_ty)
@@ -398,6 +453,43 @@ fn emit_do_while(
     ))
 }
 
+/// Writes a value into a shared (captured) variable.
+///
+/// The environment field holds `Option<T>` (the storage the runtime uses to
+/// detect a read before initialization), so a nullish value resets it to `None`
+/// and anything else is coerced to `T` and wrapped in `Some`. Without this the
+/// write emitted `Some(())`/`Some(<i64>)` for an `Option<f64>` field, i.e. code
+/// that cannot compile.
+fn shared_write_capture(
+    value: &MirExpr,
+    declared: Option<TypeId>,
+    acc: &SharedAccess,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    let tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
+    // The environment field holds `Option<declared type>` (the outer `Option` is
+    // the runtime's "written yet?" marker, which `shared_write_tokens` adds), so
+    // the value must be coerced to the *declared* type - an `Option<f64>` field
+    // of a captured `number | null` needs `Some(Option::None)` for `null`, not
+    // `Some(())`, and `Some(5.0)` for `5`, not `Some(5)`.
+    let tokens = match declared {
+        Some(declared_ty)
+            if !matches!(
+                emit_env.types.resolve(declared_ty),
+                None | Some(Type::Error)
+            ) =>
+        {
+            let tokens = dynamic_string_coerce(value, tokens, declared_ty, emit_env, body_ctx);
+            let tokens =
+                optional_coerce(value, tokens, declared_ty, ctx, emit_env, body_ctx, false)?;
+            numeric_coerce(value, tokens, declared_ty, ctx, emit_env, body_ctx)
+        }
+        _ => tokens,
+    };
+    Ok(shared_write_tokens(acc, &tokens))
+}
 fn emit_stmt(
     stmt: &MirStmt,
     ctx: &EmitCtx,
@@ -416,8 +508,7 @@ fn emit_stmt(
                 let Some(init) = init else {
                     return Ok(shared_reset_tokens(&acc));
                 };
-                let init = emit_owned_value(init, ctx, emit_env, body_ctx)?;
-                return Ok(shared_write_tokens(&acc, &init));
+                return shared_write_capture(init, Some(*ty), &acc, ctx, emit_env, body_ctx);
             }
             let name = body_ctx.local_ident(*local);
             let target_ty = *ty;
@@ -436,9 +527,12 @@ fn emit_stmt(
                 quote!()
             };
             if let Some(init) = init {
+                check_fn_value_init(init, target_ty, ctx)?;
                 let init_tokens = emit_owned_value(init, ctx, emit_env, body_ctx)?;
                 let init_tokens =
                     dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
+                let init_tokens =
+                    optional_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx, false)?;
                 let init_tokens =
                     numeric_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx);
                 Ok(quote!(let #mutability #name: #ty = #init_tokens;))
@@ -450,14 +544,34 @@ fn emit_stmt(
             if let MirPlace::Local { id } = target
                 && let Some(acc) = body_ctx.shared_access_for_local(*id)
             {
-                let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
-                return Ok(shared_write_tokens(&acc, &value_tokens));
+                return shared_write_capture(
+                    value,
+                    // A closure's own `BodyCtx` has no entry for the captured
+                    // local (it belongs to the enclosing function), so the
+                    // capture table is consulted as well.
+                    body_ctx.local_ty(*id).or_else(|| body_ctx.capture_ty(*id)),
+                    &acc,
+                    ctx,
+                    emit_env,
+                    body_ctx,
+                );
             }
             if let MirPlace::Global(name) = target
                 && let Some(acc) = body_ctx.shared_access_for_name(name)
             {
-                let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
-                return Ok(shared_write_tokens(&acc, &value_tokens));
+                return shared_write_capture(
+                    value,
+                    // A shared name is a captured local: the module-global table
+                    // does not have it, so the env field's declared type is the
+                    // one to coerce to.
+                    body_ctx
+                        .shared_ty_for_name(name)
+                        .or_else(|| ctx.global_ty(name)),
+                    &acc,
+                    ctx,
+                    emit_env,
+                    body_ctx,
+                );
             }
             if let Some(chain_assign) =
                 emit_optional_chain_assign(target, value, ctx, emit_env, body_ctx)?
@@ -469,12 +583,23 @@ fn emit_stmt(
             let value_tokens = match target {
                 MirPlace::Local { id } => match body_ctx.local_ty(*id) {
                     Some(target_ty) => {
-                        dynamic_string_coerce(value, value_tokens, target_ty, emit_env, body_ctx)
+                        let coerced = dynamic_string_coerce(
+                            value,
+                            value_tokens,
+                            target_ty,
+                            emit_env,
+                            body_ctx,
+                        );
+                        let coerced = optional_coerce(
+                            value, coerced, target_ty, ctx, emit_env, body_ctx, false,
+                        )?;
+                        numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
                     }
                     None => value_tokens,
                 },
-                MirPlace::Global(name) if is_durable_string_global(name, ctx, emit_env) => {
-                    let coerced = match ctx.global_ty(name) {
+                MirPlace::Global(name) if is_durable_global(name, ctx, emit_env) => {
+                    let target_ty = ctx.global_ty(name);
+                    let coerced = match target_ty {
                         Some(target_ty) => dynamic_string_coerce(
                             value,
                             value_tokens,
@@ -484,9 +609,38 @@ fn emit_stmt(
                         ),
                         None => value_tokens,
                     };
-                    quote!(#coerced.to_string_lossy())
+                    if let (Some(target_ty), Some(DurableGlobal::OptionalString)) = (
+                        target_ty,
+                        target_ty.and_then(|ty| global_durable_kind(ty, emit_env)),
+                    ) {
+                        optional_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx, true)?
+                    } else {
+                        quote!(#coerced.to_string_lossy())
+                    }
                 }
-                _ => value_tokens,
+                MirPlace::Global(name) => {
+                    if let Some(target_ty) = ctx.global_ty(name) {
+                        let coerced = optional_coerce(
+                            value,
+                            value_tokens,
+                            target_ty,
+                            ctx,
+                            emit_env,
+                            body_ctx,
+                            false,
+                        )?;
+                        numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
+                    } else {
+                        value_tokens
+                    }
+                }
+                MirPlace::Field { ty, .. } | MirPlace::Index { ty, .. } => {
+                    let coerced =
+                        dynamic_string_coerce(value, value_tokens, *ty, emit_env, body_ctx);
+                    let coerced =
+                        optional_coerce(value, coerced, *ty, ctx, emit_env, body_ctx, false)?;
+                    numeric_coerce(value, coerced, *ty, ctx, emit_env, body_ctx)
+                }
             };
             let reset = emit_weakmap_liveness_reset(target, body_ctx);
             let assignment = quote! {
@@ -509,7 +663,11 @@ fn emit_stmt(
             Ok(quote!(#expr;))
         }
         MirStmt::Return(slot) => emit_return_stmt(slot.as_ref(), ctx, emit_env, body_ctx),
-        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+        MirStmt::ReturnResultErr { error, err_ty }
+        | MirStmt::Throw {
+            error,
+            error_ty: err_ty,
+        } => {
             if body_ctx.is_async_generator() && !body_ctx.in_try() {
                 let payload = emit_throw_payload(error, ctx, emit_env, body_ctx)?;
                 Ok(quote!(ts_aot_runtime::__ts_aot_async_generator_throw(#payload);))
@@ -517,8 +675,14 @@ fn emit_stmt(
                 let payload = emit_throw_payload(error, ctx, emit_env, body_ctx)?;
                 Ok(quote!(ts_aot_runtime::__ts_aot_throw(#payload);))
             } else {
-                let error = emit_expr(error, ctx, emit_env, body_ctx)?;
-                Ok(quote!(return Err(#error);))
+                let tokens = emit_expr(error, ctx, emit_env, body_ctx)?;
+                // The thrown value must have the function's error type
+                // (`throw 1` in a function that throws `f64`).
+                let ty = *err_ty;
+                let tokens = dynamic_string_coerce(error, tokens, ty, emit_env, body_ctx);
+                let tokens = optional_coerce(error, tokens, ty, ctx, emit_env, body_ctx, false)?;
+                let tokens = numeric_coerce(error, tokens, ty, ctx, emit_env, body_ctx);
+                Ok(quote!(return Err(#tokens);))
             }
         }
         MirStmt::If {
@@ -713,9 +877,49 @@ fn emit_stmt(
     }
 }
 
-fn is_durable_string_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+fn durable_global_kind(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> Option<DurableGlobal> {
     ctx.global_ty(name)
-        .is_some_and(|ty| global_is_durable_string(ty, emit_env))
+        .and_then(|ty| global_durable_kind(ty, emit_env))
+}
+
+fn is_durable_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+    durable_global_kind(name, ctx, emit_env).is_some()
+}
+
+/// A function value is emitted as a variant of the enum for its *own* signature
+/// bucket, so a local initialised from a function name is valid only when the
+/// local's declared function type is that same bucket and the bucket has a
+/// variant for the function.
+///
+/// Both failures are possible - parameter bivariance lets `f(x: number)` be
+/// stored in a `(x: number | null) => number` local, whose bucket no declaration
+/// fits, and a declaration is left out of a bucket when its ABI cannot be
+/// adapted (see `fn_value_bucket`) - and both are invalid Rust: the emitted
+/// initialiser is a bare function item where the enum is expected. Report it
+/// instead of emitting that.
+fn check_fn_value_init(
+    init: &MirExpr,
+    target_ty: TypeId,
+    ctx: &EmitCtx,
+) -> Result<(), BackendError> {
+    let MirExpr::Global(name) = init else {
+        return Ok(());
+    };
+    let Some(declared) = ctx.fn_value_kind(target_ty) else {
+        return Ok(());
+    };
+    if ctx
+        .fn_value_for_name(name)
+        .is_some_and(|(registered, _)| registered == declared)
+    {
+        return Ok(());
+    }
+    Err(BackendError::Internal(format!(
+        "`{}` cannot be stored in this function value: its own signature belongs to a different \
+         function-value bucket, so the generated crate would name a variant the enum does not \
+         have (the AOT target has no adapter for this function type yet)",
+        name.as_str()
+    )))
 }
 
 fn emit_global_access(
@@ -734,13 +938,22 @@ fn emit_global_access(
     }
     let ident = ident_from(name);
     let mutable = ctx.is_mutable_global(name);
-    let inner = if is_durable_string_global(name, ctx, emit_env) {
+    let inner = if let Some(kind) = durable_global_kind(name, ctx, emit_env) {
         let base = if mutable {
             quote!((*::core::ptr::addr_of!(#ident)))
         } else {
             quote!(#ident)
         };
-        quote!(ts_aot_runtime::JsString::Valid(__ctx.arena.alloc_str(#base.as_str())))
+        match kind {
+            DurableGlobal::OptionalString => quote!(
+                #base.as_ref().map(|__s| ts_aot_runtime::JsString::Valid(
+                    __ctx.arena.alloc_str(__s.as_str())
+                ))
+            ),
+            DurableGlobal::String => {
+                quote!(ts_aot_runtime::JsString::Valid(__ctx.arena.alloc_str(#base.as_str())))
+            }
+        }
     } else if owned
         && ctx
             .global_ty(name)
@@ -873,13 +1086,19 @@ fn emit_place_base(
 fn place_base_ty(base: &MirPlaceBase, body_ctx: &BodyCtx) -> Option<TypeId> {
     match base {
         MirPlaceBase::Local(id) => body_ctx.local_ty(*id),
+        // A name-based capture is a `MirPlaceBase::Global` whose declared type
+        // lives in the closure environment, not in the module globals.
+        MirPlaceBase::Global(name) => body_ctx.shared_ty_for_name(name),
         other => other.ty(),
     }
 }
 
 fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
     match base {
-        MirExpr::Local(id) => body_ctx.local_ty(*id),
+        MirExpr::Local(id) => body_ctx.local_ty(*id).or_else(|| body_ctx.capture_ty(*id)),
+        // A name-based capture (`x` captured through two levels of closure) is a
+        // `MirExpr::Global` that carries no `TypeId`; the env field does.
+        MirExpr::Global(name) => body_ctx.shared_ty_for_name(name),
         other => other.ty(),
     }
 }
@@ -891,9 +1110,16 @@ fn value_ty(
     body_ctx: &BodyCtx,
 ) -> Option<TypeId> {
     match expr {
-        MirExpr::Call { callee, .. } => ctx
-            .function_ret(*callee)
-            .or_else(|| expr_base_ty(expr, body_ctx)),
+        MirExpr::Call { callee, .. } => {
+            let mir_ty = expr_base_ty(expr, body_ctx);
+            match mir_ty.and_then(|t| emit_env.types.resolve(t)) {
+                // A method call through an optional receiver (`c?.m()`) is typed
+                // `T | undefined` by the passes, which is more precise than the
+                // declared return type of the method.
+                Some(Type::Optional { .. }) => mir_ty,
+                _ => ctx.function_ret(*callee).or(mir_ty),
+            }
+        }
         MirExpr::IndirectCall { callee, .. } => {
             let callee_ty = expr_base_ty(callee, body_ctx)?;
             match emit_env.types.resolve(callee_ty) {
@@ -902,6 +1128,49 @@ fn value_ty(
             }
         }
         MirExpr::Global(name) => ctx.global_ty(name).or_else(|| expr_base_ty(expr, body_ctx)),
+        // A negation carries the frontend's placeholder type, but the Rust value
+        // it emits has the operand's type (`-y` for `y: i64` is an `i64`). The
+        // binary/argument/return coercions take the operand type to pick a common
+        // numeric type, so `1.5 + -y` widens the negation instead of leaving an
+        // `i64` in an `f64` position. `!` (`UnaryOp::Not`) yields a `bool` and is
+        // deliberately not covered.
+        MirExpr::Unary {
+            op: UnaryOp::Neg,
+            expr: operand,
+            ..
+        } => value_ty(operand, ctx, emit_env, body_ctx),
+        // `~` is a Rust integer operation (`!`), so its value is an integer even
+        // when the operand's own type is a float. A float operand has no integer
+        // value type to read from the metadata, so that case keeps the
+        // expression's placeholder type like the other arms that do not know the
+        // emitted type.
+        MirExpr::Unary {
+            op: UnaryOp::BitNot,
+            expr: operand,
+            ..
+        } => match value_ty(operand, ctx, emit_env, body_ctx)
+            .and_then(|ty| emit_env.types.resolve(ty).map(|t| (ty, t)))
+        {
+            Some((ty, t)) if is_integer_type(t) => Some(ty),
+            _ => expr_base_ty(expr, body_ctx),
+        },
+        // A binary arithmetic expression carries the frontend's placeholder type
+        // too, while the Rust expression it emits has the numeric unification of
+        // its operands: a float operand makes the result a float, two integers
+        // keep an integer. Without this the assignment/return/argument
+        // coercions see the placeholder and leave an `i64` where an `f64` is
+        // required (`-(a + b)`, `1.5 + a + b`), which is E0308.
+        MirExpr::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod,
+            left,
+            right,
+            ..
+        } => numeric_binary_result_ty(
+            value_ty(left, ctx, emit_env, body_ctx),
+            value_ty(right, ctx, emit_env, body_ctx),
+            emit_env,
+        )
+        .or_else(|| expr_base_ty(expr, body_ctx)),
         MirExpr::Field { base, field, .. } => value_ty(base, ctx, emit_env, body_ctx)
             .and_then(|base_ty| struct_field_type(emit_env, base_ty, *field))
             .or_else(|| expr_base_ty(expr, body_ctx)),
@@ -922,7 +1191,7 @@ pub(super) fn type_requires_arena(ty: TypeId, ctx: &EmitCtx, emit_env: &EmitEnv)
             type_requires_arena(*ok, ctx, emit_env) || type_requires_arena(*err, ctx, emit_env)
         }
         Some(
-            Type::Optional { inner }
+            Type::Optional { inner, .. }
             | Type::Generator { inner, .. }
             | Type::GeneratorResult { inner }
             | Type::AsyncGenYield { inner },
@@ -957,14 +1226,33 @@ fn emit_throw_payload(
 }
 
 fn struct_field_type(emit_env: &EmitEnv, ty: TypeId, field: FieldId) -> Option<TypeId> {
-    let id = match emit_env.types.resolve(ty)? {
-        Type::Struct { id } => *id,
-        _ => return None,
-    };
+    let id = emit_env.types.struct_id(ty)?;
+    struct_field_decl_ty(emit_env, id, field)
+}
+
+/// The *declared* type of `field` in `struct_id`, read from the MIR struct
+/// declaration. Unlike the type of an access expression (which the frontend
+/// already flattens to a single `Optional` for `a?.b`), this tells whether the
+/// field itself is nullable - the distinction the optional-chain emission needs.
+fn struct_field_decl_ty(emit_env: &EmitEnv, struct_id: StructId, field: FieldId) -> Option<TypeId> {
     emit_env.program.declarations.iter().find_map(|d| match d {
-        MirDecl::Struct(s) if s.id == id => s.fields.iter().find(|f| f.id == field).map(|f| f.ty),
+        MirDecl::Struct(s) if s.id == struct_id => {
+            s.fields.iter().find(|f| f.id == field).map(|f| f.ty)
+        }
         _ => None,
     })
+}
+
+/// The inner type of an `OptionalChain` expression, i.e. the receiver's type
+/// with the `| null`/`| undefined` part stripped (`Optional<C>` -> `C`).
+fn optional_chain_inner_ty(emit_env: &EmitEnv, base: &MirExpr) -> Option<TypeId> {
+    let MirExpr::OptionalChain { ty, .. } = base else {
+        return None;
+    };
+    match emit_env.types.resolve(*ty) {
+        Some(ts_aot_core::Type::Optional { inner, .. }) => Some(*inner),
+        _ => None,
+    }
 }
 
 fn emit_same_value(
@@ -977,7 +1265,9 @@ fn emit_same_value(
 ) -> Result<TokenStream, BackendError> {
     fn supported(types: &TypeTable, ty: &Type) -> bool {
         match ty {
-            Type::Optional { inner } => types.resolve(*inner).is_some_and(|t| supported(types, t)),
+            Type::Optional { inner, .. } => {
+                types.resolve(*inner).is_some_and(|t| supported(types, t))
+            }
             Type::Void
             | Type::Null
             | Type::Struct { .. }
@@ -1007,7 +1297,7 @@ fn emit_same_value(
     let left = format_ident!("__ts_aot_left_{}", depth);
     let right = format_ident!("__ts_aot_right_{}", depth);
     match (a_ty, b_ty) {
-        (Type::Optional { inner: x }, Type::Optional { inner: y }) => {
+        (Type::Optional { inner: x, .. }, Type::Optional { inner: y, .. }) => {
             let inner = emit_same_value(
                 types,
                 types.resolve(*x).ok_or_else(unsupported)?,
@@ -1022,7 +1312,7 @@ fn emit_same_value(
                 _ => false,
             }))
         }
-        (Type::Optional { inner }, _) => {
+        (Type::Optional { inner, .. }, _) => {
             let comparison = emit_same_value(
                 types,
                 types.resolve(*inner).ok_or_else(unsupported)?,
@@ -1115,7 +1405,7 @@ fn is_copy_type(types: &TypeTable, ty: TypeId) -> bool {
             | Type::Date
             | Type::Symbol,
         ) => true,
-        Some(Type::Optional { inner }) => is_copy_type(types, *inner),
+        Some(Type::Optional { inner, .. }) => is_copy_type(types, *inner),
         _ => false,
     }
 }
@@ -1202,6 +1492,7 @@ fn emit_owned_exprs_coerced(
             let Some(target) = param_tys.and_then(|tys| tys.get(i).copied()) else {
                 return Ok(tokens);
             };
+            let tokens = optional_coerce(e, tokens, target, ctx, emit_env, body_ctx, false)?;
             Ok(numeric_coerce(e, tokens, target, ctx, emit_env, body_ctx))
         })
         .collect()
@@ -1304,7 +1595,7 @@ fn emit_optional_chain_assign(
     }
     let inner_tokens = emit_expr(inner, ctx, emit_env, body_ctx)?;
     let inner_ty = match types.resolve(*ty) {
-        Some(ts_aot_core::Type::Optional { inner }) => *inner,
+        Some(ts_aot_core::Type::Optional { inner, .. }) => *inner,
         _ => {
             return Err(BackendError::NotImplemented(
                 "optional field assign: target not Optional",
@@ -1357,6 +1648,12 @@ fn emit_expr(
             Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
         MirExpr::Local(id) => Ok(body_ctx.local_read(*id)),
+        // `expr?`: the passes only emit this when the enclosing function
+        // declares the same `throws` type, so `?` type-checks directly.
+        MirExpr::Propagate { expr, .. } => {
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            Ok(quote!(#inner?))
+        }
         MirExpr::Global(name) => Ok(emit_global_access(name, ctx, emit_env, body_ctx, true)),
         MirExpr::Field { base, field, .. } => {
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
@@ -1364,7 +1661,7 @@ fn emit_expr(
                     "optional-chain field: base type unresolved",
                 ))?;
                 let inner_ty = match types.resolve(base_ty) {
-                    Some(ts_aot_core::Type::Optional { inner }) => *inner,
+                    Some(ts_aot_core::Type::Optional { inner, .. }) => *inner,
                     _ => {
                         return Err(BackendError::NotImplemented(
                             "optional-chain field: base not Optional",
@@ -1376,8 +1673,33 @@ fn emit_expr(
                     .ok_or(BackendError::NotImplemented(
                         "optional-chain field: base is not a struct",
                     ))?;
-                let field = ctx.struct_field_ident(struct_id, *field);
-                return Ok(quote!(#map.map(|o| o.#field)));
+                let field_id = *field;
+                let field_ty = struct_field_decl_ty(emit_env, struct_id, field_id);
+                let field = ctx.struct_field_ident(struct_id, field_id);
+                // `a?.b` yields exactly one level of absence in JavaScript: when
+                // the field itself is optional (`b: T | null`), `null` and
+                // "`a` was nullish" are the same absent value, so the access must
+                // flatten (`and_then`) instead of nesting (`map` would give
+                // `Option<Option<T>>`). The type of the *access expression* cannot
+                // tell the two apart (the frontend already flattens it), so the
+                // decision comes from the field's declared type. Both `map` and
+                // `and_then` hand the receiver to the closure by shared reference,
+                // so a non-`Copy` field has to be cloned out of it - otherwise the
+                // closure moves the field from behind `&` (E0507).
+                let access = if field_ty.is_some_and(|ty| !is_copy_type(types, ty)) {
+                    quote!(o.#field.clone())
+                } else {
+                    quote!(o.#field)
+                };
+                if let Some(field_ty) = field_ty
+                    && matches!(
+                        types.resolve(field_ty),
+                        Some(ts_aot_core::Type::Optional { .. })
+                    )
+                {
+                    return Ok(quote!(#map.and_then(|o| #access)));
+                }
+                return Ok(quote!(#map.map(|o| #access)));
             }
             if let Some(base_ty) = expr_base_ty(base, body_ctx)
                 && matches!(
@@ -1431,7 +1753,48 @@ fn emit_expr(
             );
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
-                return Ok(quote!(#map.map(|o| o[#index as usize])));
+                // A string receiver is not indexed as a container: `s?.[i]` on a
+                // `string | null` has to use the same string-index helper as the
+                // plain `s[i]` path below. Indexing the emitted `JsString`/`String`
+                // directly would be E0608, and the short-circuit for `None` must
+                // stay (`map` over the receiver's `as_ref()`), so the helper is
+                // called inside the closure.
+                if let Some(inner_ty) = optional_chain_inner_ty(emit_env, base)
+                    && matches!(types.resolve(inner_ty), Some(Type::String))
+                {
+                    return Ok(quote!(#map.map(|o| ts_aot_runtime::__ts_aot_string_char_at(
+                        __ctx,
+                        o,
+                        #index as i64,
+                    ))));
+                }
+                // Same flattening rule as for fields: an element that is itself
+                // optional (`(T | null)[]`) must not nest the two absences.
+                // The element type comes from the receiver's array type, not from
+                // the access expression, whose type the frontend already flattened.
+                let element_ty = optional_chain_inner_ty(emit_env, base).and_then(|inner| {
+                    match types.resolve(inner) {
+                        Some(Type::Array { element }) => Some(*element),
+                        _ => None,
+                    }
+                });
+                // Same clone rule as for `?.field` above: the element comes out of
+                // a shared reference, so a non-`Copy` element type must be cloned
+                // in both the flattening (`and_then`) and the nesting (`map`) arm.
+                let access = if element_ty.is_some_and(|ty| !is_copy_type(types, ty)) {
+                    quote!(o[#index as usize].clone())
+                } else {
+                    quote!(o[#index as usize])
+                };
+                if let Some(element_ty) = element_ty
+                    && matches!(
+                        types.resolve(element_ty),
+                        Some(ts_aot_core::Type::Optional { .. })
+                    )
+                {
+                    return Ok(quote!(#map.and_then(|o| #access)));
+                }
+                return Ok(quote!(#map.map(|o| #access)));
             }
             if matches!(
                 value_ty(base, ctx, emit_env, body_ctx).and_then(|t| emit_env.types.resolve(t)),
@@ -1455,16 +1818,94 @@ fn emit_expr(
             Ok(quote!(#base[#index as usize]))
         }
         MirExpr::Call { callee, args, .. } => {
-            let is_async = ctx.function_is_async(*callee);
-            let is_method = ctx.function_owner(*callee).is_some();
-            let callee_ident = ctx.function_ident(*callee);
-            let param_tys = ctx.function_params(*callee);
-            let callee = if let Some(owner) = ctx.function_owner(*callee) {
-                let owner_ident = ctx.struct_ident(owner);
+            let callee_id = *callee;
+            let is_async = ctx.function_is_async(callee_id);
+            let is_method = ctx.function_owner(callee_id).is_some();
+            let is_constructor = ctx.function_is_constructor(callee_id);
+            let is_mutating_method = ctx.function_is_mutating_method(callee_id);
+            let callee_ident = ctx.function_ident(callee_id);
+            let param_tys = ctx.function_params(callee_id);
+            let owner_ident = ctx
+                .function_owner(callee_id)
+                .map(|owner| ctx.struct_ident(owner));
+            // `c?.m(...)`: the receiver is an optional value, so the call is
+            // mapped over it and the result is `Option<ret>` (the passes type
+            // the call that way).
+            if is_method
+                && let Some(MirExpr::OptionalChain { base, ty }) = args.first()
+                && let Some(owner_ident) = owner_ident.clone()
+                && matches!(emit_env.types.resolve(*ty), Some(Type::Optional { .. }))
+            {
+                let receiver = if is_mutating_method {
+                    match base.as_ref() {
+                        MirExpr::Local(id) => body_ctx.local_ref(*id),
+                        other => emit_expr(other, ctx, emit_env, body_ctx)?,
+                    }
+                } else {
+                    emit_expr(base, ctx, emit_env, body_ctx)?
+                };
+                let rest = &args[1..];
+                let rest_param_tys = param_tys.map(|tys| &tys[1..]);
+                let rest = emit_owned_exprs_coerced(rest, rest_param_tys, ctx, emit_env, body_ctx)?;
+                let call = if is_mutating_method {
+                    quote!(#owner_ident::#callee_ident(__ts_recv, __ctx, #(#rest),*))
+                } else {
+                    quote!(#owner_ident::#callee_ident(__ts_recv.clone(), __ctx, #(#rest),*))
+                };
+                let call = if is_async {
+                    quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call))
+                } else {
+                    call
+                };
+                return Ok(if is_mutating_method {
+                    quote!(#receiver.as_mut().map(|__ts_recv| #call))
+                } else {
+                    quote!(#receiver.as_ref().map(|__ts_recv| #call))
+                });
+            }
+            let callee = if let Some(owner_ident) = owner_ident {
                 quote!(#owner_ident::#callee_ident)
             } else {
                 quote!(#callee_ident)
             };
+            if is_method && (is_constructor || is_mutating_method) {
+                // A constructor mutates the instance the caller allocated, and a
+                // method that writes a field of `this` mutates the instance it is
+                // called on, so the receiver is borrowed (`&mut self`) instead of
+                // being moved or cloned.
+                let (receiver, rest) = args
+                    .split_first()
+                    .expect("a method call always carries its receiver");
+                // The receiver must be emitted as a *place*: a value read of `this`
+                // clones it (`&mut (self.clone())` mutates a temporary), while
+                // `local_ref` keeps the borrow (`&mut (self)`, `&mut (c)`).
+                let receiver = match receiver {
+                    // Inside a mutating method `self` is already a `&mut` binding, so
+                    // the place is a reborrow (`&mut (*self)`); `&mut (self)` would
+                    // borrow the binding, which needs `mut self`.
+                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => {
+                        Ok(if body_ctx.self_is_borrowed() {
+                            quote!((*self))
+                        } else {
+                            quote!((self))
+                        })
+                    }
+                    // A captured (shared) local lives in the closure environment, so
+                    // it has no ident to borrow: it keeps the by-value form.
+                    MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
+                        Ok(body_ctx.local_ref(*id))
+                    }
+                    other => emit_expr(other, ctx, emit_env, body_ctx),
+                }?;
+                let rest = emit_owned_exprs_coerced(
+                    rest,
+                    param_tys.map(|tys| &tys[1..]),
+                    ctx,
+                    emit_env,
+                    body_ctx,
+                )?;
+                return Ok(quote!(#callee(&mut (#receiver), __ctx, #(#rest),*)));
+            }
             let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
             let call_args = if is_method {
                 let mut v: Vec<TokenStream> = Vec::with_capacity(args.len() + 1);
@@ -1494,7 +1935,31 @@ fn emit_expr(
             }
             if let Some(k) = indirect_callee_fn_kind(callee, ctx, emit_env, body_ctx) {
                 let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
-                let args = emit_owned_exprs(args, ctx, emit_env, body_ctx)?;
+                // The generated `__ts_fn_call_k` helper is typed by the `Fn` type
+                // of the callee, so its arguments need the same coercion a direct
+                // call gets: numeric widening and `Some(..)`/`None` for optional
+                // parameters (an omitted `?`-parameter reaches us as `MirExpr::Unit`).
+                let sig = ctx.fn_value_sig(k);
+                let param_tys = sig.params.clone();
+                let param_optional = sig.optional.clone();
+                let mut coerced_args: Vec<MirExpr> = args.clone();
+                while coerced_args.len() < param_tys.len() {
+                    // Only a *declared* optional parameter may be left out: the
+                    // signature's flag, never an `Option` in the ABI type alone -
+                    // `x: T | undefined` without `?` is a required parameter.
+                    let index = coerced_args.len();
+                    if !param_optional.get(index).copied().unwrap_or(false) {
+                        break;
+                    }
+                    coerced_args.push(MirExpr::Unit);
+                }
+                let args = emit_owned_exprs_coerced(
+                    &coerced_args,
+                    Some(&param_tys),
+                    ctx,
+                    emit_env,
+                    body_ctx,
+                )?;
                 let helper = EmitCtx::fn_call_ident(k);
                 return Ok(quote!(#helper(__ctx, &#callee, #(#args),*)));
             }
@@ -1524,7 +1989,11 @@ fn emit_expr(
                 let field = ctx.struct_field_ident(*struct_id, *field_id);
                 let value_tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
                 let value_tokens = match field_tys.get(field_id) {
-                    Some(fty) => numeric_coerce(value, value_tokens, *fty, ctx, emit_env, body_ctx),
+                    Some(fty) => {
+                        let coerced =
+                            numeric_coerce(value, value_tokens, *fty, ctx, emit_env, body_ctx);
+                        optional_coerce(value, coerced, *fty, ctx, emit_env, body_ctx, false)?
+                    }
                     None => value_tokens,
                 };
                 emitted.push(quote!(#field: #value_tokens));
@@ -1594,6 +2063,14 @@ fn emit_expr(
             }
         }
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
+        MirExpr::IsSome { expr, .. } => {
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            Ok(quote!(#inner.is_some()))
+        }
+        MirExpr::UnwrapOptional { expr, .. } => {
+            let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            Ok(quote!(#inner.unwrap()))
+        }
         MirExpr::TypeOf { expr, .. } => emit_typeof(expr, ctx, emit_env, body_ctx),
         MirExpr::Cast { expr, ty } => {
             let bare = emit_cast_expr(expr, *ty, ctx, emit_env, body_ctx)?;
@@ -1838,6 +2315,7 @@ fn collect_global_names_place_base(base: &MirPlaceBase, out: &mut Vec<Atom>) {
 fn collect_global_names_expr(expr: &MirExpr, out: &mut Vec<Atom>) {
     match expr {
         MirExpr::Global(name) => out.push(name.clone()),
+
         MirExpr::Closure { body, .. } => collect_global_names(body, out),
         MirExpr::Field { base, .. }
         | MirExpr::OptionalChain { base, .. }
@@ -1856,7 +2334,12 @@ fn collect_global_names_expr(expr: &MirExpr, out: &mut Vec<Atom>) {
             collect_global_names_expr(left, out);
             collect_global_names_expr(right, out);
         }
-        MirExpr::Yield { expr: Some(e), .. } => collect_global_names_expr(e, out),
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_global_names_expr(expr, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } | MirExpr::Propagate { expr: e, .. } => {
+            collect_global_names_expr(e, out);
+        }
         MirExpr::Call { args, .. } => {
             for a in args {
                 collect_global_names_expr(a, out);
@@ -1987,6 +2470,7 @@ fn emit_closure_value(
     let mut child =
         BodyCtx::for_closure(ret_ty, body_ctx.shared_name_map(), body_ctx.shared_id_map());
     child.inherit_dynamic(body_ctx);
+    child.seed_capture_types(captures, body_ctx);
     child.seed_dynamic(body, params, locals, types);
     child.seed_move_safe(body, locals);
     let mut candidates: std::collections::HashSet<LocalId> = params.iter().map(|p| p.id).collect();
@@ -2091,11 +2575,40 @@ fn emit_binary_expr(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    if matches!(op, BinaryOp::Eq | BinaryOp::Ne)
-        && let Some(tokens) = emit_dynamic_equality(op, left, right, ctx, emit_env, body_ctx)?
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    ) && let Some(tokens) = emit_dynamic_equality(op, left, right, ctx, emit_env, body_ctx)?
     {
         return Ok(tokens);
     }
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    ) && let Some(tokens) =
+        emit_nullish_literal_equality(op, left, right, ctx, emit_env, body_ctx)?
+    {
+        return Ok(tokens);
+    }
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    ) && let Some(tokens) =
+        emit_mixed_optional_equality(op, left, right, ctx, emit_env, body_ctx)?
+    {
+        return Ok(tokens);
+    }
+    // Two optional operands are compared with Rust's `Option` equality below,
+    // where `null` and `undefined` share one `Option::None`. That is JavaScript's
+    // answer only while both sides carry the same nullish kinds, so a strict
+    // comparison whose kinds make the `None`/`None` case ambiguous is rejected
+    // instead of silently answering `true`.
+    check_optional_strict_equality_kinds(op, left, right, ctx, emit_env, body_ctx)?;
+    // The same `Option` comparison also needs both inner types to be the *same*
+    // Rust type and to implement `PartialEq`; when the metadata cannot supply
+    // that, the emitted `a == b` would not compile (E0308 for two different
+    // numeric inner types, E0369 for a structure without `PartialEq`).
+    check_optional_strict_equality_inner_types(op, left, right, ctx, emit_env, body_ctx)?;
     let target = if matches!(
         op,
         BinaryOp::Add
@@ -2105,6 +2618,8 @@ fn emit_binary_expr(
             | BinaryOp::Mod
             | BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::StrictEq
+            | BinaryOp::StrictNe
             | BinaryOp::Lt
             | BinaryOp::Le
             | BinaryOp::Gt
@@ -2130,8 +2645,8 @@ fn emit_binary_expr(
         BinaryOp::Mul => quote!(#left_tokens * #right_tokens),
         BinaryOp::Div => quote!(#left_tokens / #right_tokens),
         BinaryOp::Mod => quote!(#left_tokens % #right_tokens),
-        BinaryOp::Eq => quote!(#left_tokens == #right_tokens),
-        BinaryOp::Ne => quote!(#left_tokens != #right_tokens),
+        BinaryOp::Eq | BinaryOp::StrictEq => quote!(#left_tokens == #right_tokens),
+        BinaryOp::Ne | BinaryOp::StrictNe => quote!(#left_tokens != #right_tokens),
         BinaryOp::Lt => quote!(#left_tokens < #right_tokens),
         BinaryOp::Le => quote!(#left_tokens <= #right_tokens),
         BinaryOp::Gt => quote!(#left_tokens > #right_tokens),
@@ -2167,6 +2682,35 @@ fn common_numeric_target(
     None
 }
 
+/// The type of the Rust expression a binary arithmetic operator emits: the
+/// numeric unification of its two operands. A float operand makes the result a
+/// float (the wider of the two when both are floats), two integers keep an
+/// integer (the left operand's type). `None` when the operands are not both
+/// numeric, so the caller keeps the expression's placeholder type.
+///
+/// This is the *result* type, unlike [`common_numeric_target`], which reports the
+/// type two operands have to be coerced to and returns `None` when they already
+/// agree. `value_ty` needs the result type to tell the enclosing assignment or
+/// return which coercion to apply to a composite expression.
+fn numeric_binary_result_ty(
+    left: Option<TypeId>,
+    right: Option<TypeId>,
+    emit_env: &EmitEnv,
+) -> Option<TypeId> {
+    let (left_id, left_ty) = (left?, emit_env.types.resolve(left?)?);
+    let (right_id, right_ty) = (right?, emit_env.types.resolve(right?)?);
+    if !is_numeric_type(left_ty) || !is_numeric_type(right_ty) {
+        return None;
+    }
+    if is_float_type(left_ty) {
+        return Some(left_id);
+    }
+    if is_float_type(right_ty) {
+        return Some(right_id);
+    }
+    Some(left_id)
+}
+
 fn is_dynamic_expr(expr: &MirExpr, body_ctx: &BodyCtx) -> bool {
     match expr {
         MirExpr::Local(id) => body_ctx.is_dynamic(*id),
@@ -2191,6 +2735,147 @@ fn dynamic_string_coerce(
     }
 }
 
+fn optional_string_coerce(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    owned: bool,
+) -> TokenStream {
+    let is_optional_string = matches!(
+        emit_env.types.resolve(target),
+        Some(Type::Optional { inner, .. }) if matches!(emit_env.types.resolve(*inner), Some(Type::String))
+    );
+    if !is_optional_string {
+        return tokens;
+    }
+    if is_nullish_literal(expr) {
+        return quote!(::core::option::Option::None);
+    }
+    match value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)) {
+        Some(Type::Optional { .. }) if owned => quote!(#tokens.map(|__s| __s.to_string_lossy())),
+        Some(Type::Optional { .. }) => tokens,
+        Some(Type::String) if owned => {
+            quote!(::core::option::Option::Some(#tokens.to_string_lossy()))
+        }
+        Some(Type::String) => quote!(::core::option::Option::Some(#tokens)),
+        _ if owned => quote!(#tokens.map(|__s| __s.to_string_lossy())),
+        _ => tokens,
+    }
+}
+
+fn optional_coerce(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    owned: bool,
+) -> Result<TokenStream, BackendError> {
+    let Some(Type::Optional { inner, .. }) = emit_env.types.resolve(target) else {
+        return Ok(tokens);
+    };
+    let inner = *inner;
+    // A parameter that has a default *and* a nullable declared type is emitted
+    // with a nested ABI type `Option<Option<T>>`: the outer `Option` records
+    // whether an argument was supplied at all (the callee's prologue applies the
+    // default when it is `None`), the inner one is the value's own nullishness.
+    // Coercing into that shape is "coerce one level down, then wrap once more":
+    // a plain value becomes `Some(Some(v))`, a nullable source `Some(v)` and an
+    // explicit `null` stays `Some(None)` instead of collapsing into the outer
+    // `None`, which would silently select the default.
+    if matches!(emit_env.types.resolve(inner), Some(Type::Optional { .. })) {
+        // A missing argument reaches us as `MirExpr::Unit` (the passes pad
+        // trailing slots with it, and an explicit `undefined` lowers to the same
+        // node): the outer `None` is what asks the callee for its default.
+        if matches!(expr, MirExpr::Unit) {
+            return Ok(quote!(::core::option::Option::None));
+        }
+        // `null` is *not* a missing argument in JavaScript.
+        if matches!(expr, MirExpr::Null { .. }) {
+            return Ok(quote!(::core::option::Option::Some(
+                ::core::option::Option::None
+            )));
+        }
+        // The same distinction for a *call* declared `null`/`void`: it supplies a
+        // nullish argument, and `undefined` (`void`) asks for the default.
+        match source_nullish_kind(expr, ctx, emit_env, body_ctx) {
+            Some(SourceNullish::Null) => {
+                return Ok(quote!(::core::option::Option::Some(
+                    ::core::option::Option::None
+                )));
+            }
+            Some(SourceNullish::Undefined) => return Ok(quote!(::core::option::Option::None)),
+            None => {}
+        }
+        // A source that already has the nested shape needs no extra wrapping.
+        if matches!(
+            value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)),
+            Some(Type::Optional { inner: value, .. })
+                if matches!(emit_env.types.resolve(*value), Some(Type::Optional { .. }))
+        ) {
+            return Ok(tokens);
+        }
+        if let Some(kinds) = optional_operand_kinds(expr, ctx, emit_env, body_ctx) {
+            if kinds.null && kinds.undefined {
+                return Err(BackendError::NotImplemented(
+                    "a null-or-undefined optional argument cannot select a nullable parameter default unambiguously",
+                ));
+            }
+            if kinds.undefined {
+                let value = optional_coerce(expr, tokens, inner, ctx, emit_env, body_ctx, owned)?;
+                return Ok(quote!((#value).map(::core::option::Option::Some)));
+            }
+        }
+        let value = optional_coerce(expr, tokens, inner, ctx, emit_env, body_ctx, owned)?;
+        return Ok(quote!(::core::option::Option::Some(#value)));
+    }
+    if matches!(emit_env.types.resolve(inner), Some(Type::String)) {
+        return Ok(optional_string_coerce(
+            expr, tokens, target, ctx, emit_env, body_ctx, owned,
+        ));
+    }
+    // A nullish *type* (`void`/`null`) is as nullish as the literal syntax: a call
+    // declared `void` yields `undefined`, so it has to become `None` and not
+    // `Some(())`, which is not an `Option<T>` at all.
+    if is_nullish_literal(expr) || source_nullish_kind(expr, ctx, emit_env, body_ctx).is_some() {
+        return Ok(quote!(::core::option::Option::None));
+    }
+    let source_is_optional = matches!(
+        value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)),
+        Some(Type::Optional { .. })
+    );
+    if source_is_optional {
+        // The source is already an `Option`, so only its present values need the
+        // numeric coercion: `None` stays `None` and `Some(v)` becomes
+        // `Some(v as T)`. Returning the source untouched would leave `Option<i64>`
+        // where `Option<f64>` is required (E0308), while wrapping the whole source
+        // in another `Some` would produce a nested `Option<Option<T>>`.
+        let source_inner = value_ty(expr, ctx, emit_env, body_ctx)
+            .and_then(|ty| emit_env.types.resolve(ty))
+            .and_then(|ty| match ty {
+                Type::Optional {
+                    inner: source_inner,
+                    ..
+                } => Some(*source_inner),
+                _ => None,
+            });
+        let Some(source_inner) = source_inner else {
+            return Ok(tokens);
+        };
+        if !numeric_requires_cast(source_inner, inner, emit_env) {
+            return Ok(tokens);
+        }
+        let dst_tokens = emit_type_id_with_ctx(inner, emit_env, ctx);
+        return Ok(quote!((#tokens).map(|__value| ((__value) as #dst_tokens))));
+    }
+    let inner = numeric_coerce(expr, tokens, inner, ctx, emit_env, body_ctx);
+    Ok(quote!(::core::option::Option::Some(#inner)))
+}
+
 fn is_float_type(ty: &Type) -> bool {
     matches!(ty, Type::F32 | Type::F64)
 }
@@ -2202,6 +2887,67 @@ fn is_integer_type(ty: &Type) -> bool {
     )
 }
 
+fn is_numeric_type(ty: &Type) -> bool {
+    is_float_type(ty) || is_integer_type(ty)
+}
+
+/// Whether converting a value of `source` into `target` needs an `as` cast.
+/// Both must be numeric; a change of kind (integer vs float) or of width
+/// (`i32` vs `i64`) changes the Rust type, so the emitted value has to be cast.
+/// Non-numeric and identical types need no conversion, which keeps the existing
+/// emission for them.
+fn numeric_requires_cast(source: TypeId, target: TypeId, emit_env: &EmitEnv) -> bool {
+    if source == target {
+        return false;
+    }
+    let (Some(source), Some(target)) = (
+        emit_env.types.resolve(source),
+        emit_env.types.resolve(target),
+    ) else {
+        return false;
+    };
+    is_numeric_type(source) && is_numeric_type(target)
+}
+
+/// A literal initializer of a `static` must have the static's type: Rust reads
+/// `0` as an integer literal even when the static is an `f64`.
+pub(super) fn coerce_static_init(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    ty: TypeId,
+    emit_env: &EmitEnv,
+) -> TokenStream {
+    // An optional static uses the representation every other optional value
+    // uses: `Option<T>`, with a nullish constant as `None` and any other
+    // constant wrapped in `Some` (and coerced to the inner type). Without this
+    // a `number | null` global emitted `()`/`5` where `Option<f64>` was
+    // declared.
+    if let Some(Type::Optional { inner, .. }) = emit_env.types.resolve(ty).cloned() {
+        if is_nullish_literal(expr) {
+            return quote!(::core::option::Option::None);
+        }
+        let inner_tokens = coerce_static_init(expr, tokens, inner, emit_env);
+        return quote!(::core::option::Option::Some(#inner_tokens));
+    }
+    if !matches!(emit_env.types.resolve(ty), Some(t) if is_float_type(t)) {
+        return tokens;
+    }
+    match expr {
+        MirExpr::Int { value, .. } => emit_float_from_int(*value),
+        MirExpr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+            ..
+        } => match expr.as_ref() {
+            MirExpr::Int { value, .. } => {
+                let inner = emit_float_from_int(*value);
+                quote!(-(#inner))
+            }
+            _ => tokens,
+        },
+        _ => tokens,
+    }
+}
 fn numeric_coerce(
     expr: &MirExpr,
     tokens: TokenStream,
@@ -2240,27 +2986,89 @@ fn numeric_coerce_impl(
             Some(t) if is_integer_type(t) => emit_whole_number_literal(*value),
             _ => tokens,
         },
+        // A negated *literal* keeps its special emission: `-1` is emitted as
+        // `-(1)`, and against a float target the literal itself has to be a
+        // float (`-(1.0)`); a negated float literal against an integer target
+        // needs the same `as` cast as the plain float literal above.
+        //
+        // A negation of a typed value must not stop here: its Rust type follows
+        // the operand (`i64` for an `i64` variable), so it takes the ordinary
+        // source-type-driven cast below. Without that, `return -y` from a
+        // `number` function emitted `-(y)` and assigned an `i64` where the
+        // `f64` return type is required (E0308).
+        MirExpr::Unary {
+            op: UnaryOp::Neg,
+            expr: operand,
+            ..
+        } => match (operand.as_ref(), dst) {
+            (MirExpr::Int { value, .. }, Some(t)) if is_float_type(t) => {
+                let inner = emit_float_from_int(*value);
+                quote!(-(#inner))
+            }
+            (MirExpr::Float { .. }, Some(t)) if is_integer_type(t) => {
+                let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
+                quote!(((#tokens) as #dst_tokens))
+            }
+            _ => numeric_coerce_from_source_ty(
+                operand,
+                tokens,
+                target,
+                dst,
+                ctx,
+                emit_env,
+                body_ctx,
+                cast_int_widths,
+            ),
+        },
         MirExpr::Float { .. } if matches!(dst, Some(t) if is_integer_type(t)) => {
             let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
             quote!(((#tokens) as #dst_tokens))
         }
-        _ => {
-            let Some(src) = value_ty(expr, ctx, emit_env, body_ctx) else {
-                return tokens;
-            };
-            let (Some(src), Some(dst)) = (emit_env.types.resolve(src), dst) else {
-                return tokens;
-            };
-            let both_numeric = (is_float_type(src) || is_integer_type(src))
-                && (is_float_type(dst) || is_integer_type(dst));
-            let width_mismatch = cast_int_widths && src != dst;
-            if both_numeric && (is_float_type(src) != is_float_type(dst) || width_mismatch) {
-                let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
-                quote!(((#tokens) as #dst_tokens))
-            } else {
-                tokens
-            }
-        }
+        _ => numeric_coerce_from_source_ty(
+            expr,
+            tokens,
+            target,
+            dst,
+            ctx,
+            emit_env,
+            body_ctx,
+            cast_int_widths,
+        ),
+    }
+}
+
+/// The ordinary numeric coercion: cast `tokens` to `target` when the source type
+/// of `value` differs from the target in kind (integer vs float) or - for
+/// [`numeric_coerce_exact`] - in width. `dst` is `emit_env.types.resolve(target)`.
+///
+/// The source type is the *value's* own type and not the enclosing expression's:
+/// a `MirExpr::Unary` or `MirExpr::Binary` carries the frontend's placeholder
+/// type, while the Rust expression's type comes from the operands.
+#[allow(clippy::too_many_arguments)]
+fn numeric_coerce_from_source_ty(
+    value: &MirExpr,
+    tokens: TokenStream,
+    target: TypeId,
+    dst: Option<&Type>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    cast_int_widths: bool,
+) -> TokenStream {
+    let Some(src) = value_ty(value, ctx, emit_env, body_ctx) else {
+        return tokens;
+    };
+    let (Some(src), Some(dst)) = (emit_env.types.resolve(src), dst) else {
+        return tokens;
+    };
+    let both_numeric = (is_float_type(src) || is_integer_type(src))
+        && (is_float_type(dst) || is_integer_type(dst));
+    let width_mismatch = cast_int_widths && src != dst;
+    if both_numeric && (is_float_type(src) != is_float_type(dst) || width_mismatch) {
+        let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
+        quote!(((#tokens) as #dst_tokens))
+    } else {
+        tokens
     }
 }
 
@@ -2303,6 +3111,465 @@ fn emit_caught_literal_eq(
     Ok(Some(quote!(#caught == #variant)))
 }
 
+/// The nullish kind a value's *static type* carries, for a value that is not a
+/// literal node: a call declared `void` (or `null`) yields `undefined` (`null`),
+/// which an optional destination stores as `None` - wrapping it in `Some` emitted
+/// `Some(())` for an `Option<f64>`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceNullish {
+    Null,
+    Undefined,
+}
+
+fn source_nullish_kind(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<SourceNullish> {
+    match value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)) {
+        Some(Type::Null) => Some(SourceNullish::Null),
+        Some(Type::Void) => Some(SourceNullish::Undefined),
+        _ => None,
+    }
+}
+pub(super) fn is_nullish_literal(expr: &MirExpr) -> bool {
+    matches!(expr, MirExpr::Null { .. } | MirExpr::Unit)
+}
+
+fn is_pure_operand(expr: &MirExpr) -> bool {
+    match expr {
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_) => true,
+        MirExpr::Field { base, .. } => is_pure_operand(base),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NullishKind {
+    Null,
+    Undefined,
+}
+
+fn nullish_kind(expr: &MirExpr) -> Option<NullishKind> {
+    match expr {
+        MirExpr::Null { .. } => Some(NullishKind::Null),
+        MirExpr::Unit => Some(NullishKind::Undefined),
+        _ => None,
+    }
+}
+
+fn emit_nullish_literal_equality(
+    op: BinaryOp,
+    left: &MirExpr,
+    right: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let strict = matches!(op, BinaryOp::StrictEq | BinaryOp::StrictNe);
+    let neg = matches!(op, BinaryOp::Ne | BinaryOp::StrictNe);
+    let (left_kind, right_kind) = (nullish_kind(left), nullish_kind(right));
+    if let (Some(left_kind), Some(right_kind)) = (left_kind, right_kind) {
+        let equal = left_kind == right_kind || !strict;
+        return Ok(Some(if equal == neg {
+            quote!(false)
+        } else {
+            quote!(true)
+        }));
+    }
+    let (operand, literal) = match (left_kind, right_kind) {
+        (Some(kind), None) => (right, kind),
+        (None, Some(kind)) => (left, kind),
+        _ => return Ok(None),
+    };
+    let Some(ty) = value_ty(operand, ctx, emit_env, body_ctx) else {
+        return Ok(None);
+    };
+    let resolved = emit_env.types.resolve(ty);
+    if let Some(Type::Optional { nullish, .. }) = resolved {
+        // A strict comparison against `null`/`undefined` is decidable only when
+        // the operand admits a single nullish kind: `null` and `undefined` share
+        // one `Option::None`, so `x === null` and `x === undefined` cannot be
+        // told apart at runtime when the operand allows both. That is exactly
+        // the case `check_optional_strict_equality_kinds` rejects for two
+        // operands, so reject it here too instead of lowering to `is_none()`
+        // (which would answer `true` for an `undefined` value as well). Loose
+        // comparisons keep the presence-test lowering, which is correct for both
+        // kinds.
+        if strict && nullish.null && nullish.undefined {
+            let op_name = match op {
+                BinaryOp::StrictNe => "!==",
+                _ => "===",
+            };
+            return Err(BackendError::UndecidableNullishComparison {
+                code: "P0020",
+                message: format!(
+                    "`{op_name}` compares an optional value that allows both `null` and \
+                     `undefined` with a nullish literal; the AOT target stores both as one \
+                     `Option::None`, so the runtime value cannot decide the comparison \
+                     (`null === undefined` is `false` in JavaScript while `None == None` is \
+                     `true`). Narrow the operand to a single nullish kind (`T | null` or \
+                     `T | undefined`), or use a presence test (`x == null` / `x != null`)"
+                ),
+            });
+        }
+        let includes_literal = !strict
+            || match literal {
+                NullishKind::Null => nullish.null,
+                NullishKind::Undefined => nullish.undefined,
+            };
+        if includes_literal {
+            let tokens = emit_expr(operand, ctx, emit_env, body_ctx)?;
+            return Ok(Some(if neg {
+                quote!((#tokens).is_some())
+            } else {
+                quote!((#tokens).is_none())
+            }));
+        }
+        let folded = if neg { quote!(true) } else { quote!(false) };
+        if is_pure_operand(operand) {
+            return Ok(Some(folded));
+        }
+        let tokens = emit_expr(operand, ctx, emit_env, body_ctx)?;
+        return Ok(Some(quote!({
+            let _ = &(#tokens);
+            #folded
+        })));
+    }
+    if resolved.is_none() || matches!(resolved, Some(Type::Error | Type::GenericParam { .. })) {
+        return Ok(None);
+    }
+    let equal = match (resolved, literal) {
+        (Some(Type::Null), NullishKind::Null) | (Some(Type::Void), NullishKind::Undefined) => true,
+        (Some(Type::Null), NullishKind::Undefined) | (Some(Type::Void), NullishKind::Null) => {
+            !strict
+        }
+        _ => false,
+    };
+    let folded = if equal == neg {
+        quote!(false)
+    } else {
+        quote!(true)
+    };
+    if is_pure_operand(operand) {
+        return Ok(Some(folded));
+    }
+    let tokens = emit_expr(operand, ctx, emit_env, body_ctx)?;
+    Ok(Some(quote!({
+        let _ = &(#tokens);
+        #folded
+    })))
+}
+
+/// `x === y` where one side is optional (`T | null`) and the other is a plain
+/// `T`: JavaScript compares the *values*, and a nullish value never equals a
+/// non-nullish one, so the plain side is compared against `Some(..)` of the
+/// optional side instead of emitting `Option<T> == T` (which does not compile).
+/// Whether a value of this type compiles as the operand of Rust's `==`.
+///
+/// The mixed optional comparison below turns `x == y` into
+/// `x.as_ref() == Some(&(y))`, so both sides must have `PartialEq`. Scalars do:
+/// their emitted Rust type is a primitive, `i64` (symbols and dates), `()` (the
+/// nullish types) or `BigIntHandle` (which implements value equality).
+/// Structures, arrays and the runtime handles do not, so they must not enter
+/// this path.
+fn is_rust_comparable_value(ty: &Type) -> bool {
+    super::types::is_comparable_primitive(ty)
+        || matches!(
+            ty,
+            Type::Symbol | Type::Date | Type::BigInt | Type::Null | Type::Void
+        )
+}
+
+fn emit_mixed_optional_equality(
+    op: BinaryOp,
+    left: &MirExpr,
+    right: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Option<TokenStream>, BackendError> {
+    let neg = matches!(op, BinaryOp::Ne | BinaryOp::StrictNe);
+    let optional_inner = |expr: &MirExpr| -> Option<TypeId> {
+        match value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)) {
+            Some(Type::Optional { inner, .. }) => Some(*inner),
+            _ => None,
+        }
+    };
+    let optional_is_left = optional_inner(left).is_some();
+    let (optional_side, plain_side) = match (optional_is_left, optional_inner(right).is_some()) {
+        (true, false) => (left, right),
+        (false, true) => (right, left),
+        _ => return Ok(None),
+    };
+    let Some(inner_ty) = optional_inner(optional_side) else {
+        return Ok(None);
+    };
+    let plain_ty = value_ty(plain_side, ctx, emit_env, body_ctx);
+    let inner_resolved = emit_env.types.resolve(inner_ty);
+    let plain_resolved = plain_ty.and_then(|t| emit_env.types.resolve(t));
+    let plain_matches_inner = match plain_side {
+        // A literal is coerced to the inner type when the comparison is emitted
+        // (`numeric_coerce` below), so the literal's own MIR type does not decide
+        // this: an integer literal compares against an `f64` inner, while an
+        // `i64` *variable* is coerced the same way.
+        MirExpr::Bool(_) => matches!(inner_resolved, Some(Type::Bool)),
+        MirExpr::Int { .. } | MirExpr::Float { .. } => matches!(
+            inner_resolved,
+            Some(ty) if is_float_type(ty) || is_integer_type(ty)
+        ),
+        MirExpr::String { .. } => matches!(inner_resolved, Some(Type::String)),
+        _ => match (plain_resolved, inner_resolved) {
+            // A struct/array pair used to pass the "same type" check and
+            // emitted `a.as_ref() == Some(&(b.clone()))`, which does not compile
+            // because those types have no `PartialEq`.
+            (Some(plain), Some(inner)) => {
+                (inner == plain && is_rust_comparable_value(plain))
+                    || (is_numeric_type(plain) && is_numeric_type(inner))
+            }
+            _ => false,
+        },
+    };
+    if !plain_matches_inner {
+        // Different inner types: either a genuine type error or a pair the
+        // generic path handles; leave it untouched.
+        return Ok(None);
+    }
+    // JavaScript compares numbers by value, so both sides have to be compared
+    // in their *common* numeric type. Coercing the plain side to the optional's
+    // inner type compared `1` against `(1.5) as i64` for
+    // `i64EqFloat(Some(1))` and answered `true`, while `1 === 1.5` is `false`.
+    // If either side is a float, compare in that float type and widen the
+    // optional's integer inner value to it; two integers keep the integer
+    // comparison, and non-numeric pairs keep the inner type.
+    let comparison_ty = match (inner_resolved, plain_resolved) {
+        (Some(inner), Some(plain)) if is_integer_type(inner) && is_float_type(plain) => {
+            plain_ty.unwrap_or(inner_ty)
+        }
+        _ => inner_ty,
+    };
+    let optional = emit_expr(optional_side, ctx, emit_env, body_ctx)?;
+    let plain = emit_owned_value(plain_side, ctx, emit_env, body_ctx)?;
+    let plain = numeric_coerce_exact(plain_side, plain, comparison_ty, ctx, emit_env, body_ctx);
+    let optional = match (inner_resolved, emit_env.types.resolve(comparison_ty)) {
+        (Some(inner), Some(comparison)) if is_integer_type(inner) && is_float_type(comparison) => {
+            let comparison = emit_type_id_with_ctx(comparison_ty, emit_env, ctx);
+            quote!((#optional).map(|__ts_num| __ts_num as #comparison))
+        }
+        _ => optional,
+    };
+    // Keep the source evaluation order of the two operands.
+    let cmp = if optional_is_left {
+        quote!(#optional.as_ref() == ::core::option::Option::Some(&(#plain)))
+    } else {
+        quote!(::core::option::Option::Some(&(#plain)) == #optional.as_ref())
+    };
+    Ok(Some(if neg { quote!(!(#cmp)) } else { cmp }))
+}
+
+/// The nullish kinds an optional operand can hold, or `None` when the operand is
+/// not a statically known optional value.
+fn optional_operand_kinds(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<NullishKinds> {
+    match value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)) {
+        Some(Type::Optional { nullish, .. }) => Some(*nullish),
+        _ => None,
+    }
+}
+
+/// `null`, `undefined` or `null | undefined` for a diagnostic message.
+fn describe_nullish_kinds(kinds: NullishKinds) -> &'static str {
+    match (kinds.null, kinds.undefined) {
+        (true, true) => "`null | undefined`",
+        (true, false) => "`null`",
+        (false, true) => "`undefined`",
+        (false, false) => "a non-nullish value",
+    }
+}
+
+/// Reject a strict comparison between two optional operands whose nullish kinds
+/// the `Option<T>` representation cannot tell apart.
+///
+/// `null` and `undefined` both lower to `Option::None`, so `a === b` emitted as
+/// `a == b` answers `true` where JavaScript answers `null === undefined` as
+/// `false`. That is correct while both operands admit the *same* single nullish
+/// kind: each `None` then means the same value on both sides, and the two sides
+/// differ only in the cases where Rust's `Option` equality agrees. It is wrong
+/// when they admit *different* kinds (`T | null` vs `T | undefined`), and
+/// undecidable when an operand admits both (the runtime value could be either),
+/// so both need a diagnostic instead of a silent comparison.
+///
+/// Loose `==`/`!=` keeps the plain lowering: `null == undefined` is `true` in
+/// JavaScript, which is exactly what `None == None` answers. Mixed
+/// optional/plain comparisons and the `null`/`undefined` literal cases are
+/// lowered before this check and never reach it.
+fn check_optional_strict_equality_kinds(
+    op: BinaryOp,
+    left: &MirExpr,
+    right: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<(), BackendError> {
+    if !matches!(op, BinaryOp::StrictEq | BinaryOp::StrictNe) {
+        return Ok(());
+    }
+    let (Some(left_kinds), Some(right_kinds)) = (
+        optional_operand_kinds(left, ctx, emit_env, body_ctx),
+        optional_operand_kinds(right, ctx, emit_env, body_ctx),
+    ) else {
+        return Ok(());
+    };
+    let empty = |kinds: NullishKinds| !kinds.null && !kinds.undefined;
+    if empty(left_kinds) || empty(right_kinds) {
+        // No operand can be nullish, so there is no `None`/`None` case to get
+        // wrong: `Option` equality is exact.
+        return Ok(());
+    }
+    let op_name = if op == BinaryOp::StrictEq {
+        "==="
+    } else {
+        "!=="
+    };
+    let both = |kinds: NullishKinds| kinds.null && kinds.undefined;
+    if both(left_kinds) || both(right_kinds) {
+        return Err(BackendError::UndecidableNullishComparison {
+            code: "P0020",
+            message: format!(
+                "`{op_name}` compares two optional values, and one operand allows both `null` and \
+                 `undefined`; the AOT target stores both as one `Option::None`, so the runtime value \
+                 cannot decide the comparison (`null === undefined` is `false` in JavaScript while \
+                 `None == None` is `true`). Narrow the operand to a single nullish kind (`T | null` \
+                 or `T | undefined`), or use a presence test (`x == null` / `x != null`)"
+            ),
+        });
+    }
+    if left_kinds != right_kinds {
+        return Err(BackendError::UndecidableNullishComparison {
+            code: "P0019",
+            message: format!(
+                "`{op_name}` compares two optional values whose nullish kinds do not match ({} vs \
+                 {}); the AOT target stores `null` and `undefined` as one `Option::None`, so the \
+                 comparison cannot be decided (it would report `null === undefined` as `true`). \
+                 Widen both operands to the same nullish kind, or compare each against its literal \
+                 (`x === null` / `x === undefined`)",
+                describe_nullish_kinds(left_kinds),
+                describe_nullish_kinds(right_kinds)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The inner type of a statically known optional operand, or `None` when the
+/// operand is not optional.
+fn optional_operand_inner(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<TypeId> {
+    match value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)) {
+        Some(Type::Optional { inner, .. }) => Some(*inner),
+        _ => None,
+    }
+}
+
+/// Reject a comparison between two optional operands whose inner types the
+/// ordinary `Option` comparison cannot handle.
+///
+/// `a === b` and `a == b` both lower to Rust's `Option<T> == Option<T>`, which
+/// needs both sides to be the *same* Rust type and that type to implement
+/// `PartialEq`. The metadata leaves two such comparisons undecidable:
+///
+/// * different numeric inner types (`number | null` vs `i64 | null`) emit
+///   `Option<f64> == Option<i64>`, which does not compile at all (E0308). The
+///   review prefers a diagnostic over a numeric unification here, because a
+///   wrong comparison value would be worse than a compile-time rejection;
+/// * an identical but non-comparable inner type (a structure or an array) has no
+///   `PartialEq`, so the comparison is E0369. JavaScript compares such operands
+///   by identity, which the emitted value equality would not express either.
+///
+/// The combinations that stay keep the plain `a == b`: two optional operands with
+/// the same inner primitive/string/`Date`/`Symbol`/`BigInt`/nullish type. The
+/// mixed optional/plain and literal cases are lowered before this check, so only
+/// two optional operands reach it. Both strict and loose equality reach it: the
+/// lowering is the same `Option` comparison, so a pair the Rust types cannot
+/// express is undecidable for either. The operator-specific message spells the
+/// operator the source used. An operand whose inner type the metadata cannot
+/// resolve keeps the existing lowering.
+fn check_optional_strict_equality_inner_types(
+    op: BinaryOp,
+    left: &MirExpr,
+    right: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<(), BackendError> {
+    if !matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    ) {
+        return Ok(());
+    }
+    let (Some(left_inner), Some(right_inner)) = (
+        optional_operand_inner(left, ctx, emit_env, body_ctx),
+        optional_operand_inner(right, ctx, emit_env, body_ctx),
+    ) else {
+        return Ok(());
+    };
+    let (Some(left_ty), Some(right_ty)) = (
+        emit_env.types.resolve(left_inner),
+        emit_env.types.resolve(right_inner),
+    ) else {
+        // The metadata does not resolve the inner type, so there is nothing to
+        // decide from: leave the comparison to the generic lowering.
+        return Ok(());
+    };
+    let op_name = match op {
+        BinaryOp::StrictEq => "===",
+        BinaryOp::StrictNe => "!==",
+        BinaryOp::Eq => "==",
+        _ => "!=",
+    };
+    if left_inner != right_inner {
+        return Err(BackendError::UndecidableNullishComparison {
+            code: "P0022",
+            message: format!(
+                "`{op_name}` compares two optional values whose inner types differ ({left_ty:?} vs \
+                 {right_ty:?}); the AOT target compares them as one `Option<T>`, and the two Rust \
+                 types do not match, so the comparison cannot be emitted. Compare the values in one \
+                 numeric type (cast one operand first) or narrow both operands to the same `T | null`, \
+                 or compare each against its literal (`x === null`)"
+            ),
+        });
+    }
+    if !is_rust_comparable_value(left_ty) {
+        return Err(BackendError::UndecidableNullishComparison {
+            code: "P0022",
+            message: format!(
+                "`{op_name}` compares two optional values whose inner type {left_ty:?} has no Rust \
+                 `PartialEq` (a structure or an array); the AOT target would emit `Option<T> == \
+                 Option<T>`, which does not compile. Compare a scalar field of the operands, or use a \
+                 presence test (`x == null` / `x != null`)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn emit_dynamic_equality(
     op: BinaryOp,
     left: &MirExpr,
@@ -2316,7 +3583,7 @@ fn emit_dynamic_equality(
     if !left_dynamic && !right_dynamic {
         return Ok(None);
     }
-    let neg = matches!(op, BinaryOp::Ne);
+    let neg = matches!(op, BinaryOp::Ne | BinaryOp::StrictNe);
     if !left_dynamic || !right_dynamic {
         let (caught_expr, other_expr) = if left_dynamic {
             (left, right)
@@ -2690,6 +3957,7 @@ fn emit_runtime_call(
             "__ts_aot_array_create",
             args,
             ty,
+            true,
             ctx,
             emit_env,
             body_ctx,
@@ -2698,6 +3966,7 @@ fn emit_runtime_call(
             "__ts_aot_array_concat",
             args,
             ty,
+            false,
             ctx,
             emit_env,
             body_ctx,
@@ -2726,6 +3995,13 @@ fn emit_runtime_call(
         RuntimeOp::ArrayPush => {
             let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let item = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
+            let item = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
+                Some(element) => {
+                    let item = numeric_coerce(&args[1], item, element, ctx, emit_env, body_ctx);
+                    optional_coerce(&args[1], item, element, ctx, emit_env, body_ctx, false)?
+                }
+                None => item,
+            };
             let call = quote!(__ts_aot_array_push(&mut #arr, #item));
             Ok(if needs_unsafe {
                 quote!(unsafe { #call })
@@ -2737,6 +4013,13 @@ fn emit_runtime_call(
             let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let value = emit_owned_value(&args[2], ctx, emit_env, body_ctx)?;
+            let value = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
+                Some(element) => {
+                    let value = numeric_coerce(&args[2], value, element, ctx, emit_env, body_ctx);
+                    optional_coerce(&args[2], value, element, ctx, emit_env, body_ctx, false)?
+                }
+                None => value,
+            };
             let call = quote!(__ts_aot_array_set(&mut #arr, #idx as i64, #value));
             Ok(if needs_unsafe {
                 quote!(unsafe { #call })
@@ -3065,6 +4348,7 @@ fn emit_array_op_with_element_type(
     op_name: &'static str,
     args: &[MirExpr],
     ty: TypeId,
+    coerce_optionals: bool,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
@@ -3079,20 +4363,40 @@ fn emit_array_op_with_element_type(
         .iter()
         .map(|a| {
             let tokens = emit_owned_value(a, ctx, emit_env, body_ctx)?;
-            Ok::<_, BackendError>(numeric_coerce(
-                a,
-                tokens,
-                element_ty_id,
-                ctx,
-                emit_env,
-                body_ctx,
-            ))
+            let tokens = numeric_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx);
+            Ok::<_, BackendError>(if coerce_optionals {
+                // Array literal elements are values of the element type; a
+                // non-optional one needs `Some(..)` and a `null`/`undefined`
+                // element needs `None`.
+                optional_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx, false)?
+            } else {
+                tokens
+            })
         })
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
     Ok(
         quote!(#name::<#element_ty>(__ctx, ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#parts),*])),
     )
+}
+
+/// Element type of an array-typed expression (`T` for `T[]`, `T` for
+/// `(T[] | undefined)`).
+fn array_element_ty(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<TypeId> {
+    let ty = value_ty(expr, ctx, emit_env, body_ctx)?;
+    match emit_env.types.resolve(ty) {
+        Some(Type::Array { element }) => Some(*element),
+        Some(Type::Optional { inner, .. }) => match emit_env.types.resolve(*inner) {
+            Some(Type::Array { element }) => Some(*element),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn emit_js_string_arg(
@@ -3292,10 +4596,12 @@ fn emit_try(
             let param_ty_id = body_ctx.local_ty(param);
             let is_any_catch =
                 param_ty_id.is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::Error)));
-            let shared_write = body_ctx
-                .shared_access_for_local(param)
-                .map(|acc| shared_write_tokens(&acc, &quote!(#param_ident)))
-                .unwrap_or_default();
+            // `map_or_default` would be the shortest form, but it is still
+            // unstable on the toolchains this workspace builds with (rust-lang#138099).
+            let shared_write = match body_ctx.shared_access_for_local(param) {
+                Some(acc) => shared_write_tokens(&acc, &quote!(#param_ident)),
+                None => TokenStream::default(),
+            };
             let bind = if is_any_catch {
                 quote!(let #param_ident: ts_aot_runtime::CaughtValue = ts_aot_runtime::__ts_aot_catch_bind(&*__e);)
             } else {
@@ -3458,7 +4764,10 @@ mod same_value_tests {
         use quote::quote;
         let mut types = TypeTable::new();
         let number = types.intern(&Type::I64);
-        let optional = Type::Optional { inner: number };
+        let optional = Type::Optional {
+            inner: number,
+            nullish: ts_aot_core::NullishKinds::BOTH,
+        };
         let emit = |a: &Type, b: &Type| {
             emit_same_value(&types, a, b, (quote!(a), quote!(b)), false, 0)
                 .map(|tokens| tokens.to_string())

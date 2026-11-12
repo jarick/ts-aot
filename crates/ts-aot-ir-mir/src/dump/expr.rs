@@ -387,6 +387,11 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
             dump_expr_inline(value, d);
             d.write(&format!("):{}", ty.raw()));
         }
+        MirExpr::Propagate { expr, ty } => {
+            d.write("propagate(");
+            dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
         MirExpr::ResultErr { error, ty } => {
             d.write("err(");
             dump_expr_inline(error, d);
@@ -427,6 +432,16 @@ pub(crate) fn dump_expr_inline(expr: &MirExpr, d: &mut Dumper) {
         MirExpr::OptionalChain { base, ty } => {
             d.write("opt(");
             dump_expr_inline(base, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
+        MirExpr::IsSome { expr, ty } => {
+            d.write("is_some(");
+            dump_expr_inline(expr, d);
+            d.write(&format!("):{}", ty.raw()));
+        }
+        MirExpr::UnwrapOptional { expr, ty } => {
+            d.write("unwrap(");
+            dump_expr_inline(expr, d);
             d.write(&format!("):{}", ty.raw()));
         }
         MirExpr::TypeOf { expr, ty } => {
@@ -485,6 +500,8 @@ fn fmt_bin_op(op: BinaryOp) -> &'static str {
         BinaryOp::Mod => "%",
         BinaryOp::Eq => "==",
         BinaryOp::Ne => "!=",
+        BinaryOp::StrictEq => "===",
+        BinaryOp::StrictNe => "!==",
         BinaryOp::Lt => "<",
         BinaryOp::Le => "<=",
         BinaryOp::Gt => ">",

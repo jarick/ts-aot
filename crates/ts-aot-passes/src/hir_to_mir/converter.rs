@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use ts_aot_core::{
@@ -10,6 +10,415 @@ use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 
 use crate::PassContext;
 use crate::hir_to_mir::{PLACEHOLDER_FUNCTION, qualified_name};
+
+/// The callee key the throws fixpoint records for a call.
+///
+/// A *declared* callee is looked up by its exact key: the free-function
+/// declaration the call selects, a constructor, or a method whose receiver class
+/// is known statically. A method whose receiver class is *not* known is only a
+/// bare name, and the fixpoint falls back to a `::name` suffix match over the
+/// method keys - a fallback that must not apply to free functions, whose name may
+/// coincide with a method's.
+enum RecordedCallee {
+    Declared(Atom),
+    Method(Atom),
+}
+
+/// The key of the free-function declaration a call to `name` selects: the
+/// innermost namespace that declares it wins, exactly as `resolve_callee`
+/// resolves the call.
+///
+/// `declarations` holds every function and method keyed the way the throws map
+/// is, so membership answers "is this declared?" - resolution must not depend on
+/// the declaration being a *throwing* one.
+fn resolve_free_function(
+    namespace_path: &[String],
+    name: &str,
+    declarations: &HashMap<Atom, TypeId>,
+) -> Option<Atom> {
+    for depth in (0..=namespace_path.len()).rev() {
+        let probe = qualified_name(&namespace_path[..depth], name);
+        if declarations.contains_key(&probe) {
+            return Some(probe);
+        }
+    }
+    None
+}
+
+/// Error type of every function that can throw, computed as a fixpoint over the
+/// call graph: a function that calls a throwing function can throw the same
+/// error itself (and so does its caller, transitively). Without this the callee
+/// returned a `Result` while the caller was emitted as a plain function, which
+/// only showed up as a type error inside the generated Rust.
+pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> HashMap<Atom, TypeId> {
+    use ts_aot_ir_hir::{HirCallee, HirDecl, Visitor, walk_expr};
+
+    struct Callees<'a> {
+        out: Vec<RecordedCallee>,
+        class_keys: &'a HashMap<TypeId, Atom>,
+        declarations: &'a HashMap<Atom, TypeId>,
+        types: &'a TypeTable,
+        namespace_path: &'a [String],
+    }
+    impl Visitor for Callees<'_> {
+        fn visit_stmt(&mut self, stmt: &ts_aot_ir_hir::HirStmt) {
+            if let ts_aot_ir_hir::HirStmt::Try { catch, finally, .. } = stmt {
+                if let Some(catch) = catch {
+                    self.visit_stmt(&catch.body);
+                }
+                if let Some(finally) = finally {
+                    self.visit_stmt(finally);
+                }
+            } else {
+                ts_aot_ir_hir::walk_stmt(self, stmt);
+            }
+        }
+
+        fn visit_expr(&mut self, expr: &HirExpr) {
+            if let HirExpr::Closure { captures, .. } = expr {
+                for capture in captures {
+                    self.visit_expr(capture);
+                }
+                return;
+            }
+            if let HirExpr::New { ty, .. } = expr
+                && let Some(class) = self.class_keys.get(&unwrap_optional_ty(*ty, self.types))
+            {
+                // A throwing constructor makes its caller throwing as well: its
+                // `Result` is propagated like any other callee's.
+                self.out.push(RecordedCallee::Declared(
+                    crate::hir_to_mir::program::extend_qualified(class, "constructor"),
+                ));
+            }
+            if let HirExpr::Call {
+                callee: HirCallee::Indirect(inner),
+                ..
+            } = expr
+            {
+                match inner.as_ref() {
+                    HirExpr::Global { name, .. } => {
+                        // Only the declaration the call *selects* is recorded: a
+                        // module-level function of the same name is a different
+                        // callee and must not supply its error type.
+                        self.out.push(RecordedCallee::Declared(
+                            resolve_free_function(
+                                self.namespace_path,
+                                name.as_str(),
+                                self.declarations,
+                            )
+                            .unwrap_or_else(|| name.clone()),
+                        ));
+                    }
+                    // A method call is qualified by the receiver's class when it
+                    // is known statically, so same-named methods of different
+                    // classes are not confused; otherwise only the bare name is
+                    // known and the fixpoint matches `C::m` by suffix.
+                    HirExpr::Field {
+                        owner, field_name, ..
+                    } => {
+                        let owner_ty = unwrap_optional_ty(owner.ty(), self.types);
+                        let qualified = self.class_keys.get(&owner_ty).map(|class| {
+                            crate::hir_to_mir::program::extend_qualified(class, field_name.as_str())
+                        });
+                        self.out.push(match qualified {
+                            Some(key) => RecordedCallee::Declared(key),
+                            None => RecordedCallee::Method(field_name.clone()),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            walk_expr(self, expr);
+        }
+    }
+
+    /// The class behind a receiver's static type: `b: B | null` still dispatches
+    /// to `B::m`, so the optional (and a single-member union) is unwrapped before
+    /// the class lookup - otherwise the key falls back to an ambiguous suffix
+    /// match on the bare method name.
+    fn unwrap_optional_ty(mut ty: TypeId, types: &TypeTable) -> TypeId {
+        loop {
+            match types.resolve(ty) {
+                Some(Type::Optional { inner, .. }) => ty = *inner,
+                Some(Type::Union { variants }) if variants.len() == 1 => ty = variants[0],
+                _ => return ty,
+            }
+        }
+    }
+
+    /// The declared return type of the callee a `throw <call>` invokes.
+    ///
+    /// `throw boom()` carries `boom`'s error when it throws and its return value
+    /// otherwise; either way the caller's error type is the callee's declared
+    /// return type, so the fixpoint can seed it before the call graph is walked
+    /// instead of leaving the operand as `Type::Error`.
+    fn thrown_call_return_ty(
+        body: &[ts_aot_ir_hir::HirStmt],
+        returns: &HashMap<Atom, TypeId>,
+        class_keys: &HashMap<TypeId, Atom>,
+        namespace_path: &[String],
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let expr = crate::hir_to_mir::program::thrown_call_operand(body)?;
+        let HirExpr::Call {
+            callee: HirCallee::Indirect(inner),
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let ty = match inner.as_ref() {
+            // The same enclosing-namespace resolution `resolve_callee` applies:
+            // the innermost namespace that declares the function wins, so a
+            // `throw boom()` inside a nested namespace seeds the function the call
+            // actually selects (`N::boom`, not the bare `boom`).
+            HirExpr::Global { name, .. } => {
+                resolve_free_function(namespace_path, name.as_str(), returns)
+                    .and_then(|key| returns.get(&key).copied())
+            }
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let class = class_keys.get(&unwrap_optional_ty(owner.ty(), types))?;
+                returns
+                    .get(&crate::hir_to_mir::program::extend_qualified(
+                        class,
+                        field_name.as_str(),
+                    ))
+                    .copied()
+            }
+            _ => None,
+        }?;
+        // An unresolved type is not an error type: leave the entry out rather
+        // than seeding the fixpoint with `Error`.
+        match types.resolve(ty) {
+            None | Some(Type::Error | Type::GenericParam { .. }) => None,
+            _ => Some(ty),
+        }
+    }
+
+    fn collect(
+        decls: &[HirDecl],
+        namespace_path: &mut Vec<String>,
+        explicit: &mut HashMap<Atom, TypeId>,
+        callees: &mut Vec<(Atom, Vec<RecordedCallee>)>,
+        class_keys: &HashMap<TypeId, Atom>,
+        returns: &HashMap<Atom, TypeId>,
+        types: &mut TypeTable,
+    ) {
+        for decl in decls {
+            match decl {
+                HirDecl::Function(f) => {
+                    let key = qualified_name(namespace_path, f.name.as_str());
+                    if let Some(throws) = f
+                        .throws
+                        .or_else(|| crate::hir_to_mir::program::body_throws_type(&f.body, types))
+                        .or_else(|| {
+                            thrown_call_return_ty(
+                                &f.body,
+                                returns,
+                                class_keys,
+                                namespace_path,
+                                types,
+                            )
+                        })
+                    {
+                        explicit.insert(key.clone(), throws);
+                    }
+                    let mut visitor = Callees {
+                        out: Vec::new(),
+                        class_keys,
+                        declarations: returns,
+                        types,
+                        namespace_path,
+                    };
+                    visitor.visit_block(&f.body);
+                    callees.push((key, visitor.out));
+                }
+                // Methods live in the class declaration, not in `Function`: a
+                // `this.m()`/`c.m()` call resolves through the class-qualified
+                // key (`C::m`).
+                HirDecl::Class(c) => {
+                    let class_key = qualified_name(namespace_path, c.name.as_str());
+                    for method in &c.methods {
+                        let key = crate::hir_to_mir::program::extend_qualified(
+                            &class_key,
+                            method.name.as_str(),
+                        );
+                        if let Some(throws) = method
+                            .throws
+                            .or_else(|| {
+                                crate::hir_to_mir::program::body_throws_type(&method.body, types)
+                            })
+                            .or_else(|| {
+                                thrown_call_return_ty(
+                                    &method.body,
+                                    returns,
+                                    class_keys,
+                                    namespace_path,
+                                    types,
+                                )
+                            })
+                        {
+                            explicit.insert(key.clone(), throws);
+                        }
+                        let mut visitor = Callees {
+                            out: Vec::new(),
+                            class_keys,
+                            declarations: returns,
+                            types,
+                            namespace_path,
+                        };
+                        visitor.visit_block(&method.body);
+                        callees.push((key, visitor.out));
+                    }
+                }
+                HirDecl::Namespace { name, members } => {
+                    namespace_path.push(name.as_str().to_owned());
+                    collect(
+                        members,
+                        namespace_path,
+                        explicit,
+                        callees,
+                        class_keys,
+                        returns,
+                        types,
+                    );
+                    namespace_path.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Class name by the type of an instance: `new C()` and a `c.m()` receiver are
+    // qualified through it.
+    let mut class_keys: HashMap<TypeId, Atom> = HashMap::new();
+    collect_class_keys(&program.declarations, &mut Vec::new(), &mut class_keys);
+    // Declared return types, keyed like the throws map: a `throw <call>` operand
+    // has no HIR type of its own and is seeded from its callee.
+    let mut returns: HashMap<Atom, TypeId> = HashMap::new();
+    collect_return_types(&program.declarations, &mut Vec::new(), &mut returns);
+    let mut explicit: HashMap<Atom, TypeId> = HashMap::new();
+    // Declaration order, so which callee's error type a function inherits is
+    // deterministic.
+    let mut callees: Vec<(Atom, Vec<RecordedCallee>)> = Vec::new();
+    let mut namespace_path = Vec::new();
+    collect(
+        &program.declarations,
+        &mut namespace_path,
+        &mut explicit,
+        &mut callees,
+        &class_keys,
+        &returns,
+        types,
+    );
+    // The suffix fallback below has to recognise a class prefix; a set keeps that
+    // check out of the candidate scan (it runs for every unresolved method call,
+    // on every fixpoint round).
+    let class_names: HashSet<&str> = class_keys.values().map(|name| name.as_str()).collect();
+    let mut throws = explicit;
+    // Bounded by the number of functions: each round can only add entries.
+    for _ in 0..=callees.len() {
+        let mut changed = false;
+        for (name, callee_names) in &callees {
+            if throws.contains_key(name) {
+                continue;
+            }
+            if let Some(ty) = callee_names.iter().find_map(|callee| match callee {
+                // A free function (a constructor, or a method on a statically
+                // known class) is looked up by its exact key: a same-named method
+                // must not supply its error type.
+                RecordedCallee::Declared(key) => throws.get(key).copied(),
+                // A method whose receiver class is not known statically is
+                // matched by its `::name` suffix only: a *bare* name in the map
+                // belongs to a free function, which this call does not invoke, so
+                // it must not supply the error type.
+                RecordedCallee::Method(name) => {
+                    // A method named `m` may be declared by several classes; pick
+                    // the first class-qualified key so the choice is stable. The
+                    // key's prefix before `::name` has to be a class of this
+                    // program: a namespace-qualified *free* function (`ns::m`) ends
+                    // with the same suffix but is not a method this call reaches.
+                    let suffix = format!("::{name}");
+                    let mut candidates: Vec<&Atom> = throws
+                        .keys()
+                        .filter(|key| {
+                            let Some(class) = key.as_str().strip_suffix(suffix.as_str()) else {
+                                return false;
+                            };
+                            class_names.contains(class)
+                        })
+                        .collect();
+                    candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                    candidates.first().and_then(|key| throws.get(*key).copied())
+                }
+            }) {
+                throws.insert(name.clone(), ty);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    throws
+}
+/// Declared return type of every function and method, keyed the way the throws
+/// map is keyed (a bare/namespace-qualified name, or `Class::method`).
+fn collect_return_types(
+    decls: &[HirDecl],
+    namespace_path: &mut Vec<String>,
+    out: &mut HashMap<Atom, TypeId>,
+) {
+    for decl in decls {
+        match decl {
+            HirDecl::Function(f) => {
+                out.insert(qualified_name(namespace_path, f.name.as_str()), f.ret);
+            }
+            HirDecl::Class(c) => {
+                let class_key = qualified_name(namespace_path, c.name.as_str());
+                for method in &c.methods {
+                    out.insert(
+                        crate::hir_to_mir::program::extend_qualified(
+                            &class_key,
+                            method.name.as_str(),
+                        ),
+                        method.ret,
+                    );
+                }
+            }
+            HirDecl::Namespace { name, members } => {
+                namespace_path.push(name.as_str().to_owned());
+                collect_return_types(members, namespace_path, out);
+                namespace_path.pop();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Class name by the type of an instance of that class (nested namespaces
+/// included): used by the throws fixpoint to qualify `new C()` and `c.m()`.
+fn collect_class_keys(
+    decls: &[HirDecl],
+    namespace_path: &mut Vec<String>,
+    out: &mut HashMap<TypeId, Atom>,
+) {
+    for decl in decls {
+        match decl {
+            HirDecl::Class(c) => {
+                out.insert(c.ty, qualified_name(namespace_path, c.name.as_str()));
+            }
+            HirDecl::Namespace { name, members } => {
+                namespace_path.push(name.as_str().to_owned());
+                collect_class_keys(members, namespace_path, out);
+                namespace_path.pop();
+            }
+            _ => {}
+        }
+    }
+}
 
 pub struct ExprConverter {
     pub(super) local_map: HashMap<LocalId, LocalId>,
@@ -25,12 +434,25 @@ pub struct ExprConverter {
     pub(super) method_map: HashMap<(StructId, Atom, bool), FunctionId>,
     pub(super) method_ret: HashMap<(StructId, Atom, bool), TypeId>,
     pub(super) method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
+    pub(super) method_param_optional: HashMap<(StructId, Atom, bool), Vec<bool>>,
     pub(super) class_struct_by_name: HashMap<Atom, StructId>,
     pub(super) current_call_type_args: Vec<TypeId>,
     pub(super) current_return_ty: Option<TypeId>,
     pub(super) expected_ty: Option<TypeId>,
     pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
     pub(super) global_types: OnceLock<HashMap<Atom, TypeId>>,
+    /// Error type of every function that can throw, propagated along the call
+    /// graph (see `module_throws`): a caller of a throwing function must itself
+    /// return a `Result` of the same error type, otherwise the call cannot be
+    /// lowered.
+    pub(super) throws_by_name: OnceLock<HashMap<Atom, TypeId>>,
+    /// Error type of the function whose body is being converted (`None` outside
+    /// a `Result`-returning function, in generators and in closure bodies).
+    pub(super) current_throws: Option<TypeId>,
+    /// How many `try` blocks enclose the expression being converted: a callee's
+    /// error cannot be caught by this AOT target, so a throwing call there is
+    /// rejected instead of silently escaping the `try`.
+    pub(super) try_depth: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,12 +488,16 @@ impl ExprConverter {
             method_map: HashMap::new(),
             method_ret: HashMap::new(),
             method_param_tys: HashMap::new(),
+            method_param_optional: HashMap::new(),
             class_struct_by_name: HashMap::new(),
             current_call_type_args: Vec::new(),
             current_return_ty: None,
             expected_ty: None,
             class_index: OnceLock::new(),
             global_types: OnceLock::new(),
+            throws_by_name: OnceLock::new(),
+            current_throws: None,
+            try_depth: 0,
         }
     }
 
@@ -85,12 +511,14 @@ impl ExprConverter {
         method_map: HashMap<(StructId, Atom, bool), FunctionId>,
         method_ret: HashMap<(StructId, Atom, bool), TypeId>,
         method_param_tys: HashMap<(StructId, Atom, bool), Vec<TypeId>>,
+        method_param_optional: HashMap<(StructId, Atom, bool), Vec<bool>>,
         class_struct_by_name: HashMap<Atom, StructId>,
     ) {
         self.field_id_lookup = field_id_lookup;
         self.method_map = method_map;
         self.method_ret = method_ret;
         self.method_param_tys = method_param_tys;
+        self.method_param_optional = method_param_optional;
         self.class_struct_by_name = class_struct_by_name;
     }
 
@@ -102,6 +530,32 @@ impl ExprConverter {
         self.program = program;
         self.class_index = OnceLock::new();
         self.global_types = OnceLock::new();
+        self.throws_by_name = OnceLock::new();
+    }
+
+    /// Computes the call-graph error types once (`module_throws` needs the type
+    /// table, so it cannot run inside the `OnceLock` closure).
+    pub(super) fn ensure_throws_types(&mut self, types: &mut TypeTable) {
+        if self.throws_by_name.get().is_none() {
+            let map = module_throws(&self.program, types);
+            let _ = self.throws_by_name.set(map);
+        }
+    }
+
+    /// Whether `name` is a function that may throw, and with which error type.
+    pub(super) fn function_throws(&self, name: &Atom) -> Option<TypeId> {
+        let map = self.throws_by_name.get()?;
+        for depth in (0..=self.namespace_path.len()).rev() {
+            let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+            if let Some(&ty) = map.get(&probe) {
+                return Some(ty);
+            }
+        }
+        map.get(name).copied()
+    }
+
+    pub(super) fn set_current_throws(&mut self, throws: Option<TypeId>) {
+        self.current_throws = throws;
     }
 
     pub(super) fn global_decl_type(&self, name: &Atom) -> Option<TypeId> {
@@ -351,7 +805,7 @@ impl ExprConverter {
             _ => owner.ty(),
         };
         let owner_ty = match types.resolve(owner_ty) {
-            Some(Type::Optional { inner }) => *inner,
+            Some(Type::Optional { inner, .. }) => *inner,
             _ => owner_ty,
         };
         self.struct_ids
@@ -397,7 +851,7 @@ impl ExprConverter {
             _ => None,
         };
         let Some(ty) = owner_ty.map(|t| match types.resolve(t) {
-            Some(Type::Optional { inner }) => *inner,
+            Some(Type::Optional { inner, .. }) => *inner,
             _ => t,
         }) else {
             if owner.has_static_type() && matches!(types.resolve(owner.ty()), Some(Type::Error)) {
@@ -506,7 +960,7 @@ fn is_object_prototype_method(field_name: &Atom) -> bool {
     OBJECT_PROTOTYPE_METHODS.contains(&field_name.as_str())
 }
 
-fn compute_chain_owner_ty(
+pub(crate) fn compute_chain_owner_ty(
     expr: &HirExpr,
     class_index: &HashMap<TypeId, ClassPath>,
     declarations: &[HirDecl],
@@ -522,7 +976,7 @@ fn compute_chain_owner_ty(
             let inner =
                 compute_chain_owner_ty(base, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(inner) {
-                Some(Type::Optional { inner }) => *inner,
+                Some(Type::Optional { inner, .. }) => *inner,
                 _ => inner,
             })
         }
@@ -532,7 +986,7 @@ fn compute_chain_owner_ty(
             let owner_class =
                 compute_chain_owner_ty(owner, class_index, declarations, types, resolve_global)?;
             let owner_class = match types.resolve(owner_class) {
-                Some(Type::Optional { inner }) => *inner,
+                Some(Type::Optional { inner, .. }) => *inner,
                 _ => owner_class,
             };
             let class = class_at(owner_class)?;
@@ -542,7 +996,7 @@ fn compute_chain_owner_ty(
                 .find(|f| f.name == *field_name)
                 .map(|f| f.ty)?;
             Some(match types.resolve(field_ty) {
-                Some(Type::Optional { inner }) => *inner,
+                Some(Type::Optional { inner, .. }) => *inner,
                 _ => field_ty,
             })
         }
@@ -550,7 +1004,7 @@ fn compute_chain_owner_ty(
             let owner_ty =
                 compute_chain_owner_ty(owner, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(owner_ty) {
-                Some(Type::Optional { inner }) => *inner,
+                Some(Type::Optional { inner, .. }) => *inner,
                 _ => owner_ty,
             })
         }
@@ -561,7 +1015,7 @@ fn compute_chain_owner_ty(
             let inner_ty =
                 compute_chain_owner_ty(inner, class_index, declarations, types, resolve_global)?;
             Some(match types.resolve(inner_ty) {
-                Some(Type::Optional { inner }) => *inner,
+                Some(Type::Optional { inner, .. }) => *inner,
                 _ => inner_ty,
             })
         }
@@ -618,5 +1072,86 @@ pub(crate) fn class_at_path(declarations: &[HirDecl], path: ClassPath) -> Option
     match current {
         HirDecl::Class(c) => Some(c),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod call_graph_tests {
+    use super::*;
+    use ts_aot_ir_hir::{HirFunction, HirStmt};
+
+    #[test]
+    fn excludes_try_and_closure_bodies_but_records_finally_and_normal_calls() {
+        let mut types = TypeTable::new();
+        let number = types.intern(&Type::F64);
+        let call = || HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                    name: Atom::from("boom"),
+                    ty: number,
+                    span: Span::default(),
+                })),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                ty: number,
+                span: Span::default(),
+            },
+        };
+        let function = |name: &str, body, throws| {
+            HirDecl::Function(HirFunction {
+                name: Atom::from(name),
+                params: Vec::new(),
+                ret: number,
+                throws,
+                body,
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                type_params: Vec::new(),
+                async_info: None,
+            })
+        };
+        let mut program = HirProgram::new(ModuleId::from_raw(0));
+        program.declarations = vec![
+            function("boom", Vec::new(), Some(number)),
+            function(
+                "in_try",
+                vec![HirStmt::Try {
+                    body: Box::new(call()),
+                    catch: None,
+                    finally: None,
+                }],
+                None,
+            ),
+            function(
+                "in_closure",
+                vec![HirStmt::Expr {
+                    expr: HirExpr::Closure {
+                        id: LocalId::from_raw(0),
+                        params: Vec::new(),
+                        captures: Vec::new(),
+                        body: vec![call()],
+                        ty: number,
+                        span: Span::default(),
+                    },
+                }],
+                None,
+            ),
+            function(
+                "in_finally",
+                vec![HirStmt::Try {
+                    body: Box::new(HirStmt::Block(Vec::new())),
+                    catch: None,
+                    finally: Some(Box::new(call())),
+                }],
+                None,
+            ),
+            function("normal", vec![call()], None),
+        ];
+        let throws = module_throws(&program, &mut types);
+        assert!(!throws.contains_key(&Atom::from("in_try")));
+        assert!(!throws.contains_key(&Atom::from("in_closure")));
+        assert_eq!(throws.get(&Atom::from("in_finally")), Some(&number));
+        assert_eq!(throws.get(&Atom::from("normal")), Some(&number));
     }
 }

@@ -186,7 +186,10 @@ impl ExprConverter {
             .collect();
         let result_ty = if op == RuntimeOp::SymbolKeyFor {
             let string_ty = types.intern(&Type::String);
-            types.intern(&Type::Optional { inner: string_ty })
+            types.intern(&Type::Optional {
+                inner: string_ty,
+                nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+            })
         } else {
             ty
         };

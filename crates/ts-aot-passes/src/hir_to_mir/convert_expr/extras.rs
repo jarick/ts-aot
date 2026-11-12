@@ -1,17 +1,66 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{FunctionId, LocalId, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::{MirExpr, MirLocalDecl, MirParam, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::convert_expr::globals::is_string_typed_source;
 use crate::hir_to_mir::convert_expr::util::{
-    has_potential_side_effects, is_numeric_type_for_array_len,
+    has_potential_side_effects, is_numeric_type_for_array_len, mir_expr_ty,
 };
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
+    /// Wraps a constructor call in `?` when the constructor may throw and the
+    /// enclosing function propagates the same error type.
+    fn propagate_constructor_throws(
+        &mut self,
+        ctor: FunctionId,
+        call: MirExpr,
+        ty: TypeId,
+        span: Span,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let Some((name, callee_throws)) = self.function_id_throws(ctor) else {
+            return call;
+        };
+        // `function_id_throws` names the constructor's module function
+        // (`A::constructor`): the message must name the class, not the mangled
+        // function.
+        let ctor_name = name
+            .strip_suffix("::constructor")
+            .unwrap_or(name.as_str())
+            .to_owned();
+        let message = match self.current_throws {
+            None => format!(
+                "the constructor of `{ctor_name}` may throw, but the enclosing context cannot \
+                 propagate it (a generator, a closure body or top-level code does not return a \
+                 `Result`)"
+            ),
+            Some(current) if current != callee_throws => format!(
+                "the constructor of `{ctor_name}` throws an error type the enclosing function does \
+                 not propagate; make both throw the same type"
+            ),
+            Some(_) if self.try_depth > 0 => format!(
+                "the constructor of `{ctor_name}` may throw, and this AOT target cannot catch an \
+                 error raised inside a constructor: call `new` outside the `try`"
+            ),
+            Some(_) => {
+                return MirExpr::Propagate {
+                    expr: Box::new(call),
+                    ty,
+                };
+            }
+        };
+        ctx.error(
+            crate::hir_to_mir::convert_expr::call::THROW_PROPAGATION_DIAG,
+            message,
+            span,
+        );
+        call
+    }
+
     pub(super) fn convert_new(
         &mut self,
         callee: &HirExpr,
@@ -95,6 +144,121 @@ impl ExprConverter {
             out.push(MirStmt::Expr(callee_mir));
         }
         let struct_id = self.lookup_or_alloc_struct_id(ty, shared_struct_ids, shared_next_struct);
+        let class_name = match callee {
+            HirExpr::Global { name, .. } => Some(name.as_str().to_owned()),
+            _ => None,
+        };
+        let is_user_class = match callee {
+            HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name).is_some(),
+            _ => false,
+        };
+        let ctor_key = (
+            struct_id,
+            ts_aot_core::Atom::new_inline("constructor"),
+            false,
+        );
+        let ctor = self.method_map.get(&ctor_key).copied();
+        // JavaScript evaluates the callee and then the arguments *before* the
+        // instance exists: an argument whose evaluation has side effects must
+        // therefore run before the field initializers, not just before the
+        // constructor body. Converting the arguments here - ahead of the
+        // initializer loop below - puts every statement an argument emits at
+        // that earlier position, and pins a non-trivial argument value in a
+        // temporary so it is not re-evaluated at the constructor call.
+        let ctor_args: Option<Vec<MirExpr>> = if ctor.is_some() {
+            let param_tys = self.method_param_tys.get(&ctor_key).cloned();
+            let param_optional = self.method_param_optional.get(&ctor_key).cloned();
+            let offset = 1; // the receiver
+            if let Some(optional) = &param_optional {
+                let declared = optional.len().saturating_sub(offset);
+                let required = optional
+                    .iter()
+                    .skip(offset)
+                    .rposition(|optional| !*optional)
+                    .map_or(0, |last| last.saturating_add(1));
+                if args.len() < required || args.len() > declared {
+                    ctx.error(
+                        "P0004",
+                        format!(
+                            "`new` passes {passed} argument(s) to the constructor of `{}`, \
+                             which requires {required} and declares {declared} parameter(s)",
+                            class_name.as_deref().unwrap_or("<anonymous class>"),
+                            passed = args.len(),
+                        ),
+                        callee.span(),
+                    );
+                }
+            }
+            let mut materialized: Vec<MirExpr> = Vec::with_capacity(args.len());
+            for (i, a) in args.iter().enumerate() {
+                let expected = param_tys
+                    .as_ref()
+                    .and_then(|tys| tys.get(i + offset).copied());
+                if let Some(param_ty) = expected {
+                    // The ABI type of a defaulted parameter is `Option<T>`, whose
+                    // outer `Option` only marks "an argument was supplied": the
+                    // argument itself is a `T`, which may be nullable. The check
+                    // therefore uses the same type every call site does, or a
+                    // valid `new C(null)` would be reported as a kind mismatch.
+                    crate::hir_to_mir::nullish::check_nullish_write(
+                        a,
+                        crate::hir_to_mir::nullish::argument_check_ty(param_ty, types),
+                        types,
+                        a.span(),
+                        ctx,
+                        "this constructor parameter",
+                        false,
+                    );
+                }
+                let value = self.convert_call_arg(
+                    a,
+                    expected,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                if has_potential_side_effects(&value) {
+                    // The value is pinned in a temporary so that its statement
+                    // precedes the field initializers below and the value is not
+                    // recomputed at the constructor call. A direct call carries a
+                    // dynamic type in MIR (the emitter resolves the real type
+                    // from the callee), so such an argument is declared with the
+                    // type of the parameter it has to satisfy.
+                    let mut value_ty = mir_expr_ty(&value);
+                    if matches!(types.resolve(value_ty), None | Some(Type::Error))
+                        && let Some(param_ty) = expected
+                    {
+                        value_ty = param_ty;
+                    }
+                    let temp = self.fresh_local();
+                    self.push_temp_local(temp, value_ty);
+                    out.push(MirStmt::Let {
+                        local: temp,
+                        ty: value_ty,
+                        init: Some(value),
+                        mutable: false,
+                    });
+                    materialized.push(MirExpr::Local(temp));
+                } else {
+                    materialized.push(value);
+                }
+            }
+            if let Some(optional) = &param_optional {
+                let declared = optional.len().saturating_sub(offset);
+                while materialized.len() < declared {
+                    materialized.push(MirExpr::Unit);
+                }
+            }
+            Some(materialized)
+        } else {
+            // A class with no constructor of its own never converts its
+            // arguments *here*: the fallback arm below decides what happens to
+            // them (an arity error for a user class, side effects for a callee
+            // that is lowered elsewhere), so nothing is converted twice.
+            None
+        };
         let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
         let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
             .program
@@ -127,19 +291,75 @@ impl ExprConverter {
             }),
             mutable: true,
         });
-        if !args.is_empty() {
-            ctx.warning(
-                "E0406",
-                "constructor arguments are not supported for this `new`; the arguments are \
-                 evaluated for their side effects only and the constructor is not invoked",
-                ts_aot_core::Span::new(0, 0),
-            );
-        }
-        for a in args {
-            let arg = self.convert_expr(a, out, shared_struct_ids, shared_next_struct, types, ctx);
-            if has_potential_side_effects(&arg) {
-                out.push(MirStmt::Expr(arg));
+        // JavaScript runs the field initializers and then the constructor body on
+        // the freshly allocated instance; the constructor takes it by mutable
+        // reference (`&mut self`) and returns nothing. The arguments were already
+        // evaluated and materialized above, so the receiver is simply prepended
+        // to them here.
+        match (ctor, ctor_args) {
+            (Some(ctor), Some(ctor_args)) => {
+                let mut mir_args: Vec<MirExpr> = Vec::with_capacity(ctor_args.len() + 1);
+                mir_args.push(MirExpr::Local(alloc_id));
+                mir_args.extend(ctor_args);
+                let void_ty = types.intern(&ts_aot_core::Type::Void);
+                let call = MirExpr::Call {
+                    callee: ctor,
+                    args: mir_args,
+                    ty: void_ty,
+                };
+                // A constructor that may throw returns a `Result`: without this
+                // the value is dropped and the error silently disappears.
+                out.push(MirStmt::Expr(self.propagate_constructor_throws(
+                    ctor,
+                    call,
+                    void_ty,
+                    callee.span(),
+                    ctx,
+                )));
             }
+            // Only a *user* class declares whether it takes arguments: built-ins
+            // (`Error`, `Map`, ...) accept their own constructor signatures, which
+            // this AOT target lowers elsewhere.
+            _ if !args.is_empty() && is_user_class => {
+                ctx.error(
+                    "P0004",
+                    format!(
+                        "`new` passes {} argument(s) but `{}` declares no constructor; a class \
+                         without a constructor takes no arguments",
+                        args.len(),
+                        class_name.as_deref().unwrap_or("<anonymous class>"),
+                    ),
+                    callee.span(),
+                );
+            }
+            // The callee is not lowered here, but its arguments are still
+            // JavaScript expressions: evaluate each one for its side effects,
+            // exactly as the callee itself is evaluated above. `convert_call_arg`
+            // with no expectation is the established argument path - the `new`
+            // result's expected type must not leak into an argument.
+            _ if !args.is_empty() => {
+                ctx.warning(
+                    "E0406",
+                    "constructor arguments are not supported for this `new`; the arguments are \
+                     evaluated for their side effects only and the constructor is not invoked",
+                    callee.span(),
+                );
+                for a in args {
+                    let arg = self.convert_call_arg(
+                        a,
+                        None,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    if has_potential_side_effects(&arg) {
+                        out.push(MirStmt::Expr(arg));
+                    }
+                }
+            }
+            _ => {}
         }
         MirExpr::Local(alloc_id)
     }
@@ -218,12 +438,16 @@ impl ExprConverter {
     ) -> MirExpr {
         let inner = self.convert_expr(base, out, shared_struct_ids, shared_next_struct, types, ctx);
         let base_ty = crate::monomorphize::hir_expr_ty(base, types)
-            .unwrap_or_else(|| crate::hir_to_mir::convert_expr::util::mir_expr_ty(&inner));
+            .or_else(|| self.mir_expr_static_ty(&inner, types))
+            .unwrap_or_else(|| types.intern(&Type::Error));
         let inner_ty = match types.resolve(base_ty) {
-            Some(Type::Optional { inner }) => *inner,
+            Some(Type::Optional { inner, .. }) => *inner,
             _ => base_ty,
         };
-        let opt_ty = types.intern(&Type::Optional { inner: inner_ty });
+        let opt_ty = types.intern(&Type::Optional {
+            inner: inner_ty,
+            nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+        });
         MirExpr::OptionalChain {
             base: Box::new(inner),
             ty: opt_ty,
@@ -339,8 +563,27 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        let _ = target;
-        self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx)
+        let value = self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
+        let value_ty = crate::hir_to_mir::convert_expr::util::hir_expr_type_id(expr)
+            .or_else(|| self.mir_expr_static_ty(&value, types));
+        // `x!` (and `x as T`) strip the nullish part: the AOT representation is
+        // `Option<T>`, so the value must be unwrapped or the emitted code would
+        // use `Option<T>` where `T` is required.
+        let value_is_optional = matches!(
+            value_ty.and_then(|t| types.resolve(t)),
+            Some(Type::Optional { .. })
+        );
+        let target_is_optional = matches!(
+            types.resolve(target),
+            Some(Type::Optional { .. } | Type::Error) | None
+        );
+        if value_is_optional && !target_is_optional {
+            return MirExpr::UnwrapOptional {
+                expr: Box::new(value),
+                ty: target,
+            };
+        }
+        value
     }
 
     pub(super) fn convert_closure(
@@ -413,8 +656,22 @@ impl ExprConverter {
         let saved_return_ty = self.current_return_ty;
         let saved_expected_ty = self.expected_ty;
         self.current_return_ty = closure_ret_ty
-            .filter(|ret| !matches!(types.resolve(*ret), None | Some(ts_aot_core::Type::Error)));
+            .filter(|ret| !matches!(types.resolve(*ret), None | Some(ts_aot_core::Type::Error)))
+            .or_else(|| {
+                self.expected_ty
+                    .and_then(|expected| match types.resolve(expected) {
+                        Some(ts_aot_core::Type::Fn { ret, .. }) => Some(*ret),
+                        _ => None,
+                    })
+                    .filter(|ret| {
+                        !matches!(types.resolve(*ret), None | Some(ts_aot_core::Type::Error))
+                    })
+            });
         self.expected_ty = None;
+        // A closure body is not a `Result`-returning function of its own, so a
+        // throwing call inside it cannot be propagated (and is reported there).
+        let saved_throws = self.current_throws;
+        self.current_throws = None;
         let (mir_body, body_locals) = self.convert_block_with_shared_struct_ids(
             body,
             shared_struct_ids,
@@ -424,6 +681,7 @@ impl ExprConverter {
         );
         self.current_return_ty = saved_return_ty;
         self.expected_ty = saved_expected_ty;
+        self.current_throws = saved_throws;
         self.local_map = snapshot;
         self.temp_locals = temp_locals_snapshot;
         let closure_expr = MirExpr::Closure {

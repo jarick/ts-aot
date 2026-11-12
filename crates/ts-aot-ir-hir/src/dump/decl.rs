@@ -68,7 +68,8 @@ fn dump_function_inner(f: &HirFunction, prefix: &str, d: &mut Dumper) {
 }
 
 fn dump_param(p: &HirParam) -> String {
-    format!("{}: {}", p.name.as_str(), p.ty.raw())
+    let optional = if p.optional { "?" } else { "" };
+    format!("{}{optional}: {}", p.name.as_str(), p.ty.raw())
 }
 
 fn dump_field(field: &HirField) -> String {
@@ -173,6 +174,7 @@ mod tests {
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("a"),
             ty: TypeId::from_raw(1),
+            optional: false,
         }];
         let mut d = Dumper::new();
         dump_function(&f, &mut d);
@@ -211,6 +213,7 @@ mod tests {
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("p"),
             ty: TypeId::from_raw(9),
+            optional: false,
         }];
         let class = HirClass {
             name: Atom::new_inline("K"),
@@ -425,6 +428,7 @@ mod tests {
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("a"),
             ty: TypeId::from_raw(2),
+            optional: false,
         };
         assert_eq!(dump_param(&p), "a: 2");
     }

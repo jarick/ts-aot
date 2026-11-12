@@ -9,16 +9,33 @@ fn compile_mir(source: &str) -> ts_aot_driver::DriverOutput {
     Driver::new().compile_source("test.ts", source, &opts)
 }
 
-fn skip_type_annotation(s: &str) -> &str {
-    s.strip_prefix(':').map_or(s, |rest| {
-        let end = rest
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(rest.len());
-        &rest[end..]
-    })
+fn strip_type_annotations(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' {
+            let mut digits = false;
+            while let Some(&n) = chars.peek() {
+                if n.is_ascii_digit() {
+                    digits = true;
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !digits {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn assert_node_with_op(normalized: &str, parent: &str, inner: &str, op: &str, context: &str) {
+    let normalized = strip_type_annotations(normalized);
+    let inner = strip_type_annotations(inner);
     let pattern = format!("{parent}({inner})");
     let pos = normalized.find(&pattern).unwrap_or_else(|| {
         panic!(
@@ -26,7 +43,7 @@ fn assert_node_with_op(normalized: &str, parent: &str, inner: &str, op: &str, co
              expected `{pattern}` substring not found in:\n{normalized}"
         );
     });
-    let after = skip_type_annotation(&normalized[pos + pattern.len()..]);
+    let after = &normalized[pos + pattern.len()..];
     assert!(
         after.starts_with(op),
         "MIR must apply `{op}` directly to `{parent}`'s result ({context}); \
@@ -36,8 +53,9 @@ fn assert_node_with_op(normalized: &str, parent: &str, inner: &str, op: &str, co
 
 #[test]
 fn e2e_optional_field_lowering_wires_owner_through_optional_chain() {
-    let out =
-        compile_mir("class C { x: i64 = 0; } function f(c: C | null): i64 | null { return c?.x; }");
+    let out = compile_mir(
+        "class C { x: i64 = 0; } function f(c: C | null): i64 | null | undefined { return c?.x; }",
+    );
     assert!(
         !out.has_errors(),
         "c?.x on a class field must compile through full pipeline; got {:?}",
@@ -96,7 +114,7 @@ fn e2e_optional_call_lowering_wires_callee_through_optional_chain() {
     assert_node_with_op(
         &normalized,
         "indirect_call",
-        "opt(local(0)):3",
+        "opt(local(0))",
         "()",
         "g?.(): indirect_call's argument is the OptionalChain wrapping the Local callee directly, \
          and the call `()` is applied directly to indirect_call's result",
@@ -129,7 +147,7 @@ fn e2e_delete_with_optional_member_lowers_inner_to_optional_chain() {
 fn e2e_short_circuit_chain_wraps_each_question_dot_in_optional_chain() {
     let out = compile_mir(
         "class C { b: C | null = null; d: i64 = 0; } \
-         function f(a: C | null): i64 | null { return a?.b?.d; }",
+         function f(a: C | null): i64 | null | undefined { return a?.b?.d; }",
     );
     assert!(
         !out.has_errors(),
@@ -151,7 +169,7 @@ fn e2e_short_circuit_chain_wraps_each_question_dot_in_optional_chain() {
     assert_node_with_op(
         &normalized,
         "opt",
-        "opt(local(0)):2.0:5",
+        "opt(local(0)).0",
         ".1",
         "a?.b?.d outer: second OptionalChain wraps the inner OptionalChain (with its `.0` field \
          access) directly, and `.1` (d) field access is applied to the outer OptionalChain result",
@@ -176,7 +194,7 @@ fn e2e_optional_method_call_wraps_owner_then_uses_indirect_call() {
     assert_node_with_op(
         &normalized,
         "indirect_call",
-        "opt(local(0)):5.0:6",
+        "opt(local(0)).0",
         "()",
         "c?.m(): indirect_call's argument is the OptionalChain with its `.0` (m) field access, \
          and the call `()` is applied directly to indirect_call's result",
@@ -187,7 +205,7 @@ fn e2e_optional_method_call_wraps_owner_then_uses_indirect_call() {
 fn e2e_chained_field_access_inside_ternary_lowers_without_p0012() {
     let out = compile_mir(
         "class C { b: C | null = null; d: i64 = 0; } \
-         function f(a: C | null): i64 | null { return a ? a.b?.d : null; }",
+         function f(a: C | null): i64 | null | undefined { return a ? a.b?.d : null; }",
     );
     assert!(
         !out.has_errors(),

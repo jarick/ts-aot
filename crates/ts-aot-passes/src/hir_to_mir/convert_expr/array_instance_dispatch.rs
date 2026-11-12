@@ -14,7 +14,10 @@ use super::util::hir_expr_type_id;
 fn array_len_result_ty(types: &mut TypeTable, is_optional: bool) -> TypeId {
     let f64_ty = types.intern(&Type::F64);
     if is_optional {
-        types.intern(&Type::Optional { inner: f64_ty })
+        types.intern(&Type::Optional {
+            inner: f64_ty,
+            nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+        })
     } else {
         f64_ty
     }
@@ -26,7 +29,7 @@ fn array_len_result_ty(types: &mut TypeTable, is_optional: bool) -> TypeId {
 fn array_receiver_is_optional(owner: &HirExpr, types: &TypeTable) -> Option<bool> {
     let owner_ty = hir_expr_type_id(owner)?;
     match types.resolve(owner_ty) {
-        Some(Type::Optional { inner }) => {
+        Some(Type::Optional { inner, .. }) => {
             matches!(types.resolve(*inner), Some(Type::Array { .. })).then_some(true)
         }
         _ => matches!(types.resolve(owner_ty), Some(Type::Array { .. })).then_some(false),

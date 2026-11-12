@@ -36,13 +36,13 @@ fn json_parse_i64_emits_runtime_call() {
 
 #[test]
 fn json_parse_with_unsupported_target_type_emits_e0406() {
-    let (_mir, diags) = convert("function f(s: string): never { return JSON.parse<never>(s); }");
+    let (_mir, diags) = convert("function f(s: string): bigint { return JSON.parse<bigint>(s); }");
     let has_e0406 = diags
         .iter()
         .any(|d| d.contains("E0406") && d.contains("JSON.parse") && d.contains("target type"));
     assert!(
         has_e0406,
-        "JSON.parse<never>(s) must emit E0406 via is_json_supported_target_type (Type::Never is not in MVP whitelist); got: {diags:?}"
+        "JSON.parse<bigint>(s) must emit E0406 via is_json_supported_target_type (BigInt is not in the MVP whitelist); got: {diags:?}"
     );
 }
 

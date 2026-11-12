@@ -11,6 +11,7 @@ use ts_aot_ir_mir::{
 };
 
 use super::ident::{ident_from, sanitize_ident};
+use super::types::emit_type_id_with_ctx;
 
 pub(super) struct RuntimeCallSpec<'a> {
     pub(super) op: RuntimeOp,
@@ -27,6 +28,10 @@ pub(super) struct EmitCtx {
     function_params: HashMap<FunctionId, Vec<TypeId>>,
     function_async: HashSet<FunctionId>,
     function_owner: HashMap<FunctionId, StructId>,
+    constructors: HashSet<FunctionId>,
+    /// Methods whose body writes their receiver: they take &mut self and their
+    /// call sites borrow the receiver instead of cloning it.
+    pub(super) mutating_methods: HashSet<FunctionId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
     struct_field_names: HashMap<StructId, Vec<Atom>>,
     mutable_globals: HashSet<Atom>,
@@ -35,6 +40,16 @@ pub(super) struct EmitCtx {
     struct_lifetimes: HashMap<StructId, bool>,
     fn_value_index: HashMap<TypeId, usize>,
     fn_value_sigs: Vec<FnValueSig>,
+    /// Per bucket, `(callee, variant, is_throwing, is_async)`: the Rust item the
+    /// bucket's dispatch arm calls, the enum variant a value is built with, and
+    /// the two call shims that arm needs.
+    ///
+    /// `callee` is normally the declaration's own name. For a declaration whose
+    /// ABI parameter list is one `Option` level *wider* than the bucket's
+    /// (`x: number | null = 7` against `(x: number | null) => ...`) it is a
+    /// generated `FnValueAdapter` instead - the bucket's flat argument has to be
+    /// re-wrapped before the call - and both flags are then `false`, because the
+    /// adapter applies the throwing/async mapping itself.
     fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>>,
     fn_value_of_fn: HashMap<Atom, (usize, Ident)>,
     closure_variants: RefCell<HashMap<usize, Vec<ClosureVariantInfo>>>,
@@ -50,6 +65,10 @@ pub(super) type ClosureVariantInfo = (u32, Ident, Vec<TokenStream>);
 
 pub(super) struct FnValueSig {
     pub(super) params: Vec<TypeId>,
+    /// Positional "the caller may omit this argument" flags copied from the
+    /// `Type::Fn` this signature was built from; an indirect call pads a missing
+    /// trailing argument with `undefined` only where a flag is set.
+    pub(super) optional: Vec<bool>,
     pub(super) ret: TypeId,
 }
 
@@ -94,7 +113,7 @@ fn type_needs_lifetime(ty: TypeId, types: &TypeTable, needs: &HashMap<StructId, 
         Some(Type::String | Type::Array { .. } | Type::Fn { .. }) => true,
         Some(Type::Struct { id }) => needs.get(id).copied().unwrap_or(true),
         Some(
-            Type::Optional { inner }
+            Type::Optional { inner, .. }
             | Type::GeneratorResult { inner }
             | Type::AsyncGenYield { inner }
             | Type::Generator { inner, .. }
@@ -118,6 +137,39 @@ impl EmitCtx {
         let mut function_ret = HashMap::new();
         let mut function_async = HashSet::new();
         let mut function_owner = HashMap::new();
+        let mut constructors = HashSet::new();
+        let mut mutating_methods = HashSet::new();
+        // A method that writes a field of `this` mutates the instance it is called
+        // on - directly, or through another mutating method (`this.w ??= 7` calls
+        // the setter). Such a method takes `&mut self` and its call sites borrow the
+        // receiver: the by-value `mut self` wrote into a clone and the mutation was
+        // silently lost. Which methods qualify is a fixpoint, and it has to be the
+        // same predicate the signature is emitted from (`BodyCtx::local_mut`).
+        loop {
+            let mut changed = false;
+            for decl in &program.declarations {
+                let MirDecl::Struct(s) = decl else {
+                    continue;
+                };
+                for method in &s.methods {
+                    let FunctionKind::Method { self_param, .. } = method.kind else {
+                        continue;
+                    };
+                    if mutating_methods.contains(&method.id) {
+                        continue;
+                    }
+                    if collect_written_locals(&method.body.block, types, &mutating_methods)
+                        .contains(&self_param)
+                    {
+                        mutating_methods.insert(method.id);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
         let mut struct_fields: HashMap<(StructId, FieldId), Ident> = HashMap::new();
         let mut struct_field_names: HashMap<StructId, Vec<Atom>> = HashMap::new();
         let mut mutable_globals = HashSet::new();
@@ -158,9 +210,13 @@ impl EmitCtx {
                             function_async.insert(method.id);
                         }
                         if let FunctionKind::Method { owner, .. }
-                        | FunctionKind::GeneratorMethod { owner, .. } = method.kind
+                        | FunctionKind::GeneratorMethod { owner, .. }
+                        | FunctionKind::Constructor { owner } = method.kind
                         {
                             function_owner.insert(method.id, owner);
+                        }
+                        if matches!(method.kind, FunctionKind::Constructor { .. }) {
+                            constructors.insert(method.id);
                         }
                     }
                 }
@@ -172,16 +228,18 @@ impl EmitCtx {
                 }
             }
         }
-        let (fn_value_index, fn_value_sigs, fn_value_variants, fn_value_of_fn) =
+        let (fn_value_index, fn_value_sigs, fn_value_variants, fn_value_of_fn, fn_value_adapters) =
             collect_fn_values(program, types);
         let struct_lifetimes = collect_struct_lifetimes(program, types);
-        Self {
+        let ctx = Self {
             struct_names,
             function_names,
             function_ret,
             function_params,
             function_async,
             function_owner,
+            constructors,
+            mutating_methods,
             struct_fields,
             struct_field_names,
             mutable_globals,
@@ -199,7 +257,20 @@ impl EmitCtx {
             dispatch_sources: RefCell::new(HashSet::new()),
             next_closure_id: Cell::new(0),
             used_runtime: Cell::new(false),
+        };
+        // The enum and the `__ts_fn_call_k` helper are emitted from
+        // `fn_value_variants` alone and only know the *bucket's* parameter types,
+        // so a declaration registered under a wider ABI gets its argument
+        // re-wrapping through a generated adapter fn, emitted next to the closure
+        // bodies (the same slot `emit_closure_value` uses).
+        if !fn_value_adapters.is_empty() {
+            let emit_env = EmitEnv { types, program };
+            for adapter in &fn_value_adapters {
+                let tokens = adapter.emit(&emit_env, &ctx);
+                ctx.push_closure_fn(tokens);
+            }
         }
+        ctx
     }
 
     pub(super) fn mark_runtime_used(&self) {
@@ -210,12 +281,12 @@ impl EmitCtx {
         self.used_runtime.get()
     }
 
-    pub(super) fn type_needs_lifetime(&self, ty: TypeId, types: &TypeTable) -> bool {
-        type_needs_lifetime(ty, types, &self.struct_lifetimes)
-    }
-
     pub(super) fn struct_needs_lifetime(&self, id: StructId) -> bool {
         self.struct_lifetimes.get(&id).copied().unwrap_or(true)
+    }
+
+    pub(super) fn type_needs_lifetime(&self, ty: TypeId, types: &TypeTable) -> bool {
+        type_needs_lifetime(ty, types, &self.struct_lifetimes)
     }
 
     pub(super) fn alloc_closure_id(&self) -> u32 {
@@ -364,6 +435,18 @@ impl EmitCtx {
         self.function_owner.get(&id).copied()
     }
 
+    /// A class constructor: its receiver is passed by mutable reference and it
+    /// returns `()` (the instance is built by the caller).
+    pub(super) fn function_is_constructor(&self, id: FunctionId) -> bool {
+        self.constructors.contains(&id)
+    }
+
+    /// A method that mutates the instance it is called on: its receiver is passed
+    /// by mutable reference, so the write reaches the caller's object.
+    pub(super) fn function_is_mutating_method(&self, id: FunctionId) -> bool {
+        self.mutating_methods.contains(&id)
+    }
+
     pub(super) fn struct_field_ident(&self, struct_id: StructId, field_id: FieldId) -> Ident {
         self.struct_fields
             .get(&(struct_id, field_id))
@@ -372,12 +455,15 @@ impl EmitCtx {
     }
 }
 
+// These flags describe independent emission properties of a function.
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct BodyCtx {
     locals: HashMap<LocalId, Ident>,
     locals_ty: HashMap<LocalId, TypeId>,
     locals_mut: HashMap<LocalId, bool>,
     reserved_idents: HashSet<Ident>,
     self_param: Option<LocalId>,
+    self_is_borrowed: bool,
     is_generator: bool,
     is_async_generator: bool,
     gen_co: Option<Ident>,
@@ -397,6 +483,12 @@ pub(super) struct BodyCtx {
     next_try_id: Cell<u32>,
     next_block_id: Cell<u32>,
     shared_by_id: HashMap<LocalId, SharedAccess>,
+    /// Value types of the enclosing closure's captures. A capture read is a
+    /// `MirExpr::Local` of an outer local, which the closure's own ctx has no
+    /// declaration for, so without this its value type (and therefore every
+    /// type-driven emission decision, e.g. numeric coercion of a literal
+    /// operand) would be unknown.
+    capture_tys: HashMap<LocalId, TypeId>,
     shared_by_name: HashMap<Ident, SharedAccess>,
     own_env: Option<OwnEnv>,
     dynamic_locals: RefCell<HashSet<LocalId>>,
@@ -416,6 +508,12 @@ pub(super) struct SharedAccess {
     pub(super) env_type: Ident,
     pub(super) field: Ident,
     pub(super) storage: SharedStorage,
+    /// The declared type of the shared variable. A name-based capture
+    /// (`MirExpr::Global`/`MirPlace::Global` of a variable captured through two
+    /// levels of `ScopeEnv`) carries no type of its own, so this is the only
+    /// place the emitter can learn it; without it the write is emitted without
+    /// the `Option`/numeric coercion the field type requires.
+    pub(super) ty: TypeId,
 }
 
 #[derive(Clone)]
@@ -522,12 +620,21 @@ fn shared_storage_for(ty: Option<&Type>) -> SharedStorage {
 }
 
 impl BodyCtx {
-    pub(super) fn new(f: &MirFunctionDecl, types: &TypeTable) -> Self {
+    pub(super) fn new(
+        f: &MirFunctionDecl,
+        types: &TypeTable,
+        mutating_methods: &HashSet<FunctionId>,
+    ) -> Self {
         let self_param = match f.kind {
             FunctionKind::Method { self_param, .. }
             | FunctionKind::GeneratorMethod { self_param, .. } => Some(self_param),
+            // A constructor's receiver is the first parameter (`this`), the same
+            // convention the passes use for methods.
+            FunctionKind::Constructor { .. } => Some(LocalId::from_raw(0)),
             _ => None,
         };
+        let self_is_borrowed = matches!(f.kind, FunctionKind::Constructor { .. })
+            || (matches!(f.kind, FunctionKind::Method { .. }) && mutating_methods.contains(&f.id));
         let is_generator = matches!(
             f.kind,
             FunctionKind::Generator | FunctionKind::GeneratorMethod { .. }
@@ -554,7 +661,7 @@ impl BodyCtx {
             None
         };
         let gen_co = is_generator.then(|| format_ident!("__gen_co_{}", f.id.raw()));
-        let written = collect_written_locals(&f.body.block, types);
+        let written = collect_written_locals(&f.body.block, types, mutating_methods);
         let mut locals = HashMap::new();
         let mut locals_ty = HashMap::new();
         let mut locals_mut = HashMap::new();
@@ -628,6 +735,7 @@ impl BodyCtx {
                     env_type: env_type.clone(),
                     field: ef.field.clone(),
                     storage: ef.storage,
+                    ty: ef.ty,
                 };
                 shared_by_id.insert(*id, acc.clone());
                 shared_by_name.insert(name.clone(), acc);
@@ -644,6 +752,7 @@ impl BodyCtx {
             locals_mut,
             reserved_idents,
             self_param,
+            self_is_borrowed,
             is_generator,
             is_async_generator,
             gen_co,
@@ -664,6 +773,7 @@ impl BodyCtx {
             next_block_id: Cell::new(0),
             shared_by_id,
             shared_by_name,
+            capture_tys: HashMap::new(),
             own_env,
             dynamic_locals: RefCell::new(dynamic_ids),
             dynamic_names: RefCell::new(dynamic_names),
@@ -694,6 +804,7 @@ impl BodyCtx {
             locals_mut: HashMap::new(),
             reserved_idents: HashSet::new(),
             self_param: None,
+            self_is_borrowed: false,
             is_generator: false,
             is_async_generator: false,
             gen_co: None,
@@ -713,6 +824,7 @@ impl BodyCtx {
             next_try_id: Cell::new(0),
             next_block_id: Cell::new(0),
             shared_by_id: inherited_ids,
+            capture_tys: HashMap::new(),
             shared_by_name: inherited_names,
             own_env: None,
             dynamic_locals: RefCell::new(HashSet::new()),
@@ -800,6 +912,7 @@ impl BodyCtx {
                 env_type: env_type.clone(),
                 field: ef.field.clone(),
                 storage: ef.storage,
+                ty: ef.ty,
             };
             self.shared_by_id.insert(*id, acc.clone());
             self.shared_by_name.insert(name.clone(), acc);
@@ -819,9 +932,24 @@ impl BodyCtx {
         self.shared_by_name.get(&ident_from(name)).cloned()
     }
 
+    /// The declared type of a variable reached through a name-based capture.
+    ///
+    /// A capture two closure levels deep is emitted as a `MirExpr::Global`/
+    /// `MirPlace::Global` of the captured name, which carries no `TypeId`; the
+    /// env field still knows its declared type.
+    pub(super) fn shared_ty_for_name(&self, name: &Atom) -> Option<TypeId> {
+        self.shared_by_name.get(&ident_from(name)).map(|acc| acc.ty)
+    }
+
     pub(super) fn local_read(&self, id: LocalId) -> TokenStream {
         if Some(id) == self.self_param {
-            return quote!(self);
+            // A mutating method holds `&mut self`, so an owned read has to clone:
+            // `return this` must not move out of the borrow.
+            return if self.self_is_borrowed {
+                quote!(self.clone())
+            } else {
+                quote!(self)
+            };
         }
         if let Some(acc) = self.shared_access_for_local(id) {
             return shared_read_tokens(&acc);
@@ -936,6 +1064,10 @@ impl BodyCtx {
         }
     }
 
+    pub(super) fn self_is_borrowed(&self) -> bool {
+        self.self_is_borrowed
+    }
+
     pub(super) fn self_param(&self) -> Option<LocalId> {
         self.self_param
     }
@@ -951,6 +1083,20 @@ impl BodyCtx {
 
     pub(super) fn local_ty(&self, id: LocalId) -> Option<TypeId> {
         self.locals_ty.get(&id).copied()
+    }
+
+    pub(super) fn capture_ty(&self, id: LocalId) -> Option<TypeId> {
+        self.capture_tys.get(&id).copied()
+    }
+
+    /// Records the value type of every capture of the closure whose body this
+    /// ctx emits, so capture reads can be typed like ordinary locals.
+    pub(super) fn seed_capture_types(&mut self, captures: &[LocalId], parent: &BodyCtx) {
+        for id in captures {
+            if let Some(ty) = parent.local_ty(*id).or_else(|| parent.capture_ty(*id)) {
+                self.capture_tys.insert(*id, ty);
+            }
+        }
     }
 
     pub(super) fn set_in_try(&self, value: bool) {
@@ -1282,11 +1428,15 @@ fn count_uses_expr(expr: &MirExpr, in_loop: bool, uses: &mut HashMap<LocalId, (u
             count_uses_expr(left, in_loop, uses);
             count_uses_expr(right, in_loop, uses);
         }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            count_uses_expr(expr, in_loop, uses);
+        }
         MirExpr::Unary { expr, .. }
         | MirExpr::Await { expr, .. }
         | MirExpr::TypeOf { expr, .. }
         | MirExpr::Cast { expr, .. }
         | MirExpr::ResultErr { error: expr, .. }
+        | MirExpr::Propagate { expr, .. }
         | MirExpr::Import { source: expr, .. } => count_uses_expr(expr, in_loop, uses),
         MirExpr::Yield { expr: Some(e), .. } => count_uses_expr(e, in_loop, uses),
         MirExpr::Call { args, .. } => {
@@ -1392,9 +1542,13 @@ pub(super) fn mutably_borrowed_arg_index(op: RuntimeOp) -> Option<usize> {
     }
 }
 
-pub(super) fn collect_written_locals(block: &MirBlock, types: &TypeTable) -> HashSet<LocalId> {
+pub(super) fn collect_written_locals(
+    block: &MirBlock,
+    types: &TypeTable,
+    mutating: &HashSet<FunctionId>,
+) -> HashSet<LocalId> {
     let mut written = HashSet::new();
-    collect_from_block(block, types, &mut written);
+    collect_from_block(block, types, &mut written, mutating);
     written
 }
 
@@ -1512,18 +1666,28 @@ pub(super) fn collect_assigned_locals(
 ) -> HashSet<LocalId> {
     let mut all_written = HashSet::new();
     for stmt in stmts {
-        collect_from_stmt(stmt, types, &mut all_written);
+        collect_from_stmt(stmt, types, &mut all_written, &HashSet::new());
     }
     all_written.intersection(candidates).copied().collect()
 }
 
-fn collect_from_block(block: &MirBlock, types: &TypeTable, written: &mut HashSet<LocalId>) {
+fn collect_from_block(
+    block: &MirBlock,
+    types: &TypeTable,
+    written: &mut HashSet<LocalId>,
+    mutating: &HashSet<FunctionId>,
+) {
     for stmt in &block.stmts {
-        collect_from_stmt(stmt, types, written);
+        collect_from_stmt(stmt, types, written, mutating);
     }
 }
 
-fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<LocalId>) {
+fn collect_from_stmt(
+    stmt: &MirStmt,
+    types: &TypeTable,
+    written: &mut HashSet<LocalId>,
+    mutating: &HashSet<FunctionId>,
+) {
     match stmt {
         MirStmt::Assign { target, .. } => {
             if let Some(root) = place_root_local_id(target) {
@@ -1545,15 +1709,15 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
             else_block,
             ..
         } => {
-            collect_from_block(then_block, types, written);
+            collect_from_block(then_block, types, written, mutating);
             if let Some(b) = else_block {
-                collect_from_block(b, types, written);
+                collect_from_block(b, types, written, mutating);
             }
         }
         MirStmt::While { body, .. }
         | MirStmt::DoWhile { body, .. }
         | MirStmt::ForIn { body, .. } => {
-            collect_from_block(body, types, written);
+            collect_from_block(body, types, written, mutating);
         }
         MirStmt::ForOf {
             iterable,
@@ -1572,14 +1736,14 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
             {
                 written.insert(id);
             }
-            collect_from_block(body, types, written);
+            collect_from_block(body, types, written, mutating);
         }
         MirStmt::Switch { cases, default, .. } => {
             for c in cases {
-                collect_from_block(&c.body, types, written);
+                collect_from_block(&c.body, types, written, mutating);
             }
             if let Some(b) = default {
-                collect_from_block(b, types, written);
+                collect_from_block(b, types, written, mutating);
             }
         }
         MirStmt::Try {
@@ -1588,23 +1752,23 @@ fn collect_from_stmt(stmt: &MirStmt, types: &TypeTable, written: &mut HashSet<Lo
             finally,
             ..
         } => {
-            collect_from_block(body, types, written);
+            collect_from_block(body, types, written, mutating);
             if let Some(b) = catch {
-                collect_from_block(b, types, written);
+                collect_from_block(b, types, written, mutating);
             }
             if let Some(b) = finally {
-                collect_from_block(b, types, written);
+                collect_from_block(b, types, written, mutating);
             }
         }
         MirStmt::Expr(expr) | MirStmt::Return(Some(expr)) => {
-            collect_from_expr(expr, types, written);
+            collect_from_expr(expr, types, written, mutating);
         }
         MirStmt::Throw { error, .. } | MirStmt::ReturnResultErr { error, .. } => {
-            collect_from_expr(error, types, written);
+            collect_from_expr(error, types, written, mutating);
         }
         MirStmt::Let {
             init: Some(init), ..
-        } => collect_from_expr(init, types, written),
+        } => collect_from_expr(init, types, written, mutating),
         MirStmt::Let { init: None, .. }
         | MirStmt::Return(None)
         | MirStmt::Break
@@ -1617,7 +1781,224 @@ type FnValueRegistry = (
     Vec<FnValueSig>,
     Vec<Vec<(Atom, Ident, bool, bool)>>,
     HashMap<Atom, (usize, Ident)>,
+    Vec<FnValueAdapter>,
 );
+
+/// How one bucket argument is adapted for the declaration parameter it feeds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lift {
+    /// The bucket parameter *is* the declaration's ABI parameter.
+    None,
+    /// The declaration's ABI parameter is `Option<bucket parameter>`: the
+    /// argument is always supplied, so wrap it (`Some(__a0)`).
+    Wrap,
+    /// Same nesting, but the bucket may also be called *without* this argument,
+    /// which its ABI spells `None` (the call site pads an omitted trailing
+    /// argument with `undefined`, which `optional_coerce` turns into `None`).
+    /// `None` then means "no argument" and has to stay the outer `None`, so that
+    /// the callee's default still applies: `__a0.map(Some)`.
+    ///
+    /// Only a bucket type that admits just `undefined` can use this: `null` and
+    /// "no argument" would both be the flat `None`, so a passed `null` would
+    /// select the default. A bucket type that admits `null` is rejected instead
+    /// of being registered (see [`fn_value_bucket`]).
+    WrapIfSupplied,
+}
+
+/// A declaration whose ABI parameter list is one `Option` level *wider* than the
+/// function-value bucket it is registered in.
+///
+/// `f(x: number | null = 7)` is emitted with the nested ABI parameter
+/// `Option<Option<f64>>`: the outer `Option` answers "was an argument supplied?"
+/// (the callee's prologue applies the default when it is `None`) and the inner
+/// one is the value's own nullishness. A function *type* can never spell a
+/// default, so `(x: number | null) => number | null` has the flat parameter
+/// `Option<f64>` and its call sites pass a flat value onward. The bucket arm
+/// therefore cannot call the declaration directly: the generated adapter takes
+/// the bucket's parameters and re-wraps the lifted ones, which is exactly the
+/// "argument supplied" state the nested ABI encodes - a `null` argument reaches
+/// the arm as `None` and becomes `Some(None)`, never the outer `None` that would
+/// select the default.
+struct FnValueAdapter {
+    /// Name of the generated adapter fn; also the callee recorded for the
+    /// bucket's dispatch arm.
+    ident: Ident,
+    /// The bucket's parameters, which are the adapter's own parameters.
+    params: Vec<TypeId>,
+    /// The bucket's return type.
+    ret: TypeId,
+    /// The declaration the adapter forwards to.
+    decl: Ident,
+    /// Positional adaptation of the bucket's arguments.
+    lifts: Vec<Lift>,
+    is_throwing: bool,
+    is_async: bool,
+}
+
+impl FnValueAdapter {
+    /// Rust source of `fn __ts_fn_value_lift_N<'a>(ctx, <bucket params>) -> <bucket ret>`
+    /// forwarding to the declaration with the lifted arguments re-wrapped.
+    fn emit(&self, emit_env: &EmitEnv<'_>, ctx: &EmitCtx) -> TokenStream {
+        let ident = &self.ident;
+        let decl = &self.decl;
+        let arg_names: Vec<Ident> = (0..self.params.len())
+            .map(|i| format_ident!("__a{}", i))
+            .collect();
+        let param_tys: Vec<TokenStream> = self
+            .params
+            .iter()
+            .map(|ty| emit_type_id_with_ctx(*ty, emit_env, ctx))
+            .collect();
+        let ret = emit_type_id_with_ctx(self.ret, emit_env, ctx);
+        let args: Vec<TokenStream> = arg_names
+            .iter()
+            .zip(&self.lifts)
+            .map(|(name, lift)| match lift {
+                Lift::None => quote!(#name),
+                Lift::Wrap => quote!(::core::option::Option::Some(#name)),
+                Lift::WrapIfSupplied => {
+                    quote!(#name.map(::core::option::Option::Some))
+                }
+            })
+            .collect();
+        // The same shims `emit_fn_values` puts around a direct arm call; the
+        // adapter owns them so the bucket only ever sees its own flat signature.
+        let mut call = quote!(#decl(__ctx, #(#args),*));
+        if self.is_async {
+            call = quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call));
+        }
+        if self.is_throwing {
+            call = quote!(match #call {
+                Ok(__v) => __v,
+                Err(__e) => ts_aot_runtime::__ts_aot_throw(__e),
+            });
+        }
+        quote! {
+            fn #ident<'a>(
+                __ctx: &ts_aot_runtime::Ctx<'a>,
+                #(#arg_names: #param_tys),*
+            ) -> #ret {
+                #call
+            }
+        }
+    }
+}
+
+/// Whether two types are the *same in the generated Rust* even though they are
+/// distinct `TypeId`s.
+///
+/// Interning keys `Option` types by their nullish kind: `T | null` keeps `null`,
+/// `T | undefined` and `x?: T` accept only `undefined`, so `number | null` and
+/// `number | undefined` are two `TypeId`s - but one `Option<f64>`. The
+/// difference lives in the source language and in `optional_coerce`, not in the
+/// ABI, which is why the bucket for `(x?: number) => number` has to accept a
+/// declaration parameter declared `number | null`. A function type whose
+/// `optional` flags differ is the same ABI too whenever both intern to one
+/// value bucket (that is exactly the enum both emit). Every other type is
+/// compared by `TypeId`, which is structural equality for the rest.
+fn same_abi(
+    types: &TypeTable,
+    fn_value_index: &HashMap<TypeId, usize>,
+    a: TypeId,
+    b: TypeId,
+) -> bool {
+    if a == b {
+        return true;
+    }
+    match (types.resolve(a), types.resolve(b)) {
+        (Some(Type::Optional { inner: ia, .. }), Some(Type::Optional { inner: ib, .. })) => {
+            same_abi(types, fn_value_index, *ia, *ib)
+        }
+        (Some(Type::Fn { .. }), Some(Type::Fn { .. })) => matches!(
+            (fn_value_index.get(&a), fn_value_index.get(&b)),
+            (Some(ka), Some(kb)) if ka == kb
+        ),
+        _ => false,
+    }
+}
+
+/// The bucket a declaration's ABI parameter list belongs to, plus the positions
+/// that have to be re-wrapped.
+///
+/// Exact `params`/`ret` equality is tried first, so every declaration that was
+/// registered before is still registered in the very same bucket. A declaration
+/// whose parameter is one `Option` level *above* the bucket's is accepted as
+/// well (see `FnValueAdapter`); the reverse relation never is - a bucket
+/// parameter `Option<T>` against a declaration parameter `T` would let a call
+/// omit an argument the declaration requires. The levels are compared with
+/// `same_abi`, so the bucket's `Option<f64>` is the inner level of `number |
+/// null`'s `Option<Option<f64>>` even though the two intern apart.
+fn fn_value_bucket(
+    types: &TypeTable,
+    fn_value_index: &HashMap<TypeId, usize>,
+    sigs: &[FnValueSig],
+    params: &[TypeId],
+    ret: TypeId,
+) -> Option<(usize, Vec<Lift>)> {
+    if let Some(k) = sigs.iter().position(|s| s.params == params && s.ret == ret) {
+        return Some((k, vec![Lift::None; params.len()]));
+    }
+    sigs.iter().enumerate().find_map(|(k, s)| {
+        if s.params.len() != params.len() || s.ret != ret {
+            return None;
+        }
+        let mut lifts: Vec<Lift> = Vec::with_capacity(params.len());
+        for (index, (declared, bucket)) in params.iter().zip(&s.params).enumerate() {
+            if declared == bucket {
+                lifts.push(Lift::None);
+                continue;
+            }
+            let Some(Type::Optional { inner, .. }) = types.resolve(*declared) else {
+                return None;
+            };
+            if !same_abi(types, fn_value_index, *inner, *bucket) {
+                return None;
+            }
+            // Only an `Option` bucket parameter can carry "no argument" as its
+            // `None`; a bucket safe to call without the argument therefore has to
+            // keep that `None` outside the wrapper.
+            let bucket_ty = types.resolve(*bucket);
+            let may_omit = s.optional.get(index).copied().unwrap_or(false)
+                && matches!(bucket_ty, Some(Type::Optional { .. }));
+            if may_omit && matches!(bucket_ty, Some(Type::Optional { nullish, .. }) if nullish.null)
+            {
+                // The flat `Option<T>` ABI cannot express "the caller passed
+                // `null`" and "the caller omitted the argument" at the same time:
+                // both are `None`. `Lift::WrapIfSupplied` maps `None` to the outer
+                // `None`, so a passed `null` would select the callee's default
+                // instead of staying `null`. Reject the registration (the
+                // established unsupported path leaves the declaration out of the
+                // bucket) rather than emit an adapter that miscompiles one of the
+                // two cases. A bucket whose type admits only `undefined` is fine:
+                // an omitted argument and an explicit `undefined` both ask for the
+                // default, so one `None` can mean both.
+                return None;
+            }
+            lifts.push(if may_omit {
+                Lift::WrapIfSupplied
+            } else {
+                Lift::Wrap
+            });
+        }
+        lifts
+            .iter()
+            .any(|lift| *lift != Lift::None)
+            .then_some((k, lifts))
+    })
+}
+
+/// A name for a generated adapter that keeps out of the module's value
+/// namespace: the adapter fn is emitted next to the declarations, so it must not
+/// collide with a function, method or global of the program.
+fn next_fn_value_adapter_ident(taken: &mut HashSet<String>, index: usize) -> Ident {
+    let mut candidate = format!("__ts_fn_value_lift_{index}");
+    let mut suffix = 0u32;
+    while !taken.insert(candidate.clone()) {
+        suffix = suffix.saturating_add(1);
+        candidate = format!("__ts_fn_value_lift_{index}_{suffix}");
+    }
+    format_ident!("{candidate}")
+}
 
 fn normalize_dispatch_name(composed: &str) -> String {
     let mut out = String::with_capacity(composed.len());
@@ -1683,22 +2064,77 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
     let mut fn_value_index: HashMap<TypeId, usize> = HashMap::new();
     let mut fn_value_sigs: Vec<FnValueSig> = Vec::new();
     for id in used {
-        if let Some(Type::Fn { params, ret, .. }) = types.resolve(id) {
+        if let Some(Type::Fn {
+            params,
+            optional,
+            ret,
+            ..
+        }) = types.resolve(id)
+        {
             if fn_value_index.contains_key(&id) {
                 continue;
             }
-            let k = fn_value_sigs.len();
+            // `optional` takes part in `Type`'s `Hash`/`Eq`, so `x?: number` and
+            // `x: number | undefined` intern to two distinct `TypeId`s even though
+            // their ABI is identical (`Option<f64>` either way) and a short vector
+            // means "the rest is required" just like an explicit `false`. Bucketing
+            // by `TypeId` alone therefore left one of the two enums
+            // `__Uninhabited`, while a closure declared with the other spelling was
+            // stored into it (E0308). All signatures that agree on `params`/`ret`
+            // share one bucket, and the bucket keeps the *union* of the omission
+            // flags: padding an omitted argument with `undefined` is always safe,
+            // whereas dropping a pad a caller relied on would emit a call with a
+            // missing argument.
+            let k = if let Some(k) = fn_value_sigs
+                .iter()
+                .position(|s| s.params == *params && s.ret == *ret)
+            {
+                let flags = &mut fn_value_sigs[k].optional;
+                for (index, may_omit) in optional.iter().enumerate() {
+                    if !*may_omit {
+                        continue;
+                    }
+                    if index >= flags.len() {
+                        flags.resize(index + 1, false);
+                    }
+                    flags[index] = true;
+                }
+                k
+            } else {
+                let k = fn_value_sigs.len();
+                fn_value_sigs.push(FnValueSig {
+                    params: params.clone(),
+                    optional: optional.clone(),
+                    ret: *ret,
+                });
+                k
+            };
             fn_value_index.insert(id, k);
-            fn_value_sigs.push(FnValueSig {
-                params: params.clone(),
-                ret: *ret,
-            });
         }
     }
 
     let mut fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>> =
         vec![Vec::new(); fn_value_sigs.len()];
     let mut fn_value_of_fn: HashMap<Atom, (usize, Ident)> = HashMap::new();
+    let mut fn_value_adapters: Vec<FnValueAdapter> = Vec::new();
+    // Generated adapters are emitted next to the declarations, so keep their
+    // names away from every name the program already puts in that namespace.
+    let mut taken_idents: HashSet<String> = HashSet::new();
+    for decl in &program.declarations {
+        match decl {
+            MirDecl::Function(f) => {
+                taken_idents.insert(sanitize_ident(f.name.as_str()));
+            }
+            MirDecl::Struct(s) => {
+                for m in &s.methods {
+                    taken_idents.insert(sanitize_ident(m.name.as_str()));
+                }
+            }
+            MirDecl::Global(g) => {
+                taken_idents.insert(sanitize_ident(g.name.as_str()));
+            }
+        }
+    }
     for decl in &program.declarations {
         let funcs: Vec<&MirFunctionDecl> = match decl {
             MirDecl::Function(f) => vec![f],
@@ -1722,9 +2158,15 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
                 Some(Type::Result { ok, .. }) => *ok,
                 _ => f.ret,
             };
-            let Some(k) = fn_value_sigs
-                .iter()
-                .position(|s| s.params == params && s.ret == eff_ret)
+            // A signature is picked by `params`/`ret` alone: a `MirParam` does not
+            // carry the "may be omitted" flag, and it does not have to - the
+            // registry above keeps exactly one bucket per `(params, ret)` pair, so
+            // the position is unique and the bucket's flags already cover every
+            // spelling of the same function type. The ABI parameter may still be
+            // one `Option` level *wider* than the bucket's (a defaulted nullable
+            // parameter), in which case the bucket arm goes through an adapter.
+            let Some((k, lifts)) =
+                fn_value_bucket(types, &fn_value_index, &fn_value_sigs, &params, eff_ret)
             else {
                 continue;
             };
@@ -1741,7 +2183,24 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
                 suffix += 1;
                 variant = format_ident!("{}{}", base, suffix);
             }
-            fn_value_variants[k].push((f.name.clone(), variant.clone(), is_throwing, is_async));
+            let (callee, is_throwing, is_async) = if lifts.iter().any(|lift| *lift != Lift::None) {
+                let ident = next_fn_value_adapter_ident(&mut taken_idents, fn_value_adapters.len());
+                fn_value_adapters.push(FnValueAdapter {
+                    ident: ident.clone(),
+                    params: fn_value_sigs[k].params.clone(),
+                    ret: fn_value_sigs[k].ret,
+                    decl: ident_from(&f.name),
+                    lifts,
+                    is_throwing,
+                    is_async,
+                });
+                // The adapter owns the throwing/async shims, so the arm must not
+                // apply them a second time.
+                (Atom::from(ident.to_string()), false, false)
+            } else {
+                (f.name.clone(), is_throwing, is_async)
+            };
+            fn_value_variants[k].push((callee, variant.clone(), is_throwing, is_async));
             fn_value_of_fn.insert(f.name.clone(), (k, variant));
         }
     }
@@ -1751,6 +2210,7 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
         fn_value_sigs,
         fn_value_variants,
         fn_value_of_fn,
+        fn_value_adapters,
     )
 }
 
@@ -1784,7 +2244,7 @@ fn collect_type_ids(
     }
     out.push(id);
     match types.resolve(id) {
-        Some(Type::Array { element } | Type::Optional { inner: element }) => {
+        Some(Type::Array { element } | Type::Optional { inner: element, .. }) => {
             collect_type_ids(*element, types, seen, out);
         }
         Some(Type::Result { ok, err }) => {
@@ -1797,7 +2257,9 @@ fn collect_type_ids(
                 collect_type_ids(*err, types, seen, out);
             }
         }
-        Some(Type::Fn { params, ret, err }) => {
+        Some(Type::Fn {
+            params, ret, err, ..
+        }) => {
             for p in params {
                 collect_type_ids(*p, types, seen, out);
             }
@@ -2007,7 +2469,8 @@ fn collect_expr_tys(
         | MirExpr::TypeOf { expr: base, .. }
         | MirExpr::Cast { expr: base, .. }
         | MirExpr::Import { source: base, .. }
-        | MirExpr::ResultErr { error: base, .. } => collect_expr_tys(base, types, seen, out),
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Propagate { expr: base, .. } => collect_expr_tys(base, types, seen, out),
         MirExpr::Index { base, index, .. } => {
             collect_expr_tys(base, types, seen, out);
             collect_expr_tys(index, types, seen, out);
@@ -2015,6 +2478,9 @@ fn collect_expr_tys(
         MirExpr::Binary { left, right, .. } => {
             collect_expr_tys(left, types, seen, out);
             collect_expr_tys(right, types, seen, out);
+        }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_expr_tys(expr, types, seen, out);
         }
         MirExpr::Yield { expr: Some(e), .. } => collect_expr_tys(e, types, seen, out),
         MirExpr::Call { args, .. } => {
@@ -2191,10 +2657,14 @@ fn collect_captures_expr(expr: &MirExpr, out: &mut HashSet<LocalId>) {
         | MirExpr::TypeOf { expr: base, .. }
         | MirExpr::Cast { expr: base, .. }
         | MirExpr::Import { source: base, .. }
-        | MirExpr::ResultErr { error: base, .. } => collect_captures_expr(base, out),
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Propagate { expr: base, .. } => collect_captures_expr(base, out),
         MirExpr::Index { base, index, .. } => {
             collect_captures_expr(base, out);
             collect_captures_expr(index, out);
+        }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_captures_expr(expr, out);
         }
         MirExpr::Binary { left, right, .. } => {
             collect_captures_expr(left, out);
@@ -2232,44 +2702,62 @@ fn collect_captures_expr(expr: &MirExpr, out: &mut HashSet<LocalId>) {
     }
 }
 
-fn collect_from_expr(expr: &MirExpr, types: &TypeTable, written: &mut HashSet<LocalId>) {
+fn collect_from_expr(
+    expr: &MirExpr,
+    types: &TypeTable,
+    written: &mut HashSet<LocalId>,
+    mutating: &HashSet<FunctionId>,
+) {
     match expr {
         MirExpr::Field { base, .. }
         | MirExpr::OptionalChain { base, .. }
-        | MirExpr::ResultOk { value: base, .. } => collect_from_expr(base, types, written),
+        | MirExpr::ResultOk { value: base, .. } => {
+            collect_from_expr(base, types, written, mutating);
+        }
         MirExpr::Index { base, index, .. } => {
-            collect_from_expr(base, types, written);
-            collect_from_expr(index, types, written);
+            collect_from_expr(base, types, written, mutating);
+            collect_from_expr(index, types, written, mutating);
+        }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_from_expr(expr, types, written, mutating);
         }
         MirExpr::Binary { left, right, .. } => {
-            collect_from_expr(left, types, written);
-            collect_from_expr(right, types, written);
+            collect_from_expr(left, types, written, mutating);
+            collect_from_expr(right, types, written, mutating);
         }
         MirExpr::Unary { expr, .. }
         | MirExpr::Await { expr, .. }
         | MirExpr::TypeOf { expr, .. }
         | MirExpr::Cast { expr, .. }
         | MirExpr::ResultErr { error: expr, .. }
-        | MirExpr::Import { source: expr, .. } => collect_from_expr(expr, types, written),
-        MirExpr::Yield { expr: Some(e), .. } => collect_from_expr(e, types, written),
-        MirExpr::Call { args, .. } => {
+        | MirExpr::Propagate { expr, .. }
+        | MirExpr::Import { source: expr, .. } => collect_from_expr(expr, types, written, mutating),
+        MirExpr::Yield { expr: Some(e), .. } => collect_from_expr(e, types, written, mutating),
+        MirExpr::Call { callee, args, .. } => {
+            // The receiver of a mutating method is passed as &mut, so its
+            // binding has to be mut even though the MIR never assigns it.
+            if mutating.contains(callee)
+                && let Some(root) = args.first().and_then(expr_root_local_id)
+            {
+                written.insert(root);
+            }
             for a in args {
-                collect_from_expr(a, types, written);
+                collect_from_expr(a, types, written, mutating);
             }
         }
         MirExpr::IndirectCall { callee, args, .. } => {
-            collect_from_expr(callee, types, written);
+            collect_from_expr(callee, types, written, mutating);
             for a in args {
-                collect_from_expr(a, types, written);
+                collect_from_expr(a, types, written, mutating);
             }
         }
         MirExpr::StructLiteral { fields, .. } => {
             for (_, v) in fields {
-                collect_from_expr(v, types, written);
+                collect_from_expr(v, types, written, mutating);
             }
         }
         MirExpr::Closure { body, .. } => {
-            collect_from_block(body, types, written);
+            collect_from_block(body, types, written, mutating);
         }
         MirExpr::Unit
         | MirExpr::Bool(_)

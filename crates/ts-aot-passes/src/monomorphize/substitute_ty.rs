@@ -14,6 +14,7 @@ pub fn substitute_param(
         id: param.id,
         name: param.name.clone(),
         ty: substitute_type(param.ty, mapping, types, result),
+        optional: param.optional,
     }
 }
 
@@ -84,9 +85,17 @@ pub fn substitute_type(
                 ty
             }
         },
-        Type::Optional { inner } => {
+        Type::Optional { inner, nullish } => {
             let new_inner = substitute_type(inner, mapping, types, result);
-            intern_substituted(ty, types, result, Type::Optional { inner: new_inner })
+            intern_substituted(
+                ty,
+                types,
+                result,
+                Type::Optional {
+                    inner: new_inner,
+                    nullish,
+                },
+            )
         }
         Type::Array { element } => {
             let new_element = substitute_type(element, mapping, types, result);
@@ -99,7 +108,12 @@ pub fn substitute_type(
                 },
             )
         }
-        Type::Fn { params, ret, err } => {
+        Type::Fn {
+            params,
+            optional,
+            ret,
+            err,
+        } => {
             let new_params: Vec<TypeId> = params
                 .iter()
                 .map(|p| substitute_type(*p, mapping, types, result))
@@ -112,6 +126,10 @@ pub fn substitute_type(
                 result,
                 Type::Fn {
                     params: new_params,
+                    // Optionality is a property of the *position*, not of the
+                    // parameter type, so substituting a generic argument must
+                    // not change which arguments may be omitted.
+                    optional: optional.clone(),
                     ret: new_ret,
                     err: new_err,
                 },

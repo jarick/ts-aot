@@ -803,6 +803,39 @@ fn function_body_return_emits_expression() {
 }
 
 #[test]
+fn empty_void_body_emits_empty_block_not_unimplemented() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("noop");
+    f.ret = void_ty;
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("unimplemented"),
+        "an empty void body must not emit `unimplemented!()`, got: {s}"
+    );
+    assert!(s.contains("{ }"), "expected an empty body block, got: {s}");
+}
+
+#[test]
+fn empty_non_void_body_emits_unreachable_not_unimplemented() {
+    let mut types = TypeTable::new();
+    let int_ty = types.intern(&Type::I32);
+    let mut f = empty_func("missing");
+    f.ret = int_ty;
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    assert!(
+        !s.contains("unimplemented"),
+        "an empty non-void body must not emit `unimplemented!()`, got: {s}"
+    );
+    assert!(
+        s.contains("unreachable"),
+        "an empty non-void body must emit `unreachable!()`, got: {s}"
+    );
+}
+
+#[test]
 fn function_body_let_binary_and_return_emits_statements() {
     let mut types = TypeTable::new();
     let int_ty = types.intern(&Type::I32);
@@ -843,6 +876,501 @@ fn function_body_let_binary_and_return_emits_statements() {
     let s = tokens.to_string();
     assert!(s.contains("let total : i32 = 1 + 2"), "got: {s}");
     assert!(s.contains("return total"), "got: {s}");
+}
+
+fn optional_binary_func(name: &str, param_ty: TypeId, ret_ty: TypeId) -> MirFunctionDecl {
+    let mut f = empty_func(name);
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("x"),
+        ty: param_ty,
+    }];
+    f.ret = ret_ty;
+    f
+}
+
+fn opt_eq_body(op: BinaryOp, left: MirExpr, right: MirExpr, bool_ty: TypeId) -> MirBody {
+    MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                ty: bool_ty,
+            }))],
+        },
+    }
+}
+
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+#[test]
+fn eq_null_on_optional_number_emits_is_none() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("isNull", opt_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: opt_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("(x).is_none()"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn ne_null_on_optional_number_emits_is_some() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("isNotNull", opt_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Ne,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: opt_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("(x).is_some()"), "got: {s}");
+    assert!(!norm(&s).contains("!=()"), "got: {s}");
+}
+
+#[test]
+fn eq_null_on_optional_string_emits_is_none() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("isNullStr", opt_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: opt_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("(x).is_none()"), "got: {s}");
+}
+
+#[test]
+fn null_literal_on_the_left_emits_is_none() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("rev", opt_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Null { ty: opt_ty },
+        MirExpr::Local(LocalId::from_raw(0)),
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("(x).is_none()"), "got: {s}");
+}
+
+#[test]
+fn eq_undefined_on_optional_number_emits_is_none_like_null() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("isUndef", opt_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("(x).is_none()"), "got: {s}");
+}
+
+#[test]
+fn eq_of_two_optionals_without_a_literal_is_unchanged() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("bothOpt", opt_ty, bool_ty);
+    f.params.push(MirParam {
+        id: LocalId::from_raw(1),
+        name: Atom::from("y"),
+        ty: opt_ty,
+    });
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Local(LocalId::from_raw(1)),
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(!norm(&s).contains("is_none"), "got: {s}");
+    assert!(norm(&s).contains("x==y"), "got: {s}");
+}
+
+#[test]
+fn loose_eq_of_two_nullish_literals_folds_to_true() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = empty_func("bothNull");
+    f.ret = bool_ty;
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Null { ty: opt_ty },
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(!norm(&s).contains("is_none"), "got: {s}");
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn strict_eq_of_two_nullish_literals_folds_to_false() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = empty_func("bothNullStrict");
+    f.ret = bool_ty;
+    f.body = opt_eq_body(
+        BinaryOp::StrictEq,
+        MirExpr::Null { ty: opt_ty },
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn eq_undefined_with_non_optional_number_folds_to_false() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plainUndef", f64_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+    assert!(!norm(&s).contains("is_none"), "got: {s}");
+}
+
+#[test]
+fn eq_null_with_non_optional_number_folds_to_false() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plain", f64_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: f64_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+    assert!(!norm(&s).contains("is_none"), "got: {s}");
+}
+
+#[test]
+fn ne_null_with_non_optional_number_folds_to_true() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plainNe", f64_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Ne,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: f64_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("!=()"), "got: {s}");
+}
+
+#[test]
+fn eq_null_with_non_optional_string_folds_to_false() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plainStr", string_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: string_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn eq_null_with_null_typed_operand_folds_to_true() {
+    let mut types = TypeTable::new();
+    let null_ty = types.intern(&Type::Null);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("nullOp", null_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: null_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn loose_eq_undefined_with_null_typed_operand_folds_to_true() {
+    let mut types = TypeTable::new();
+    let null_ty = types.intern(&Type::Null);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("nullUndefOp", null_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+}
+
+#[test]
+fn strict_eq_undefined_with_null_typed_operand_folds_to_false() {
+    let mut types = TypeTable::new();
+    let null_ty = types.intern(&Type::Null);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("nullUndefOpStrict", null_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::StrictEq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+}
+
+#[test]
+fn loose_eq_null_with_undefined_typed_operand_folds_to_true() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("voidOp", void_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: void_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn strict_eq_null_with_undefined_typed_operand_folds_to_false() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("voidOpStrict", void_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::StrictEq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: void_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn strict_eq_null_with_non_optional_number_folds_to_false() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plainStrict", f64_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::StrictEq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: f64_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+}
+
+#[test]
+fn strict_ne_null_with_non_optional_number_folds_to_true() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("plainStrictNe", f64_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::StrictNe,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: f64_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("!=()"), "got: {s}");
+}
+
+#[test]
+fn eq_undefined_with_undefined_typed_operand_folds_to_true() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("voidUndefOp", void_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Unit,
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(norm(&s).contains("returntrue"), "got: {s}");
+}
+
+#[test]
+fn eq_null_with_generic_operand_is_unchanged() {
+    let mut types = TypeTable::new();
+    let generic_ty = types.intern(&Type::GenericParam {
+        id: ts_aot_core::GenericParamId::from_raw(0),
+    });
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = optional_binary_func("genericOp", generic_ty, bool_ty);
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Local(LocalId::from_raw(0)),
+        MirExpr::Null { ty: generic_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(!norm(&s).contains("returnfalse"), "got: {s}");
+    assert!(!norm(&s).contains("returntrue"), "got: {s}");
+    assert!(!norm(&s).contains("is_none"), "got: {s}");
+}
+
+#[test]
+fn eq_null_with_call_operand_folds_but_keeps_the_call() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let bool_ty = types.intern(&Type::Bool);
+    let mut f = empty_func("callOp");
+    f.ret = bool_ty;
+    f.body = opt_eq_body(
+        BinaryOp::Eq,
+        MirExpr::Call {
+            callee: FunctionId::from_raw(0),
+            args: Vec::new(),
+            ty: f64_ty,
+        },
+        MirExpr::Null { ty: f64_ty },
+        bool_ty,
+    );
+    let s = emit_function(&f, &types)
+        .expect("function should emit")
+        .to_string();
+    assert!(!norm(&s).contains("==()"), "got: {s}");
+    assert!(
+        norm(&s).contains("let_=&("),
+        "the call operand must still be evaluated for its side effects; got: {s}"
+    );
+    assert!(norm(&s).contains("false"), "got: {s}");
 }
 
 #[test]
@@ -1243,7 +1771,10 @@ fn param_used_in_optional_chain_place_assign_emits_mut() {
     let i32_ty = types.intern(&Type::I32);
     let struct_id = StructId::from_raw(0);
     let obj_ty = types.intern(&Type::Struct { id: struct_id });
-    let opt_ty = types.intern(&Type::Optional { inner: obj_ty });
+    let opt_ty = types.intern(&Type::Optional {
+        inner: obj_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let param = LocalId::from_raw(1);
 
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
@@ -1703,6 +2234,624 @@ fn read_of_string_global_reallocates_in_arena() {
 }
 
 #[test]
+fn optional_string_global_uses_owned_option_string_storage() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let tokens = emit_decls(&prog, &types).expect("optional-string global must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("pubstaticmutgreeting:::core::option::Option<::std::string::String>"),
+        "an optional-string global must be stored as `Option<String>` so a write from a \
+         `string | null` parameter is accepted and the value stays valid after the arena \
+         resets; got: {s}"
+    );
+    assert!(
+        norm.contains("::core::option::Option::None"),
+        "an uninitialized optional-string global must default to `Option::None`; got: {s}"
+    );
+    assert!(
+        !s.contains("'static"),
+        "an optional-string global must not borrow the arena as `'static`; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_to_optional_string_global_converts_to_owned_string() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("setGreeting");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("s"),
+        ty: opt_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("greeting")),
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{greeting=")
+            && norm.contains(".map(")
+            && norm.contains(".to_string_lossy()"),
+        "assigning an `Option<JsString>` to an `Option<String>`-backed global must convert the \
+         inner value through `to_string_lossy` inside the `unsafe` write; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_string_to_optional_string_global_wraps_in_some_owned() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("setGreeting");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("greeting")),
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{greeting=")
+            && norm.contains("::core::option::Option::Some(")
+            && norm.contains(".to_string_lossy()"),
+        "assigning a borrowed `JsString` to an `Option<String>`-backed global must wrap it in \
+         `Some(..to_string_lossy())` inside the `unsafe` write; got: {s}"
+    );
+    assert!(
+        !norm.contains(".map("),
+        "a plain `JsString` source must not be treated as an `Option` and mapped; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_null_to_optional_string_global_writes_none() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("clearGreeting");
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("greeting")),
+                value: MirExpr::Null { ty: opt_ty },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{greeting=::core::option::Option::None"),
+        "assigning `null` to an `Option<String>`-backed global must write `Option::None`; got: {s}"
+    );
+}
+
+#[test]
+fn null_init_of_optional_string_local_emits_none() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("clear");
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(0),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Let {
+                local: LocalId::from_raw(0),
+                ty: opt_ty,
+                init: Some(MirExpr::Null { ty: opt_ty }),
+                mutable: true,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("letmutx:Option<") && norm.contains("=::core::option::Option::None"),
+        "initializing an optional-string local from `null` must emit `Option::None`, not `()`; \
+         got: {s}"
+    );
+}
+
+#[test]
+fn let_of_string_into_optional_string_local_wraps_in_some() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("wrap");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(1),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Let {
+                local: LocalId::from_raw(1),
+                ty: opt_ty,
+                init: Some(MirExpr::Local(LocalId::from_raw(0))),
+                mutable: false,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("letx:Option<") && norm.contains("=::core::option::Option::Some("),
+        "initializing an optional-string local from a `string` must wrap it in `Some(..)`; \
+         got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_string_to_optional_string_local_wraps_in_some() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("set");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("s"),
+        ty: string_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(1),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Local {
+                    id: LocalId::from_raw(1),
+                },
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("x=::core::option::Option::Some("),
+        "assigning a `string` to an optional-string local must wrap it in `Some(..)`; got: {s}"
+    );
+}
+
+#[test]
+fn null_init_of_optional_number_local_emits_none() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("clear");
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(0),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Let {
+                local: LocalId::from_raw(0),
+                ty: opt_ty,
+                init: Some(MirExpr::Null { ty: opt_ty }),
+                mutable: true,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("letmutx:Option<") && norm.contains("=::core::option::Option::None"),
+        "initializing an optional-number local from `null` must emit `Option::None`, not `()`; \
+         got: {s}"
+    );
+}
+
+#[test]
+fn let_of_number_into_optional_number_local_wraps_in_some() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("wrap");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("n"),
+        ty: f64_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(1),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Let {
+                local: LocalId::from_raw(1),
+                ty: opt_ty,
+                init: Some(MirExpr::Local(LocalId::from_raw(0))),
+                mutable: false,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("letx:Option<") && norm.contains("=::core::option::Option::Some("),
+        "initializing an optional-number local from a `number` must wrap it in `Some(..)`; got: {s}"
+    );
+}
+
+#[test]
+fn let_of_int_literal_into_optional_number_local_coerces_the_inner_value() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("wrap");
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(0),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Let {
+                local: LocalId::from_raw(0),
+                ty: opt_ty,
+                init: Some(MirExpr::Int {
+                    value: 3,
+                    ty: i64_ty,
+                }),
+                mutable: false,
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("=::core::option::Option::Some(3.0)"),
+        "an `int` literal assigned to an optional-number local must be coerced to the inner \
+         `f64` inside `Some(..)`; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_number_to_optional_number_local_wraps_in_some() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut f = empty_func("set");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("n"),
+        ty: f64_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: LocalId::from_raw(1),
+            name: Atom::from("x"),
+            ty: opt_ty,
+            mutable: true,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Local {
+                    id: LocalId::from_raw(1),
+                },
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    let tokens = emit_function(&f, &types).expect("function should emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("x=::core::option::Option::Some("),
+        "assigning a `number` to an optional-number local must wrap it in `Some(..)`; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_number_to_optional_number_global_wraps_in_some() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("g"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("setG");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("n"),
+        ty: f64_ty,
+    }];
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("g")),
+                value: MirExpr::Local(LocalId::from_raw(0)),
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{g=::core::option::Option::Some("),
+        "assigning a `number` to an optional-number global must wrap it in `Some(..)` inside the \
+         `unsafe` write; got: {s}"
+    );
+}
+
+#[test]
+fn assignment_of_null_to_optional_number_global_writes_none() {
+    let mut types = TypeTable::new();
+    let f64_ty = types.intern(&Type::F64);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let void_ty = types.intern(&Type::Void);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("g"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("clearG");
+    f.ret = void_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Assign {
+                target: MirPlace::Global(Atom::from("g")),
+                value: MirExpr::Null { ty: opt_ty },
+            }],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("assignment must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("unsafe{g=::core::option::Option::None"),
+        "assigning `null` to an optional-number global must write `Option::None`; got: {s}"
+    );
+}
+
+#[test]
+fn read_of_optional_string_global_reallocates_in_arena() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let opt_ty = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("greeting"),
+        ty: opt_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let mut f = empty_func("getGreeting");
+    f.ret = opt_ty;
+    f.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Global(Atom::from(
+                "greeting",
+            ))))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("read must emit");
+    let s = tokens.to_string();
+    let norm: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("as_ref().map(") && norm.contains("alloc_str("),
+        "reading an `Option<String>`-backed global must reallocate the inner `JsString` in the \
+         current arena; got: {s}"
+    );
+    assert!(
+        norm.contains("addr_of!(greeting)"),
+        "reading a mutable `Option<String>`-backed global must go through `addr_of!`; got: {s}"
+    );
+}
+
+#[test]
+fn struct_global_with_a_borrowed_string_field_is_rejected() {
+    let mut types = TypeTable::new();
+    let string_ty = types.intern(&Type::String);
+    let sid = StructId::from_raw(9);
+    let struct_ty = types.intern(&Type::Struct { id: sid });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: sid,
+        name: Atom::from("Holder"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("s"),
+            ty: string_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Global(MirGlobalDecl {
+        name: Atom::from("holder"),
+        ty: struct_ty,
+        mutable: true,
+        visibility: Visibility::Public,
+        export_name: None,
+        init: None,
+    }));
+    let err = emit_decls(&prog, &types).expect_err(
+        "a struct global with a borrowed string field must be rejected: a `static` cannot hold \
+         arena-borrowing data it has no owned representation for",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("static") && msg.contains("string"),
+        "the borrowed-struct-global rejection must explain that the type cannot live in a \
+         `static` and mention the supported `string`/`string | null` forms; got: {msg}"
+    );
+}
+
+#[test]
 fn read_of_immutable_global_is_not_wrapped_in_unsafe() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
@@ -1848,8 +2997,14 @@ fn array_len_maps_over_optional_chain_receiver() {
     let mut types = TypeTable::new();
     let i64_ty = types.intern(&Type::I64);
     let arr_ty = types.intern(&Type::Array { element: i64_ty });
-    let opt_arr_ty = types.intern(&Type::Optional { inner: arr_ty });
-    let opt_i64_ty = types.intern(&Type::Optional { inner: i64_ty });
+    let opt_arr_ty = types.intern(&Type::Optional {
+        inner: arr_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let opt_i64_ty = types.intern(&Type::Optional {
+        inner: i64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let arr_param = LocalId::from_raw(0);
     let temp = LocalId::from_raw(1);
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
@@ -2316,7 +3471,10 @@ fn emit_type_for_unknown_id_emits_placeholder() {
 fn emit_type_optional_resolves_inner_via_table() {
     let mut types = TypeTable::new();
     let i32_id = types.intern(&Type::I32);
-    let opt_id = types.intern(&Type::Optional { inner: i32_id });
+    let opt_id = types.intern(&Type::Optional {
+        inner: i32_id,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let tokens = emit_type_id(opt_id, &types);
     assert_eq!(tokens.to_string(), "Option < i32 >");
 }
@@ -2718,7 +3876,10 @@ fn indirect_call_emits_callee_args_for_known_callee() {
 fn indirect_call_with_optional_chain_callee_emits_as_ref_map_call() {
     let mut types = TypeTable::new();
     let int_ty = types.intern(&Type::I64);
-    let opt_int = types.intern(&Type::Optional { inner: int_ty });
+    let opt_int = types.intern(&Type::Optional {
+        inner: int_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let obj = LocalId::from_raw(0);
     let mut f = empty_func("caller");
     f.ret = int_ty;
@@ -2761,7 +3922,10 @@ fn assignment_to_optional_chain_field_emits_is_some_branch() {
     let mut types = TypeTable::new();
     let point = StructId::from_raw(0);
     let point_ty = types.intern(&Type::Struct { id: point });
-    let opt = types.intern(&Type::Optional { inner: point_ty });
+    let opt = types.intern(&Type::Optional {
+        inner: point_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Struct(MirStructDecl {
         id: point,
@@ -2856,7 +4020,10 @@ fn optional_chain_field_with_optional_base_emits_as_ref_map() {
     let mut types = TypeTable::new();
     let point = StructId::from_raw(0);
     let point_ty = types.intern(&Type::Struct { id: point });
-    let opt = types.intern(&Type::Optional { inner: point_ty });
+    let opt = types.intern(&Type::Optional {
+        inner: point_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(MirDecl::Struct(MirStructDecl {
         id: point,
@@ -2902,11 +4069,193 @@ fn optional_chain_field_with_optional_base_emits_as_ref_map() {
     );
 }
 
+/// `c?.n` where the field itself is optional (`n: number | null`) yields exactly
+/// one level of absence in JavaScript ("receiver was nullish" and "the field is
+/// null" are the same absent value), so the emission must flatten with
+/// `and_then`; `map` would nest `Option<Option<T>>` and not type-check against
+/// the flattened return type.
+#[test]
+fn optional_chain_field_with_optional_declared_field_emits_and_then() {
+    let mut types = TypeTable::new();
+    let point = StructId::from_raw(0);
+    let point_ty = types.intern(&Type::Struct { id: point });
+    let opt = types.intern(&Type::Optional {
+        inner: point_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let f64_ty = types.intern(&Type::F64);
+    let opt_f64 = types.intern(&Type::Optional {
+        inner: f64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("n"),
+            ty: opt_f64,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let local = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = opt_f64;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: local,
+            name: Atom::from("obj"),
+            ty: opt,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Field {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: opt,
+                }),
+                field: FieldId::from_raw(0),
+                ty: opt_f64,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("OptionalChain field must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("obj . as_ref () . and_then (| o | o . n)"),
+        "an optional declared field must flatten to one `Option` via `and_then` \
+         (a `map` would produce `Option<Option<f64>>`). Got: {s}"
+    );
+}
+
+/// A non-`Copy` optional field still flattens, but the access inside the closure
+/// must clone out of the shared reference (`o: &C`).
+#[test]
+fn optional_chain_non_copy_optional_field_emits_and_then_with_clone() {
+    let mut types = TypeTable::new();
+    let point = StructId::from_raw(0);
+    let point_ty = types.intern(&Type::Struct { id: point });
+    let opt = types.intern(&Type::Optional {
+        inner: point_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let string_ty = types.intern(&Type::String);
+    let opt_string = types.intern(&Type::Optional {
+        inner: string_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: point,
+        name: Atom::from("Point"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("s"),
+            ty: opt_string,
+            mutable: false,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let local = LocalId::from_raw(0);
+    let mut f = empty_func("caller");
+    f.ret = opt_string;
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: local,
+            name: Atom::from("obj"),
+            ty: opt,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Field {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: opt,
+                }),
+                field: FieldId::from_raw(0),
+                ty: opt_string,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("OptionalChain field must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("obj . as_ref () . and_then (| o | o . s . clone ())"),
+        "a non-Copy optional field must be cloned inside the `and_then` closure, so the \
+         generated Rust compiles. Got: {s}"
+    );
+}
+
+/// The same flattening rule for an optional *element*: `arr?.[i]` on a
+/// `(number | null)[]` must not nest, so the element type is read from the
+/// receiver's array type (the access expression's own type is already flattened).
+#[test]
+fn optional_chain_index_with_optional_element_emits_and_then() {
+    let mut types = TypeTable::new();
+    let i64_ty = types.intern(&Type::I64);
+    let opt_i64 = types.intern(&Type::Optional {
+        inner: i64_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let arr_ty = types.intern(&Type::Array { element: opt_i64 });
+    let opt_arr = types.intern(&Type::Optional {
+        inner: arr_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let local = LocalId::from_raw(0);
+    let idx_local = LocalId::from_raw(1);
+    let mut f = empty_func("caller");
+    f.ret = opt_i64;
+    f.body = MirBody {
+        locals: vec![
+            MirLocalDecl {
+                id: local,
+                name: Atom::from("arr"),
+                ty: opt_arr,
+                mutable: false,
+            },
+            MirLocalDecl {
+                id: idx_local,
+                name: Atom::from("i"),
+                ty: i64_ty,
+                mutable: false,
+            },
+        ],
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Index {
+                base: Box::new(MirExpr::OptionalChain {
+                    base: Box::new(MirExpr::Local(local)),
+                    ty: opt_arr,
+                }),
+                index: Box::new(MirExpr::Local(idx_local)),
+                ty: opt_i64,
+            }))],
+        },
+    };
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("OptionalChain index must emit");
+    let s = tokens.to_string();
+    assert!(
+        s.contains("arr . as_ref () . and_then (| o | o [i as usize])"),
+        "an optional array element must flatten to one `Option` via `and_then`. Got: {s}"
+    );
+}
+
 #[test]
 fn optional_chain_index_with_optional_base_emits_as_ref_map() {
     let mut types = TypeTable::new();
     let inner = types.intern(&Type::I64);
-    let opt = types.intern(&Type::Optional { inner });
+    let opt = types.intern(&Type::Optional {
+        inner,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let mut prog = MirProgram::new(ModuleId::from_raw(0));
     let local = LocalId::from_raw(0);
     let idx_local = LocalId::from_raw(1);
@@ -5448,11 +6797,13 @@ fn function_typed_param_and_return_exclude_function_from_dispatch_table() {
     let i64_ty = types.intern(&Type::I64);
     let fn_param_ty = types.intern(&Type::Fn {
         params: vec![i64_ty],
+        optional: vec![false],
         ret: i64_ty,
         err: None,
     });
     let fn_return_ty = types.intern(&Type::Fn {
         params: vec![],
+        optional: vec![],
         ret: i64_ty,
         err: None,
     });
@@ -5500,6 +6851,7 @@ fn function_typed_param_emits_fn_value_enum() {
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
         params: vec![i64_ty],
+        optional: vec![false],
         ret: i64_ty,
         err: None,
     });
@@ -5531,6 +6883,7 @@ fn function_typed_return_emits_fn_value_enum() {
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
         params: vec![i64_ty],
+        optional: vec![false],
         ret: i64_ty,
         err: None,
     });
@@ -5558,6 +6911,7 @@ fn fn_value_let_local_emits_enum() {
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
         params: vec![],
+        optional: vec![],
         ret: i64_ty,
         err: None,
     });
@@ -5604,6 +6958,7 @@ fn fn_value_enum_and_call_helper_are_emitted() {
     let i64_ty = types.intern(&Type::I64);
     let fn_ty = types.intern(&Type::Fn {
         params: vec![i64_ty],
+        optional: vec![false],
         ret: i64_ty,
         err: None,
     });
@@ -6473,7 +7828,10 @@ fn closure_param_assigned_via_optional_chain_place_emits_mut() {
     let i32_ty = types.intern(&Type::I32);
     let struct_id = StructId::from_raw(0);
     let obj_ty = types.intern(&Type::Struct { id: struct_id });
-    let opt_ty = types.intern(&Type::Optional { inner: obj_ty });
+    let opt_ty = types.intern(&Type::Optional {
+        inner: obj_ty,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let param_id = LocalId::from_raw(0);
 
     let mut f = empty_func("make_closure_optional_chain");

@@ -114,25 +114,31 @@ fn emit_hir_skips_mir_conversion_for_hir_only_valid_input() {
 }
 
 #[test]
-fn parameter_default_value_is_reported_as_ignored() {
-    let opts = CompileOptions::with_emit(EmitStage::Hir);
+fn parameter_default_value_is_applied_in_the_callee() {
+    let opts = CompileOptions::with_emit(EmitStage::Rust);
     let out = Driver::new().compile_source(
         "test.ts",
-        "export function f(x: number = 1): number { return x; }",
+        "function add(x: number = 1, y: number = x + 1): number { return x + y; } \
+         export function run(): number { return add() + add(10); }",
         &opts,
     );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     assert!(
-        !out.has_errors(),
-        "a parameter default must be a warning, not an error; got {:?}",
+        !out.diagnostics.iter().any(|d| d.code.as_str() == "P0017"),
+        "a parameter default is supported and must not be reported as ignored; got {:?}",
         out.diagnostics
     );
+    let rust = out.rust_source.expect("rust_source");
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        out.diagnostics.iter().any(|d| d.code.as_str() == "P0017"),
-        "a parameter default must be reported as ignored (P0017), got {:?}",
-        out.diagnostics
+        norm.contains("is_some()"),
+        "the default must be applied through the optional ABI parameter; got:\n{rust}"
+    );
+    assert!(
+        norm.contains("+1.0"),
+        "the default expression must be emitted; got:\n{rust}"
     );
 }
-
 #[test]
 fn destructured_parameter_default_value_is_reported_as_ignored() {
     let opts = CompileOptions::with_emit(EmitStage::Hir);
@@ -173,7 +179,7 @@ fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
     let opts = CompileOptions::with_emit(EmitStage::Mir);
     let out = Driver::new().compile_source(
         "test.ts",
-        "function f(c: i64): never { throw c > 0 ? throwingFn() : 0; } \
+        "function f(c: i64): i64 { throw c > 0 ? throwingFn() : 0; } \
          function throwingFn(): i64 { return 0; }",
         &opts,
     );
@@ -185,14 +191,28 @@ fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
     let text = out
         .mir_text
         .expect("emit-mir must populate mir_text for e2e ternary throws check");
-    let throws_id = parse_throws_id(&text, "f").unwrap_or_else(|| {
+    // `throws N` must be present (the sentinel-free `unwrap_or_else` above is the
+    // presence check). The id itself cannot be compared against zero: `TypeId`s
+    // are interned per module, so the error type may legitimately be id 0. What
+    // the sentinel bug actually broke was the *type* (it resolved to `()`), so
+    // the Rust signature is what pins this down.
+    let _throws_id = parse_throws_id(&text, "f").unwrap_or_else(|| {
         panic!(
             "MIR dump must contain `fn #0 f(c: ...) -> ... throws N` for function f; got:\n{text}"
         )
     });
+    let rust_out = Driver::new().compile_source(
+        "test.ts",
+        "function f(c: i64): i64 { throw c > 0 ? throwingFn() : 0; } \
+         function throwingFn(): i64 { return 0; }",
+        &CompileOptions::with_emit(EmitStage::Rust),
+    );
+    let rust = rust_out
+        .rust_source
+        .expect("emit-rust must populate rust_source for the throws signature check");
     assert!(
-        throws_id > 0,
-        "MIR dump must show `throws N` with N > 0 — `throw c > 0 ? throwingFn() : 0` must propagate the Ternary's `ty` through throw_expr_type, not the TypeId::from_raw(0) sentinel; got:\n{text}"
+        rust.contains("Result < i64 , i64 >") || rust.contains("Result<i64, i64>"),
+        "`f` must propagate the thrown `i64` (a real type, not the TypeId::from_raw(0) sentinel); got:\n{rust}"
     );
     assert!(
         text.contains("can_throw: true"),
@@ -293,8 +313,10 @@ fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
 #[test]
 fn e2e_array_length_borrows_plain_and_maps_optional_receiver() {
     for src in [
-        "function f(a: i32[] | null): i64 | null { return a?.length; }",
-        "function f(a: i32[] | null): i64 | null { return a?.len(); }",
+        // `a?.length` is `i64 | undefined` (JavaScript yields `undefined` when the
+        // chain short-circuits), so the declared type must admit `undefined`.
+        "function f(a: i32[] | null): i64 | null | undefined { return a?.length; }",
+        "function f(a: i32[] | null): i64 | null | undefined { return a?.len(); }",
     ] {
         let out = compile(src);
         assert!(
@@ -1317,11 +1339,11 @@ fn e2e_accessor_ordinary_name_collision_stays_e0300() {
 
 #[test]
 fn e2e_static_method_this_is_reported_as_unsupported() {
-    let out = compile("class C { static f(): i64 { return this; } }");
+    let out = compile("class C { static f() { return this; } }");
     assert!(
         !out.has_errors(),
-        "`this` in a static method lowers to `undefined`, which must not be a hard error; \
-         got {:?}",
+        "`this` in a static method lowers to `undefined`, which must not be a hard error when the \
+         function has no declared return type; got {:?}",
         out.diagnostics
     );
     let combined: String = out
@@ -1338,6 +1360,28 @@ fn e2e_static_method_this_is_reported_as_unsupported() {
 }
 
 #[test]
+fn e2e_static_method_this_cannot_satisfy_a_non_optional_return_type() {
+    let out = compile("class C { static f(): i64 { return this; } }");
+    let combined: String = out
+        .diagnostics
+        .iter()
+        .map(|d| format!("{d:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        combined.contains("P0014"),
+        "the unsupported-`this` warning must still be reported; got:\n{combined}"
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "P0018" && d.severity == Severity::Error),
+        "the `undefined` placeholder cannot satisfy `i64`, so the function must be rejected \
+         instead of emitting `return ()` inside a `-> i64` function; got:\n{combined}"
+    );
+}
+
+#[test]
 fn e2e_instance_method_this_still_resolves_to_self() {
     let out = compile("class C { x: i64 = 0; f(): i64 { return this.x; } }");
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
@@ -1350,10 +1394,11 @@ fn e2e_instance_method_this_still_resolves_to_self() {
 
 #[test]
 fn e2e_top_level_this_is_reported_as_unsupported() {
-    let out = compile("function g(): i64 { return this; }");
+    let out = compile("function g() { return this; }");
     assert!(
         !out.has_errors(),
-        "top-level `this` lowers to `undefined`, which must not be a hard error; got {:?}",
+        "top-level `this` lowers to `undefined`, which must not be a hard error when the function \
+         has no declared return type; got {:?}",
         out.diagnostics
     );
     let combined: String = out
@@ -1464,8 +1509,8 @@ fn e2e_setter_assignment_evaluates_to_assigned_value() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__set_y (c"),
-        "the setter must be invoked, got:\n{rust}"
+        rust.contains("C__set_y (& mut (c)"),
+        "the setter must be invoked on the caller's instance (borrowed), got:\n{rust}"
     );
     assert!(
         !rust.contains("z = C__set_y"),
@@ -1486,8 +1531,8 @@ fn e2e_accessor_compound_update_routes_through_getter_and_setter() {
         "a compound accessor update must read through the getter, got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (c"),
-        "a compound accessor update must write through the setter, got:\n{rust}"
+        rust.contains("C__set_y (& mut (c)"),
+        "a compound accessor update must write through the setter on the caller's instance, got:\n{rust}"
     );
 }
 
@@ -1505,10 +1550,12 @@ fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
         "a global receiver must be forwarded without an intermediate by-value temp (a direct \
          clone is used because moving out of a static is E0507), got:\n{rust}"
     );
+    // The setter borrows its receiver, but a global is read through a clone (a
+    // static cannot be borrowed mutably), so the update to the global is still
+    // discarded - the same as before this call became a borrow.
     assert!(
-        rust.contains("C__set_y (g . clone () ,"),
-        "a global receiver must be forwarded to the setter as-is (cloned, not spilled into a \
-         temp), got:\n{rust}"
+        rust.contains("C__set_y (& mut (g . clone ()) ,"),
+        "a global receiver is forwarded to the setter without an intermediate temp, got:\n{rust}"
     );
 }
 

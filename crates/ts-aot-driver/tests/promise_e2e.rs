@@ -237,6 +237,66 @@ fn e2e_promise_resolve_of_call_returning_promise_adopts_argument() {
 }
 
 #[test]
+fn e2e_nested_promise_resolve_adopts_the_inner_promise_once() {
+    let opts = CompileOptions {
+        module: false,
+        ..CompileOptions::default()
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f(): void { const p = Promise.resolve(Promise.resolve(1)); p; }",
+        &opts,
+    );
+    assert!(!out.has_errors(), "must compile; got {:?}", out.diagnostics);
+    let rust_raw = out
+        .rust_source
+        .expect("emit-rust must populate rust_source");
+    check_generated_crate("promise_resolve_nested", &rust_raw);
+    let rust = common::normalize_rust(&rust_raw);
+    assert_eq!(
+        rust.matches("__ts_aot_promise_resolve_value").count(),
+        1,
+        "`Promise.resolve(Promise.resolve(1))` adopts the inner promise; the outer call must not \
+         emit a second resolve that passes a `Promise<i64>` where `i64` is expected; got:\n{rust}"
+    );
+    assert!(
+        !rust.contains("Promise<Promise"),
+        "the adopted promise must keep its own type instead of wrapping it in another Promise; \
+         got:\n{rust}"
+    );
+}
+
+#[test]
+fn e2e_promise_resolve_of_a_promise_local_adopts_the_argument() {
+    let opts = CompileOptions {
+        module: false,
+        ..CompileOptions::default()
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f(x: Promise<number>): void { const p = Promise.resolve(x); p; }",
+        &opts,
+    );
+    assert!(!out.has_errors(), "must compile; got {:?}", out.diagnostics);
+    let rust_raw = out
+        .rust_source
+        .expect("emit-rust must populate rust_source");
+    check_generated_crate("promise_resolve_adopt_local", &rust_raw);
+    let rust = common::normalize_rust(&rust_raw);
+    assert!(
+        !rust.contains("__ts_aot_promise_resolve_value"),
+        "`Promise.resolve(<promise local>)` adopts the argument; recovering the local's type must \
+         not re-resolve `Promise<T>` into `Promise<Promise<T>>` (which does not compile); \
+         got:\n{rust}"
+    );
+    assert!(
+        rust.contains("let p : ts_aot_runtime::Promise<f64>"),
+        "the adopted local promise must keep the concrete promise type of the argument; \
+         got:\n{rust}"
+    );
+}
+
+#[test]
 fn e2e_promise_resolve_ok_type_is_interning_order_independent() {
     let opts = CompileOptions {
         module: false,
@@ -870,6 +930,31 @@ fn e2e_discarded_promise_resolve_inside_a_closure_is_not_a_false_positive() {
         !out.has_errors(),
         "a discarded `Promise.resolve()` inside a closure body has no expected type, so it must \
          not be checked against the enclosing function's `Promise<number>`; got {:?}",
+        out.diagnostics
+    );
+}
+
+#[test]
+fn e2e_closure_without_its_own_return_type_does_not_inherit_the_enclosing_one() {
+    let opts = CompileOptions {
+        module: false,
+        ..CompileOptions::default()
+    };
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "export function f(): Promise<number> { \
+            const n: number = 1; \
+            const g = () => { n; return Promise.resolve(); }; \
+            g; \
+            return Promise.resolve(1); \
+         }",
+        &opts,
+    );
+    assert!(
+        !out.has_errors(),
+        "an unannotated closure with no contextual type must not check its body against the \
+         enclosing function's `Promise<number>`; that leak produced a spurious E0506 against \
+         `Promise<void>`; got {:?}",
         out.diagnostics
     );
 }

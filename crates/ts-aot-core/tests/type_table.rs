@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use ts_aot_core::{Atom, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, NullishKinds, StructId, Type, TypeId, TypeTable};
 
 #[test]
 fn intern_returns_same_id_for_same_type() {
@@ -49,9 +49,36 @@ fn empty_table_has_no_types() {
 fn optional_dedups_by_inner() {
     let mut table = TypeTable::new();
     let inner = table.intern(&Type::I32);
-    let a = table.intern(&Type::Optional { inner });
-    let b = table.intern(&Type::Optional { inner });
+    let a = table.intern(&Type::Optional {
+        inner,
+        nullish: NullishKinds::BOTH,
+    });
+    let b = table.intern(&Type::Optional {
+        inner,
+        nullish: NullishKinds::BOTH,
+    });
     assert_eq!(a, b);
+}
+
+#[test]
+fn optional_distinguishes_by_nullish_kind() {
+    let mut table = TypeTable::new();
+    let inner = table.intern(&Type::I32);
+    let null_only = table.intern(&Type::Optional {
+        inner,
+        nullish: NullishKinds::NULL_ONLY,
+    });
+    let undefined_only = table.intern(&Type::Optional {
+        inner,
+        nullish: NullishKinds::UNDEFINED_ONLY,
+    });
+    let both = table.intern(&Type::Optional {
+        inner,
+        nullish: NullishKinds::BOTH,
+    });
+    assert_ne!(null_only, undefined_only);
+    assert_ne!(null_only, both);
+    assert_ne!(undefined_only, both);
 }
 
 #[test]
@@ -59,9 +86,11 @@ fn optional_distinguishes_by_inner() {
     let mut table = TypeTable::new();
     let a = table.intern(&Type::Optional {
         inner: TypeId::from_raw(1),
+        nullish: NullishKinds::BOTH,
     });
     let b = table.intern(&Type::Optional {
         inner: TypeId::from_raw(2),
+        nullish: NullishKinds::BOTH,
     });
     assert_ne!(a, b);
 }
@@ -83,16 +112,53 @@ fn fn_dedups_by_full_signature() {
     let ret = table.intern(&Type::Bool);
     let a = table.intern(&Type::Fn {
         params: vec![p1, p2],
+        optional: vec![false, true],
         ret,
         err: None,
     });
     let b = table.intern(&Type::Fn {
         params: vec![p1, p2],
+        optional: vec![false, true],
         ret,
         err: None,
     });
     assert_eq!(a, b);
     assert_eq!(table.len(), 4);
+}
+
+#[test]
+fn fn_interns_optional_flags_separately() {
+    let mut table = TypeTable::new();
+    let p1 = table.intern(&Type::I32);
+    let p2 = table.intern(&Type::I64);
+    let ret = table.intern(&Type::Bool);
+    let required = table.intern(&Type::Fn {
+        params: vec![p1, p2],
+        optional: vec![false, false],
+        ret,
+        err: None,
+    });
+    let second_omittable = table.intern(&Type::Fn {
+        params: vec![p1, p2],
+        optional: vec![false, true],
+        ret,
+        err: None,
+    });
+    assert_ne!(
+        required, second_omittable,
+        "`(a: i32, b: i64)` and `(a: i32, b?: i64)` must not share a TypeId: the optional flags \
+         are part of the signature and of its `Hash`/`Eq`"
+    );
+    let again = table.intern(&Type::Fn {
+        params: vec![p1, p2],
+        optional: vec![false, true],
+        ret,
+        err: None,
+    });
+    assert_eq!(
+        again, second_omittable,
+        "same flags must dedup to one TypeId"
+    );
 }
 
 #[test]
@@ -103,11 +169,13 @@ fn fn_distinguishes_by_param_order() {
     let ret = table.intern(&Type::Bool);
     let a = table.intern(&Type::Fn {
         params: vec![p1, p2],
+        optional: vec![],
         ret,
         err: None,
     });
     let b = table.intern(&Type::Fn {
         params: vec![p2, p1],
+        optional: vec![],
         ret,
         err: None,
     });
@@ -175,8 +243,14 @@ fn promise_dedups_by_ok_and_err() {
 fn intern_with_dependent_types_dedups() {
     let mut table = TypeTable::new();
     let i32_id = table.intern(&Type::I32);
-    let opt1 = table.intern(&Type::Optional { inner: i32_id });
-    let opt2 = table.intern(&Type::Optional { inner: i32_id });
+    let opt1 = table.intern(&Type::Optional {
+        inner: i32_id,
+        nullish: NullishKinds::BOTH,
+    });
+    let opt2 = table.intern(&Type::Optional {
+        inner: i32_id,
+        nullish: NullishKinds::BOTH,
+    });
     assert_eq!(opt1, opt2);
     let arr = table.intern(&Type::Array { element: opt1 });
     let arr2 = table.intern(&Type::Array { element: opt2 });
@@ -187,7 +261,6 @@ fn intern_with_dependent_types_dedups() {
 fn arb_simple_type() -> impl Strategy<Value = Type> {
     prop_oneof![
         Just(Type::Void),
-        Just(Type::Never),
         Just(Type::Bool),
         Just(Type::I8),
         Just(Type::I16),
@@ -202,8 +275,13 @@ fn arb_simple_type() -> impl Strategy<Value = Type> {
         Just(Type::String),
         Just(Type::Null),
         Just(Type::Error),
-        (0u32..64, 0u32..64).prop_map(|(inner, _)| Type::Optional {
-            inner: TypeId::from_raw(inner)
+        (0u32..64, 0u32..3).prop_map(|(inner, kind)| Type::Optional {
+            inner: TypeId::from_raw(inner),
+            nullish: match kind {
+                0 => NullishKinds::NULL_ONLY,
+                1 => NullishKinds::UNDEFINED_ONLY,
+                _ => NullishKinds::BOTH,
+            },
         }),
         (0u32..64).prop_map(|id| Type::Struct {
             id: StructId::from_raw(id)

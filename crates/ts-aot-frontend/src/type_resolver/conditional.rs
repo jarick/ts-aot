@@ -17,7 +17,9 @@ pub(super) fn resolve_conditional(
     resolve_branch(&c.extends_type, "extends", types, lookup, diagnostics);
     resolve_branch(&c.true_type, "true", types, lookup, diagnostics);
     resolve_branch(&c.false_type, "false", types, lookup, diagnostics);
-    types.intern(&Type::Never)
+    // The conditional type is not resolved; `Error` is the same "unknown type"
+    // marker the rest of the frontend uses.
+    types.intern(&Type::Error)
 }
 
 fn resolve_branch(
@@ -39,7 +41,7 @@ fn resolve_branch(
                 "E0400",
                 format!(
                     "conditional type `{label}` branch did not resolve to a concrete type; \
-                     treating whole conditional as `never`"
+                     treating the whole conditional as an unresolved type"
                 ),
                 span,
             ));
@@ -55,7 +57,8 @@ fn report_unsupported_conditional_types(
         diag.push(Diagnostic::warning(
             "E0407",
             "conditional type `T extends U ? A : B` is not supported in Phase 4 — \
-             requires distributive type checker; falling back to `never`",
+             requires distributive type checker; the whole conditional resolves to the \
+             unresolved (error) type",
             core_span_from_oxc(c.span),
         ));
     }

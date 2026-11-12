@@ -14,14 +14,19 @@ fn end_to_end_optional_chain_field_emit_uses_as_ref_map() {
     });
     let opt_point = types.intern(&Type::Optional {
         inner: point_struct,
+        nullish: ts_aot_core::NullishKinds::BOTH,
     });
-    let opt_i64 = types.intern(&Type::Optional { inner: point });
+    let opt_i64 = types.intern(&Type::Optional {
+        inner: point,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     let fn_name = Atom::new_inline("getX");
     let obj_local = LocalId::from_raw(0);
     let mut hir = HirProgram::new(ModuleId::from_raw(0));
     hir.declarations.push(HirDecl::Function(HirFunction {
         name: fn_name,
         params: vec![HirParam {
+            optional: false,
             id: ts_aot_core::LocalId::from_raw(0),
             name: Atom::new_inline("obj"),
             ty: opt_point,

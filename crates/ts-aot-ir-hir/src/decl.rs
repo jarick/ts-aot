@@ -16,6 +16,7 @@ pub struct HirParam {
     pub id: LocalId,
     pub name: Atom,
     pub ty: TypeId,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

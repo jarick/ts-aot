@@ -26,7 +26,7 @@ mod string_dispatch;
 mod symbol_dispatch;
 mod template;
 mod typed_array_dispatch;
-mod util;
+pub(super) mod util;
 pub(crate) mod weakmap_dispatch;
 
 impl ExprConverter {
@@ -107,7 +107,10 @@ impl ExprConverter {
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
                 let field_ty = match types.resolve(owner.ty()) {
                     Some(Type::AsyncGenYield { inner }) => match field_name.as_str() {
-                        "value" => types.intern(&Type::Optional { inner: *inner }),
+                        "value" => types.intern(&Type::Optional {
+                            inner: *inner,
+                            nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+                        }),
                         "done" => types.intern(&Type::Bool),
                         _ => *ty,
                     },

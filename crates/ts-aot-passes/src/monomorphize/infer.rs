@@ -86,11 +86,30 @@ pub fn bind_param_ty_resolved(
                 found.insert(id, arg_ty);
             }
         }
-        Type::Optional { inner } => {
-            if let Some(Type::Optional { inner: arg_inner }) = types.resolve(arg_ty).cloned()
-                && let Some(inner_resolved) = types.resolve(inner).cloned()
-            {
-                bind_param_ty_resolved(inner_resolved, Some(arg_inner), found, conflicted, types);
+        Type::Optional { inner, .. } => {
+            let Some(inner_resolved) = types.resolve(inner).cloned() else {
+                return;
+            };
+            match types.resolve(arg_ty).cloned() {
+                // An optional argument matches the parameter's inner type.
+                Some(Type::Optional {
+                    inner: arg_inner, ..
+                }) => {
+                    bind_param_ty_resolved(
+                        inner_resolved,
+                        Some(arg_inner),
+                        found,
+                        conflicted,
+                        types,
+                    );
+                }
+                // A plain argument matches it as well: `id(1)` binds `T` for
+                // `function id<T>(x: T | undefined)`. A nullish literal or an
+                // unknown type is not a type for `T`, so it binds nothing.
+                Some(Type::Null | Type::Void | Type::Error) | None => {}
+                Some(_) => {
+                    bind_param_ty_resolved(inner_resolved, Some(arg_ty), found, conflicted, types);
+                }
             }
         }
         Type::Array { element } => {
@@ -112,11 +131,15 @@ pub fn bind_param_ty_resolved(
             params: fn_params,
             ret,
             err,
+            // Which parameters may be omitted does not constrain inference: the
+            // generic is bound from the parameter *types*.
+            optional: _,
         } => {
             if let Some(Type::Fn {
                 params: arg_params,
                 ret: arg_ret,
                 err: arg_err,
+                ..
             }) = types.resolve(arg_ty).cloned()
             {
                 for (p, a) in fn_params.iter().zip(arg_params.iter()) {
@@ -186,9 +209,11 @@ pub fn type_resolved(ty: TypeId, types: &TypeTable) -> bool {
     };
     match resolved {
         Type::GenericParam { .. } => false,
-        Type::Optional { inner } => type_resolved(*inner, types),
+        Type::Optional { inner, .. } => type_resolved(*inner, types),
         Type::Array { element } => type_resolved(*element, types),
-        Type::Fn { params, ret, err } => {
+        Type::Fn {
+            params, ret, err, ..
+        } => {
             params.iter().all(|p| type_resolved(*p, types))
                 && type_resolved(*ret, types)
                 && err.is_none_or(|e| type_resolved(e, types))

@@ -1,6 +1,6 @@
 use oxc_ast::ast::TSTupleElement;
 use oxc_span::GetSpan;
-use ts_aot_core::{Diagnostic, DiagnosticBag, Type, TypeId, TypeTable};
+use ts_aot_core::{Diagnostic, DiagnosticBag, NullishKinds, Type, TypeId, TypeTable};
 
 use crate::util::core_span_from_oxc;
 
@@ -19,17 +19,22 @@ pub(super) fn resolve_union(
             .unwrap_or_else(|| types.intern(&Type::Error));
         variants.push(id);
     }
-    if let Some(inner) = nullable_inner(&variants, types) {
-        return types.intern(&Type::Optional { inner });
+    if let Some((inner, nullish)) = nullable_inner(&variants, types) {
+        return types.intern(&Type::Optional { inner, nullish });
     }
     types.intern(&Type::Union { variants })
 }
 
-fn nullable_inner(variants: &[TypeId], types: &TypeTable) -> Option<TypeId> {
+fn nullable_inner(variants: &[TypeId], types: &TypeTable) -> Option<(TypeId, NullishKinds)> {
     let mut non_nullish: Option<TypeId> = None;
+    let mut nullish = NullishKinds {
+        null: false,
+        undefined: false,
+    };
     for &v in variants {
         match types.resolve(v) {
-            Some(Type::Null | Type::Void) => {}
+            Some(Type::Null) => nullish.null = true,
+            Some(Type::Void) => nullish.undefined = true,
             Some(Type::Error) => return None,
             _ => {
                 if non_nullish.is_some() {
@@ -39,7 +44,7 @@ fn nullable_inner(variants: &[TypeId], types: &TypeTable) -> Option<TypeId> {
             }
         }
     }
-    non_nullish
+    non_nullish.map(|inner| (inner, nullish))
 }
 
 pub(super) fn resolve_intersection(

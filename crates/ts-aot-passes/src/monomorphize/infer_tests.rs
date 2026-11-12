@@ -31,6 +31,65 @@ fn format_type_args_multiple_joined_with_underscores() {
     );
 }
 
+/// `function id<T>(x: T | undefined)` called with a plain argument: the optional
+/// parameter's inner type is matched against it, so `id(1)` binds `T = number`.
+/// An optional argument keeps the previous behaviour, and a nullish literal binds
+/// no type parameter at all.
+#[test]
+fn optional_parameter_binds_from_a_plain_argument_too() {
+    let mut types = TypeTable::new();
+    let t = GenericParamId::from_raw(0);
+    let generic = types.intern(&Type::GenericParam { id: t });
+    let optional_param = types.intern(&Type::Optional {
+        inner: generic,
+        nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+    });
+    let param = types
+        .resolve(optional_param)
+        .cloned()
+        .expect("optional param type");
+    let number = types.intern(&Type::F64);
+
+    // `id(1)`: a plain argument binds `T`.
+    let mut found = HashMap::new();
+    let mut conflicted = HashSet::new();
+    bind_param_ty_resolved(
+        param.clone(),
+        Some(number),
+        &mut found,
+        &mut conflicted,
+        &types,
+    );
+    assert_eq!(found.get(&t).copied(), Some(number));
+    assert!(conflicted.is_empty());
+
+    // `id(maybeNumber)`: an optional argument keeps working.
+    let maybe = types.intern(&Type::Optional {
+        inner: number,
+        nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+    });
+    let mut found = HashMap::new();
+    let mut conflicted = HashSet::new();
+    bind_param_ty_resolved(
+        param.clone(),
+        Some(maybe),
+        &mut found,
+        &mut conflicted,
+        &types,
+    );
+    assert_eq!(found.get(&t).copied(), Some(number));
+
+    // `id(undefined)`: a nullish value is not a type for `T`.
+    let void = types.intern(&Type::Void);
+    let mut found = HashMap::new();
+    let mut conflicted = HashSet::new();
+    bind_param_ty_resolved(param, Some(void), &mut found, &mut conflicted, &types);
+    assert!(
+        found.is_empty(),
+        "a nullish argument binds no type parameter"
+    );
+}
+
 fn make_fn(
     name: &str,
     params: Vec<HirParam>,
@@ -77,7 +136,6 @@ fn type_resolved_true_for_leaf_types() {
     let mut types = TypeTable::new();
     for variant in [
         Type::Void,
-        Type::Never,
         Type::Bool,
         Type::I32,
         Type::F64,
@@ -108,10 +166,14 @@ fn type_resolved_recurses_through_composites() {
     let str_ty = types.intern(&Type::String);
 
     let unresolved = [
-        types.intern(&Type::Optional { inner: gp }),
+        types.intern(&Type::Optional {
+            inner: gp,
+            nullish: ts_aot_core::NullishKinds::BOTH,
+        }),
         types.intern(&Type::Array { element: gp }),
         types.intern(&Type::Fn {
             params: vec![i32],
+            optional: vec![false],
             ret: gp,
             err: None,
         }),
@@ -126,10 +188,14 @@ fn type_resolved_recurses_through_composites() {
     }
 
     let resolved = [
-        types.intern(&Type::Optional { inner: i32 }),
+        types.intern(&Type::Optional {
+            inner: i32,
+            nullish: ts_aot_core::NullishKinds::BOTH,
+        }),
         types.intern(&Type::Array { element: i32 }),
         types.intern(&Type::Fn {
             params: vec![i32],
+            optional: vec![false],
             ret: i32,
             err: None,
         }),
@@ -228,8 +294,12 @@ fn bind_param_ty_resolved_peels_optional() {
     let mut found = HashMap::new();
     let param = Type::Optional {
         inner: types.intern(&Type::GenericParam { id: gp }),
+        nullish: ts_aot_core::NullishKinds::BOTH,
     };
-    let arg = types.intern(&Type::Optional { inner: i32 });
+    let arg = types.intern(&Type::Optional {
+        inner: i32,
+        nullish: ts_aot_core::NullishKinds::BOTH,
+    });
     bind_param_ty_resolved(param, Some(arg), &mut found, &mut HashSet::new(), &types);
     assert_eq!(found.get(&gp), Some(&i32));
 }
@@ -286,11 +356,13 @@ fn bind_param_ty_resolved_peels_fn_params_and_ret() {
     let mut found = HashMap::new();
     let param = Type::Fn {
         params: vec![types.intern(&Type::GenericParam { id: gp0 })],
+        optional: vec![false],
         ret: types.intern(&Type::GenericParam { id: gp1 }),
         err: None,
     };
     let arg = types.intern(&Type::Fn {
         params: vec![i32],
+        optional: vec![false],
         ret: bool_ty,
         err: None,
     });
@@ -388,11 +460,13 @@ fn infer_type_args_with_multiple_type_params() {
         "f",
         vec![
             HirParam {
+                optional: false,
                 id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("a"),
                 ty: types.intern(&Type::GenericParam { id: gp0 }),
             },
             HirParam {
+                optional: false,
                 id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::from("b"),
                 ty: types.intern(&Type::GenericParam { id: gp1 }),
@@ -467,11 +541,13 @@ fn infer_type_args_conflict_blocks_single_param_arg_fallback() {
         "f",
         vec![
             HirParam {
+                optional: false,
                 id: ts_aot_core::LocalId::from_raw(0),
                 name: Atom::from("a"),
                 ty: types.intern(&Type::GenericParam { id: gp }),
             },
             HirParam {
+                optional: false,
                 id: ts_aot_core::LocalId::from_raw(1),
                 name: Atom::from("b"),
                 ty: types.intern(&Type::GenericParam { id: gp }),

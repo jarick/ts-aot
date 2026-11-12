@@ -11,8 +11,11 @@ fn e2e_weakmap_constructor_emits_weak_map_new_runtime_call() {
         module: false,
         ..CompileOptions::default()
     };
-    let out =
-        Driver::new().compile_source("test.ts", "function f() { return new WeakMap(); }", &opts);
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "class K {}\nfunction f(): WeakMap<K, i64> { return new WeakMap(); }",
+        &opts,
+    );
     assert!(
         !out.has_errors(),
         "new WeakMap() must compile through full pipeline; got {:?}",
@@ -34,8 +37,11 @@ fn e2e_weakmap_type_resolves_to_weak_map_handle() {
         module: false,
         ..CompileOptions::default()
     };
-    let out =
-        Driver::new().compile_source("test.ts", "function f() { return new WeakMap(); }", &opts);
+    let out = Driver::new().compile_source(
+        "test.ts",
+        "class K {}\nfunction f(): WeakMap<K, i64> { return new WeakMap(); }",
+        &opts,
+    );
     assert!(
         !out.has_errors(),
         "WeakMap type annotation must resolve; got {:?}",
@@ -173,8 +179,9 @@ fn e2e_weakmap_constructor_evaluates_initializer_for_side_effects() {
     };
     let out = Driver::new().compile_source(
         "test.ts",
-        "function makeEntries() { return []; } \
-         function f() { return new WeakMap(makeEntries()); }",
+        "class K {} \
+         function makeEntries(): i64[] { return []; } \
+         function f(): WeakMap<K, i64> { return new WeakMap(makeEntries()); }",
         &opts,
     );
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);

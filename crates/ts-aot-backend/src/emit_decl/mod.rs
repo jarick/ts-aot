@@ -16,6 +16,7 @@ use ts_aot_ir_mir::{
 };
 
 use self::body::emit_body;
+use self::body::is_nullish_literal;
 use self::ctx::BodyCtx;
 use self::ctx::EmitCtx;
 use self::ctx::EmitEnv;
@@ -313,7 +314,7 @@ fn emit_function_with_ctx(
     } else {
         ident_from(&f.name)
     };
-    let mut body_ctx = BodyCtx::new(f, types);
+    let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods);
     if is_tla_main {
         body_ctx.set_in_tla_main(true);
     }
@@ -736,8 +737,23 @@ fn emit_const_default(
     }
 }
 
-fn global_is_durable_string(ty: TypeId, emit_env: &EmitEnv) -> bool {
-    matches!(emit_env.types.resolve(ty), Some(Type::String))
+#[derive(Clone, Copy)]
+pub(super) enum DurableGlobal {
+    String,
+    OptionalString,
+}
+
+fn global_durable_kind(ty: TypeId, emit_env: &EmitEnv) -> Option<DurableGlobal> {
+    let EmitEnv { types, .. } = emit_env;
+    match types.resolve(ty) {
+        Some(Type::String) => Some(DurableGlobal::String),
+        Some(Type::Optional { inner, .. })
+            if matches!(types.resolve(*inner), Some(Type::String)) =>
+        {
+            Some(DurableGlobal::OptionalString)
+        }
+        _ => None,
+    }
 }
 
 fn emit_global_with_ctx(
@@ -746,26 +762,40 @@ fn emit_global_with_ctx(
     emit_env: &EmitEnv,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&g.name);
-    let durable_string = global_is_durable_string(g.ty, emit_env);
-    if !durable_string && ctx.type_needs_lifetime(g.ty, emit_env.types) {
+    let durable = global_durable_kind(g.ty, emit_env);
+    if durable.is_none() && ctx.type_needs_lifetime(g.ty, emit_env.types) {
         return Err(BackendError::NotImplemented(
-            "global storage: this arena-backed type borrows the arena and cannot live in a static without a supported durable storage representation",
+            "global/static declaration: this global's type is arena-backed (it borrows from the \
+             per-call `Ctx<'a>` arena) and has no owned representation, so a `static` cannot store \
+             it; a value written from a function parameter would be rejected, and a stored value \
+             would dangle after the arena resets. Only `string` and `string | null` globals have \
+             an owned representation. Keep the value inside a function, or reduce the global to \
+             a scalar, `string`, or `string | null`",
         ));
     }
-    let ty = if durable_string {
-        quote!(::std::string::String)
-    } else {
-        emit_static_type_id(g.ty, emit_env, ctx)
+    let ty = match durable {
+        Some(DurableGlobal::String) => quote!(::std::string::String),
+        Some(DurableGlobal::OptionalString) => {
+            quote!(::core::option::Option<::std::string::String>)
+        }
+        None => emit_static_type_id(g.ty, emit_env, ctx),
     };
     let vis = visibility_token(g.visibility);
     let mutability = if g.mutable { quote!(mut) } else { quote!() };
-    let init = if let Some(expr) = &g.init {
-        emit_const_expr(expr, emit_env.types)?
-    } else if durable_string {
-        quote!(::std::string::String::new())
-    } else {
-        let mut budget = CONST_DEFAULT_BUDGET;
-        emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+    let init = match (&g.init, durable) {
+        (Some(expr), Some(DurableGlobal::OptionalString)) if is_nullish_literal(expr) => {
+            quote!(::core::option::Option::None)
+        }
+        (Some(expr), _) => {
+            let tokens = emit_const_expr(expr, emit_env.types)?;
+            body::coerce_static_init(expr, tokens, g.ty, emit_env)
+        }
+        (None, Some(DurableGlobal::String)) => quote!(::std::string::String::new()),
+        (None, Some(DurableGlobal::OptionalString)) => quote!(::core::option::Option::None),
+        (None, None) => {
+            let mut budget = CONST_DEFAULT_BUDGET;
+            emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+        }
     };
     Ok((
         quote! {
@@ -799,15 +829,30 @@ fn emit_params(
 
 fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
     match *kind {
-        FunctionKind::Method { self_param, .. }
-        | FunctionKind::GeneratorMethod { self_param, .. } => {
+        FunctionKind::Method { self_param, .. } => {
+            if body_ctx.local_mut(self_param) {
+                // A method that writes a field of `this` mutates the *caller's*
+                // instance: it borrows the receiver (`&mut self`, the way a
+                // constructor does) instead of taking it by value, which wrote into
+                // a clone and silently dropped the mutation.
+                quote!(&mut self,)
+            } else {
+                quote!(self,)
+            }
+        }
+        // A generator method keeps the by-value receiver: its body runs later, so a
+        // `&mut self` borrow would have to outlive the generator and the caller
+        // could not touch the instance until it is dropped. The mutation is lost
+        // there, as it was before the borrowing ABI.
+        FunctionKind::GeneratorMethod { self_param, .. } => {
             if body_ctx.local_mut(self_param) {
                 quote!(mut self,)
             } else {
                 quote!(self,)
             }
         }
-        FunctionKind::Constructor { .. } => quote!(self,),
+        // A constructor mutates the instance the caller allocated.
+        FunctionKind::Constructor { .. } => quote!(&mut self,),
         _ => TokenStream::new(),
     }
 }

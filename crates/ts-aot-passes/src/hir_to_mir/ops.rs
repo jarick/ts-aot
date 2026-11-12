@@ -14,6 +14,8 @@ pub fn convert_binop(op: HirBinaryOp, ctx: &mut PassContext) -> BinaryOp {
         HirBinaryOp::Mod => M::Mod,
         HirBinaryOp::Eq => M::Eq,
         HirBinaryOp::Ne => M::Ne,
+        HirBinaryOp::StrictEq => M::StrictEq,
+        HirBinaryOp::StrictNe => M::StrictNe,
         HirBinaryOp::Lt => M::Lt,
         HirBinaryOp::Le => M::Le,
         HirBinaryOp::Gt => M::Gt,
@@ -25,7 +27,7 @@ pub fn convert_binop(op: HirBinaryOp, ctx: &mut PassContext) -> BinaryOp {
         HirBinaryOp::BitXor => M::BitXor,
         HirBinaryOp::Shl => M::Shl,
         HirBinaryOp::Shr => M::Shr,
-        HirBinaryOp::Usr | HirBinaryOp::In | HirBinaryOp::InstanceOf => {
+        HirBinaryOp::Usr | HirBinaryOp::In | HirBinaryOp::InstanceOf | HirBinaryOp::Coalesce => {
             ctx.warning(
                 "P0005",
                 format!(

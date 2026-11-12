@@ -50,11 +50,14 @@ pub(super) fn mir_expr_ty(e: &MirExpr) -> TypeId {
         | MirExpr::StructLiteral { ty, .. }
         | MirExpr::ResultOk { ty, .. }
         | MirExpr::ResultErr { ty, .. }
+        | MirExpr::Propagate { ty, .. }
         | MirExpr::Binary { ty, .. }
         | MirExpr::Unary { ty, .. }
         | MirExpr::Await { ty, .. }
         | MirExpr::Yield { ty, .. }
         | MirExpr::OptionalChain { ty, .. }
+        | MirExpr::IsSome { ty, .. }
+        | MirExpr::UnwrapOptional { ty, .. }
         | MirExpr::IndirectCall { ty, .. }
         | MirExpr::TypeOf { ty, .. }
         | MirExpr::Cast { ty, .. }
@@ -93,7 +96,7 @@ pub(super) fn is_numeric_type_for_array_len(arg: &HirExpr, types: &TypeTable) ->
     )
 }
 
-pub(super) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
+pub(crate) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
     match owner {
         HirExpr::Local { ty, .. }
         | HirExpr::Global { ty, .. }
