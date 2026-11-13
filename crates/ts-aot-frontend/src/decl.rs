@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
     Class, Declaration, Expression, Function, MemberExpression, MethodDefinitionKind, Program,
@@ -116,7 +116,7 @@ impl SkeletonBuilder {
                     .push_decl(ts_aot_ir_hir::HirDecl::Function(hir_fn));
             }
             Declaration::ClassDeclaration(c) => {
-                let hir_class = self.build_class(senv, c, true);
+                let hir_class = self.build_class(senv, c, true, true);
                 senv.program
                     .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
             }
@@ -173,7 +173,7 @@ impl SkeletonBuilder {
             }
             Declaration::ClassDeclaration(c) => {
                 let name = Atom::from(c.id.as_ref().map_or("", |id| id.name.as_str()));
-                let hir_class = self.build_class(senv, c, true);
+                let hir_class = self.build_class(senv, c, true, true);
                 senv.program
                     .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
                 if !name.as_str().is_empty() {
@@ -267,6 +267,7 @@ impl SkeletonBuilder {
             },
             func.generator,
             false,
+            true,
         );
         self.type_param_stack.pop();
         self.strict = prev_strict;
@@ -297,11 +298,14 @@ impl SkeletonBuilder {
         }
     }
 
+    // `top_level` says the class is declared at the module's top level, so a static
+    // field's computed initializer may run in the module-init body.
     pub(crate) fn build_class(
         &mut self,
         senv: &mut SkeletonEnv,
         class: &Class<'_>,
         reuse: bool,
+        top_level: bool,
     ) -> HirClass {
         let name = class
             .id
@@ -316,6 +320,7 @@ impl SkeletonBuilder {
             senv.types.intern(&Type::Struct { id: struct_id })
         };
         let prior_binding = self.class_types.insert(name.as_str().to_owned(), ty);
+        self.register_static_fields(senv, class, ty);
 
         let (class_type_param_ids, class_type_param_map) = build_type_param_context(
             senv.types,
@@ -333,6 +338,9 @@ impl SkeletonBuilder {
                 computed
             };
         let mut field_inits: Vec<(Atom, HirExpr)> = Vec::new();
+        // Static fields already emitted for this class, per name: a redeclaration
+        // reuses the global instead of adding a second one under the same name.
+        let mut emitted_statics: HashSet<Atom> = HashSet::new();
         for element in &class.body.body {
             let oxc_ast::ast::ClassElement::PropertyDefinition(p) = element else {
                 continue;
@@ -341,27 +349,104 @@ impl SkeletonBuilder {
                 .key
                 .static_name()
                 .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
+            if p.r#static {
+                // A private (`static #x`) or computed name has no static name, and an
+                // empty one would make every such global collide on `Class__` (E0503).
+                if p.key.static_name().is_none() {
+                    continue;
+                }
+                // A static field is class-level storage: emit the module-level global
+                // that holds it (`Counter.count` → `Counter__count`) and keep it out
+                // of the instance struct. A literal initializer seeds the global;
+                // anything else is reported and leaves the zero value, like an
+                // instance field's initializer.
+                if !already_processed {
+                    // A static field may be declared twice (`static f = 1; static f = 2`)
+                    // - the class still holds one global, and the second declaration only
+                    // re-runs its initializer, in order, exactly as the field definitions
+                    // do. Emitting a second global would collide on the name.
+                    let is_redeclaration = !emitted_statics.insert(field_name.clone());
+                    let field_ty = self
+                        .static_field_globals
+                        .get(&ty)
+                        .and_then(|statics| statics.get(&field_name))
+                        .map_or_else(|| senv.error_ty(), |(_, field_ty)| *field_ty);
+                    let span = p.value.as_ref().map_or_else(
+                        || core_span_from_oxc(p.span),
+                        |value| core_span_from_oxc(value.span()),
+                    );
+                    let global = static_field_global_name(name.as_str(), field_name.as_str(), ty);
+                    let literal = p
+                        .value
+                        .as_ref()
+                        .and_then(|value| field_init_hir(value, Some(field_ty), senv.types, span));
+                    // A module-level static field is initialized in the module-init body, in
+                    // declaration order, on the same path as a computed initializer: an
+                    // initializer may observe another field, and preinitializing the global
+                    // would apply it before the body runs, reordering the observable reads.
+                    // Outside module mode the initializer may name things the module scope
+                    // does not have, so only a literal seeds the global there.
+                    let seedable = self.module && top_level && p.value.is_some();
+                    let goes_to_module = is_redeclaration
+                        || literal.is_none()
+                        || matches!(literal, Some(HirExpr::String(..)));
+                    let const_init = if is_redeclaration || goes_to_module || seedable {
+                        None
+                    } else {
+                        literal.clone()
+                    };
+                    let module_init = if seedable {
+                        match literal {
+                            Some(value) => Some(value),
+                            None => p
+                                .value
+                                .as_ref()
+                                .map(|value| self.walk_top_level_init(senv, value)),
+                        }
+                    } else {
+                        None
+                    };
+                    if p.value.is_some() && const_init.is_none() && module_init.is_none() {
+                        senv.diagnostics.push(Diagnostic::warning(
+                            "E0406",
+                            format!(
+                                "static field initializer for `{}.{}` is not supported here; the \
+                                 field will default to its zero value",
+                                name.as_str(),
+                                field_name.as_str()
+                            ),
+                            span,
+                        ));
+                    }
+                    if !is_redeclaration {
+                        senv.program.push_decl(HirDecl::Global {
+                            name: global.clone(),
+                            ty: field_ty,
+                            init: const_init,
+                        });
+                    }
+                    if let Some(value) = module_init {
+                        self.tla_main_body
+                            .push(TlaMainItem::Expr(HirExpr::Assignment {
+                                target: Box::new(HirExpr::Global {
+                                    name: global,
+                                    ty: field_ty,
+                                    span,
+                                }),
+                                value: Box::new(value),
+                                ty: field_ty,
+                                span,
+                            }));
+                    }
+                }
+                continue;
+            }
             let Some(value) = &p.value else {
                 continue;
             };
             let span = core_span_from_oxc(value.span());
             let field_ty = fields.iter().find(|f| f.name == field_name).map(|f| f.ty);
-            let init = match value {
-                Expression::NumericLiteral(n) => {
-                    if field_ty.is_some_and(|t| {
-                        matches!(senv.types.resolve(t), Some(Type::F64 | Type::F32))
-                    }) {
-                        Some(HirExpr::Float(n.value.to_bits(), span))
-                    } else {
-                        Some(crate::ops::number_to_hir(n.value, span))
-                    }
-                }
-                Expression::BooleanLiteral(b) => Some(HirExpr::Bool(b.value, span)),
-                Expression::StringLiteral(s) => {
-                    Some(HirExpr::String(Atom::from(s.value.as_str()), span))
-                }
-                _ => None,
-            };
+            let init = field_init_hir(value, field_ty, senv.types, span);
             match init {
                 Some(init) => field_inits.push((field_name.clone(), init)),
                 None => {
@@ -440,6 +525,30 @@ impl SkeletonBuilder {
         }
     }
 
+    /// The declared type of a class property, inferred from a literal initializer
+    /// when it carries no annotation.
+    fn class_property_ty(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        p: &oxc_ast::ast::PropertyDefinition<'_>,
+        type_params: Option<&TypeParamMap>,
+    ) -> TypeId {
+        let mut ty = self.resolve_ts_type_from_annotation_with_params(
+            senv,
+            p.type_annotation.as_deref(),
+            type_params,
+        );
+        if p.type_annotation.is_none()
+            && matches!(senv.types.resolve(ty), None | Some(Type::Error))
+            && let Some(value) = &p.value
+            && let Some(init) = literal_value_hir(value, core_span_from_oxc(value.span()))
+            && let Some(inferred) = crate::expr::literal_hir_ty(senv.types, &init)
+        {
+            ty = inferred;
+        }
+        ty
+    }
+
     fn collect_class_fields(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -454,26 +563,61 @@ impl SkeletonBuilder {
                 let oxc_ast::ast::ClassElement::PropertyDefinition(p) = m else {
                     return None;
                 };
+                // A static field is class-level storage: it becomes a module-level
+                // global (see `build_class`) and `Counter.count` is rewritten to
+                // it, so it must not become an instance field of the struct.
+                if p.r#static {
+                    return None;
+                }
                 let name = p
                     .key
                     .static_name()
                     .map_or_else(|| Atom::from(""), |n| Atom::from(n.as_ref()));
-                let mut ty = self.resolve_ts_type_from_annotation_with_params(
-                    senv,
-                    p.type_annotation.as_deref(),
-                    type_params,
-                );
-                if p.type_annotation.is_none()
-                    && matches!(senv.types.resolve(ty), None | Some(Type::Error))
-                    && let Some(value) = &p.value
-                    && let Some(init) = literal_value_hir(value, core_span_from_oxc(value.span()))
-                    && let Some(inferred) = crate::expr::literal_hir_ty(senv.types, &init)
-                {
-                    ty = inferred;
-                }
+                let ty = self.class_property_ty(senv, p, type_params);
                 Some(HirField { name, ty })
             })
             .collect()
+    }
+
+    /// Record the module-level globals that hold a class's static fields, so the member
+    /// walk can rewrite `Counter.count` (read or write) to that global. A static member
+    /// may not reference the class's type parameters, so its global does not depend on
+    /// them and a generic class registers its statics too. Called for top-level classes
+    /// before their bodies are walked, and for an anonymous class expression right after
+    /// it is built (its statics are read through the value it evaluates to).
+    pub(crate) fn register_static_fields(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        class: &Class<'_>,
+        ty: TypeId,
+    ) {
+        let class_name = class.id.as_ref().map_or("", |id| id.name.as_str());
+        let mut statics: HashMap<Atom, (Atom, TypeId)> = HashMap::new();
+        for element in &class.body.body {
+            let oxc_ast::ast::ClassElement::PropertyDefinition(p) = element else {
+                continue;
+            };
+            if !p.r#static {
+                continue;
+            }
+            // A private (`static #x`) or computed name has no static name, and an empty
+            // one would make every such global collide on `Class__` (E0503).
+            let Some(key_name) = p.key.static_name() else {
+                continue;
+            };
+            let field_name = Atom::from(key_name.as_ref());
+            let field_ty = self.class_property_ty(senv, p, None);
+            statics.insert(
+                field_name.clone(),
+                (
+                    static_field_global_name(class_name, field_name.as_str(), ty),
+                    field_ty,
+                ),
+            );
+        }
+        if !statics.is_empty() {
+            self.static_field_globals.insert(ty, statics);
+        }
     }
 
     pub(crate) fn pre_register_class_fields(
@@ -505,6 +649,12 @@ impl SkeletonBuilder {
             let Some(id) = class.id.as_ref() else {
                 continue;
             };
+            let Some(ty) = self.class_types.get(id.name.as_str()).copied() else {
+                continue;
+            };
+            self.register_static_fields(senv, class, ty);
+            // Instance fields do depend on the class's type parameters, so a generic
+            // class registers them where its type arguments are known (`build_class`).
             if class
                 .type_parameters
                 .as_ref()
@@ -512,9 +662,6 @@ impl SkeletonBuilder {
             {
                 continue;
             }
-            let Some(ty) = self.class_types.get(id.name.as_str()).copied() else {
-                continue;
-            };
             if senv.program.class_fields.contains_key(&ty) {
                 continue;
             }
@@ -608,6 +755,7 @@ impl SkeletonBuilder {
             },
             value.generator,
             true,
+            true,
         );
         self.in_static_method = saved_static;
         self.type_param_stack.pop();
@@ -691,6 +839,9 @@ impl SkeletonBuilder {
                     ty = t;
                 }
             }
+            if matches!(v.kind, oxc_ast::ast::VariableDeclarationKind::Let) {
+                self.module_lets.insert(name.as_str().to_owned());
+            }
             self.emit_top_level_let(senv, name, ty, init, v.span);
         }
     }
@@ -703,6 +854,38 @@ impl SkeletonBuilder {
         init: Option<HirExpr>,
         span: oxc_span::Span,
     ) {
+        // A binding whose initializer is a class expression holds a class value, so it is
+        // recorded where class names are recorded: `new C()` and `C.staticField` then resolve
+        // exactly as they do for a class declaration's name, instead of falling back to the
+        // error type (which made the binding `()` and every access through it fail). The value
+        // is the class *tag*, the same representation a function-local class value uses, so the
+        // binding can be rebound to another class and a static read picks the class at run time.
+        let mut ty = ty;
+        let mut init = init;
+        // A generic class expression keeps its `DefaultConstruct`: generic classes are not
+        // specialized, and replacing it with a tag would hide that diagnostic.
+        let generic_class = matches!(
+            &init,
+            Some(HirExpr::DefaultConstruct { ty, .. })
+                if senv.program.declarations.iter().any(|d| matches!(
+                    d,
+                    ts_aot_ir_hir::HirDecl::Class(c)
+                        if c.ty == *ty && !c.type_params.is_empty()
+                ))
+        );
+        if let Some(HirExpr::DefaultConstruct {
+            ty: class_ty, span, ..
+        }) = &init
+            && !generic_class
+        {
+            let (class_ty, class_span) = (*class_ty, *span);
+            self.class_types.insert(name.as_str().to_owned(), class_ty);
+            self.class_value_globals
+                .insert(name.as_str().to_owned(), vec![class_ty]);
+            let tag = self.class_value_tag(class_ty);
+            init = Some(HirExpr::Int(tag, class_span));
+            ty = senv.types.intern(&ts_aot_core::Type::I64);
+        }
         if let Some(init_expr) = init {
             if is_const_initializer(&init_expr) {
                 senv.program.push_decl(HirDecl::Global {
@@ -915,6 +1098,36 @@ impl SkeletonBuilder {
         }
     }
 }
+/// The HIR literal a class field's initializer produces: a numeric literal becomes
+/// a float when the field is one, so `0` in a `number` field is `0.0`.
+fn field_init_hir(
+    value: &Expression<'_>,
+    field_ty: Option<TypeId>,
+    types: &TypeTable,
+    span: CoreSpan,
+) -> Option<HirExpr> {
+    match value {
+        Expression::NumericLiteral(n) => {
+            if field_ty.is_some_and(|t| matches!(types.resolve(t), Some(Type::F64 | Type::F32))) {
+                Some(HirExpr::Float(n.value.to_bits(), span))
+            } else {
+                Some(crate::ops::number_to_hir(n.value, span))
+            }
+        }
+        Expression::BooleanLiteral(b) => Some(HirExpr::Bool(b.value, span)),
+        Expression::StringLiteral(s) => Some(HirExpr::String(Atom::from(s.value.as_str()), span)),
+        _ => None,
+    }
+}
+
+/// The module-level global that stores one static class field. The class name alone does
+/// not identify it: two class *expressions* may share a source name (`class Foo {}` in two
+/// places) and an anonymous class has none at all, so the class's type id disambiguates
+/// them (E0503 otherwise).
+fn static_field_global_name(class: &str, field: &str, ty: TypeId) -> Atom {
+    Atom::from(format!("{class}__{field}_{}", ty.raw()))
+}
+
 fn literal_value_hir(value: &Expression<'_>, span: CoreSpan) -> Option<HirExpr> {
     Some(match value {
         Expression::NumericLiteral(n) => crate::ops::number_to_hir(n.value, span),

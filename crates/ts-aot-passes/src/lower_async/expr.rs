@@ -91,6 +91,7 @@ fn recurse_subexprs(
     stats: &mut LowerAsyncStats,
 ) {
     match expr {
+        HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Await { expr: inner, .. } => {
             rewrite_expr(
                 inner.as_mut(),

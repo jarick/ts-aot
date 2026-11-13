@@ -61,6 +61,106 @@ impl ExprConverter {
         call
     }
 
+    /// Build a fresh temp local holding `ty` from the class field initializers, the way
+    /// JavaScript initializes an instance before any constructor body runs, and return it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn alloc_class_instance(
+        &mut self,
+        ty: TypeId,
+        struct_id: StructId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> ts_aot_core::LocalId {
+        let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
+        let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
+            .program
+            .class_field_inits
+            .get(&ty)
+            .cloned()
+            .unwrap_or_default();
+        for (fname, init) in init_names {
+            if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
+                let value = self.convert_expr(
+                    &init,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                lit_fields.push((fid, value));
+            }
+        }
+        let alloc_id = self.fresh_local();
+        self.push_temp_local(alloc_id, ty);
+        out.push(MirStmt::Let {
+            local: alloc_id,
+            ty,
+            init: Some(MirExpr::StructLiteral {
+                struct_id,
+                fields: lit_fields,
+                ty,
+            }),
+            mutable: true,
+        });
+        alloc_id
+    }
+    /// A class expression evaluates to a class value. This target has no separate class-object
+    /// representation, so the value is a fresh instance whose fields keep their *defaults*:
+    /// evaluating the class must not run the field initializers (JavaScript runs those when an
+    /// instance is constructed with `new`, not when the class expression is evaluated) and it
+    /// must not run the constructor. A generic class stays unemittable here, exactly as in
+    /// `new`: its fields would name a type the crate does not declare, so it is reported
+    /// instead.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn convert_default_construct(
+        &mut self,
+        ty: TypeId,
+        span: ts_aot_core::Span,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        if let Some(class) = self
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                ts_aot_ir_hir::HirDecl::Class(c) if c.ty == ty => Some(c),
+                _ => None,
+            })
+            && !class.type_params.is_empty()
+        {
+            ctx.error(
+                "E0300",
+                format!(
+                    "`{}` is a generic class expression; generic classes are not specialized \
+                     yet, so its fields would name a type the generated crate does not declare",
+                    class.name.as_str()
+                ),
+                span,
+            );
+            return MirExpr::Unit;
+        }
+        let struct_id = self.lookup_or_alloc_struct_id(ty, shared_struct_ids, shared_next_struct);
+        let alloc_id = self.fresh_local();
+        self.push_temp_local(alloc_id, ty);
+        out.push(MirStmt::Let {
+            local: alloc_id,
+            ty,
+            init: Some(MirExpr::StructLiteral {
+                struct_id,
+                fields: Vec::new(),
+                ty,
+            }),
+            mutable: true,
+        });
+        MirExpr::Local(alloc_id)
+    }
     pub(super) fn convert_new(
         &mut self,
         callee: &HirExpr,
@@ -152,6 +252,31 @@ impl ExprConverter {
             HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name).is_some(),
             _ => false,
         };
+        // A generic class is never specialized: its fields stay `Type::GenericParam`, which
+        // has no Rust type, so the backend drops the struct. A `new` here would name a struct
+        // the crate does not declare, so report it instead of emitting a dangling symbol.
+        if let Some(name) = class_name.as_deref()
+            && let Some(class) = self
+                .program
+                .declarations
+                .iter()
+                .find_map(|decl| match decl {
+                    ts_aot_ir_hir::HirDecl::Class(c) if c.name.as_str() == name => Some(c),
+                    _ => None,
+                })
+            && !class.type_params.is_empty()
+        {
+            ctx.error(
+                "E0300",
+                format!(
+                    "`new {name}()` instantiates a generic class; generic classes are not \
+                     specialized yet, so its fields would name a type the generated crate does \
+                     not declare"
+                ),
+                callee.span(),
+            );
+            return MirExpr::Unit;
+        }
         let ctor_key = (
             struct_id,
             ts_aot_core::Atom::new_inline("constructor"),
@@ -259,38 +384,15 @@ impl ExprConverter {
             // that is lowered elsewhere), so nothing is converted twice.
             None
         };
-        let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
-        let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
-            .program
-            .class_field_inits
-            .get(&ty)
-            .cloned()
-            .unwrap_or_default();
-        for (fname, init) in init_names {
-            if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
-                let value = self.convert_expr(
-                    &init,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    types,
-                    ctx,
-                );
-                lit_fields.push((fid, value));
-            }
-        }
-        let alloc_id = self.fresh_local();
-        self.push_temp_local(alloc_id, ty);
-        out.push(MirStmt::Let {
-            local: alloc_id,
+        let alloc_id = self.alloc_class_instance(
             ty,
-            init: Some(MirExpr::StructLiteral {
-                struct_id,
-                fields: lit_fields,
-                ty,
-            }),
-            mutable: true,
-        });
+            struct_id,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
         // JavaScript runs the field initializers and then the constructor body on
         // the freshly allocated instance; the constructor takes it by mutable
         // reference (`&mut self`) and returns nothing. The arguments were already
@@ -440,6 +542,14 @@ impl ExprConverter {
         let base_ty = crate::monomorphize::hir_expr_ty(base, types)
             .or_else(|| self.mir_expr_static_ty(&inner, types))
             .unwrap_or_else(|| types.intern(&Type::Error));
+        // `k?.m()` with a `k` that cannot be nullish is exactly `k.m()`: typing the chain as an
+        // `Option` makes the backend emit `.as_ref()` on a plain struct, which does not
+        // compile, so only a receiver that can really be nullish keeps the chain.
+        if let Some(resolved) = types.resolve(base_ty)
+            && !matches!(resolved, Type::Null | Type::Void | Type::Optional { .. })
+        {
+            return inner;
+        }
         let inner_ty = match types.resolve(base_ty) {
             Some(Type::Optional { inner, .. }) => *inner,
             _ => base_ty,
@@ -731,8 +841,32 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        // `yield 1` in a generator declared to yield `number` has to produce an
+        // `f64`, exactly as `return 1` does in an `f64` function: the declared yield
+        // type is the operand's expected type. A generator lowers with
+        // `Generator<inner>` as its return type, so that inner type is the yield
+        // type. The `ty` the caller passes is not it - the frontend leaves the yield
+        // *expression*'s own type as an error placeholder, since `yield` evaluates
+        // to whatever `next()` is given.
+        let yield_ty = self.current_return_ty.map(|ty| match types.resolve(ty) {
+            Some(Type::Generator { inner, .. }) => *inner,
+            _ => ty,
+        });
         let inner = expr
-            .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .map(|e| {
+                let saved = self.expected_ty;
+                self.expected_ty = yield_ty;
+                let value =
+                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx);
+                self.expected_ty = saved;
+                match yield_ty {
+                    Some(target) => {
+                        let value_ty = self.mir_expr_static_ty(&value, types);
+                        super::control::cast_numeric_branch_to_dest(value, value_ty, target, types)
+                    }
+                    None => value,
+                }
+            })
             .map(Box::new);
         MirExpr::Yield { expr: inner, ty }
     }

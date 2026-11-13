@@ -103,6 +103,7 @@ pub(crate) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::Field { ty, .. }
         | HirExpr::Index { ty, .. }
         | HirExpr::Call { ty, .. }
+        | HirExpr::DefaultConstruct { ty, .. }
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }

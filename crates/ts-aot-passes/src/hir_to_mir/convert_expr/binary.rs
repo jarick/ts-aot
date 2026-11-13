@@ -437,6 +437,7 @@ fn op_name_for_bigint(op: HirBinaryOp) -> &'static str {
 
 fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
     match expr {
+        HirExpr::DefaultConstruct { .. } => false,
         HirExpr::Assignment { .. } | HirExpr::CompoundUpdate { .. } => true,
         HirExpr::Field { owner, .. }
         | HirExpr::Unary { expr: owner, .. }
@@ -496,6 +497,7 @@ fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
 
 fn hir_expr_contains_call(expr: &HirExpr) -> bool {
     match expr {
+        HirExpr::DefaultConstruct { .. } => true,
         HirExpr::Call { .. }
         | HirExpr::New { .. }
         | HirExpr::Await { .. }

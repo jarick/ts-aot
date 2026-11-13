@@ -607,7 +607,45 @@ impl SkeletonBuilder {
             {
                 *arr_ty = ty;
             }
+            // A declarator initialized by a class expression holds a class value. Such a value
+            // is its class *tag*, not an instance: a binding may be rebound to another class,
+            // and the tag is what selects the class at run time.
+            let class_value = match &init {
+                Some(HirExpr::DefaultConstruct {
+                    ty: class_ty, span, ..
+                }) => Some((*class_ty, *span)),
+                _ => None,
+            };
+            // A generic class expression keeps its `DefaultConstruct`: generic classes are not
+            // specialized, and replacing it with a tag would hide that diagnostic.
+            let generic_class = matches!(
+                &init,
+                Some(HirExpr::DefaultConstruct { ty, .. })
+                    if senv.program.declarations.iter().any(|d| matches!(
+                        d,
+                        ts_aot_ir_hir::HirDecl::Class(c)
+                            if c.ty == *ty && !c.type_params.is_empty()
+                    ))
+            );
+            if let Some((class_ty, span)) = class_value
+                && !generic_class
+            {
+                let tag = self.class_value_tag(class_ty);
+                init = Some(HirExpr::Int(tag, span));
+                ty = senv.types.intern(&ts_aot_core::Type::I64);
+            }
             let id = scope.declare(name.as_str(), ty);
+            if let Some((class_ty, _)) = class_value {
+                self.class_value_locals.insert(id, vec![class_ty]);
+            }
+            // A binding initialized from another class value holds that value too: the tag is
+            // copied, so the classes the source may hold come along.
+            if let Some(HirExpr::Local { id: source, .. }) = &init {
+                let storage = self.class_value_storage(*source);
+                if let Some(classes) = self.class_value_locals.get(&storage).cloned() {
+                    self.class_value_locals.insert(id, classes);
+                }
+            }
             let copy_back = match (simple_binding, init.as_ref()) {
                 (true, Some(init)) => self.finish_statement_expression(init, senv),
                 _ => None,

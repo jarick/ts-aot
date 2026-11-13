@@ -22,7 +22,9 @@ use self::ctx::EmitCtx;
 use self::ctx::EmitEnv;
 use self::ident::ident_from;
 use self::literals::emit_const_expr;
-use self::types::{LifetimeMode, emit_static_type_id, emit_type_id_with_ctx};
+use self::types::{
+    LifetimeMode, emit_static_type_id, emit_type_id_with_ctx, mentions_generic_param,
+};
 use crate::error::BackendError;
 
 pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream, BackendError> {
@@ -79,6 +81,17 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         let enum_name = EmitCtx::fn_value_ident(k);
         let helper = EmitCtx::fn_call_ident(k);
         let sig = ctx.fn_value_sig(k);
+        // A function type that mentions a generic parameter has no Rust signature to
+        // give its shim; the only code that could reference it - the generic original
+        // itself - is dropped as well.
+        if sig
+            .params
+            .iter()
+            .any(|ty| mentions_generic_param(*ty, emit_env.types))
+            || mentions_generic_param(sig.ret, emit_env.types)
+        {
+            continue;
+        }
         let variants = ctx.fn_value_variants(k);
         let closure_variants = ctx.closure_variants_for(k);
         let param_tys: Vec<TokenStream> = sig
@@ -275,13 +288,119 @@ fn emit_tla_init_entry(program: &MirProgram) -> TokenStream {
     }
 }
 
+/// Whether a type - or a struct it names through its fields, at any depth - is generic and
+/// so has no Rust form: a `Type::GenericParam`, or a struct dropped for holding one.
+///
+/// A struct can name itself (`Node { children: Node[] }`), so the walk remembers the types
+/// it already inspected. A depth limit cannot do this job: it would both cut the walk short
+/// (missing a real parameter) and classify a deeply nested *concrete* type as generic.
+fn mentions_generic_through_structs(
+    ty: TypeId,
+    types: &TypeTable,
+    program: &MirProgram,
+    visited: &mut Vec<TypeId>,
+) -> bool {
+    if mentions_generic_param(ty, types) {
+        return true;
+    }
+    if visited.contains(&ty) {
+        return false;
+    }
+    visited.push(ty);
+    match types.resolve(ty) {
+        Some(Type::Struct { id }) => program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                MirDecl::Struct(s) if s.id == *id => Some(s),
+                _ => None,
+            })
+            .is_some_and(|s| {
+                s.fields.iter().any(|field| {
+                    mentions_generic_through_structs(field.ty, types, program, visited)
+                })
+            }),
+        Some(Type::Optional { inner, .. } | Type::Array { element: inner }) => {
+            mentions_generic_through_structs(*inner, types, program, visited)
+        }
+        Some(Type::Promise { ok, err }) => {
+            mentions_generic_through_structs(*ok, types, program, visited)
+                || err.is_some_and(|e| mentions_generic_through_structs(e, types, program, visited))
+        }
+        Some(Type::WeakMap { key, value }) => {
+            mentions_generic_through_structs(*key, types, program, visited)
+                || mentions_generic_through_structs(*value, types, program, visited)
+        }
+        Some(Type::Result { ok, err }) => {
+            mentions_generic_through_structs(*ok, types, program, visited)
+                || mentions_generic_through_structs(*err, types, program, visited)
+        }
+        Some(Type::Union { variants }) => variants
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(Type::Intersection { parts }) => parts
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(Type::Tuple { elements }) => elements
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(
+            Type::Generator { inner, .. }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner },
+        ) => mentions_generic_through_structs(*inner, types, program, visited),
+        Some(Type::Fn { params, ret, .. }) => {
+            params
+                .iter()
+                .any(|p| mentions_generic_through_structs(*p, types, program, visited))
+                || mentions_generic_through_structs(*ret, types, program, visited)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a function's signature cannot be emitted as Rust: some part of it names a
+/// generic parameter, directly or through the fields of a struct it takes or returns.
+fn signature_mentions_generic_param(
+    f: &MirFunctionDecl,
+    types: &TypeTable,
+    program: &MirProgram,
+) -> bool {
+    mentions_generic_through_structs(f.ret, types, program, &mut Vec::new())
+        || f.params
+            .iter()
+            .any(|p| mentions_generic_through_structs(p.ty, types, program, &mut Vec::new()))
+}
 fn emit_decl(
     decl: &MirDecl,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     match decl {
+        MirDecl::Function(f)
+            // A generic original has no Rust type to emit (`__generic0`): every call
+            // to it was replaced by a specialization, so it is dropped here instead of
+            // emitting a function the compiler cannot name the types of.
+            if signature_mentions_generic_param(f, emit_env.types, emit_env.program) =>
+        {
+            Ok((TokenStream::new(), Vec::new()))
+        }
         MirDecl::Function(f) => emit_function_with_ctx(f, ctx, emit_env, None),
+        // A struct whose field names a generic parameter - directly, or through a struct it
+        // names - is unemittable (`__generic0`): skip it. A concrete struct that names such a
+        // struct would otherwise be emitted with a field of a type nothing declares.
+        MirDecl::Struct(s)
+            if s.fields.iter().any(|field| {
+                mentions_generic_through_structs(
+                    field.ty,
+                    emit_env.types,
+                    emit_env.program,
+                    &mut Vec::new(),
+                )
+            }) =>
+        {
+            Ok((TokenStream::new(), Vec::new()))
+        }
         MirDecl::Struct(s) => emit_struct_with_ctx(s, ctx, emit_env),
         MirDecl::Global(g) => emit_global_with_ctx(g, ctx, emit_env),
     }
@@ -567,6 +686,13 @@ fn emit_struct_with_ctx(
     let mut free_fns = TokenStream::new();
     let mut dispatch_entries: Vec<TokenStream> = Vec::new();
     for m in &s.methods {
+        // A generic method is never specialized into this class: its body still names
+        // `__generic0`, which nothing declares, so leaving it in would break the whole
+        // generated crate. Every call was replaced by a specialization, which is not generic
+        // and stays, exactly as for a generic free function.
+        if signature_mentions_generic_param(m, emit_env.types, emit_env.program) {
+            continue;
+        }
         let is_static = matches!(m.kind, FunctionKind::Plain | FunctionKind::Generator);
         let enclosing = if is_static { None } else { Some(s.id) };
         let (m_tokens, m_entries) = emit_function_with_ctx(m, ctx, emit_env, enclosing)?;
@@ -763,14 +889,20 @@ fn emit_global_with_ctx(
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&g.name);
     let durable = global_durable_kind(g.ty, emit_env);
-    if durable.is_none() && ctx.type_needs_lifetime(g.ty, emit_env.types) {
+
+    // A `static` can only be initialized by a constant, and an arena-backed value (the MIR
+    // type is a `Vec` borrowing the call arena) has none: an array whose elements need no
+    // lifetime is stored in its owned form (`std::vec::Vec<T>`, which `Vec::new()`
+    // initializes for free), and every read converts it into the calling arena. Any other
+    // arena-backed global still has no representation here.
+    let owned = body::owned_array_ty(g.ty, ctx, emit_env);
+    if durable.is_none() && owned.is_none() && ctx.type_needs_lifetime(g.ty, emit_env.types) {
         return Err(BackendError::NotImplemented(
             "global/static declaration: this global's type is arena-backed (it borrows from the \
-             per-call `Ctx<'a>` arena) and has no owned representation, so a `static` cannot store \
-             it; a value written from a function parameter would be rejected, and a stored value \
-             would dangle after the arena resets. Only `string` and `string | null` globals have \
-             an owned representation. Keep the value inside a function, or reduce the global to \
-             a scalar, `string`, or `string | null`",
+             per-call `Ctx<'a>` arena) and has no owned representation, so a `static` cannot hold \
+             it; only an array of lifetime-free elements (`number[]`, `boolean[]`) is stored \
+             owned today. Keep the value inside a function, or reduce the global to a scalar, \
+             `string`, or `string | null`",
         ));
     }
     let ty = match durable {
@@ -778,23 +910,36 @@ fn emit_global_with_ctx(
         Some(DurableGlobal::OptionalString) => {
             quote!(::core::option::Option<::std::string::String>)
         }
-        None => emit_static_type_id(g.ty, emit_env, ctx),
+
+        None => owned
+            .clone()
+            .unwrap_or_else(|| emit_static_type_id(g.ty, emit_env, ctx)),
     };
     let vis = visibility_token(g.visibility);
-    let mutability = if g.mutable { quote!(mut) } else { quote!() };
-    let init = match (&g.init, durable) {
-        (Some(expr), Some(DurableGlobal::OptionalString)) if is_nullish_literal(expr) => {
-            quote!(::core::option::Option::None)
-        }
-        (Some(expr), _) => {
-            let tokens = emit_const_expr(expr, emit_env.types)?;
-            body::coerce_static_init(expr, tokens, g.ty, emit_env)
-        }
-        (None, Some(DurableGlobal::String)) => quote!(::std::string::String::new()),
-        (None, Some(DurableGlobal::OptionalString)) => quote!(::core::option::Option::None),
-        (None, None) => {
-            let mut budget = CONST_DEFAULT_BUDGET;
-            emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+    // The module init writes an owned global, so it must be `static mut` even when the
+    // TypeScript binding is never reassigned.
+    let mutability = if g.mutable || owned.is_some() {
+        quote!(mut)
+    } else {
+        quote!()
+    };
+    let init = if owned.is_some() {
+        quote!(::std::vec::Vec::new())
+    } else {
+        match (&g.init, durable) {
+            (Some(expr), Some(DurableGlobal::OptionalString)) if is_nullish_literal(expr) => {
+                quote!(::core::option::Option::None)
+            }
+            (Some(expr), _) => {
+                let tokens = emit_const_expr(expr, emit_env.types)?;
+                body::coerce_static_init(expr, tokens, g.ty, emit_env)
+            }
+            (None, Some(DurableGlobal::String)) => quote!(::std::string::String::new()),
+            (None, Some(DurableGlobal::OptionalString)) => quote!(::core::option::Option::None),
+            (None, None) => {
+                let mut budget = CONST_DEFAULT_BUDGET;
+                emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+            }
         }
     };
     Ok((

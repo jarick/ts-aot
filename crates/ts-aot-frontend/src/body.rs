@@ -129,6 +129,7 @@ impl SkeletonBuilder {
         input: &FunctionBodyInput<'_, '_>,
         is_generator: bool,
         inherit_this_scope: bool,
+        fresh_class_values: bool,
     ) -> (Vec<HirStmt>, u32) {
         let body = input.body;
         let params = input.params;
@@ -143,6 +144,14 @@ impl SkeletonBuilder {
         );
         let Some(body) = body else {
             return (Vec::new(), base);
+        };
+        // Local ids restart in every function body, so a class value recorded by an earlier
+        // body must not classify a same-numbered local here. An arrow function keeps the
+        // mapping: its locals continue the enclosing body's ids and it captures them.
+        let saved_class_values = if fresh_class_values {
+            Some(std::mem::take(&mut self.class_value_locals))
+        } else {
+            None
         };
         let saved_static = self.in_static_method;
         if !inherit_this_scope {
@@ -171,6 +180,9 @@ impl SkeletonBuilder {
         if !prelude.is_empty() {
             prelude.append(&mut result);
             result = prelude;
+        }
+        if let Some(saved) = saved_class_values {
+            self.class_value_locals = saved;
         }
         let used = scope.peek_next();
         (result, used)

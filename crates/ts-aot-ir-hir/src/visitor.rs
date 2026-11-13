@@ -121,7 +121,8 @@ pub fn walk_expr<V: Visitor + ?Sized>(v: &mut V, expr: &HirExpr) {
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. }
         | HirExpr::Local { .. }
-        | HirExpr::Global { .. } => {}
+        | HirExpr::Global { .. }
+        | HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Field { owner, .. } => v.visit_expr(owner),
         HirExpr::Index { owner, index, .. } => {
             v.visit_expr(owner);
@@ -288,7 +289,8 @@ pub fn walk_expr_mut<V: VisitorMut + ?Sized>(v: &mut V, expr: &mut HirExpr) {
         | HirExpr::RegExp { .. }
         | HirExpr::BigInt { .. }
         | HirExpr::Local { .. }
-        | HirExpr::Global { .. } => {}
+        | HirExpr::Global { .. }
+        | HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Field { owner, .. } => v.visit_expr_mut(owner),
         HirExpr::Index { owner, index, .. } => {
             v.visit_expr_mut(owner);
