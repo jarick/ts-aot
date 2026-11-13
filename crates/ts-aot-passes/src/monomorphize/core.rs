@@ -6,51 +6,88 @@ use ts_aot_ir_hir::{
 };
 
 use crate::PassContext;
+use crate::hir_to_mir::ExprConverter;
 
 use super::MonomorphizeStats;
 use super::infer::{build_mapping, format_type_args, infer_type_args, type_args_resolved};
 use super::substitute::{TypeSubstitutionResult, substitute_func};
 
 type SpecializationKey = (FunctionId, Vec<TypeId>);
+#[derive(Default)]
+struct MethodIndex {
+    generic: HashMap<(TypeId, Atom, bool), FunctionId>,
+    class_names: HashSet<Atom>,
+}
+
+impl MethodIndex {
+    fn insert(&mut self, key: (TypeId, Atom, bool), fid: FunctionId) {
+        self.generic.insert(key, fid);
+    }
+
+    fn get(&self, key: &(TypeId, Atom, bool)) -> Option<&FunctionId> {
+        self.generic.get(key)
+    }
+}
+
 type OnCallee<'a> = &'a mut dyn FnMut(&mut HirCallee, &[HirExpr], &[TypeId]);
 
 pub fn monomorphize(
     program: &mut HirProgram,
     types: &mut TypeTable,
-    _ctx: &mut PassContext,
+    ctx: &mut PassContext,
 ) -> MonomorphizeStats {
     let mut stats = MonomorphizeStats::default();
     let mut next_fid: u32 = 0;
     let mut generic_fn_ids: HashSet<FunctionId> = HashSet::new();
     let mut fn_index: HashMap<FunctionId, HirFunction> = HashMap::new();
 
+    let mut name_to_generic: HashMap<Atom, FunctionId> = HashMap::new();
+    let mut method_to_generic: MethodIndex = MethodIndex::default();
+    let mut method_owner: HashMap<FunctionId, TypeId> = HashMap::new();
     classify_decls(
         &program.declarations,
         &mut next_fid,
         &mut generic_fn_ids,
         &mut fn_index,
+        &mut name_to_generic,
+        &mut method_to_generic,
+        &mut method_owner,
         &mut stats,
     );
 
     let mut worklist: VecDeque<SpecializationKey> = VecDeque::new();
+    let mut inference = ExprConverter::new();
+    if !generic_fn_ids.is_empty() {
+        inference.set_program(std::sync::Arc::new(program.clone()));
+    }
     {
         let mut on_callee =
             |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
-                if let HirCallee::Function(fid) = callee
-                    && generic_fn_ids.contains(fid)
-                    && let Some(generic_fn) = fn_index.get(fid)
-                {
-                    let type_args = infer_type_args(generic_fn, args, explicit_type_args, types);
-                    if type_args_resolved(&type_args, types) {
-                        worklist.push_back((*fid, type_args));
-                    }
-                }
+                push_specialization(
+                    callee,
+                    args,
+                    explicit_type_args,
+                    &generic_fn_ids,
+                    &name_to_generic,
+                    &method_to_generic,
+                    &fn_index,
+                    &inference,
+                    types,
+                    &mut worklist,
+                );
             };
         visit_callees(&mut program.declarations, &mut on_callee);
+        for inits in program.class_field_inits.values_mut() {
+            for (_, init) in inits.iter_mut() {
+                visit_expr_callees(init, &mut on_callee);
+            }
+        }
     }
 
     let mut mono_for_specialization: HashMap<SpecializationKey, FunctionId> = HashMap::new();
+    let mut specialization_names: HashMap<FunctionId, Atom> = HashMap::new();
     let mut new_decls: Vec<HirDecl> = Vec::new();
+    let mut method_specializations: Vec<(TypeId, HirFunction)> = Vec::new();
     let mut processed: HashSet<SpecializationKey> = HashSet::new();
 
     while let Some(key) = worklist.pop_front() {
@@ -71,49 +108,233 @@ pub fn monomorphize(
             generic_fn.name.as_str(),
             format_type_args(&type_args)
         ));
-        let mono_decl = HirDecl::Function(mono);
+        specialization_names.insert(mono_fid, mono.name.clone());
+        let mono_decl = HirDecl::Function(mono.clone());
 
         let mut mono_for_scan = mono_decl.clone();
         let mut on_callee =
             |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
-                if let HirCallee::Function(fid) = callee
-                    && generic_fn_ids.contains(fid)
-                    && let Some(target_fn) = fn_index.get(fid)
-                {
-                    let type_args = infer_type_args(target_fn, args, explicit_type_args, types);
-                    if type_args_resolved(&type_args, types) {
-                        worklist.push_back((*fid, type_args));
-                    }
-                }
+                push_specialization(
+                    callee,
+                    args,
+                    explicit_type_args,
+                    &generic_fn_ids,
+                    &name_to_generic,
+                    &method_to_generic,
+                    &fn_index,
+                    &inference,
+                    types,
+                    &mut worklist,
+                );
             };
         visit_decl_callees(&mut mono_for_scan, &mut on_callee);
 
-        new_decls.push(mono_decl);
+        if let Some(owner_ty) = method_owner.get(&generic_fid).copied() {
+            method_specializations.push((owner_ty, mono));
+        } else {
+            new_decls.push(mono_decl);
+        }
         mono_for_specialization.insert(key, mono_fid);
         stats.monomorphized += 1;
     }
 
     program.declarations.extend(new_decls);
+    for (owner_ty, method) in method_specializations {
+        let name = method.name.clone();
+        let class = program.declarations.iter_mut().find_map(|decl| match decl {
+            HirDecl::Class(c) if c.ty == owner_ty => Some(c),
+            _ => None,
+        });
+        match class {
+            Some(class) => class.methods.push(method),
+            None => ctx.error(
+                "E0300",
+                format!(
+                    "the class of method `{}` is not emitted (it was dropped as unemittable), \
+                     so its specialization has nowhere to go",
+                    name.as_str()
+                ),
+                ts_aot_core::Span::new(0, 0),
+            ),
+        }
+    }
 
     {
-        let mut on_callee =
-            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
-                if let HirCallee::Function(fid) = callee
-                    && generic_fn_ids.contains(fid)
-                    && let Some(generic_fn) = fn_index.get(fid)
-                {
-                    let type_args = infer_type_args(generic_fn, args, explicit_type_args, types);
-                    let key: SpecializationKey = (*fid, type_args);
-                    if let Some(&mono_fid) = mono_for_specialization.get(&key) {
-                        *callee = HirCallee::Function(mono_fid);
-                        stats.calls_rewritten += 1;
-                    }
-                }
+        let mut on_callee = |callee: &mut HirCallee,
+                             args: &[HirExpr],
+                             explicit_type_args: &[TypeId]| {
+            let Some(fid) = generic_callee(
+                callee,
+                &generic_fn_ids,
+                &name_to_generic,
+                &method_to_generic,
+                &inference,
+                types,
+            ) else {
+                return;
             };
+            let Some(generic_fn) = fn_index.get(&fid) else {
+                return;
+            };
+            let type_args = infer_for_callee(
+                callee,
+                &method_to_generic,
+                generic_fn,
+                args,
+                explicit_type_args,
+                &inference,
+                types,
+            );
+            let key: SpecializationKey = (fid, type_args);
+            if let Some(&mono_fid) = mono_for_specialization.get(&key) {
+                let renamed = match (&mut *callee, specialization_names.get(&mono_fid)) {
+                    (HirCallee::Indirect(inner), Some(mono_name)) => match inner.as_mut() {
+                        HirExpr::Field { field_name, .. } if method_owner.contains_key(&fid) => {
+                            *field_name = mono_name.clone();
+                            true
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !renamed {
+                    *callee = HirCallee::Function(mono_fid);
+                }
+                stats.calls_rewritten += 1;
+            }
+        };
         visit_callees(&mut program.declarations, &mut on_callee);
+        for inits in program.class_field_inits.values_mut() {
+            for (_, init) in inits.iter_mut() {
+                visit_expr_callees(init, &mut on_callee);
+            }
+        }
     }
 
     stats
+}
+
+fn receiver_class_ty(owner: &HirExpr, converter: &ExprConverter, types: &mut TypeTable) -> TypeId {
+    let ty = owner.ty();
+    let ty = if matches!(types.resolve(ty), Some(ts_aot_core::Type::Error) | None) {
+        converter.expr_type(owner, types).unwrap_or(ty)
+    } else {
+        ty
+    };
+    match types.resolve(ty) {
+        Some(ts_aot_core::Type::Optional { inner, .. }) => *inner,
+        _ => ty,
+    }
+}
+
+fn receiver_is_static(owner: &HirExpr, class_names: &HashSet<Atom>) -> bool {
+    match owner {
+        HirExpr::Global { name, .. } => class_names.contains(name),
+        _ => false,
+    }
+}
+
+fn method_generic(
+    index: &MethodIndex,
+    owner: &HirExpr,
+    field_name: &Atom,
+    converter: &ExprConverter,
+    types: &mut TypeTable,
+) -> Option<FunctionId> {
+    let ty = receiver_class_ty(owner, converter, types);
+    let preferred = receiver_is_static(owner, &index.class_names);
+    index.get(&(ty, field_name.clone(), preferred)).copied()
+}
+
+fn generic_callee(
+    callee: &HirCallee,
+    generic_fn_ids: &HashSet<FunctionId>,
+    name_to_generic: &HashMap<Atom, FunctionId>,
+    method_to_generic: &MethodIndex,
+    converter: &ExprConverter,
+    types: &mut TypeTable,
+) -> Option<FunctionId> {
+    match callee {
+        HirCallee::Function(fid) if generic_fn_ids.contains(fid) => Some(*fid),
+        HirCallee::Function(_) => None,
+        HirCallee::Indirect(inner) => match inner.as_ref() {
+            HirExpr::Global { name, .. } => name_to_generic.get(name).copied(),
+            HirExpr::Field {
+                owner, field_name, ..
+            } => method_generic(method_to_generic, owner, field_name, converter, types),
+            _ => None,
+        },
+        HirCallee::Closure(_) | HirCallee::Runtime { .. } => None,
+    }
+}
+
+fn infer_for_callee(
+    callee: &HirCallee,
+    method_to_generic: &MethodIndex,
+    generic_fn: &HirFunction,
+    args: &[HirExpr],
+    explicit_type_args: &[TypeId],
+    converter: &ExprConverter,
+    types: &mut TypeTable,
+) -> Vec<TypeId> {
+    if !explicit_type_args.is_empty() && explicit_type_args.len() == generic_fn.type_params.len() {
+        return explicit_type_args.to_vec();
+    }
+    if let HirCallee::Indirect(inner) = callee
+        && let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        && method_generic(method_to_generic, owner, field_name, converter, types).is_some()
+        && generic_fn
+            .params
+            .first()
+            .is_some_and(|param| param.name.as_str() == "this")
+    {
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push(owner.as_ref().clone());
+        all.extend(args.iter().cloned());
+        return infer_type_args(generic_fn, &all, explicit_type_args, types, converter);
+    }
+    infer_type_args(generic_fn, args, explicit_type_args, types, converter)
+}
+
+fn push_specialization(
+    callee: &HirCallee,
+    args: &[HirExpr],
+    explicit_type_args: &[TypeId],
+    generic_fn_ids: &HashSet<FunctionId>,
+    name_to_generic: &HashMap<Atom, FunctionId>,
+    method_to_generic: &MethodIndex,
+    fn_index: &HashMap<FunctionId, HirFunction>,
+    converter: &ExprConverter,
+    types: &mut TypeTable,
+    worklist: &mut VecDeque<SpecializationKey>,
+) {
+    let Some(fid) = generic_callee(
+        callee,
+        generic_fn_ids,
+        name_to_generic,
+        method_to_generic,
+        converter,
+        types,
+    ) else {
+        return;
+    };
+    let Some(generic_fn) = fn_index.get(&fid) else {
+        return;
+    };
+    let type_args = infer_for_callee(
+        callee,
+        method_to_generic,
+        generic_fn,
+        args,
+        explicit_type_args,
+        converter,
+        types,
+    );
+    if type_args_resolved(&type_args, types) {
+        worklist.push_back((fid, type_args));
+    }
 }
 
 fn classify_decls(
@@ -121,6 +342,9 @@ fn classify_decls(
     next_fid: &mut u32,
     generic_fn_ids: &mut HashSet<FunctionId>,
     fn_index: &mut HashMap<FunctionId, HirFunction>,
+    top_level_names: &mut HashMap<Atom, FunctionId>,
+    method_to_generic: &mut MethodIndex,
+    method_owner: &mut HashMap<FunctionId, TypeId>,
     stats: &mut MonomorphizeStats,
 ) {
     for decl in decls {
@@ -130,19 +354,25 @@ fn classify_decls(
                 *next_fid += 1;
                 if !f.type_params.is_empty() {
                     generic_fn_ids.insert(fid);
+                    top_level_names.insert(f.name.clone(), fid);
                     stats.generic_functions += 1;
                 }
                 fn_index.insert(fid, f.clone());
             }
             HirDecl::Class(c) => {
+                method_to_generic.class_names.insert(c.name.clone());
                 for m in &c.methods {
                     if m.params.is_empty() {
                         continue;
                     }
                     let fid = FunctionId::from_raw(*next_fid);
                     *next_fid += 1;
-                    if !m.type_params.is_empty() {
+                    let is_static = m.params.first().is_none_or(|p| p.name.as_str() != "this");
+                    let shadowed_by_field = !is_static && c.fields.iter().any(|f| f.name == m.name);
+                    if !m.type_params.is_empty() && !shadowed_by_field {
                         generic_fn_ids.insert(fid);
+                        method_to_generic.insert((c.ty, m.name.clone(), is_static), fid);
+                        method_owner.insert(fid, c.ty);
                         stats.generic_functions += 1;
                     }
                     fn_index.insert(fid, m.clone());
@@ -153,7 +383,6 @@ fn classify_decls(
         }
     }
 }
-
 fn visit_callees(decls: &mut [HirDecl], on_callee: OnCallee<'_>) {
     for decl in decls {
         visit_decl_callees(decl, on_callee);
@@ -246,6 +475,7 @@ fn visit_stmt_callees(stmt: &mut HirStmt, on_callee: OnCallee<'_>) {
 
 fn visit_expr_callees(expr: &mut HirExpr, on_callee: OnCallee<'_>) {
     match expr {
+        HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Call {
             callee,
             args,

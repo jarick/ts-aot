@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
@@ -32,6 +33,7 @@ pub(super) struct EmitCtx {
     pub(super) mutating_methods: HashSet<FunctionId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
     struct_field_names: HashMap<StructId, Vec<Atom>>,
+    module_idents: Rc<HashSet<Ident>>,
     mutable_globals: HashSet<Atom>,
     function_arity: HashMap<Atom, usize>,
     global_tys: HashMap<Atom, TypeId>,
@@ -155,6 +157,14 @@ impl EmitCtx {
         let mut global_tys = HashMap::new();
         let mut function_arity = HashMap::new();
         let mut function_params: HashMap<FunctionId, Vec<TypeId>> = HashMap::new();
+        let mut module_idents: HashSet<Ident> = HashSet::new();
+        for decl in &program.declarations {
+            module_idents.insert(match decl {
+                MirDecl::Function(f) => ident_from(&f.name),
+                MirDecl::Struct(s) => ident_from(&s.name),
+                MirDecl::Global(g) => ident_from(&g.name),
+            });
+        }
         for decl in &program.declarations {
             match decl {
                 MirDecl::Function(f) => {
@@ -221,6 +231,7 @@ impl EmitCtx {
             mutating_methods,
             struct_fields,
             struct_field_names,
+            module_idents: Rc::new(module_idents),
             mutable_globals,
             global_tys,
             function_arity,
@@ -249,6 +260,10 @@ impl EmitCtx {
 
     pub(super) fn mark_runtime_used(&self) {
         self.used_runtime.set(true);
+    }
+
+    pub(super) fn module_idents(&self) -> &Rc<HashSet<Ident>> {
+        &self.module_idents
     }
 
     pub(super) fn runtime_used(&self) -> bool {
@@ -423,6 +438,7 @@ pub(super) struct BodyCtx {
     locals_ty: HashMap<LocalId, TypeId>,
     locals_mut: HashMap<LocalId, bool>,
     reserved_idents: HashSet<Ident>,
+    module_idents: Rc<HashSet<Ident>>,
     self_param: Option<LocalId>,
     self_is_borrowed: bool,
     is_generator: bool,
@@ -700,6 +716,7 @@ impl BodyCtx {
             locals_ty,
             locals_mut,
             reserved_idents,
+            module_idents: Rc::new(HashSet::new()),
             self_param,
             self_is_borrowed,
             is_generator,
@@ -752,6 +769,7 @@ impl BodyCtx {
             locals_ty: HashMap::new(),
             locals_mut: HashMap::new(),
             reserved_idents: HashSet::new(),
+            module_idents: Rc::new(HashSet::new()),
             self_param: None,
             self_is_borrowed: false,
             is_generator: false,
@@ -957,11 +975,27 @@ impl BodyCtx {
         let mut suffix: u32 = 0;
         loop {
             let candidate = format_ident!("__wm_liveness_{}", suffix);
-            if !self.reserved_idents.contains(&candidate) && !used_in_cache.contains(&candidate) {
+            if !self.is_reserved(&candidate) && !used_in_cache.contains(&candidate) {
                 return candidate;
             }
             suffix += 1;
         }
+    }
+
+    pub(super) fn set_module_idents(&mut self, idents: Rc<HashSet<Ident>>) {
+        self.module_idents = idents;
+    }
+
+    fn is_reserved(&self, ident: &Ident) -> bool {
+        self.reserved_idents.contains(ident) || self.module_idents.contains(ident)
+    }
+
+    pub(super) fn alloc_hoist_ident(&self, base: &str) -> Ident {
+        let mut name = base.to_owned();
+        while self.is_reserved(&format_ident!("{name}")) {
+            name.push('_');
+        }
+        format_ident!("{name}")
     }
 
     pub(super) fn has_weakmap_liveness(&self) -> bool {
@@ -994,7 +1028,7 @@ impl BodyCtx {
         match self.locals.get(&id) {
             Some(ident) if ident == "_" => {
                 let mut candidate = format_ident!("__tmp{}", id.raw());
-                while self.reserved_idents.contains(&candidate) {
+                while self.is_reserved(&candidate) {
                     candidate = format_ident!("{}_", candidate);
                 }
                 candidate
@@ -1244,7 +1278,11 @@ fn bump_use(uses: &mut HashMap<LocalId, (u32, bool)>, id: LocalId, in_loop: bool
     entry.1 |= in_loop;
 }
 
-fn count_uses_block(block: &MirBlock, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
+pub(super) fn count_uses_block(
+    block: &MirBlock,
+    in_loop: bool,
+    uses: &mut HashMap<LocalId, (u32, bool)>,
+) {
     for stmt in &block.stmts {
         count_uses_stmt(stmt, in_loop, uses);
     }

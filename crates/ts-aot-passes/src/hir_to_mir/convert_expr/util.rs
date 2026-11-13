@@ -7,6 +7,8 @@ use ts_aot_ir_mir::{MirExpr, MirStmt};
 use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
+use super::call::is_numeric_type;
+
 fn is_constant_literal(e: &MirExpr) -> bool {
     matches!(
         e,
@@ -34,6 +36,14 @@ pub(super) fn is_pure_place(e: &MirExpr) -> bool {
     match e {
         MirExpr::Field { base, .. } => is_pure_place(base),
         MirExpr::Index { base, index, .. } => is_pure_place(base) && is_pure_place(index),
+        _ => false,
+    }
+}
+
+pub(super) fn is_place(e: &MirExpr) -> bool {
+    match e {
+        MirExpr::Local(_) | MirExpr::Global(_) => true,
+        MirExpr::Field { base, .. } | MirExpr::Index { base, .. } => is_place(base),
         _ => false,
     }
 }
@@ -103,6 +113,7 @@ pub(crate) fn hir_expr_type_id(owner: &HirExpr) -> Option<TypeId> {
         | HirExpr::Field { ty, .. }
         | HirExpr::Index { ty, .. }
         | HirExpr::Call { ty, .. }
+        | HirExpr::DefaultConstruct { ty, .. }
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }
@@ -224,5 +235,85 @@ impl ExprConverter {
             }
         }
         length_mir
+    }
+
+    pub(super) fn hoist_effectful_place_parts(
+        &mut self,
+        hir: &HirExpr,
+        place: MirExpr,
+        types: &mut TypeTable,
+        hoisted: &mut Vec<MirStmt>,
+    ) -> MirExpr {
+        match (hir, place) {
+            (
+                HirExpr::Index {
+                    owner: hir_owner,
+                    index: hir_index,
+                    ..
+                },
+                MirExpr::Index { base, index, ty },
+            ) => {
+                let base = self.hoist_effectful_place_parts(hir_owner, *base, types, hoisted);
+                let index = if is_pure_place(&index) {
+                    index
+                } else {
+                    Box::new(self.hoist_index_component(*index, hir_index, types, hoisted))
+                };
+                MirExpr::Index {
+                    base: Box::new(base),
+                    index,
+                    ty,
+                }
+            }
+            (
+                HirExpr::Field {
+                    owner: hir_owner, ..
+                },
+                MirExpr::Field { base, field, ty },
+            ) => {
+                let base = self.hoist_effectful_place_parts(hir_owner, *base, types, hoisted);
+                MirExpr::Field {
+                    base: Box::new(base),
+                    field,
+                    ty,
+                }
+            }
+            (_, other) => other,
+        }
+    }
+
+    fn hoist_index_component(
+        &mut self,
+        index: MirExpr,
+        hir_index: &HirExpr,
+        types: &mut TypeTable,
+        hoisted: &mut Vec<MirStmt>,
+    ) -> MirExpr {
+        let known = self
+            .value_static_ty(hir_index, types)
+            .or_else(|| self.mir_expr_static_ty(&index, types))
+            .filter(|ty| is_numeric_type(*ty, types));
+        let (index_ty, init) = match known {
+            Some(ty) => (ty, index),
+            None => {
+                let ty = types.intern(&Type::U64);
+                (
+                    ty,
+                    MirExpr::Cast {
+                        expr: Box::new(index),
+                        ty,
+                    },
+                )
+            }
+        };
+        let temp = self.fresh_local();
+        self.push_temp_local_with_mut(temp, index_ty, false);
+        hoisted.push(MirStmt::Let {
+            local: temp,
+            ty: index_ty,
+            init: Some(init),
+            mutable: false,
+        });
+        MirExpr::Local(temp)
     }
 }

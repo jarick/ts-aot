@@ -144,6 +144,16 @@ fn comparison_op_name(op: HirBinaryOp) -> &'static str {
         HirBinaryOp::Le => "<=",
         HirBinaryOp::Gt => ">",
         HirBinaryOp::Ge => ">=",
+        HirBinaryOp::Add => "+",
+        HirBinaryOp::Sub => "-",
+        HirBinaryOp::Mul => "*",
+        HirBinaryOp::Div => "/",
+        HirBinaryOp::Mod => "%",
+        HirBinaryOp::BitAnd => "&",
+        HirBinaryOp::BitOr => "|",
+        HirBinaryOp::BitXor => "^",
+        HirBinaryOp::Shl => "<<",
+        HirBinaryOp::Shr => ">>",
         _ => "?",
     }
 }
@@ -331,6 +341,22 @@ fn is_equality_op(op: HirBinaryOp) -> bool {
     )
 }
 
+fn is_arithmetic_op(op: HirBinaryOp) -> bool {
+    matches!(
+        op,
+        HirBinaryOp::Add
+            | HirBinaryOp::Sub
+            | HirBinaryOp::Mul
+            | HirBinaryOp::Div
+            | HirBinaryOp::Mod
+            | HirBinaryOp::BitAnd
+            | HirBinaryOp::BitOr
+            | HirBinaryOp::BitXor
+            | HirBinaryOp::Shl
+            | HirBinaryOp::Shr
+    )
+}
+
 fn is_nullish_hir_literal(expr: &HirExpr) -> bool {
     nullish_literal_kinds(expr).is_some()
 }
@@ -369,6 +395,7 @@ fn op_name_for_bigint(op: HirBinaryOp) -> &'static str {
 
 fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
     match expr {
+        HirExpr::DefaultConstruct { .. } => false,
         HirExpr::Assignment { .. } | HirExpr::CompoundUpdate { .. } => true,
         HirExpr::Field { owner, .. }
         | HirExpr::Unary { expr: owner, .. }
@@ -428,6 +455,7 @@ fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
 
 fn hir_expr_contains_call(expr: &HirExpr) -> bool {
     match expr {
+        HirExpr::DefaultConstruct { .. } => true,
         HirExpr::Call { .. }
         | HirExpr::New { .. }
         | HirExpr::Await { .. }
@@ -567,7 +595,7 @@ impl ExprConverter {
                 );
             }
         }
-        self.check_comparison_operands(op, lhs, rhs, types, ctx);
+        self.check_optional_operands(op, lhs, rhs, types, ctx);
         if op == HirBinaryOp::Coalesce {
             return self.convert_coalesce(
                 lhs,
@@ -786,7 +814,7 @@ impl ExprConverter {
         }
     }
 
-    fn check_comparison_operands(
+    fn check_optional_operands(
         &self,
         op: HirBinaryOp,
         lhs: &HirExpr,
@@ -794,7 +822,10 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) {
-        if !is_comparison_op(op) || is_nullish_hir_literal(lhs) || is_nullish_hir_literal(rhs) {
+        if (!is_comparison_op(op) && !is_arithmetic_op(op))
+            || is_nullish_hir_literal(lhs)
+            || is_nullish_hir_literal(rhs)
+        {
             return;
         }
         let lhs_ty = self.operand_static_ty(lhs, types);
@@ -804,6 +835,22 @@ impl ExprConverter {
         let op_name = comparison_op_name(op);
         let left = operand_type_name(lhs, lhs_ty, types);
         let right = operand_type_name(rhs, rhs_ty, types);
+        if is_arithmetic_op(op) {
+            if lhs_inner.is_some() || rhs_inner.is_some() {
+                ctx.error(
+                    NULLISH_NARROWING_DIAG,
+                    format!(
+                        "`{op_name}` cannot combine an optional value: the left operand is \
+                         `{left}` and the right one is `{right}`. The AOT target represents an \
+                         optional value as `Option<T>` and has no arithmetic operator for it; \
+                         handle the nullish case first (for example with `x!` after a check, or by \
+                         narrowing the operand's type)"
+                    ),
+                    lhs.span(),
+                );
+            }
+            return;
+        }
         if is_relational_op(op) {
             if lhs_inner.is_some() || rhs_inner.is_some() {
                 ctx.error(
@@ -1796,7 +1843,7 @@ impl ExprConverter {
         value
     }
 
-    fn truthy_condition(
+    pub(super) fn truthy_condition(
         &mut self,
         value: &MirExpr,
         ty: TypeId,
@@ -1804,6 +1851,41 @@ impl ExprConverter {
         types: &mut TypeTable,
     ) -> Option<MirExpr> {
         let bool_ty = types.intern(&Type::Bool);
+        if let Some(Type::Optional { inner, .. }) = types.resolve(ty) {
+            let inner = *inner;
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, bool_ty);
+            out.push(MirStmt::Let {
+                local: dest,
+                ty: bool_ty,
+                init: None,
+                mutable: true,
+            });
+            let mut inner_stmts: Vec<MirStmt> = Vec::new();
+            let unwrapped = MirExpr::UnwrapOptional {
+                expr: Box::new(value.clone()),
+                ty: inner,
+            };
+            let inner_truthy = self.truthy_condition(&unwrapped, inner, &mut inner_stmts, types)?;
+            inner_stmts.push(MirStmt::Assign {
+                target: MirPlace::Local { id: dest },
+                value: inner_truthy,
+            });
+            out.push(MirStmt::If {
+                cond: MirExpr::IsSome {
+                    expr: Box::new(value.clone()),
+                    ty: bool_ty,
+                },
+                then_block: MirBlock { stmts: inner_stmts },
+                else_block: Some(MirBlock {
+                    stmts: vec![MirStmt::Assign {
+                        target: MirPlace::Local { id: dest },
+                        value: MirExpr::Bool(false),
+                    }],
+                }),
+            });
+            return Some(MirExpr::Local(dest));
+        }
         Some(match types.resolve(ty) {
             Some(Type::Bool) => value.clone(),
             Some(Type::String) => {
@@ -2032,6 +2114,57 @@ impl ExprConverter {
                     out.push(MirStmt::Expr(inner));
                 }
                 MirExpr::Bool(true)
+            }
+            HirUnaryOp::Not => {
+                if matches!(
+                    expr,
+                    HirExpr::Null(_) | HirExpr::Undefined(_) | HirExpr::Unit(_)
+                ) {
+                    return MirExpr::Bool(true);
+                }
+                if matches!(
+                    expr,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Void,
+                        ..
+                    }
+                ) {
+                    let _ = self.convert_expr(
+                        expr,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                    return MirExpr::Bool(true);
+                }
+                let inner_ty = self
+                    .operand_static_ty(expr, types)
+                    .unwrap_or_else(|| expr.ty());
+                let inner =
+                    self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let (place, mut stmts) = self.bind_to_temp(inner, inner_ty);
+                out.append(&mut stmts);
+                let Some(truthy) = self.truthy_condition(&place, inner_ty, out, types) else {
+                    ctx.error(
+                        LOGICAL_DIAG,
+                        format!(
+                            "the truthiness of the operand of `!` cannot be decided: its type is \
+                             `{}`, which the AOT target has no Rust representation for; narrow it \
+                             to a single type or split the expression",
+                            type_name(types, inner_ty),
+                        ),
+                        expr.span(),
+                    );
+                    return MirExpr::Bool(false);
+                };
+                let bool_ty = types.intern(&Type::Bool);
+                MirExpr::Unary {
+                    op: convert_unaryop(HirUnaryOp::Not, ctx),
+                    expr: Box::new(truthy),
+                    ty: bool_ty,
+                }
             }
             _ => MirExpr::Unary {
                 op: convert_unaryop(op, ctx),

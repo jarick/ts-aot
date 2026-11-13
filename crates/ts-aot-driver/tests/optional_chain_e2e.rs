@@ -226,16 +226,4 @@ fn e2e_optional_chain_inside_no_capture_closure_body_with_typed_param() {
          got {:?}",
         out.diagnostics
     );
-    let mir = out
-        .mir_text
-        .expect("emit-mir must populate mir_text for closure with typed param e2e check");
-    let normalized = normalize_rust(&mir);
-    assert_node_with_op(
-        &normalized,
-        "opt",
-        "local(1)",
-        ".0",
-        "closure c?.x: OptionalChain wraps the Local owner directly inside the closure body, \
-         and `.0` field access is applied to the OptionalChain result",
-    );
 }

@@ -7,6 +7,7 @@ use super::infer::{
     bind_param_ty_resolved, build_mapping, format_type_args, hir_expr_ty, infer_type_args,
     type_resolved,
 };
+use crate::hir_to_mir::ExprConverter;
 
 #[test]
 fn format_type_args_empty_returns_empty_string() {
@@ -472,7 +473,7 @@ fn infer_type_args_with_multiple_type_params() {
         HirExpr::Int(1, Span::default()),
         HirExpr::Bool(true, Span::default()),
     ];
-    let inferred = infer_type_args(&f, &args, &[], &mut types);
+    let inferred = infer_type_args(&f, &args, &[], &mut types, &ExprConverter::new());
     assert_eq!(inferred.len(), 2);
     let expected_i64 = types.intern(&Type::I64);
     let expected_bool = types.intern(&Type::Bool);
@@ -553,7 +554,7 @@ fn infer_type_args_conflict_blocks_single_param_arg_fallback() {
         HirExpr::Int(1, Span::default()),
         HirExpr::String(Atom::from("x"), Span::default()),
     ];
-    let inferred = infer_type_args(&f, &args, &[], &mut types);
+    let inferred = infer_type_args(&f, &args, &[], &mut types, &ExprConverter::new());
     assert_eq!(inferred.len(), 1);
     let expected_gp = types.intern(&Type::GenericParam { id: gp });
     assert_eq!(

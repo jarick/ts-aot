@@ -16,6 +16,7 @@ impl HirExpr {
             | Self::Field { ty, .. }
             | Self::Index { ty, .. }
             | Self::Call { ty, .. }
+            | Self::DefaultConstruct { ty, .. }
             | Self::Binary { ty, .. }
             | Self::Unary { ty, .. }
             | Self::StructLiteral { ty, .. }
@@ -67,6 +68,7 @@ impl HirExpr {
             | Self::Field { span: s, .. }
             | Self::Index { span: s, .. }
             | Self::Call { span: s, .. }
+            | Self::DefaultConstruct { span: s, .. }
             | Self::Binary { span: s, .. }
             | Self::Unary { span: s, .. }
             | Self::StructLiteral { span: s, .. }
@@ -242,6 +244,10 @@ pub enum HirExpr {
     New {
         callee: Box<HirExpr>,
         args: Vec<HirExpr>,
+        ty: TypeId,
+        span: Span,
+    },
+    DefaultConstruct {
         ty: TypeId,
         span: Span,
     },

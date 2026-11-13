@@ -7324,6 +7324,58 @@ fn array_set_runtime_call_emits_mut_borrow() {
 }
 
 #[test]
+fn array_get_or_default_evaluates_the_receiver_before_the_index() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let arr_ty = types.intern(&Type::Array { element: i32_ty });
+    let array_param = LocalId::from_raw(0);
+    let dest = LocalId::from_raw(1);
+    let mut f = empty_func("pick");
+    f.ret = i32_ty;
+    f.params = vec![MirParam {
+        id: array_param,
+        name: Atom::from("arr"),
+        ty: arr_ty,
+    }];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from("v"),
+            ty: i32_ty,
+            mutable: false,
+        }],
+        block: MirBlock {
+            stmts: vec![MirStmt::Runtime {
+                op: RuntimeOp::ArrayGetOrDefault,
+                args: vec![
+                    MirExpr::Local(array_param),
+                    MirExpr::Int {
+                        value: 0,
+                        ty: i32_ty,
+                    },
+                ],
+                dest: Some(dest),
+                ty: i32_ty,
+                target_ty: None,
+            }],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let s = tokens.to_string();
+    let array_at = s
+        .find("let __ts_array")
+        .expect("a non-global receiver must be bound before the index is evaluated");
+    let index_at = s.find("let __ts_index").expect("the index must be bound");
+    assert!(
+        array_at < index_at,
+        "`arr[i]` evaluates the receiver before the index, so the emitted code must bind the \
+         array first. Got emitted code: `{s}`"
+    );
+}
+
+#[test]
 fn map_set_runtime_marks_map_param_mut() {
     let mut types = TypeTable::new();
     let str_ty = types.intern(&Type::String);
@@ -8336,7 +8388,7 @@ fn const_default_array_in_function_context_uses_arena_vec() {
 }
 
 #[test]
-fn array_typed_global_is_rejected() {
+fn array_typed_global_is_stored_owned() {
     let mut types = TypeTable::new();
     let elem = types.intern(&Type::I64);
     let arr = types.intern(&Type::Array { element: elem });
@@ -8349,14 +8401,13 @@ fn array_typed_global_is_rejected() {
         export_name: None,
         init: None,
     }));
-    let err = emit_decls(&prog, &types).expect_err(
-        "array-typed globals must be rejected: a `static` cannot hold an arena-backed Vec",
-    );
-    let msg = err.to_string();
+    let tokens = emit_decls(&prog, &types)
+        .expect("an array-typed global is stored in its owned form")
+        .to_string();
     assert!(
-        msg.contains("arena-backed") && msg.contains("static"),
-        "the array-typed-global rejection must explain that an arena-backed array cannot live \
-         in a `static`; got: {msg}"
+        tokens.contains(":: std :: vec :: Vec < i64 >")
+            && tokens.contains(":: std :: vec :: Vec :: new ()"),
+        "the array global must be declared as an owned `std::vec::Vec`; got: {tokens}"
     );
 }
 
@@ -9061,4 +9112,207 @@ fn called_static_method_resolves_as_a_free_function() {
          got:\n{rust}"
     );
     check_generated_crate("called_static_method", &rust);
+}
+
+#[test]
+fn a_generic_param_is_detected_at_any_nesting_depth() {
+    let mut types = TypeTable::new();
+    let generic_ty = types.intern(&Type::GenericParam {
+        id: ts_aot_core::GenericParamId::from_raw(0),
+    });
+    let mut deep = generic_ty;
+    for _ in 0..12 {
+        deep = types.intern(&Type::Array { element: deep });
+    }
+    assert!(
+        super::mentions_generic_param(deep, &types),
+        "a generic parameter nested 12 arrays deep must still be detected"
+    );
+    let mut concrete = types.intern(&Type::F64);
+    for _ in 0..12 {
+        concrete = types.intern(&Type::Array { element: concrete });
+    }
+    assert!(
+        !super::mentions_generic_param(concrete, &types),
+        "a fully concrete type nested 12 arrays deep is not generic"
+    );
+}
+
+#[test]
+fn a_deeply_nested_concrete_signature_is_not_dropped() {
+    let mut types = TypeTable::new();
+    let mut field_ty = types.intern(&Type::F64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    for depth in 0..6 {
+        let id = StructId::from_raw(depth);
+        prog.push_decl(MirDecl::Struct(MirStructDecl {
+            id,
+            name: Atom::from(format!("S{depth}")),
+            fields: vec![MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("next"),
+                ty: field_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            }],
+            methods: Vec::new(),
+        }));
+        field_ty = types.intern(&Type::Struct { id });
+    }
+    let mut f = empty_func("take_deep");
+    f.ret = field_ty;
+    assert!(
+        !super::signature_mentions_generic_param(&f, &types, &prog),
+        "a fully concrete signature six structs deep must still be emitted"
+    );
+}
+
+#[test]
+fn a_self_referential_struct_terminates_the_walk() {
+    let mut types = TypeTable::new();
+    let node_id = StructId::from_raw(0);
+    let node_ty = types.intern(&Type::Struct { id: node_id });
+    let link_ty = types.intern(&Type::Array { element: node_ty });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: node_id,
+        name: Atom::from("Node"),
+        fields: vec![MirFieldDecl {
+            id: FieldId::from_raw(0),
+            name: Atom::from("children"),
+            ty: link_ty,
+            mutable: true,
+            visibility: Visibility::Public,
+        }],
+        methods: Vec::new(),
+    }));
+    let mut f = empty_func("take_node");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("n"),
+        ty: node_ty,
+    }];
+    assert!(
+        !super::signature_mentions_generic_param(&f, &types, &prog),
+        "a self-referential concrete struct is not generic"
+    );
+}
+
+#[test]
+fn a_generic_field_nested_deep_is_still_detected() {
+    let mut types = TypeTable::new();
+    let mut field_ty = types.intern(&Type::GenericParam {
+        id: ts_aot_core::GenericParamId::from_raw(0),
+    });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    for depth in 0..5 {
+        let id = StructId::from_raw(depth);
+        prog.push_decl(MirDecl::Struct(MirStructDecl {
+            id,
+            name: Atom::from(format!("G{depth}")),
+            fields: vec![MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("value"),
+                ty: field_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            }],
+            methods: Vec::new(),
+        }));
+        field_ty = types.intern(&Type::Struct { id });
+    }
+    let mut f = empty_func("take_generic");
+    f.ret = field_ty;
+    assert!(
+        super::signature_mentions_generic_param(&f, &types, &prog),
+        "a generic field five structs deep must still drop the function"
+    );
+}
+
+#[test]
+fn a_struct_naming_a_dropped_generic_struct_is_dropped_too() {
+    let mut types = TypeTable::new();
+    let generic_ty = types.intern(&Type::GenericParam {
+        id: ts_aot_core::GenericParamId::from_raw(0),
+    });
+    let inner_id = StructId::from_raw(0);
+    let inner_ty = types.intern(&Type::Struct { id: inner_id });
+    let outer_id = StructId::from_raw(1);
+    let outer_ty = types.intern(&Type::Struct { id: outer_id });
+    let array_of_inner = types.intern(&Type::Array { element: inner_ty });
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    let field = |id: u32, name: &str, ty| MirFieldDecl {
+        id: FieldId::from_raw(id),
+        name: Atom::from(name),
+        ty,
+        mutable: false,
+        visibility: Visibility::Public,
+    };
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: inner_id,
+        name: Atom::from("Inner"),
+        fields: vec![field(0, "value", generic_ty)],
+        methods: Vec::new(),
+    }));
+    prog.push_decl(MirDecl::Struct(MirStructDecl {
+        id: outer_id,
+        name: Atom::from("Outer"),
+        fields: vec![
+            field(0, "direct", inner_ty),
+            field(1, "items", array_of_inner),
+        ],
+        methods: Vec::new(),
+    }));
+    let mut f = empty_func("take_outer");
+    f.params = vec![MirParam {
+        id: LocalId::from_raw(0),
+        name: Atom::from("o"),
+        ty: outer_ty,
+    }];
+    prog.push_decl(MirDecl::Function(f));
+    let s = emit_decls(&prog, &types)
+        .expect("a dropped generic struct must not make emission fail")
+        .to_string();
+    assert!(
+        !s.contains("struct Inner"),
+        "the generic struct must be dropped; got: {s}"
+    );
+    assert!(
+        !s.contains("struct Outer"),
+        "a struct naming a dropped generic struct must be dropped too; got: {s}"
+    );
+    assert!(
+        !s.contains("fn take_outer"),
+        "a function taking such a struct must be dropped; got: {s}"
+    );
+}
+
+#[test]
+fn a_struct_naming_a_deeply_nested_concrete_struct_is_emitted() {
+    let mut types = TypeTable::new();
+    let mut field_ty = types.intern(&Type::F64);
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    for depth in 0..6 {
+        let id = StructId::from_raw(depth);
+        prog.push_decl(MirDecl::Struct(MirStructDecl {
+            id,
+            name: Atom::from(format!("C{depth}")),
+            fields: vec![MirFieldDecl {
+                id: FieldId::from_raw(0),
+                name: Atom::from("next"),
+                ty: field_ty,
+                mutable: false,
+                visibility: Visibility::Public,
+            }],
+            methods: Vec::new(),
+        }));
+        field_ty = types.intern(&Type::Struct { id });
+    }
+    let s = emit_decls(&prog, &types)
+        .expect("a deeply nested concrete chain must emit")
+        .to_string();
+    assert!(
+        s.contains("struct C0") && s.contains("struct C5"),
+        "every concrete struct in the chain must be emitted; got: {s}"
+    );
 }

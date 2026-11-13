@@ -13,6 +13,13 @@ use crate::hir_to_mir::converter::ExprConverter;
 use crate::hir_to_mir::nullish::LOGICAL_DIAG;
 use crate::hir_to_mir::ops::convert_binop;
 
+fn condition_is_already_boolean(ty: TypeId, types: &TypeTable) -> bool {
+    matches!(
+        types.resolve(ty),
+        None | Some(Type::Bool | Type::Error | Type::GenericParam { .. } | Type::Union { .. })
+    )
+}
+
 impl ExprConverter {
     pub(super) fn materialize_non_place(
         &mut self,
@@ -59,6 +66,39 @@ impl ExprConverter {
         }
     }
 
+    pub(crate) fn convert_condition(
+        &mut self,
+        cond: &HirExpr,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let value = self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
+        self.condition_from_value(cond, value, out, types)
+    }
+
+    pub(super) fn condition_from_value(
+        &mut self,
+        cond: &HirExpr,
+        value: MirExpr,
+        out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+    ) -> MirExpr {
+        let Some(cond_ty) = self
+            .expr_type(cond, types)
+            .or_else(|| hir_expr_type_id(cond))
+        else {
+            return value;
+        };
+        if condition_is_already_boolean(cond_ty, types) {
+            return value;
+        }
+        self.truthy_condition(&value, cond_ty, out, types)
+            .unwrap_or(value)
+    }
+
     pub(super) fn convert_ternary(
         &mut self,
         cond: &HirExpr,
@@ -79,6 +119,7 @@ impl ExprConverter {
             types,
             ctx,
         );
+        let cond_mir = self.condition_from_value(cond, cond_mir, out, types);
         let mut then_stmts: Vec<MirStmt> = Vec::new();
         let then_value = self.convert_expr(
             then_branch,
@@ -521,17 +562,31 @@ impl ExprConverter {
                     None,
                 ),
             };
-            if let Some(lowered) = lowered {
-                let value = match lowered {
-                    MirExpr::Local(_) => lowered,
-                    other => MirExpr::Local(self.materialize_non_place(other, out)),
-                };
-                out.push(MirStmt::Assign {
-                    target: place,
-                    value: value.clone(),
-                });
-                return value;
-            }
+            let Some(lowered) = lowered else {
+                ctx.error(
+                    LOGICAL_DIAG,
+                    format!(
+                        "the `{}` compound update cannot be lowered without evaluating its \
+                         right-hand side eagerly",
+                        match op {
+                            HirBinaryOp::Coalesce => "??=",
+                            HirBinaryOp::And => "&&=",
+                            _ => "||=",
+                        }
+                    ),
+                    target.span(),
+                );
+                return MirExpr::Unit;
+            };
+            let value = match lowered {
+                MirExpr::Local(_) => lowered,
+                other => MirExpr::Local(self.materialize_non_place(other, out)),
+            };
+            out.push(MirStmt::Assign {
+                target: place,
+                value: value.clone(),
+            });
+            return value;
         }
 
         let rhs_mir =
@@ -794,7 +849,7 @@ impl ExprConverter {
     }
 }
 
-fn cast_numeric_branch_to_dest(
+pub(super) fn cast_numeric_branch_to_dest(
     value: MirExpr,
     branch_ty: Option<TypeId>,
     dest_ty: TypeId,
