@@ -797,8 +797,8 @@ fn convert_program_resolves_field_id_preserves_placeholder_for_unknown_field() {
     };
     assert_eq!(
         *field,
-        FieldId::from_raw(0),
-        "unknown field keeps the placeholder and a diagnostic is emitted, not a wrong resolve"
+        FieldId::from_raw(u32::MAX),
+        "an unknown field must not resolve to a real field id of the struct"
     );
     assert!(
         cx.diagnostics().iter().any(|d| d.code.as_str() == "P0010"),
@@ -1612,7 +1612,93 @@ fn convert_program_first_class_struct_id_starts_at_one() {
 }
 
 #[test]
-fn collect_mutated_globals_marks_only_direct_reassignment() {
+/// The other shapes that mutate a global: a field write (`holder.x = 1`), an index
+/// write (`arr[0] = 1`) and a call whose receiver is the global (a method that writes
+/// a field of `this` borrows it). Each needs the global to be `static mut`.
+fn collect_mutated_globals_covers_field_index_and_call_receivers() {
+    let g_ty = TypeId::from_raw(0);
+    let span = Span::default();
+    let global = |name: &str| HirExpr::Global {
+        name: Atom::new_inline(name),
+        ty: g_ty,
+        span,
+    };
+    let assign = |target: HirExpr| HirStmt::Expr {
+        expr: HirExpr::Assignment {
+            target: Box::new(target),
+            value: Box::new(HirExpr::Int(1, span)),
+            ty: g_ty,
+            span,
+        },
+    };
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    for name in ["holder", "arr", "callee", "untouched"] {
+        prog.push_decl(HirDecl::Global {
+            name: Atom::new_inline(name),
+            ty: g_ty,
+            init: None,
+        });
+    }
+    let body = vec![
+        assign(HirExpr::Field {
+            owner: Box::new(global("holder")),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("x"),
+            ty: g_ty,
+            span,
+        }),
+        assign(HirExpr::Index {
+            owner: Box::new(global("arr")),
+            index: Box::new(HirExpr::Int(0, span)),
+            ty: g_ty,
+            span,
+        }),
+        HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Function(FunctionId::from_raw(0)),
+                args: vec![global("callee"), HirExpr::Int(1, span)],
+                type_args: Vec::new(),
+                ty: g_ty,
+                span,
+            },
+        },
+    ];
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("__tla_main"),
+        params: Vec::new(),
+        ret: unit_ty(),
+        throws: None,
+        body,
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }));
+    let mut cx = ctx();
+    let mir = convert_program(&prog, &mut empty_types(), &mut cx);
+    for name in ["holder", "arr", "callee"] {
+        let g = mir
+            .globals()
+            .find(|g| g.name == Atom::new_inline(name))
+            .unwrap_or_else(|| panic!("`{name}` global must be present in MIR"));
+        assert!(
+            g.mutable,
+            "`{name}` is mutated through a field, an index or a call receiver, so it must be \
+             `static mut`"
+        );
+    }
+    let untouched = mir
+        .globals()
+        .find(|g| g.name == Atom::new_inline("untouched"))
+        .expect("untouched global must be present in MIR");
+    assert!(
+        !untouched.mutable,
+        "a global that is only read must stay immutable"
+    );
+}
+#[test]
+fn collect_mutated_globals_marks_direct_reassignment() {
     let g_ty = TypeId::from_raw(0);
     let mut prog = HirProgram::new(ModuleId::from_raw(0));
     prog.push_decl(HirDecl::Global {

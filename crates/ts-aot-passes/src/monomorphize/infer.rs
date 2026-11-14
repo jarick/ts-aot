@@ -241,6 +241,7 @@ pub fn hir_expr_ty(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         | HirExpr::Field { ty, .. }
         | HirExpr::Index { ty, .. }
         | HirExpr::Call { ty, .. }
+        | HirExpr::DefaultConstruct { ty, .. }
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }

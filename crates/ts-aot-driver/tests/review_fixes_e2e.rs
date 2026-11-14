@@ -790,9 +790,9 @@ fn optional_arguments_to_generic_parameters_are_accepted() {
         "an optional argument to a generic parameter must not be rejected; got {:?}",
         out.diagnostics
     );
-    // The emitted crate is *not* checked here: `id<T>` is not monomorphized yet,
-    // so the backend emits an undeclared `__generic0` type (`E0425`) - a
-    // separate defect of the monomorphize/backend path, not of this check.
+    // The generic original is not emittable (its `Type::GenericParam` has no Rust
+    // type), so monomorphization replaces the call with a specialization and the
+    // backend drops the original: the crate builds.
     let rust = out
         .rust_source
         .expect("emit-rust must populate rust_source");
@@ -800,6 +800,7 @@ fn optional_arguments_to_generic_parameters_are_accepted() {
         rust.contains("id"),
         "the call must be emitted; got:\n{rust}"
     );
+    check_generated_crate("optional_generic_argument", &rust);
 }
 
 /// B3 must not weaken the real checks: a concrete non-optional target still
@@ -920,4 +921,176 @@ fn a_free_function_does_not_inherit_a_same_named_methods_error_type() {
         "`caller` calls the free `m`, which cannot throw; got:\n{rust}"
     );
     check_generated_crate("free_vs_method", &rust);
+}
+
+/// A call to a generic function is specialized, and the generic original is not
+/// emitted: `id<number>(3)` calls `id_mono_...` with `f64` and the crate runs.
+#[test]
+fn a_generic_function_call_is_specialized_and_runs() {
+    const SOURCE: &str = "
+function ident<T>(x: T): T { return x; }
+export function three(): number { return ident<number>(3); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(generic_function::three(&ctx), 3.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    assert!(
+        !rust.contains("__generic0"),
+        "the generic original must not be emitted; got:\n{rust}"
+    );
+    check_generated_crate("generic_function", &rust);
+    let stdout = run_generated_crate("generic_function", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+/// A generic parameter can reach the backend through a struct field or a function type
+/// too: the struct, a method taking it as `self`, and the fn-value shim are then dropped
+/// with the generic original, so no `__generic0` reaches Rust.
+#[test]
+fn generic_parameters_in_struct_fields_and_function_types_are_not_emitted() {
+    const SOURCE: &str = r"
+class Box<T> { value: T | null = null; }
+function make<T>(cb: () => T): T { return cb(); }
+export function f(): number { return 0; }
+";
+    let rust = rust_of(SOURCE);
+    assert!(
+        !rust.contains("__generic0"),
+        "no generic placeholder may reach Rust; got:\n{rust}"
+    );
+    check_generated_crate("generic_placeholders", &rust);
+}
+
+/// A generic class has no specialized struct to name: instantiating one reports `E0300`
+/// instead of leaving a struct the generated crate does not declare.
+#[test]
+fn instantiating_a_generic_class_reports_a_diagnostic() {
+    let out = compile_module(
+        "class Box<T> { value: T | null = null; }\n\
+         export function f(): number { const b = new Box<number>(); return 0; }\n",
+    );
+    assert!(out.has_errors(), "got {:?}", out.diagnostics);
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0300" && d.message.contains("generic class")),
+        "expected E0300 for a generic class instantiation; got {:?}",
+        out.diagnostics
+    );
+}
+
+/// A generic class that is never instantiated is dropped from the crate and nothing
+/// refers to it, so the generated crate still compiles.
+#[test]
+fn an_uninstantiated_generic_class_is_dropped_cleanly() {
+    const SOURCE: &str = "class Box<T> { value: T | null = null; }\n\
+                           export function f(): number { return 0; }\n";
+    let rust = rust_of(SOURCE);
+    assert!(!rust.contains("__generic0"), "got:\n{rust}");
+    check_generated_crate("generic_uninstantiated", &rust);
+}
+
+/// The same class without static fields has no per-evaluation storage to represent.
+#[test]
+fn a_local_class_without_static_fields_is_accepted() {
+    let out = compile_module(
+        "export function f(): number { const L = class { m: number = 1; }; return 2; }\n",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+}
+
+/// A generic class expression is unemittable for the same reason `new` on one is: its fields
+/// would name a type the generated crate does not declare.
+#[test]
+fn a_generic_class_expression_reports_a_diagnostic() {
+    let out = compile_module(
+        "const G = class<T> { v: T | null = null; };\nexport function f(): number { return 1; }\n",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0300" && d.message.contains("generic class expression")),
+        "expected E0300 for a generic class expression; got {:?}",
+        out.diagnostics
+    );
+}
+
+/// An access to a member the resolved type does not declare is an error: lowering it with a
+/// placeholder field id would silently read whichever field carries that id (`c.k` reading
+/// `c.x`).
+#[test]
+fn an_undeclared_field_reports_an_error() {
+    const SOURCE: &str = r"
+class C { x: number = 1; }
+export function read(c: C): number { return c.k; }
+";
+    let codes = codes(SOURCE);
+    assert!(
+        codes.iter().any(|c| c == "P0010"),
+        "P0010 must be reported for an undeclared field, got {codes:?}"
+    );
+}
+
+/// A class value recorded in one function must not classify a same-numbered local of another
+/// function: the two bodies number their locals independently, and the mismatched guess used to
+/// read one class's static through an unrelated instance.
+#[test]
+fn a_class_value_in_one_function_does_not_classify_another_functions_local() {
+    const SOURCE: &str = r"
+class C { static k: number = 7; }
+export function holding(): number { const L = class { static k: number = 3; }; return L.k; }
+export function reading(c: C): number { return c.k; }
+";
+    let codes = codes(SOURCE);
+    assert!(
+        codes.iter().any(|c| c == "P0010"),
+        "the local of `reading` must not resolve to a static, got {codes:?}"
+    );
+}
+
+/// A class may declare a field and a method under one name; `k.m(...)` then calls the field's
+/// value, so the call is reported instead of reaching a method the backend drops.
+#[test]
+fn calling_a_field_that_shadows_a_method_is_reported() {
+    const SOURCE: &str = r"
+class K { m: number = 1; m<T>(x: T): T { return x; } }
+export function call(k: K): number { return k.m(4); }
+";
+    let codes = codes(SOURCE);
+    assert!(
+        codes.iter().any(|c| c == "E0418"),
+        "E0418 must be reported when a field shadows the called method, got {codes:?}"
+    );
+}
+
+/// A class value is its class tag, so a binding may hold several classes; `new` has no single
+/// class to construct then, and that is reported.
+#[test]
+fn constructing_a_rebound_class_value_is_reported() {
+    const SOURCE: &str = r"
+export function made(): number {
+    let L = class { static k: number = 1; };
+    L = class { static k: number = 2; };
+    const value = new L();
+    return value.k;
+}
+";
+    let codes = codes(SOURCE);
+    assert!(
+        codes.iter().any(|c| c == "E0419"),
+        "E0419 must be reported when `new` targets a binding holding more than one class, \
+         got {codes:?}"
+    );
 }

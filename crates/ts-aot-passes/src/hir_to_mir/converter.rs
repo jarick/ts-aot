@@ -932,17 +932,21 @@ impl ExprConverter {
                 );
                 placeholder
             }
+            // The access is `undefined`, which this backend does not model, so it is lowered
+            // with a sentinel field id that no struct declares rather than the struct's own
+            // placeholder: a real id would silently read whichever field carries it (`c.k`
+            // reading `c.x`), while the sentinel makes a generated crate fail to compile.
             None => {
                 ctx.warning(
                     "P0010",
                     format!(
-                        "field `{}` is not declared on the static type of the owner; the \
+                        "field `{}` is not declared on the resolved type of the owner; the \
                          access is lowered with a placeholder field",
                         field_name.as_str()
                     ),
                     Span::new(0, 0),
                 );
-                placeholder
+                FieldId::from_raw(u32::MAX)
             }
         }
     }

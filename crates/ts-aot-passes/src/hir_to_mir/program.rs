@@ -327,8 +327,18 @@ struct MutatedGlobalCollector<'a> {
 
 impl MutatedGlobalCollector<'_> {
     fn note_target(&mut self, target: &HirExpr) {
-        if let HirExpr::Global { name, .. } = target {
-            self.names.insert(name.clone());
+        match target {
+            HirExpr::Global { name, .. } => {
+                self.names.insert(name.clone());
+            }
+            // Assigning a field or an element of a global mutates what the global
+            // holds, and a mutating accessor on it borrows the global itself: the
+            // global has to be `static mut` for that borrow (or that index write) to
+            // exist at all.
+            HirExpr::Field { owner, .. } | HirExpr::Index { owner, .. } => {
+                self.note_target(owner);
+            }
+            _ => {}
         }
     }
 }
@@ -341,6 +351,16 @@ impl Visitor for MutatedGlobalCollector<'_> {
         match expr {
             HirExpr::Assignment { target, .. } | HirExpr::CompoundUpdate { target, .. } => {
                 self.note_target(target);
+            }
+            // A global passed as the receiver of a call may be mutated by it: a
+            // method that writes a field of `this` borrows the instance, and the
+            // write then lands in the global. Over-approximating here (any call's
+            // first argument) only makes a global `static mut`, which is always
+            // sound; under-approximating would silently drop the write.
+            HirExpr::Call { args, .. } => {
+                if let Some(HirExpr::Global { name, .. }) = args.first() {
+                    self.names.insert(name.clone());
+                }
             }
             _ => {}
         }

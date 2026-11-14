@@ -31,6 +31,7 @@ impl ClosureLowerer<'_> {
         }
 
         match expr {
+            HirExpr::DefaultConstruct { .. } => {}
             HirExpr::Call {
                 callee, args, span, ..
             } => {

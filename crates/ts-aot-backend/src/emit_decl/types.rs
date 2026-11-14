@@ -1,20 +1,63 @@
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{format_ident, quote};
 
-use ts_aot_core::Type;
-use ts_aot_core::TypeId;
+use ts_aot_core::{Type, TypeId, TypeTable};
 
 use super::ctx::EmitCtx;
 use super::ctx::EmitEnv;
 use super::ident::sanitize_ident;
 
 #[cfg(test)]
-use ts_aot_core::TypeTable;
-#[cfg(test)]
 use ts_aot_ir_mir::MirProgram;
 
 #[cfg(test)]
 use ts_aot_core::ModuleId;
+
+/// Whether a type mentions a generic parameter, at any depth. A function whose
+/// signature does is a generic original: there is no Rust type to give its
+/// `__generic0` (the backend emits the bare identifier, which nothing defines), and
+/// monomorphization replaced every call to it with a specialization, so it is
+/// skipped rather than emitted.
+pub(super) fn mentions_generic_param(ty: TypeId, types: &TypeTable) -> bool {
+    fn walk(ty: TypeId, types: &TypeTable, visited: &mut Vec<TypeId>) -> bool {
+        // A type is interned, so only a recursive alias can make the walk loop; remembering
+        // what has been inspected terminates that. A fixed depth limit cannot: a generic
+        // parameter nested deeper than it would be missed, and the emitted signature would
+        // name `__generic0`, which nothing defines.
+        if visited.contains(&ty) {
+            return false;
+        }
+        visited.push(ty);
+        match types.resolve(ty) {
+            Some(Type::GenericParam { .. }) => true,
+            Some(Type::Optional { inner, .. } | Type::Array { element: inner }) => {
+                walk(*inner, types, visited)
+            }
+            Some(Type::Promise { ok, err }) => {
+                walk(*ok, types, visited) || err.is_some_and(|e| walk(e, types, visited))
+            }
+            Some(Type::WeakMap { key, value }) => {
+                walk(*key, types, visited) || walk(*value, types, visited)
+            }
+            Some(Type::Result { ok, err }) => {
+                walk(*ok, types, visited) || walk(*err, types, visited)
+            }
+            Some(Type::Union { variants }) => variants.iter().any(|v| walk(*v, types, visited)),
+            Some(Type::Intersection { parts }) => parts.iter().any(|v| walk(*v, types, visited)),
+            Some(Type::Tuple { elements }) => elements.iter().any(|v| walk(*v, types, visited)),
+            Some(
+                Type::Generator { inner, .. }
+                | Type::GeneratorResult { inner }
+                | Type::AsyncGenYield { inner },
+            ) => walk(*inner, types, visited),
+            Some(Type::Fn { params, ret, .. }) => {
+                params.iter().any(|p| walk(*p, types, visited)) || walk(*ret, types, visited)
+            }
+            _ => false,
+        }
+    }
+    walk(ty, types, &mut Vec::new())
+}
 
 #[cfg(test)]
 pub(super) fn emit_type_id(id: TypeId, types: &TypeTable) -> TokenStream {

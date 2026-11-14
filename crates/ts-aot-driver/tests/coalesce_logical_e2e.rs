@@ -22,6 +22,26 @@ fn compile_module(source: &str) -> ts_aot_driver::DriverOutput {
     )
 }
 
+/// The crate stage (`--emit crate`) emits the lib-style module, whose exports are
+/// `pub` and whose module-init body is reachable as `__ts_aot_init`.
+fn crate_rust_of(source: &str) -> String {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        source,
+        &CompileOptions {
+            emit: EmitStage::Crate,
+            module: true,
+        },
+    );
+    assert!(
+        !out.has_errors(),
+        "must compile through the full pipeline; got {:?}",
+        out.diagnostics
+    );
+    out.rust_source
+        .expect("emit-crate must populate rust_source")
+}
+
 fn rust_of(source: &str) -> String {
     let out = compile_module(source);
     assert!(
@@ -647,6 +667,22 @@ class S {
 }
 export function g(): void { S.fill(); }
 ";
+    // JavaScript: `null ?? 7` is `7`, and a truthy `5 || 9` keeps the `5`.
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(accessor_compound::filled(&ctx), 7.0);
+    assert_eq!(accessor_compound::kept(&ctx), 5.0);
+    println!("ok");
+}
+"#;
     let rust = rust_of(SOURCE);
 
     // `??` is a nullish test, not equality, and the fallback is assigned inside the
@@ -674,12 +710,14 @@ export function g(): void { S.fill(); }
         "`||=` must test the unwrapped value and keep the fallback; got:\n{keep}"
     );
 
-    // The crate has to build: the equality lowering fed a `bool` into the `f64`
-    // value type. Its runtime effect is not asserted here because a mutating
-    // accessor is emitted as `fn Box__set_w(self, ..)` and called with
-    // `self.clone()`, so the write does not reach the caller's instance (a
-    // separate, pre-existing limitation of the class lowering).
+    // The crate has to build (the equality lowering fed a `bool` into the `f64`
+    // value type) and to *run*: a mutating accessor borrows its receiver
+    // (`&mut self`), so the setter's write reaches the caller's instance -
+    // `filled()` reads the `7` its setter stored, and the truthy `kept()` keeps
+    // the `5` the test put there.
     check_generated_crate("accessor_compound", &rust);
+    let stdout = run_generated_crate("accessor_compound", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 
     let static_rust = rust_of(STATIC_SOURCE);
     let static_fill = normalized(method_body_of(&static_rust, "S__fill"));
@@ -834,17 +872,32 @@ class C {
 export function f(c: C): number { const g = () => { c.set_(5); }; g(); return c.get_(); }
 ";
     // A generator method keeps the by-value receiver: its body runs later, so a
-    // `&mut self` borrow would have to outlive the generator. The crate is not
-    // built here because the generator's own `yield 1` coercion (`Generator<f64>`
-    // vs `Generator<{integer}>`) is a separate, pre-existing defect.
+    // `&mut self` borrow would have to outlive the generator. The write it makes
+    // therefore lands in its own copy of the instance, never in the caller's.
     const GENERATOR: &str = r"
 class G {
   v: number = 0;
   *m(): number { this.v = 1; yield 1; }
   get_(): number { return this.v; }
 }
-export function f(g: G): number { const it = g.m(); return g.get_(); }
+export function run(): number { const g = new G(); g.m(); return g.get_(); }
 ";
+    // `g.m()` only builds the generator - its body has not run - so the write it
+    // will make is not visible on the instance the caller still holds.
+    const GENERATOR_MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(mutating_generator::run(&ctx), 0.0);
+    println!("ok");
+}
+"#;
 
     let rust = rust_of(SOURCE);
     let flat = normalized(&rust);
@@ -863,10 +916,104 @@ export function f(g: G): number { const it = g.m(); return g.get_(); }
 
     check_generated_crate("mutating_captured", &rust_of(CAPTURED));
 
-    let generator_flat = normalized(&rust_of(GENERATOR));
+    let generator_rust = rust_of(GENERATOR);
+    let generator_flat = normalized(&generator_rust);
 
     assert!(
         generator_flat.contains("fnG__m<'a>(mutself,"),
         "a generator method keeps the by-value receiver; got:\n{generator_flat}"
     );
+    assert!(
+        generator_flat.contains("yield_((1asf64))"),
+        "`yield 1` is coerced to the generator's `number` yield type; got:\n{generator_flat}"
+    );
+
+    // The whole crate builds and runs now that the yielded literal carries the
+    // generator's yield type: the method's write happens in its own by-value copy,
+    // so it is not visible on the instance the caller still holds.
+    check_generated_crate("mutating_generator", &generator_rust);
+    let stdout = run_generated_crate("mutating_generator", &generator_rust, GENERATOR_MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+/// A global instance is a place too: `held.set_(5)` has to write the global rather
+/// than a clone of it, so the global is emitted as a `static mut` and the call that
+/// borrows it sits in an `unsafe` block.
+#[test]
+fn a_mutating_method_on_a_global_writes_the_global() {
+    const GLOBAL_RECEIVER: &str = r"
+class Holder {
+  v: number = 0;
+  set_(x: number): void { this.v = x; }
+  get_(): number { return this.v; }
+}
+let held: Holder = new Holder();
+export function via_global(): number { held.set_(5); return held.get_(); }
+";
+    const GLOBAL_MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(global_receiver::via_global(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(GLOBAL_RECEIVER);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("unsafe{Holder::Holder__set_(&mut(held),"),
+        "a mutating method borrows the global itself, in an unsafe context; got:\n{flat}"
+    );
+    check_generated_crate("global_receiver", &rust);
+    let stdout = run_generated_crate("global_receiver", &rust, GLOBAL_MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+/// `held?.set_(5)` maps the call over the optional receiver, so the receiver the
+/// chain is mapped over has to be a *place*: `held.clone().as_mut()` would take the
+/// mutation into a temporary clone and throw it away.
+#[test]
+fn a_mutating_method_through_an_optional_chain_writes_the_receiver() {
+    const SOURCE: &str = r"
+class Holder {
+  v: number = 0;
+  set_(x: number): void { this.v = x; }
+  get_(): number { return this.v; }
+}
+let held: Holder | null = new Holder();
+function read_(h: Holder | null): number { return h?.get_() ?? -1; }
+export function via_opt(): number { held?.set_(5); return read_(held); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    // `held: Holder | null = new Holder()` is seeded by the module init, so the
+    // global is `None` until it runs.
+    optional_chain_mutation::__ts_aot_init();
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(optional_chain_mutation::via_opt(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("unsafe{held.as_mut().map("),
+        "the chain borrows the receiver instead of cloning it; got:\n{flat}"
+    );
+    check_generated_crate("optional_chain_mutation", &rust);
+    let stdout = run_generated_crate("optional_chain_mutation", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

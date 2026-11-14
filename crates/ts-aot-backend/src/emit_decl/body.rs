@@ -16,7 +16,7 @@ use super::ctx::{
 use super::ident::ident_from;
 use super::literals::{emit_float_from_int, emit_whole_number_literal};
 use super::runtime_op::runtime_op_ident;
-use super::types::emit_type_id_with_ctx;
+use super::types::{emit_static_type_id, emit_type_id_with_ctx};
 use super::{DurableGlobal, global_durable_kind};
 use crate::error::BackendError;
 
@@ -619,7 +619,7 @@ fn emit_stmt(
                     }
                 }
                 MirPlace::Global(name) => {
-                    if let Some(target_ty) = ctx.global_ty(name) {
+                    let coerced = if let Some(target_ty) = ctx.global_ty(name) {
                         let coerced = optional_coerce(
                             value,
                             value_tokens,
@@ -632,6 +632,13 @@ fn emit_stmt(
                         numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
                     } else {
                         value_tokens
+                    };
+                    // An owned global holds a `std::vec::Vec` while the expression produced
+                    // the arena `Vec` the MIR type names: convert at the boundary.
+                    if is_owned_global(name, ctx, emit_env) {
+                        quote!(#coerced.iter().cloned().collect::<::std::vec::Vec<_>>())
+                    } else {
+                        coerced
                     }
                 }
                 MirPlace::Field { ty, .. } | MirPlace::Index { ty, .. } => {
@@ -886,6 +893,34 @@ fn is_durable_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
     durable_global_kind(name, ctx, emit_env).is_some()
 }
 
+/// Whether this global is stored in its *owned* form because its MIR type is arena-backed:
+/// a `static` needs a constant initializer and a `Vec` borrowing the arena has none, so an
+/// array whose elements need no lifetime is stored as `std::vec::Vec<T>`, which
+/// `Vec::new()` initializes for free. Reads convert it into the calling arena and writes go
+/// through the owned place, so nothing depends on an arena outliving the module init.
+fn is_owned_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+    ctx.global_ty(name)
+        .and_then(|ty| owned_array_ty(ty, ctx, emit_env))
+        .is_some()
+}
+
+/// The owned Rust type of a global whose MIR type is an arena-backed array, or `None` when
+/// the global is durable, is not an array, or has elements that need a lifetime of their
+/// own (a nested array, a string, a struct) and so cannot be stored owned.
+pub(super) fn owned_array_ty(ty: TypeId, ctx: &EmitCtx, emit_env: &EmitEnv) -> Option<TokenStream> {
+    if global_durable_kind(ty, emit_env).is_some() {
+        return None;
+    }
+    let Some(Type::Array { element }) = emit_env.types.resolve(ty) else {
+        return None;
+    };
+    if ctx.type_needs_lifetime(*element, emit_env.types) {
+        return None;
+    }
+    let element = emit_static_type_id(*element, emit_env, ctx);
+    Some(quote!(::std::vec::Vec<#element>))
+}
+
 /// A function value is emitted as a variant of the enum for its *own* signature
 /// bucket, so a local initialised from a function name is valid only when the
 /// local's declared function type is that same bucket and the bucket has a
@@ -937,7 +972,9 @@ fn emit_global_access(
         return quote!(#enum_name::#variant);
     }
     let ident = ident_from(name);
-    let mutable = ctx.is_mutable_global(name);
+    // An owned global is written by the module init, so it is `static mut` even when the
+    // TypeScript binding is never reassigned, and its reads need the `unsafe` block.
+    let mutable = ctx.is_mutable_global(name) || is_owned_global(name, ctx, emit_env);
     let inner = if let Some(kind) = durable_global_kind(name, ctx, emit_env) {
         let base = if mutable {
             quote!((*::core::ptr::addr_of!(#ident)))
@@ -953,6 +990,23 @@ fn emit_global_access(
             DurableGlobal::String => {
                 quote!(ts_aot_runtime::JsString::Valid(__ctx.arena.alloc_str(#base.as_str())))
             }
+        }
+    } else if is_owned_global(name, ctx, emit_env) {
+        if owned {
+            // The value the MIR type names is an arena `Vec`: build one in this call's arena
+            // from the static's owned one.
+            quote!(ts_aot_runtime::bumpalo::collections::Vec::from_iter_in(
+                (*::core::ptr::addr_of!(#ident)).iter().cloned(),
+                __ctx.arena
+            ))
+        } else {
+            // A read-only consumer (an index read, a slice-taking helper) only needs to
+            // borrow: the static's owned `Vec` is the array, and copying it into the arena
+            // would allocate a whole array per element read.
+            // The shared borrow is taken from a `static mut`; this target is single-threaded
+            // and every write goes through a pointer in its own `unsafe` block, so no `&mut`
+            // is live at the same time.
+            quote!(&*::core::ptr::addr_of!(#ident))
         }
     } else if owned
         && ctx
@@ -970,11 +1024,24 @@ fn emit_global_access(
     }
 }
 
-fn emit_global_place_base(name: &Atom, body_ctx: &BodyCtx) -> TokenStream {
+fn emit_global_place_base(
+    name: &Atom,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> TokenStream {
     if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
         return tokens;
     }
     let ident = ident_from(name);
+    if is_owned_global(name, ctx, emit_env) {
+        // The owned `std::vec::Vec` the static holds: a `static mut` cannot be borrowed
+        // directly, so the place goes through the pointer, and the reference is explicit
+        // because indexing a raw dereference would autoref it implicitly (denied in edition
+        // 2024). No `unsafe` block of its own - the statement that writes through it is
+        // already inside one.
+        return quote!((&mut *::core::ptr::addr_of_mut!(#ident)));
+    }
     quote!(#ident)
 }
 
@@ -997,8 +1064,28 @@ fn emit_place_ref_expr(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     match expr {
-        MirExpr::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
+        MirExpr::Global(name) => Ok(emit_global_place_base(name, ctx, emit_env, body_ctx)),
         _ => emit_expr(expr, ctx, emit_env, body_ctx),
+    }
+}
+
+/// An expression a slice-taking runtime helper can borrow: a global array is borrowed from
+/// its own storage, everything else is a value that gets referenced. Materializing an arena
+/// `Vec` here would copy the whole array for a single element read.
+fn emit_array_slice_arg(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Global(name) if is_owned_global(name, ctx, emit_env) => {
+            Ok(emit_global_access(name, ctx, emit_env, body_ctx, false))
+        }
+        other => {
+            let value = emit_expr(other, ctx, emit_env, body_ctx)?;
+            Ok(quote!(&#value))
+        }
     }
 }
 
@@ -1060,7 +1147,7 @@ fn emit_place_base(
     let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
-        MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
+        MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, ctx, emit_env, body_ctx)),
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
                 "nested field place: base type unresolved",
@@ -1814,6 +1901,21 @@ fn emit_expr(
             {
                 return Ok(quote!(#borrowed[#index as usize].clone()));
             }
+            if let MirExpr::Global(base_name) = base.as_ref()
+                && is_owned_global(base_name, ctx, emit_env)
+            {
+                // The array lives in the global's own owned `Vec`: borrow it (and clone a
+                // non-`Copy` element out of the borrow) rather than copying the whole array
+                // into the arena to read one element.
+                let base = emit_global_access(base_name, ctx, emit_env, body_ctx, false);
+                if expr
+                    .ty()
+                    .is_some_and(|ty| !is_copy_type(emit_env.types, ty))
+                {
+                    return Ok(quote!((#base)[#index as usize].clone()));
+                }
+                return Ok(quote!((#base)[#index as usize]));
+            }
             let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index as usize]))
         }
@@ -1836,13 +1938,18 @@ fn emit_expr(
                 && let Some(owner_ident) = owner_ident.clone()
                 && matches!(emit_env.types.resolve(*ty), Some(Type::Optional { .. }))
             {
-                let receiver = if is_mutating_method {
+                // A mutating method borrows its receiver, so the chain is mapped over
+                // a *place*: `unsafe { held.clone() }.as_mut()` writes into a
+                // temporary clone and the mutation is silently lost. A mutable global
+                // needs the whole chain in an `unsafe` context (`emit_mut_receiver`).
+                let (receiver, receiver_unsafe) = if is_mutating_method {
                     match base.as_ref() {
-                        MirExpr::Local(id) => body_ctx.local_ref(*id),
-                        other => emit_expr(other, ctx, emit_env, body_ctx)?,
+                        MirExpr::Local(id) => (body_ctx.local_ref(*id), false),
+                        MirExpr::Global(_) => emit_mut_receiver(base, ctx, emit_env, body_ctx)?,
+                        other => (emit_expr(other, ctx, emit_env, body_ctx)?, false),
                     }
                 } else {
-                    emit_expr(base, ctx, emit_env, body_ctx)?
+                    (emit_expr(base, ctx, emit_env, body_ctx)?, false)
                 };
                 let rest = &args[1..];
                 let rest_param_tys = param_tys.map(|tys| &tys[1..]);
@@ -1857,10 +1964,15 @@ fn emit_expr(
                 } else {
                     call
                 };
-                return Ok(if is_mutating_method {
+                let chain = if is_mutating_method {
                     quote!(#receiver.as_mut().map(|__ts_recv| #call))
                 } else {
                     quote!(#receiver.as_ref().map(|__ts_recv| #call))
+                };
+                return Ok(if receiver_unsafe {
+                    quote!(unsafe { #chain })
+                } else {
+                    chain
                 });
             }
             let callee = if let Some(owner_ident) = owner_ident {
@@ -1878,25 +1990,30 @@ fn emit_expr(
                     .expect("a method call always carries its receiver");
                 // The receiver must be emitted as a *place*: a value read of `this`
                 // clones it (`&mut (self.clone())` mutates a temporary), while
-                // `local_ref` keeps the borrow (`&mut (self)`, `&mut (c)`).
-                let receiver = match receiver {
+                // `local_ref` keeps the borrow (`&mut (self)`, `&mut (c)`). A global
+                // receiver is a place as well - `g.set_(5)` has to write the global
+                // instead of a clone of it - and a mutable global needs the call in
+                // an `unsafe` context (`emit_mut_receiver` reports that).
+                let (receiver, receiver_unsafe) = match receiver {
                     // Inside a mutating method `self` is already a `&mut` binding, so
                     // the place is a reborrow (`&mut (*self)`); `&mut (self)` would
                     // borrow the binding, which needs `mut self`.
-                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => {
-                        Ok(if body_ctx.self_is_borrowed() {
+                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => (
+                        if body_ctx.self_is_borrowed() {
                             quote!((*self))
                         } else {
                             quote!((self))
-                        })
-                    }
+                        },
+                        false,
+                    ),
                     // A captured (shared) local lives in the closure environment, so
                     // it has no ident to borrow: it keeps the by-value form.
                     MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
-                        Ok(body_ctx.local_ref(*id))
+                        (body_ctx.local_ref(*id), false)
                     }
-                    other => emit_expr(other, ctx, emit_env, body_ctx),
-                }?;
+                    MirExpr::Global(_) => emit_mut_receiver(receiver, ctx, emit_env, body_ctx)?,
+                    other => (emit_expr(other, ctx, emit_env, body_ctx)?, false),
+                };
                 let rest = emit_owned_exprs_coerced(
                     rest,
                     param_tys.map(|tys| &tys[1..]),
@@ -1904,7 +2021,12 @@ fn emit_expr(
                     emit_env,
                     body_ctx,
                 )?;
-                return Ok(quote!(#callee(&mut (#receiver), __ctx, #(#rest),*)));
+                let call = quote!(#callee(&mut (#receiver), __ctx, #(#rest),*));
+                return Ok(if receiver_unsafe {
+                    quote!(unsafe { #call })
+                } else {
+                    call
+                });
             }
             let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
             let call_args = if is_method {
@@ -3800,11 +3922,11 @@ fn emit_runtime_call(
             )))
         }
         RuntimeOp::ArrayGetOrDefault => {
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
             let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
             Ok(quote!(__ts_aot_array_get_or_default::<#element_ty>(
-                &#arr,
+                #arr,
                 #idx as i64
             )))
         }
@@ -3993,7 +4115,6 @@ fn emit_runtime_call(
         }
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, emit_env, body_ctx),
         RuntimeOp::ArrayPush => {
-            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let item = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
             let item = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
                 Some(element) => {
@@ -4002,6 +4123,35 @@ fn emit_runtime_call(
                 }
                 None => item,
             };
+            if let MirExpr::Global(name) = &args[0]
+                && is_owned_global(name, ctx, emit_env)
+            {
+                // The runtime pushes into an arena `BumpVec`, while the global holds an owned
+                // `std::vec::Vec`: push into an arena copy of it and write the elements back
+                // through the pointer, so no `&mut` is derived from the `static mut` twice.
+                // The write-back copies the whole array, so a `push` in a loop is quadratic in
+                // the array length; that is the price of the owned representation.
+                let ident = ident_from(name);
+                return Ok(quote!(unsafe {
+                    {
+                        // The item is evaluated before the push, and it may itself touch the
+                        // global (`xs.push(grow())` where `grow` pushes into `xs`): evaluate it
+                        // first, so the copy below sees those effects and the write-back keeps
+                        // them instead of overwriting the global with a stale copy.
+                        let __ts_item = #item;
+                        let mut __ts_pushed =
+                            ts_aot_runtime::bumpalo::collections::Vec::from_iter_in(
+                                (*::core::ptr::addr_of!(#ident)).iter().cloned(),
+                                __ctx.arena,
+                            );
+                        let __ts_len = __ts_aot_array_push(&mut __ts_pushed, __ts_item);
+                        *::core::ptr::addr_of_mut!(#ident) =
+                            __ts_pushed.iter().cloned().collect::<::std::vec::Vec<_>>();
+                        __ts_len
+                    }
+                }));
+            }
+            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let call = quote!(__ts_aot_array_push(&mut #arr, #item));
             Ok(if needs_unsafe {
                 quote!(unsafe { #call })
@@ -4035,8 +4185,8 @@ fn emit_runtime_call(
                 let base = emit_expr(base, ctx, emit_env, body_ctx)?;
                 return Ok(quote!(#base.as_ref().map(|o| #name(o))));
             }
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(&#arr)))
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(#arr)))
         }
         RuntimeOp::MathMax | RuntimeOp::MathMin => {
             let name = runtime_op_ident(op)?;

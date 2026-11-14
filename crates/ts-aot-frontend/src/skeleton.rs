@@ -104,10 +104,30 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) next_class_struct_id: u32,
     pub(crate) resolved_aliases: HashMap<String, TypeId>,
     pub(crate) class_types: HashMap<String, TypeId>,
+    /// Module-level `let` bindings that hold a class value, and the classes each may hold, in
+    /// assignment order: the top-level twin of `class_value_locals`.
+    pub(crate) class_value_globals: HashMap<String, Vec<TypeId>>,
+    /// Module-level `let` bindings. A `let` can be reassigned at module initialisation - after
+    /// the function bodies that read it are walked - so a static read through one cannot be
+    /// resolved from the classes known so far, and is reported instead of answered wrongly.
+    pub(crate) module_lets: HashSet<String>,
+    /// Bindings that hold a class expression's value, and the classes each may hold, in
+    /// assignment order. A class value is represented by its class *tag* - an `i64` - rather
+    /// than by an instance of the class: a binding may be rebound to another class, so the tag
+    /// is what tells the classes apart at run time.
+    pub(crate) class_value_locals: HashMap<ts_aot_core::LocalId, Vec<TypeId>>,
+    /// The tag that represents a class as a value, one per class type, assigned on first use.
+    pub(crate) class_value_tags: HashMap<TypeId, i64>,
     pub(crate) is_generator_stack: Vec<bool>,
     pub(crate) type_param_stack: Vec<TypeParamMap>,
     pub(crate) in_static_method: bool,
     pub(crate) module: bool,
+    /// Static class fields: the class's type maps a field name to the module-level
+    /// global that stores it (`Counter.count` → `Counter__count`) and to the
+    /// field's type. A static field belongs to the class rather than to an
+    /// instance, so it is not part of the instance struct: the member walk rewrites
+    /// `Counter.count` to that global, reads and writes alike.
+    pub(crate) static_field_globals: HashMap<TypeId, HashMap<Atom, (Atom, TypeId)>>,
     pub(crate) strict: bool,
     pub(crate) tla_main_body: Vec<TlaMainItem>,
     pub(crate) tla_main_name: Atom,
@@ -234,10 +254,15 @@ impl SkeletonBuilder {
             next_class_struct_id: 0,
             resolved_aliases: HashMap::new(),
             class_types: HashMap::new(),
+            class_value_globals: HashMap::new(),
+            module_lets: HashSet::new(),
+            class_value_locals: HashMap::new(),
+            class_value_tags: HashMap::new(),
             is_generator_stack: Vec::new(),
             type_param_stack: Vec::new(),
             in_static_method: false,
             module,
+            static_field_globals: HashMap::new(),
             strict: module,
             tla_main_body: Vec::new(),
             tla_main_name,
@@ -263,6 +288,12 @@ impl SkeletonBuilder {
         self.check_reserved_names(senv);
         self.finalize_tla_main(senv);
         senv.program.next_class_struct_id = self.next_class_struct_id;
+    }
+
+    /// The tag that represents `ty` as a class value, assigning one on first use.
+    pub(crate) fn class_value_tag(&mut self, ty: TypeId) -> i64 {
+        let next = i64::try_from(self.class_value_tags.len()).unwrap_or(i64::MAX);
+        *self.class_value_tags.entry(ty).or_insert(next)
     }
 
     fn pre_register_class_types(&mut self, senv: &mut SkeletonEnv, program: &Program<'_>) {

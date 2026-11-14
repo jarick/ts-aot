@@ -566,17 +566,34 @@ impl ExprConverter {
                     None,
                 ),
             };
-            if let Some(lowered) = lowered {
-                let value = match lowered {
-                    MirExpr::Local(_) => lowered,
-                    other => MirExpr::Local(self.materialize_non_place(other, out)),
-                };
-                out.push(MirStmt::Assign {
-                    target: place,
-                    value: value.clone(),
-                });
-                return value;
-            }
+            let Some(lowered) = lowered else {
+                // Falling through to the eager `convert_binop` form would evaluate
+                // the right-hand side unconditionally and store a comparison result
+                // (`??` maps to equality there), so report instead of emitting it.
+                ctx.error(
+                    LOGICAL_DIAG,
+                    format!(
+                        "the `{}` compound update cannot be lowered without evaluating its \
+                         right-hand side eagerly",
+                        match op {
+                            HirBinaryOp::Coalesce => "??=",
+                            HirBinaryOp::And => "&&=",
+                            _ => "||=",
+                        }
+                    ),
+                    target.span(),
+                );
+                return MirExpr::Unit;
+            };
+            let value = match lowered {
+                MirExpr::Local(_) => lowered,
+                other => MirExpr::Local(self.materialize_non_place(other, out)),
+            };
+            out.push(MirStmt::Assign {
+                target: place,
+                value: value.clone(),
+            });
+            return value;
         }
 
         let rhs_mir =
@@ -849,7 +866,7 @@ impl ExprConverter {
     }
 }
 
-fn cast_numeric_branch_to_dest(
+pub(super) fn cast_numeric_branch_to_dest(
     value: MirExpr,
     branch_ty: Option<TypeId>,
     dest_ty: TypeId,

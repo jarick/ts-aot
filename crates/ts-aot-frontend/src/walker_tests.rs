@@ -4482,7 +4482,7 @@ fn class_expression_named_uses_module_unique_name_not_source_name() {
 }
 
 #[test]
-fn class_expression_in_body_returns_global_reference() {
+fn class_expression_in_body_evaluates_to_an_instance_of_the_anonymous_class() {
     let f = sole_function("function f(): i64 { return class { x: i32; }; }");
     let HirStmt::Return {
         value: Some(ret_expr),
@@ -4491,10 +4491,10 @@ fn class_expression_in_body_returns_global_reference() {
         panic!("expected Return with value, got {:?}", f.body[0]);
     };
     match ret_expr {
-        HirExpr::Global { name, .. } => {
-            assert_eq!(name, Atom::from("__class_m0_0"));
-        }
-        other => panic!("expected Global referencing anon class, got {other:?}"),
+        // A class expression evaluates to an instance of the class, built from its field
+        // initializers without running a constructor (only `new` runs one).
+        HirExpr::DefaultConstruct { .. } => {}
+        other => panic!("expected DefaultConstruct of the anon class, got {other:?}"),
     }
 }
 
@@ -4547,8 +4547,10 @@ fn class_expression_assigned_to_local_keeps_class_registered() {
     };
     let init = init.as_ref().expect("const binding must have an init");
     match init {
-        HirExpr::Global { name, .. } => assert_eq!(name, Atom::from("__class_m0_0")),
-        other => panic!("expected Global referencing anon class, got {other:?}"),
+        // A class value is its class tag (`class_value_tag`), while the class itself stays
+        // registered under its module-unique name.
+        HirExpr::Int(_, _) => {}
+        other => panic!("expected the anon class's tag, got {other:?}"),
     }
 }
 

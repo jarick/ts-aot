@@ -134,6 +134,7 @@ pub(super) fn rewrite_in_expr(
         }
     }
     match expr {
+        HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Closure { body, .. } => {
             rewrite_in_body(body, closure_names, ctx);
         }

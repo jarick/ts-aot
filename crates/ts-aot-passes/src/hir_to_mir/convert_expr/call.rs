@@ -1668,6 +1668,23 @@ impl ExprConverter {
         };
         let key = (sid, field_name.clone(), is_static);
         let fid = *self.method_map.get(&key)?;
+        // A class may declare an instance field and a method under one name. The field is the
+        // member an instance actually carries, so `k.m(...)` calls the field's value: report it
+        // instead of emitting a call to a method the backend drops as unspecialized.
+        if !is_static
+            && self
+                .field_id_lookup
+                .contains_key(&(sid, field_name.clone()))
+        {
+            ctx.error(
+                "E0418",
+                format!(
+                    "`{}` is an instance field, not a method; a field's value cannot be called",
+                    field_name.as_str()
+                ),
+                owner.span(),
+            );
+        }
         // `c?.m(...)`: the receiver is optional, so the backend maps the call
         // over it and the result is `ret | undefined`.
         let owner_optional = matches!(types.resolve(owner.ty()), Some(Type::Optional { .. }));

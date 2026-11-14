@@ -16,6 +16,7 @@ impl HirExpr {
             | Self::Field { ty, .. }
             | Self::Index { ty, .. }
             | Self::Call { ty, .. }
+            | Self::DefaultConstruct { ty, .. }
             | Self::Binary { ty, .. }
             | Self::Unary { ty, .. }
             | Self::StructLiteral { ty, .. }
@@ -71,6 +72,7 @@ impl HirExpr {
             | Self::Field { span: s, .. }
             | Self::Index { span: s, .. }
             | Self::Call { span: s, .. }
+            | Self::DefaultConstruct { span: s, .. }
             | Self::Binary { span: s, .. }
             | Self::Unary { span: s, .. }
             | Self::StructLiteral { span: s, .. }
@@ -247,6 +249,14 @@ pub enum HirExpr {
     New {
         callee: Box<HirExpr>,
         args: Vec<HirExpr>,
+        ty: TypeId,
+        span: Span,
+    },
+    /// An instance of `ty` built from the class's field initializers, *without* running a
+    /// user constructor. This is what a class expression evaluates to - evaluating a class
+    /// does not run its constructor, and a class value has no other representation in this
+    /// target - and it is also how the fields of a class with no constructor are laid out.
+    DefaultConstruct {
         ty: TypeId,
         span: Span,
     },

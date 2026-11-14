@@ -610,6 +610,7 @@ impl SkeletonBuilder {
                 },
                 false,
                 true,
+                false,
             );
             scope.set_next(used);
             b
@@ -712,6 +713,7 @@ impl SkeletonBuilder {
             },
             false,
             false,
+            true,
         );
         scope.set_next(used);
         senv.capture_types.pop();
@@ -1097,16 +1099,18 @@ impl SkeletonBuilder {
         let seq = self.next_anon_class_id;
         self.next_anon_class_id = self.next_anon_class_id.saturating_add(1);
         let unique_name = Atom::from(format!("__class_m{module_id}_{seq}"));
-        let mut hir_class = self.build_class(senv, class_expr, false);
+        let mut hir_class = self.build_class(senv, class_expr, false, false);
         hir_class.name = unique_name.clone();
+        let class_ty = hir_class.ty;
+        let span = core_span_from_oxc(class_expr.span);
         senv.program
             .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
-        let ty = senv.error_ty();
-        HirExpr::Global {
-            name: unique_name,
-            ty,
-            span: core_span_from_oxc(class_expr.span),
-        }
+        // A class expression evaluates to a class value. Evaluating it does not run its
+        // constructor (only `new` does), and this target has no separate class-object
+        // representation, so the value is an instance built from the class's field
+        // initializers alone. The type used to be the error type, which made the binding
+        // `()` and every read through it fail.
+        HirExpr::DefaultConstruct { ty: class_ty, span }
     }
 
     fn walk_binary(
@@ -1328,11 +1332,58 @@ impl SkeletonBuilder {
                 senv.types.intern(&ts_aot_core::Type::Date)
             }
             Expression::Identifier(id) if scope.lookup(id.name.as_str()).is_none() => {
-                match self.class_types.get(id.name.as_str()) {
-                    Some(&class_ty) => class_ty,
-                    None => senv.error_ty(),
+                // A module-level `let` may hold several classes (it was rebound), and then
+                // there is no single class to construct.
+                match self.class_value_globals.get(id.name.as_str()) {
+                    Some(classes)
+                        if classes.len() < 2 && self.module_lets.contains(id.name.as_str()) =>
+                    {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a module-level `let` holding a class value cannot know \
+                             which class to construct; use `const`, or name the class directly",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    Some(classes) if classes.len() > 1 => {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a binding that may hold more than one class value is not \
+                             supported; construct the class by name instead",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    _ => match self.class_types.get(id.name.as_str()) {
+                        Some(&class_ty) => class_ty,
+                        None => senv.error_ty(),
+                    },
                 }
             }
+            // A *local* binding may still hold a class expression, whose class type is what
+            // `new` needs; without this the binding fell back to the error type. A binding that
+            // may hold several classes (it was rebound) has no single class to construct, so
+            // that is reported rather than guessed.
+            Expression::Identifier(id) => match scope.lookup(id.name.as_str()) {
+                Some((local, _)) => match self
+                    .class_value_locals
+                    .get(&self.class_value_storage(local))
+                {
+                    Some(classes) if classes.len() == 1 => classes[0],
+                    Some(_) => {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a binding that may hold more than one class value is not \
+                             supported; construct the class by name instead",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    None => senv.error_ty(),
+                },
+                None => senv.error_ty(),
+            },
             _ => senv.error_ty(),
         };
         HirExpr::New {
@@ -1368,6 +1419,32 @@ impl SkeletonBuilder {
                         };
                     }
                 }
+                // `Counter.count`: a static field is class-level storage, kept in a
+                // module-level global rather than in the instance struct, so both
+                // the read and the assignment target are that global. The owner has
+                // to be the class name itself: a local of the same name shadows it.
+                if let Expression::Identifier(obj) = &s.object
+                    && scope.visible_binding(obj.name.as_str()).is_none()
+                    // A module-level binding rebound to another class has to go through the
+                    // class-value path below, which selects the class by its tag.
+                    && !self.module_lets.contains(obj.name.as_str())
+                    && self
+                        .class_value_globals
+                        .get(obj.name.as_str())
+                        .is_none_or(|classes| classes.len() <= 1)
+                    && let Some(class_ty) = self.class_types.get(obj.name.as_str()).copied()
+                    && let Some((global, ty)) = self
+                        .static_field_globals
+                        .get(&class_ty)
+                        .and_then(|statics| statics.get(&Atom::from(s.property.name.as_str())))
+                        .cloned()
+                {
+                    return HirExpr::Global {
+                        name: global,
+                        ty,
+                        span: core_span_from_oxc(s.span),
+                    };
+                }
                 let owner = self.walk_expr(senv, &s.object, scope);
                 let owner = if s.optional {
                     Self::wrap_optional_chain(owner, core_span_from_oxc(s.object.span()))
@@ -1379,6 +1456,57 @@ impl SkeletonBuilder {
                 // yields a nullable result, so the field type must be recovered
                 // from `C` even though the owner is `C | null`.
                 let owner_ty = owner.ty();
+                // A receiver that holds a class *value* - a class name, a binding holding a
+                // class expression, or the class expression itself - reads a static field from
+                // the module-level global. An instance of the same class is not a class value,
+                // even though both carry the class's type, so the classification (not the
+                // type) decides: an instance keeps its own field, even under the same name.
+                let class_value_classes = match &owner {
+                    HirExpr::Global { name, .. } => {
+                        if self
+                            .class_value_globals
+                            .get(name.as_str())
+                            .is_some_and(|classes| classes.len() < 2)
+                            && self.module_lets.contains(name.as_str())
+                        {
+                            // The binding is `let`, so it may be reassigned while the module
+                            // initialises - after this body was walked. Resolving the read from
+                            // the classes known so far would answer with the wrong class.
+                            senv.report_unsupported(
+                                "E0419",
+                                format!(
+                                    "`{name}` is a module-level `let` holding a class value, so \
+                                     its class is only known once the module has initialised; use \
+                                     `const`, or name the class directly"
+                                )
+                                .as_str(),
+                                s.span,
+                            );
+                        }
+                        self.class_value_globals
+                            .get(name.as_str())
+                            .cloned()
+                            .or_else(|| {
+                                self.class_types
+                                    .get(name.as_str())
+                                    .copied()
+                                    .map(|class_ty| vec![class_ty])
+                            })
+                    }
+                    HirExpr::Local { id, .. } => {
+                        let storage = self.class_value_storage(*id);
+                        self.class_value_locals.get(&storage).cloned()
+                    }
+                    HirExpr::DefaultConstruct { ty, .. } => Some(vec![*ty]),
+                    _ => None,
+                };
+                if !s.optional
+                    && let Some(classes) = class_value_classes
+                    && let Some(expr) =
+                        self.static_field_access(&classes, prop, &owner, s.span, senv)
+                {
+                    return expr;
+                }
                 let (lookup_ty, nullish) = match senv.types.resolve(owner_ty) {
                     Some(ts_aot_core::Type::Optional { inner, nullish }) => {
                         (*inner, Some(*nullish))
@@ -1495,6 +1623,101 @@ impl SkeletonBuilder {
         }
     }
 
+    /// The local that holds a binding's storage. A narrowed binding is read through a
+    /// `_narrowed_N` copy with its own id, while the value (a class tag) lives in the storage,
+    /// so every class-value lookup normalises the id first.
+    pub(crate) fn class_value_storage(&self, id: LocalId) -> LocalId {
+        self.narrowed_stack
+            .last()
+            .and_then(|frame| frame.get(&id))
+            .map_or(id, |(storage, _)| *storage)
+    }
+
+    /// A read of a static field through a class *value*. With one candidate class the field's
+    /// module-level global is read directly; with several - a binding rebound to another class -
+    /// the class is picked at run time by comparing the value's class tag.
+    fn static_field_access(
+        &mut self,
+        classes: &[TypeId],
+        field: &str,
+        owner: &HirExpr,
+        span: oxc_span::Span,
+        senv: &mut SkeletonEnv,
+    ) -> Option<HirExpr> {
+        let arms: Vec<(TypeId, Atom, TypeId)> = classes
+            .iter()
+            .filter_map(|class_ty| {
+                self.static_field_globals
+                    .get(class_ty)
+                    .and_then(|statics| statics.get(&Atom::from(field)))
+                    .cloned()
+                    .map(|(global, ty)| (*class_ty, global, ty))
+            })
+            .collect();
+        let (_, first_global, first_ty) = arms.first()?.clone();
+        let hir_span = core_span_from_oxc(span);
+        // Reading through a rebindable class value only works when every class it may hold
+        // declares the field with one type: otherwise the value would silently be the one
+        // class's field, or the branches would disagree on the result type.
+        if arms.len() != classes.len() {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "`{field}` is not a static field of every class this value may hold; the \
+                     read is only defined for some of them"
+                )
+                .as_str(),
+                span,
+            );
+        } else if arms.windows(2).any(|pair| pair[0].2 != pair[1].2) {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "static field `{field}` has a different type on the classes this value may \
+                     hold; reading it cannot pick one type"
+                )
+                .as_str(),
+                span,
+            );
+        }
+        if arms.len() == 1 {
+            return Some(HirExpr::Global {
+                name: first_global,
+                ty: first_ty,
+                span: hir_span,
+            });
+        }
+        // `L.k` where `L` may hold either class: `L === tag ? A.k : B.k`.
+        let bool_ty = senv.types.intern(&ts_aot_core::Type::Bool);
+        let mut expr = HirExpr::Global {
+            name: arms.last()?.1.clone(),
+            ty: arms.last()?.2,
+            span: hir_span,
+        };
+        for (class_ty, global, ty) in arms.iter().rev().skip(1) {
+            let tag = self.class_value_tag(*class_ty);
+            let cond = HirExpr::Binary {
+                op: HirBinaryOp::StrictEq,
+                lhs: Box::new(owner.clone()),
+                rhs: Box::new(HirExpr::Int(tag, hir_span)),
+                ty: bool_ty,
+                span: hir_span,
+            };
+            expr = HirExpr::Ternary {
+                cond: Box::new(cond),
+                then_branch: Box::new(HirExpr::Global {
+                    name: global.clone(),
+                    ty: *ty,
+                    span: hir_span,
+                }),
+                else_branch: Box::new(expr),
+                ty: first_ty,
+                span: hir_span,
+            };
+        }
+        Some(expr)
+    }
+
     fn walk_assignment(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -1510,7 +1733,52 @@ impl SkeletonBuilder {
             return self.walk_expr(senv, &a.right, scope);
         };
         let target = self.walk_simple_target(senv, simple_target, scope);
-        let rhs = self.walk_expr(senv, &a.right, scope);
+        let mut rhs = self.walk_expr(senv, &a.right, scope);
+        // Keep a class-value binding in step with its assignments. The value is the class tag,
+        // so assigning a class expression stores that tag and adds the class to the ones the
+        // binding may hold; assigning another class-value binding copies its set, and assigning
+        // anything else means the binding no longer holds a class value.
+        if let HirExpr::Global { name, .. } = &target {
+            let name = name.as_str().to_owned();
+            if let HirExpr::DefaultConstruct { ty, span, .. } = &rhs {
+                let (class_ty, span) = (*ty, *span);
+                let tag = self.class_value_tag(class_ty);
+                rhs = HirExpr::Int(tag, span);
+                let classes = self.class_value_globals.entry(name).or_default();
+                if !classes.contains(&class_ty) {
+                    classes.push(class_ty);
+                }
+            }
+        }
+        if let HirExpr::Local { id, .. } = &target {
+            let id = self.class_value_storage(*id);
+            match &rhs {
+                HirExpr::DefaultConstruct { ty, span, .. } => {
+                    let (class_ty, span) = (*ty, *span);
+                    let tag = self.class_value_tag(class_ty);
+                    rhs = HirExpr::Int(tag, span);
+                    let classes = self.class_value_locals.entry(id).or_default();
+                    if !classes.contains(&class_ty) {
+                        classes.push(class_ty);
+                    }
+                }
+                HirExpr::Local { id: source, .. } => {
+                    let source = self.class_value_storage(*source);
+                    match self.class_value_locals.get(&source) {
+                        Some(classes) => {
+                            let classes = classes.clone();
+                            self.class_value_locals.insert(id, classes);
+                        }
+                        None => {
+                            self.class_value_locals.remove(&id);
+                        }
+                    }
+                }
+                _ => {
+                    self.class_value_locals.remove(&id);
+                }
+            }
+        }
         if !matches!(
             &target,
             HirExpr::Local { .. }
