@@ -1,15 +1,3 @@
-//! Regression tests for the review findings on optional comparisons and
-//! name-based closure captures:
-//!
-//! * A2: a mixed comparison between `T | null` and a plain value must compare
-//!   in the *common* numeric type. Coercing the plain operand to the optional's
-//!   inner type truncated `1.5` to `i64`, so `i64EqFloat(Some(1))` answered
-//!   `true` although JavaScript says `1 === 1.5` is `false`.
-//! * H2: a variable captured through two levels of closure is emitted as a
-//!   name-based `MirExpr::Global`/`MirPlace::Global`, which carries no type;
-//!   the declared type has to come from the closure environment, otherwise the
-//!   write and the read do not compile.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -35,8 +23,6 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// A2: `i64 | null` compared with `number`/float literals must compare as
-/// numbers, not after truncating the float to the optional's inner type.
 #[test]
 fn optional_integer_compared_with_float_matches_javascript() {
     const SOURCE: &str = "export function i64EqNum(x: i64 | null, k: number): boolean { return x === k; } \
@@ -87,10 +73,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// H2: writing *and* reading a variable captured through two closure levels
-/// (`mid` returns the closure that uses `x`). The write used to be emitted
-/// without the `Option`/numeric coercion of the env field type, and the read
-/// had an unknown type, so neither the write nor a mixed comparison compiled.
 #[test]
 fn two_level_closure_capture_write_and_read() {
     const SOURCE: &str = "export function twoLevelWriteNum(): number { \

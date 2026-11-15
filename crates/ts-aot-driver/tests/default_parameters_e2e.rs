@@ -1,12 +1,3 @@
-//! Parameter default values (`x: T = <default>`).
-//!
-//! JavaScript evaluates a default at *call* time, inside the callee, only when
-//! the argument is missing (or explicitly `undefined`), and in parameter order
-//! so a default can use the parameters before it. The AOT target represents a
-//! defaulted parameter as an `Option<T>` ABI parameter plus a body prologue
-//! `let x: T = param ?? <default>;`, so the generated crates are compiled and
-//! their runtime results compared with JavaScript.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -65,8 +56,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The defaults are applied by the callee, so a caller that omits the argument
-/// passes `undefined`/`None` and never evaluates the default itself.
 #[test]
 fn defaults_are_applied_inside_the_callee_in_parameter_order() {
     const SOURCE: &str = "export function chain(a: number = 1, b: number = a + 1, c: number = a + b): number { \
@@ -97,8 +86,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A default runs only when the argument is missing: the fallback bumps a
-/// captured global, so the result shows whether it ran.
 #[test]
 fn a_default_is_not_evaluated_when_the_argument_is_present() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -128,7 +115,6 @@ fn main() {
     let stdout = run_generated_crate("default_lazy", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
-/// The default expression is evaluated once per call, not once per program.
 #[test]
 fn a_default_is_evaluated_per_call() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -159,7 +145,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Methods, constructors and arrow functions take defaults as well.
 #[test]
 fn methods_constructors_and_arrows_accept_defaults() {
     const SOURCE: &str = "class Box { value: number; \
@@ -194,7 +179,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Omitting an argument is only allowed for a parameter that has a default.
 #[test]
 fn omitting_a_parameter_without_a_default_is_still_rejected() {
     let out = compile_module(
@@ -220,7 +204,6 @@ fn omitting_a_parameter_without_a_default_is_still_rejected() {
     );
 }
 
-/// A parameter cannot be both `?`-optional and have an initializer.
 #[test]
 fn question_mark_with_an_initializer_is_rejected() {
     let out = compile_module("export function f(x?: number = 1): number { return x; }");
@@ -233,10 +216,6 @@ fn question_mark_with_an_initializer_is_rejected() {
         out.diagnostics
     );
 }
-/// A JavaScript default applies only to `undefined`: a supplied `null` is a
-/// value and must survive. The hidden ABI parameter therefore nests the
-/// `Option` (`Option<Option<_>>` for a nullable `T`) instead of flattening
-/// `null` into "no argument was passed".
 #[test]
 fn a_supplied_null_is_not_replaced_by_the_default() {
     const SOURCE: &str = "export function num(x: number | null = 5): number | null { return x; } \
@@ -278,10 +257,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A default on a *destructured* parameter has no single ABI slot that could
-/// carry the "was the argument supplied?" marker, so it cannot be applied. It
-/// used to be dropped silently; it is now reported, and the argument stays
-/// required (the parameter is not wrapped in `Option`).
 #[test]
 fn a_default_on_a_destructured_parameter_is_reported_and_stays_required() {
     let out = compile_module("export function f([a]: number[] = [1]): number { return a; }");

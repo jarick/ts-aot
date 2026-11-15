@@ -1,26 +1,3 @@
-//! Backend regressions around nested optional ABI shapes.
-//!
-//! Three defects, all of which only show up in the *generated Rust*:
-//!
-//! * a defaulted parameter whose declared type is itself nullable is emitted
-//!   with a nested ABI type `Option<Option<T>>` (outer = "argument supplied",
-//!   inner = the value's own nullishness). `optional_coerce` only knew the
-//!   single-level shape, so a passed `null` collapsed into the outer `None` and
-//!   silently selected the default, while a plain value landed in the outer
-//!   `Some` unwrapped (E0308);
-//! * `Fn` buckets were keyed by `TypeId`, and `optional` takes part in the
-//!   interning hash, so `(x?: number) => number` and
-//!   `(x: number | undefined) => number` got one enum each while their
-//!   (structurally identical) function values all landed in the first: the
-//!   second enum stayed `__Uninhabited` and the assignment was an E0308;
-//! * the `?.field`/`?.[index]` `map` arms moved a non-`Copy` value out of the
-//!   shared reference the closure receives (E0507); only the `and_then` arms
-//!   cloned.
-//!
-//! Every test below emits a crate, runs `cargo check` on it
-//! (`check_generated_crate`) and then builds and executes it with a `main`
-//! asserting the JavaScript-visible values (`run_generated_crate`).
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -42,11 +19,6 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// `x: number | null = 7` is an ABI `Option<Option<f64>>`: a supplied `null`
-/// must stay `Some(None)` (JavaScript keeps `null`), a supplied value must be
-/// `Some(Some(v))`, and only a missing argument may be the outer `None` that
-/// triggers the default. The non-nullable `x: number = 7` (`Option<f64>`) keeps
-/// its old shape.
 #[test]
 fn nested_optional_default_parameter_keeps_null_and_wraps_values() {
     const SOURCE: &str = "\
@@ -103,10 +75,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Closures written as `x?: number` and as `x: number | undefined` have
-/// identical ABI parameters but different `Fn::optional` flags. Both must be
-/// callable through the same enum, and the `?`-one must still be callable with
-/// no argument at all (padding with `undefined`).
 #[test]
 fn fn_value_bucket_serves_optional_and_undefined_only_closures() {
     const SOURCE: &str = "\
@@ -146,9 +114,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The same bucket rule for *declared* functions used as values: the registry
-/// assigns a declaration to the bucket by `(params, ret)`, so the two spellings
-/// must share that bucket instead of leaving one enum without variants.
 #[test]
 fn fn_value_bucket_serves_optional_and_undefined_only_declarations() {
     const SOURCE: &str = "\
@@ -185,8 +150,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// `r?.q` on a non-`Copy` field must clone it out of the shared reference the
-/// `map` closure receives; otherwise the generated crate fails with E0507.
 #[test]
 fn optional_chain_field_copies_non_copy_field() {
     const SOURCE: &str = "\
@@ -224,7 +187,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// `a?.[i]` on a non-`Copy` element type has the same requirement.
 #[test]
 fn optional_chain_index_copies_non_copy_element() {
     const SOURCE: &str = "\

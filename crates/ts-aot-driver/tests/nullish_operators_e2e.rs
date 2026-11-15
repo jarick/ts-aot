@@ -1,9 +1,3 @@
-//! `??`, non-boolean `||`/`&&`, optional-chain method calls and constructors.
-//!
-//! These operators all yield one of their *operands* (not a `bool`) and
-//! short-circuit, which Rust's own `||`/`&&` cannot express. The generated
-//! crates are compiled and their runtime results compared with JavaScript.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -131,8 +125,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The fallback stays inside its own branch, so it is not evaluated when the
-/// left-hand side holds a value (the call must sit after the `else`).
 #[test]
 fn the_fallback_of_coalescing_stays_inside_its_branch() {
     const SOURCE: &str = "function boom(): number { return 9; } \
@@ -270,7 +262,6 @@ fn arguments_for_a_class_without_a_constructor_are_rejected() {
     );
 }
 
-/// The three operators combined, with the values JavaScript yields for each.
 #[test]
 fn nullish_operators_combine_like_javascript() {
     const SOURCE: &str = "export function f(a: number, b: number, c: string, d: string): number { \

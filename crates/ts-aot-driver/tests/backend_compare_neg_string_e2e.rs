@@ -1,31 +1,3 @@
-//! Regression tests for three review findings in the backend's expression
-//! emission:
-//!
-//! * `a === b` between two optional operands lowered to Rust's `Option`
-//!   equality without checking the *inner* types. Two different numeric inner
-//!   types emitted `Option<f64> == Option<i64>` (E0308) and a structure inner
-//!   emitted `Option<C> == Option<C>` without `PartialEq` (E0369); both were
-//!   silent invalid Rust. The comparison is now reported (P0022) when the inner
-//!   types differ or the shared inner type is not Rust-comparable, and the
-//!   plain `a == b` is kept when both inner types are the same primitive/string.
-//! * `UnaryOp::Neg` in a composite expression (`-(a + b)`, `1.5 + -a + -a`) saw
-//!   the `MirExpr::Binary` placeholder as its source type and skipped the
-//!   `as f64` coercion, so the generated crate failed to compile (E0308). A
-//!   binary arithmetic expression now reports its numeric unification as its
-//!   value type (a float operand makes it a float, two integers keep an
-//!   integer), which also fixes the pre-existing `return a + b` over `i64`
-//!   parameters. The already-working `-y`, `-o.v` and `-id(a)` cases keep the
-//!   same emission.
-//! * `s?.[i]` on a `string | null` receiver took the optional-chain `map` arm
-//!   before the string-index arm and emitted `o[i as usize]` on a `JsString`
-//!   (E0608). The string receiver now goes through
-//!   `__ts_aot_string_char_at` inside the short-circuiting `map`.
-//!
-//! The accepted modules are compiled with `cargo check`
-//! (`check_generated_crate`) and then built and run (`run_generated_crate`), so
-//! the assertions cover real Rust compilation and real values, not the emitted
-//! text alone.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -55,8 +27,6 @@ fn norm(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// All diagnostic messages of a failed compilation, joined for substring
-/// assertions.
 fn messages(source: &str) -> String {
     let out = compile_module(source);
     assert!(
@@ -71,8 +41,6 @@ fn messages(source: &str) -> String {
         .join("\n")
 }
 
-/// Two optionals with the *same* inner type keep the ordinary `Option`
-/// comparison, which matches JavaScript for every input.
 #[test]
 fn strict_equality_of_two_optionals_with_the_same_inner_type_keeps_the_option_comparison() {
     const SOURCE: &str = "export function cmp(a: number | null, b: number | null): boolean { return a === b; } \
@@ -118,9 +86,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Two optional operands whose inner numeric types differ cannot be compared as
-/// one `Option<T>`; the comparison must be reported instead of emitting
-/// `Option<f64> == Option<i64>` (E0308).
 #[test]
 fn strict_equality_of_two_optionals_with_different_inner_types_is_reported() {
     let report =
@@ -149,8 +114,6 @@ fn strict_equality_of_two_optionals_with_different_inner_types_is_reported() {
     );
 }
 
-/// A structure inner type has no `PartialEq`, so `Option<C> == Option<C>` is
-/// E0369; the comparison must be reported instead.
 #[test]
 fn strict_equality_of_two_optional_structs_is_reported() {
     let report = messages(
@@ -167,9 +130,6 @@ fn strict_equality_of_two_optional_structs_is_reported() {
     );
 }
 
-/// A negation of a composite expression has to widen its integer operands to the
-/// `f64` the enclosing expression or return type requires; the already-working
-/// local/field/call negations keep the same emission.
 #[test]
 fn composite_negation_widens_integer_operands_to_f64() {
     const SOURCE: &str = "export function neg(a: i64, b: i64): number { return -(a + b); } \
@@ -213,18 +173,14 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let flat = norm(&rust);
-    // The composite negation must be cast as a whole: `((-((a + b))) as f64)`.
     assert!(
         flat.contains("((-((a+b)))asf64)"),
         "a negation of a composite expression must be cast to `f64`; got:\n{rust}"
     );
-    // The pre-existing `return a + b` over `i64` parameters is fixed by the same
-    // value-type unification: `((a + b) as f64)`.
     assert!(
         flat.contains("((a+b)asf64)"),
         "an `i64` binary expression returned as `number` must be cast to `f64`; got:\n{rust}"
     );
-    // The already-working cases keep their emission.
     assert!(
         flat.contains("((-(y))asf64)"),
         "`-y` on an `i64` local must still be cast; got:\n{rust}"
@@ -243,8 +199,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// `s?.[i]` on a `string | null` receiver must use the string-index helper and
-/// keep the short-circuit for `None`.
 #[test]
 fn optional_string_index_uses_the_string_index_helper() {
     const SOURCE: &str = "export function idx(s: string | null, i: number): string | null | undefined { \

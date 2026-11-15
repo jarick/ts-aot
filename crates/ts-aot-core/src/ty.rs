@@ -58,16 +58,6 @@ pub enum Type {
     },
     Fn {
         params: Vec<TypeId>,
-        /// Positional "the caller may omit this argument" flags, parallel to
-        /// `params`: `true` for a `?`-optional parameter and for one with a
-        /// default value. The right to omit an argument is *declared* here and
-        /// is never inferred from the parameter's type - a required parameter
-        /// whose type happens to admit `undefined` (`x: T | undefined`, no `?`)
-        /// stays required. A `optional` vector shorter than `params` (including
-        /// the empty one) means "every remaining parameter is required".
-        ///
-        /// These flags take part in `Hash`/`Eq`, so two function types that
-        /// differ only in optionality intern to two distinct `TypeId`s.
         optional: Vec<bool>,
         ret: TypeId,
         err: Option<TypeId>,
@@ -126,11 +116,6 @@ pub enum Type {
 }
 
 impl Type {
-    /// Whether parameter `index` of this function type may be omitted by a
-    /// caller. `true` only for a parameter whose `optional` flag is set; a
-    /// missing or short [`Type::Fn::optional`] vector means "required", so the
-    /// parameter's own type (`T | undefined`) never grants the right to omit an
-    /// argument.
     #[must_use]
     pub fn fn_param_optional(&self, index: usize) -> bool {
         match self {

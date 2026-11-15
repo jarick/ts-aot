@@ -110,10 +110,6 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> Box<HirStmt> {
         let mut inner = Vec::new();
-        // A braceless body does not open a scope frame, so the narrowings it
-        // establishes are recorded in the enclosing frame while the bindings
-        // they refer to are emitted inside the body - they would be out of scope
-        // right after it (and a later read would still see the narrowed copy).
         let braceless = !matches!(s, Statement::BlockStatement(_));
         if braceless {
             self.suppress_narrowing += 1;
@@ -129,19 +125,6 @@ impl SkeletonBuilder {
         }
     }
 
-    /// Redirects an assignment/update target that is bound to a narrowed copy to
-    /// the variable's own storage and withdraws that narrowing.
-    ///
-    /// A narrowed binding is a copy, so a write through the name must reach the
-    /// storage as well - inside a larger expression (`const y = (x = 5)`)
-    /// exactly as in a statement, otherwise a capture or a later widening
-    /// observes a stale value. Every assignment the expression walker builds
-    /// (`x = v`, `x &&= v`, `x ||= v`, `x ??= v`) goes through here; an
-    /// arithmetic compound update (`x += v`, `x++`) keeps the narrowed target and
-    /// is copied back by `finish_statement_expression` instead.
-    ///
-    /// The argument is the *target* expression (a plain `Local` when the name is
-    /// narrowed), not the whole assignment.
     pub(super) fn redirect_narrowed_target(
         &mut self,
         target: HirExpr,
@@ -163,21 +146,6 @@ impl SkeletonBuilder {
         target
     }
 
-    /// A narrowed binding is a copy materialised once, outside the loop, so a
-    /// name the loop writes must lose its narrowing before the loop is walked:
-    /// every iteration after the first (and the reads after the loop) would
-    /// otherwise read the copy taken before the first iteration. A name the loop
-    /// never writes keeps its narrowing - its copy is still the variable's value
-    /// on every iteration, exactly as after a plain assignment.
-    ///
-    /// A loop that can run a call (or another effect) keeps the previous,
-    /// conservative rule: a closure created inside it is not yet visible to the
-    /// capture machinery, and any of them may write a captured variable.
-    ///
-    /// Each written name is resolved to the binding it has *now* and widened by
-    /// that local: an inner loop must not cancel an outer variable's narrowing,
-    /// and a declaration inside the loop makes the name resolve to a different
-    /// binding afterwards.
     fn widen_before_loop(scope: &mut BodyScope, effects: &LoopEffects) {
         if effects.has_effect {
             for name in scope.names() {
@@ -190,10 +158,6 @@ impl SkeletonBuilder {
         }
     }
 
-    /// Withdraws the narrowing of the binding `name` resolves to now. A name
-    /// without a visible binding (or whose binding was never narrowed) is left
-    /// alone, so a shadowing declaration inside the loop keeps the outer
-    /// variable's narrowing.
     fn widen_binding(scope: &mut BodyScope, name: &str) {
         let Some(id) = scope.visible_binding(name) else {
             return;
@@ -201,8 +165,6 @@ impl SkeletonBuilder {
         scope.widen_id(id);
     }
 
-    /// The effects of a `while`/`do..while` condition and body, used by
-    /// [`SkeletonBuilder::widen_before_loop`].
     fn while_effects(test: &Expression<'_>, body: &Statement<'_>) -> LoopEffects {
         let mut effects = LoopEffects::default();
         effects.scan_expr(test);
@@ -210,7 +172,6 @@ impl SkeletonBuilder {
         effects
     }
 
-    /// The effects of a C-style `for` (init, test, update and body).
     fn for_effects(f: &ForStatement<'_>) -> LoopEffects {
         let mut effects = LoopEffects::default();
         if let Some(init) = &f.init {
@@ -226,7 +187,6 @@ impl SkeletonBuilder {
         effects
     }
 
-    /// The effects of a `for..of`/`for..in` binding, iterable and body.
     fn for_binding_effects(
         left: &ForStatementLeft<'_>,
         right: &Expression<'_>,
@@ -268,9 +228,6 @@ impl SkeletonBuilder {
                 }
             }
             Statement::ExpressionStatement(e) => {
-                // The statement path below writes a narrowed compound update back
-                // into the storage, so the expression lowering must not report it
-                // as unsupported.
                 let previous_statement_expr = self.own_statement_expr;
                 self.own_statement_expr = true;
                 let mut expr = self.walk_expr(senv, &e.expression, scope);
@@ -385,13 +342,6 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) {
         let iter = self.walk_expr(senv, &f.right, scope);
-        // Iterating a *generator* runs its body (`for item in &mut gen`), which can
-        // call a closure that writes a captured variable, so a narrowing of such a
-        // variable is stale once the loop body starts - the same invalidation a
-        // call performs. A plain array or string is lowered to a Rust `for` over a
-        // `Vec` and runs no user code, so its narrowing stays valid. Anything
-        // whose static type is not known that precisely (`for..of` over a call, an
-        // `await`) is treated conservatively, like a generator.
         let runs_user_code = f.r#await
             || !matches!(
                 senv.types.resolve(iter.ty()),
@@ -450,25 +400,11 @@ impl SkeletonBuilder {
         let mut cases = Vec::with_capacity(sw.cases.len());
         for c in &sw.cases {
             let test = c.test.as_ref().map(|e| self.walk_expr(senv, e, scope));
-            // All cases share the switch's scope frame, so a narrowing from one
-            // case would stay visible in the next one while its binding is
-            // emitted in the first case's arm. Narrowing *within* the case - up
-            // to and including a `return` of the narrowed value - is unaffected;
-            // what a case established is discarded before the next one is walked.
             let checkpoint = scope.narrowing_checkpoint();
             let body = self.walk_stmts(senv, &c.consequent, scope);
             scope.discard_narrowings_since(checkpoint);
             cases.push(HirSwitchCase { test, body });
         }
-        // JavaScript falls through a case into the next one when the case does not
-        // end in `break`/`return`/`throw`/`continue`, and the backend emits one Rust
-        // `match` arm per case (no implicit fallthrough). The falling-through arm
-        // therefore has to *contain* the next arm's body: `case 1: a(); case 2:
-        // b(); break;` runs both for `1`, and an arm that already ends in a
-        // terminator gets nothing appended. Iterating from the last case
-        // accumulates the whole chain, and statements appended after a terminator
-        // are unreachable, so the conservative "ends with a terminator" test can
-        // only add dead code, never change a result.
         for index in (0..cases.len().saturating_sub(1)).rev() {
             if !ends_with_a_terminator(&sw.cases[index].consequent) {
                 let next = cases[index + 1].body.clone();
@@ -536,10 +472,6 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) {
         for d in &v.declarations {
-            // A simple binding owns a statement slot, so a narrowed compound
-            // update in its initializer (`const y = x++`) can be copied back once
-            // the declaration is pushed; a destructuring binding expands into
-            // several statements and keeps the conservative report.
             let simple_binding = matches!(&d.id, BindingPattern::BindingIdentifier(_));
             let previous_statement_expr = self.own_statement_expr;
             if simple_binding {
@@ -769,26 +701,6 @@ fn inject_update_in_boxed(s: &mut Box<HirStmt>, update: &HirExpr) {
     }
 }
 impl SkeletonBuilder {
-    /// Flow-sensitive narrowing after a statement-level assignment: `x = v`,
-    /// `x ??= v` and `x ||= v` leave `x` without its nullish part when `v` cannot
-    /// be nullish, so a later use of `x` is no longer an optional value.
-    ///
-    /// The narrowed binding is a fresh local of the *inner* type, initialised
-    /// from the variable's own storage through a non-null assertion (`x!`),
-    /// which the passes lower to `Option::unwrap` - the assignment above is what
-    /// guarantees it is `Some`. The binding lives in the current scope frame, so
-    /// it disappears at the end of the enclosing block, branch or loop body,
-    /// which keeps the flow sensitivity sound; an assignment that may be nullish
-    /// restores the storage binding.
-    ///
-    /// The returned statement is the `let` that introduces the narrowed binding
-    /// and must be emitted *after* the assignment it follows.
-    ///
-    /// The assignment target was already redirected to the variable's *storage*
-    /// when the expression was walked (`SkeletonBuilder::redirect_narrowed_target`,
-    /// which runs in every expression context, not only for a statement), so this
-    /// function only decides the *new* narrowing. A braceless body cannot
-    /// establish one - that is what `suppress_narrowing` suppresses.
     fn narrow_after_assignment(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -805,12 +717,6 @@ impl SkeletonBuilder {
             return None;
         };
         let name = ident.name.as_str().to_owned();
-        // `x += 1` (and the other arithmetic/bitwise updates) needs the narrowed
-        // *value*, so its target must stay the narrowed binding. The new value is
-        // copied back into the storage by
-        // [`SkeletonBuilder::finish_statement_expression`], which the statement
-        // walker runs once the whole expression was walked; patching the target
-        // here would move the operator onto the `Option` storage instead.
         if let HirExpr::CompoundUpdate { op, .. } = walked
             && !matches!(
                 op,
@@ -819,28 +725,14 @@ impl SkeletonBuilder {
         {
             return None;
         }
-        // The target of a narrowed assignment/update was already redirected to
-        // the variable's storage - and the narrowing withdrawn - when the
-        // expression was walked (`SkeletonBuilder::redirect_narrowed_target`, the
-        // same helper for a plain assignment and for a logical `&&=`/`||=`/`??=`),
-        // so it reaches the storage in every expression context, not only as a
-        // statement.
-        //
-        // What is left here is the *new* narrowing: a braceless body or a `switch`
-        // case may not establish one (its binding would be out of scope right
-        // after it), so the suppression below still applies.
         if self.suppress_narrowing > 0 {
             return None;
         }
-        // `x &&= v` may keep a nullish `x`, so it must not narrow; anything else
-        // that is not an assignment to a simple name is left alone.
         match walked {
             HirExpr::Assignment { .. } => {}
             HirExpr::CompoundUpdate { op, .. } if !matches!(op, HirBinaryOp::And) => {}
             _ => return None,
         }
-        // Only a real local/parameter gets narrowed here: a global is not a
-        // scope entry, and the passes handle its type.
         let current = scope.type_of_visible(&name)?;
         let inner = non_nullish_part(current, senv.types)?;
         let (storage_id, storage_ty) = assignment_target_local(walked)?;
@@ -855,8 +747,6 @@ impl SkeletonBuilder {
                 && assignment_can_narrow(inner, assigned, senv.types)
         };
         if !can_narrow {
-            // The assigned value may be nullish (or does not fit the inner
-            // type), so any narrower binding recorded earlier is invalid.
             scope.widen(&name);
             return None;
         }
@@ -876,13 +766,6 @@ impl SkeletonBuilder {
         if let Some(frame) = self.narrowed_stack.last_mut() {
             frame.insert(id, (storage_id, storage_ty));
         }
-        // The narrowed binding must not *shadow* the variable's own storage: the
-        // storage stays addressable (a capture, or a later assignment that goes
-        // through it), and the backend maps both to their source names, so a
-        // second local called `x` would make every later `x` refer to the copy.
-        // For the same reason the name is kept away from every name the body
-        // binds - not only the ones visible here, which would miss a declaration
-        // that comes later in a nested block and shadows the generated local.
         let visible = scope.names();
         let mut uid = senv.next_destructured_id.get();
         let mut binding_name = Atom::from(format!("_narrowed_{uid}"));
@@ -903,9 +786,6 @@ impl SkeletonBuilder {
         })
     }
 
-    /// The narrowed compound update that *is* the whole expression of a statement
-    /// slot, if any: its new value is the narrowed binding's value, so it can be
-    /// copied back into the variable's storage.
     fn statement_narrowed_update(
         &self,
         walked: &HirExpr,
@@ -929,23 +809,12 @@ impl SkeletonBuilder {
         Some((*id, *ty, storage_id, storage_ty, *span))
     }
 
-    /// Closes a statement slot whose expression was just walked: emits the copy
-    /// back of a narrowed compound update that is the whole expression, and
-    /// reports every nested one, which has no slot to write the storage from.
-    ///
-    /// The copy back has to follow the statement because the arithmetic reads the
-    /// narrowed copy; writing the storage before it would move the operator onto
-    /// the `Option` storage.
     fn finish_statement_expression(
         &mut self,
         walked: &HirExpr,
         senv: &mut SkeletonEnv,
     ) -> Option<HirStmt> {
         let root = self.statement_narrowed_update(walked);
-        // Only the occurrence that *is* the statement slot is copied back: a
-        // second update of the same local inside the same expression
-        // (`x += (x += 1)`) has no slot of its own and still leaves the storage
-        // stale, so it stays reported. The span tells the two apart.
         let root_key = root.map(|(narrowed_id, _, _, _, span)| (narrowed_id, span));
         let mut claimed = false;
         for update in std::mem::take(&mut self.pending_narrowed_updates) {
@@ -979,7 +848,6 @@ impl SkeletonBuilder {
     }
 }
 
-/// The local a statement-level assignment writes (its storage).
 pub(super) fn assignment_target_local(walked: &HirExpr) -> Option<(LocalId, TypeId)> {
     let (HirExpr::Assignment { target, .. } | HirExpr::CompoundUpdate { target, .. }) = walked
     else {
@@ -991,8 +859,6 @@ pub(super) fn assignment_target_local(walked: &HirExpr) -> Option<(LocalId, Type
     }
 }
 
-/// The non-nullish part of `ty`, or `None` when the type may be nullish (or is
-/// not statically known).
 fn non_nullish_part(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
     match types.resolve(ty) {
         Some(Type::Optional { inner, .. }) => match types.resolve(*inner) {
@@ -1011,11 +877,6 @@ fn non_nullish_part(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
     }
 }
 
-/// Whether the assigned value is definitely not nullish.
-///
-/// A literal node carries no type of its own - `HirExpr::Null(..).ty()` is a
-/// placeholder, not `Type::Null` - so the literal kinds are classified here
-/// instead of by their (bogus) type id.
 fn assigned_is_non_nullish(assigned: &HirExpr, types: &TypeTable) -> bool {
     match assigned {
         HirExpr::Null(_) | HirExpr::Unit(_) | HirExpr::Undefined(_) => false,
@@ -1024,9 +885,6 @@ fn assigned_is_non_nullish(assigned: &HirExpr, types: &TypeTable) -> bool {
     }
 }
 
-/// Whether the assigned value can be represented by the narrowed type, so that
-/// narrowing to it cannot mis-type the variable: the same type, or both numeric
-/// (a numeric literal is coerced to the target by the backend).
 fn assignment_can_narrow(inner: TypeId, assigned: &HirExpr, types: &TypeTable) -> bool {
     match assigned {
         HirExpr::Null(_) | HirExpr::Unit(_) | HirExpr::Undefined(_) => false,
@@ -1061,11 +919,6 @@ fn is_numeric_ty(ty: TypeId, types: &TypeTable) -> bool {
     )
 }
 
-/// Whether executing a case body cannot reach the next case: its last statement
-/// leaves the `switch` (`break`, `return`, `throw`) or the loop iteration
-/// (`continue`). A block ends with its own last statement, and anything else
-/// (`if`, a loop, a nested `switch`) may complete normally, so the caller appends
-/// the next case's body - which is then dead code at worst.
 fn ends_with_a_terminator(stmts: &[Statement<'_>]) -> bool {
     match stmts.last() {
         Some(

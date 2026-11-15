@@ -17,8 +17,6 @@ pub(super) fn resolve_conditional(
     resolve_branch(&c.extends_type, "extends", types, lookup, diagnostics);
     resolve_branch(&c.true_type, "true", types, lookup, diagnostics);
     resolve_branch(&c.false_type, "false", types, lookup, diagnostics);
-    // The conditional type is not resolved; `Error` is the same "unknown type"
-    // marker the rest of the frontend uses.
     types.intern(&Type::Error)
 }
 

@@ -93,8 +93,6 @@ pub(crate) fn resolve_simple_type(
     mut diagnostics: Option<&mut DiagnosticBag>,
 ) -> Option<TypeId> {
     match ty? {
-        // `never` is uninhabited: no runtime value can exist, so it is rejected
-        // like `any`/`unknown` instead of mapping onto Rust's unstable `!` type.
         TSType::TSNeverKeyword(k) => {
             if let Some(diag) = diagnostics.as_deref_mut() {
                 diag.push(Diagnostic::error(

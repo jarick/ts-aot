@@ -11,26 +11,11 @@ use ts_aot_ir_mir::{MirExpr, MirLocalDecl};
 use crate::PassContext;
 use crate::hir_to_mir::{PLACEHOLDER_FUNCTION, qualified_name};
 
-/// The callee key the throws fixpoint records for a call.
-///
-/// A *declared* callee is looked up by its exact key: the free-function
-/// declaration the call selects, a constructor, or a method whose receiver class
-/// is known statically. A method whose receiver class is *not* known is only a
-/// bare name, and the fixpoint falls back to a `::name` suffix match over the
-/// method keys - a fallback that must not apply to free functions, whose name may
-/// coincide with a method's.
 enum RecordedCallee {
     Declared(Atom),
     Method(Atom),
 }
 
-/// The key of the free-function declaration a call to `name` selects: the
-/// innermost namespace that declares it wins, exactly as `resolve_callee`
-/// resolves the call.
-///
-/// `declarations` holds every function and method keyed the way the throws map
-/// is, so membership answers "is this declared?" - resolution must not depend on
-/// the declaration being a *throwing* one.
 fn resolve_free_function(
     namespace_path: &[String],
     name: &str,
@@ -45,11 +30,6 @@ fn resolve_free_function(
     None
 }
 
-/// Error type of every function that can throw, computed as a fixpoint over the
-/// call graph: a function that calls a throwing function can throw the same
-/// error itself (and so does its caller, transitively). Without this the callee
-/// returned a `Result` while the caller was emitted as a plain function, which
-/// only showed up as a type error inside the generated Rust.
 pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> HashMap<Atom, TypeId> {
     use ts_aot_ir_hir::{HirCallee, HirDecl, Visitor, walk_expr};
 
@@ -84,8 +64,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
             if let HirExpr::New { ty, .. } = expr
                 && let Some(class) = self.class_keys.get(&unwrap_optional_ty(*ty, self.types))
             {
-                // A throwing constructor makes its caller throwing as well: its
-                // `Result` is propagated like any other callee's.
                 self.out.push(RecordedCallee::Declared(
                     crate::hir_to_mir::program::extend_qualified(class, "constructor"),
                 ));
@@ -97,9 +75,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
             {
                 match inner.as_ref() {
                     HirExpr::Global { name, .. } => {
-                        // Only the declaration the call *selects* is recorded: a
-                        // module-level function of the same name is a different
-                        // callee and must not supply its error type.
                         self.out.push(RecordedCallee::Declared(
                             resolve_free_function(
                                 self.namespace_path,
@@ -109,10 +84,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
                             .unwrap_or_else(|| name.clone()),
                         ));
                     }
-                    // A method call is qualified by the receiver's class when it
-                    // is known statically, so same-named methods of different
-                    // classes are not confused; otherwise only the bare name is
-                    // known and the fixpoint matches `C::m` by suffix.
                     HirExpr::Field {
                         owner, field_name, ..
                     } => {
@@ -132,10 +103,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
         }
     }
 
-    /// The class behind a receiver's static type: `b: B | null` still dispatches
-    /// to `B::m`, so the optional (and a single-member union) is unwrapped before
-    /// the class lookup - otherwise the key falls back to an ambiguous suffix
-    /// match on the bare method name.
     fn unwrap_optional_ty(mut ty: TypeId, types: &TypeTable) -> TypeId {
         loop {
             match types.resolve(ty) {
@@ -146,12 +113,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
         }
     }
 
-    /// The declared return type of the callee a `throw <call>` invokes.
-    ///
-    /// `throw boom()` carries `boom`'s error when it throws and its return value
-    /// otherwise; either way the caller's error type is the callee's declared
-    /// return type, so the fixpoint can seed it before the call graph is walked
-    /// instead of leaving the operand as `Type::Error`.
     fn thrown_call_return_ty(
         body: &[ts_aot_ir_hir::HirStmt],
         returns: &HashMap<Atom, TypeId>,
@@ -168,10 +129,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
             return None;
         };
         let ty = match inner.as_ref() {
-            // The same enclosing-namespace resolution `resolve_callee` applies:
-            // the innermost namespace that declares the function wins, so a
-            // `throw boom()` inside a nested namespace seeds the function the call
-            // actually selects (`N::boom`, not the bare `boom`).
             HirExpr::Global { name, .. } => {
                 resolve_free_function(namespace_path, name.as_str(), returns)
                     .and_then(|key| returns.get(&key).copied())
@@ -189,8 +146,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
             }
             _ => None,
         }?;
-        // An unresolved type is not an error type: leave the entry out rather
-        // than seeding the fixpoint with `Error`.
         match types.resolve(ty) {
             None | Some(Type::Error | Type::GenericParam { .. }) => None,
             _ => Some(ty),
@@ -235,9 +190,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
                     visitor.visit_block(&f.body);
                     callees.push((key, visitor.out));
                 }
-                // Methods live in the class declaration, not in `Function`: a
-                // `this.m()`/`c.m()` call resolves through the class-qualified
-                // key (`C::m`).
                 HirDecl::Class(c) => {
                     let class_key = qualified_name(namespace_path, c.name.as_str());
                     for method in &c.methods {
@@ -291,17 +243,11 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
         }
     }
 
-    // Class name by the type of an instance: `new C()` and a `c.m()` receiver are
-    // qualified through it.
     let mut class_keys: HashMap<TypeId, Atom> = HashMap::new();
     collect_class_keys(&program.declarations, &mut Vec::new(), &mut class_keys);
-    // Declared return types, keyed like the throws map: a `throw <call>` operand
-    // has no HIR type of its own and is seeded from its callee.
     let mut returns: HashMap<Atom, TypeId> = HashMap::new();
     collect_return_types(&program.declarations, &mut Vec::new(), &mut returns);
     let mut explicit: HashMap<Atom, TypeId> = HashMap::new();
-    // Declaration order, so which callee's error type a function inherits is
-    // deterministic.
     let mut callees: Vec<(Atom, Vec<RecordedCallee>)> = Vec::new();
     let mut namespace_path = Vec::new();
     collect(
@@ -313,12 +259,8 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
         &returns,
         types,
     );
-    // The suffix fallback below has to recognise a class prefix; a set keeps that
-    // check out of the candidate scan (it runs for every unresolved method call,
-    // on every fixpoint round).
     let class_names: HashSet<&str> = class_keys.values().map(|name| name.as_str()).collect();
     let mut throws = explicit;
-    // Bounded by the number of functions: each round can only add entries.
     for _ in 0..=callees.len() {
         let mut changed = false;
         for (name, callee_names) in &callees {
@@ -326,20 +268,8 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
                 continue;
             }
             if let Some(ty) = callee_names.iter().find_map(|callee| match callee {
-                // A free function (a constructor, or a method on a statically
-                // known class) is looked up by its exact key: a same-named method
-                // must not supply its error type.
                 RecordedCallee::Declared(key) => throws.get(key).copied(),
-                // A method whose receiver class is not known statically is
-                // matched by its `::name` suffix only: a *bare* name in the map
-                // belongs to a free function, which this call does not invoke, so
-                // it must not supply the error type.
                 RecordedCallee::Method(name) => {
-                    // A method named `m` may be declared by several classes; pick
-                    // the first class-qualified key so the choice is stable. The
-                    // key's prefix before `::name` has to be a class of this
-                    // program: a namespace-qualified *free* function (`ns::m`) ends
-                    // with the same suffix but is not a method this call reaches.
                     let suffix = format!("::{name}");
                     let mut candidates: Vec<&Atom> = throws
                         .keys()
@@ -364,8 +294,6 @@ pub(super) fn module_throws(program: &HirProgram, types: &mut TypeTable) -> Hash
     }
     throws
 }
-/// Declared return type of every function and method, keyed the way the throws
-/// map is keyed (a bare/namespace-qualified name, or `Class::method`).
 fn collect_return_types(
     decls: &[HirDecl],
     namespace_path: &mut Vec<String>,
@@ -398,8 +326,6 @@ fn collect_return_types(
     }
 }
 
-/// Class name by the type of an instance of that class (nested namespaces
-/// included): used by the throws fixpoint to qualify `new C()` and `c.m()`.
 fn collect_class_keys(
     decls: &[HirDecl],
     namespace_path: &mut Vec<String>,
@@ -441,17 +367,8 @@ pub struct ExprConverter {
     pub(super) expected_ty: Option<TypeId>,
     pub(super) class_index: OnceLock<HashMap<TypeId, ClassPath>>,
     pub(super) global_types: OnceLock<HashMap<Atom, TypeId>>,
-    /// Error type of every function that can throw, propagated along the call
-    /// graph (see `module_throws`): a caller of a throwing function must itself
-    /// return a `Result` of the same error type, otherwise the call cannot be
-    /// lowered.
     pub(super) throws_by_name: OnceLock<HashMap<Atom, TypeId>>,
-    /// Error type of the function whose body is being converted (`None` outside
-    /// a `Result`-returning function, in generators and in closure bodies).
     pub(super) current_throws: Option<TypeId>,
-    /// How many `try` blocks enclose the expression being converted: a callee's
-    /// error cannot be caught by this AOT target, so a throwing call there is
-    /// rejected instead of silently escaping the `try`.
     pub(super) try_depth: u32,
 }
 
@@ -533,8 +450,6 @@ impl ExprConverter {
         self.throws_by_name = OnceLock::new();
     }
 
-    /// Computes the call-graph error types once (`module_throws` needs the type
-    /// table, so it cannot run inside the `OnceLock` closure).
     pub(super) fn ensure_throws_types(&mut self, types: &mut TypeTable) {
         if self.throws_by_name.get().is_none() {
             let map = module_throws(&self.program, types);
@@ -542,7 +457,6 @@ impl ExprConverter {
         }
     }
 
-    /// Whether `name` is a function that may throw, and with which error type.
     pub(super) fn function_throws(&self, name: &Atom) -> Option<TypeId> {
         let map = self.throws_by_name.get()?;
         for depth in (0..=self.namespace_path.len()).rev() {

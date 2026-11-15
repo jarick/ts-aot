@@ -1,9 +1,3 @@
-//! Regression tests for the issues found in the second review round: the type
-//! of a module-level global reference (`??` used to fold silently), compound
-//! logical assignment, `Option`-typed global initialisers, spurious warnings,
-//! conditional branch typing, capture types inside closures, `Generator<T>`
-//! annotations and `Result` propagation from throwing callees.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -37,8 +31,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// R1 + R4: `??` on a module-level global must lower to the fallback, and a
-/// nullish global initialiser must become `Option::None`/`Option::Some`.
 #[test]
 fn global_optionals_coalesce_and_initialise() {
     const SOURCE: &str = "let g: number | null = null; \
@@ -71,12 +63,8 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R2 + R3: `??=`, `||=` and `&&=` are short-circuiting assignments, not Rust's
-/// operators and not an equality comparison.
 #[test]
 fn compound_logical_assignment_matches_javascript() {
-    // The optional target is a global: a *local* would need narrowing after the
-    // compound assignment, which this AOT does not model yet.
     const SOURCE: &str = "let g: number | null = null; \
          let h: number | null = 1; \
          export function nullish(): number { g ??= 5; return g ?? 0; } \
@@ -118,8 +106,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R5: an absent annotation is not a resolution failure, and `undefined` is the
-/// natural value of an optional target.
 #[test]
 fn unannotated_locals_and_nullish_optionals_do_not_warn() {
     let diagnostics = codes(
@@ -137,8 +123,6 @@ fn unannotated_locals_and_nullish_optionals_do_not_warn() {
     );
 }
 
-/// P2 + P3: a conditional branch that is an arithmetic expression over a
-/// recursive call, and arithmetic over a captured variable inside a closure.
 #[test]
 fn conditional_branches_and_captures_are_typed() {
     const SOURCE: &str = "export function fact(n: number): number { \
@@ -167,8 +151,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// P4: the standard `Generator<T>` spelling declares the yielded type; the
-/// dialect's bare `: T` keeps working.
 #[test]
 fn generator_annotations_accept_wrapper_and_bare_yield_type() {
     for source in [
@@ -196,9 +178,6 @@ fn generator_annotations_accept_wrapper_and_bare_yield_type() {
     );
 }
 
-/// P1: a call to a function that may throw returns a `Result`, and the error is
-/// propagated with `?` through the whole call graph (the caller inherits the
-/// callee's error type).
 #[test]
 fn throwing_calls_propagate_through_the_call_graph() {
     const SOURCE: &str = "function boom(): number { throw 1; } \
@@ -235,12 +214,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// P1: the cases this AOT target cannot lower are reported instead of emitting
-/// code that cannot compile.
-/// A call-valued `throw` operand (`throw boom()`) has no HIR type of its own, so
-/// the throws fixpoint resolves it through the callee's declared type before the
-/// call graph is walked: the *caller* of that function then propagates the same
-/// error type instead of being skipped as `Type::Error`.
 #[test]
 fn a_call_valued_throw_seeds_the_caller_error_type() {
     let rust = rust_of(
@@ -258,7 +231,6 @@ fn a_call_valued_throw_seeds_the_caller_error_type() {
 
 #[test]
 fn throwing_calls_that_cannot_be_lowered_are_reported() {
-    // A callee's error cannot be caught by `try`/`catch`.
     let out = compile_module(
         "function boom(): number { throw 1; } \
          export function f(): number { try { return boom(); } catch (e) { return 0; } }",
@@ -272,7 +244,6 @@ fn throwing_calls_that_cannot_be_lowered_are_reported() {
         out.diagnostics
     );
 
-    // A generator body does not return a `Result`.
     let out = compile_module(
         "function boom(): number { throw 1; } \
          export function* f(): number { yield boom(); }",
@@ -283,10 +254,6 @@ fn throwing_calls_that_cannot_be_lowered_are_reported() {
         out.diagnostics
     );
 }
-/// The type of a variable is narrowed by an assignment that cannot be nullish
-/// (`x ??= v`, `x ||= v`, `x = v`), so a later use is no longer an optional
-/// value - which is what TypeScript does and what the optional-write check
-/// (`P0018`) otherwise rejects.
 #[test]
 fn assignment_narrowing_removes_the_nullish_part() {
     const SOURCE: &str = "export function fromDefault(x: number | null): number { x ??= 5; return x; } \
@@ -315,9 +282,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Narrowing is flow-sensitive: a nullish assignment undoes it, and it must not
-/// escape the branch or block that established it - those programs are rejected
-/// (`P0018`) instead of mis-typing the variable.
 #[test]
 fn assignment_narrowing_is_undone_and_does_not_escape() {
     for source in [
@@ -339,10 +303,6 @@ fn assignment_narrowing_is_undone_and_does_not_escape() {
         );
     }
 }
-/// P6: an assignment to a captured variable has to write through the shared
-/// environment. The write used to emit `Some(())` / `Some(<i64>)` for an
-/// `Option<f64>` field - code that cannot compile - so a closure created before
-/// the assignment never saw the new value either.
 #[test]
 fn assignments_to_captured_variables_are_visible_to_closures() {
     const MAIN: &str = r#"
@@ -379,10 +339,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// P7: `||=` and `&&=` on an optional target compare the value *inside* the
-/// optional by JavaScript truthiness (`null`, `undefined`, `0` and `""` are
-/// falsy). Rust's own operators cannot express that, so the lowering unwraps the
-/// value in the "present" arm only.
 #[test]
 fn optional_logical_assignment_matches_javascript() {
     const MAIN: &str = r#"
@@ -434,9 +390,6 @@ fn main() {
     let stdout = run_generated_crate("logical_optional", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
-/// B1: a narrowing must not survive the block/branch/`try` that set it - the
-/// variable's own storage can be written back to a nullish value there, and the
-/// rest of the function must see that.
 #[test]
 fn narrowing_does_not_escape_its_block_and_calls_withdraw_it() {
     for source in [
@@ -461,8 +414,6 @@ fn narrowing_does_not_escape_its_block_and_calls_withdraw_it() {
     }
 }
 
-/// B2: `a || b` with two optional operands compares the value *inside* the
-/// left one, so `Some(0)`/`None` fall through to `b`.
 #[test]
 fn both_optional_logical_operands_match_javascript() {
     const MAIN: &str = r#"
@@ -488,9 +439,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// F1/F2 (backend): a write to a captured optional from *inside* the closure is
-/// coerced to the capture's declared type, and `=== <numeric literal>` on an
-/// optional compares against the value inside it.
 #[test]
 fn captured_writes_from_closures_and_literal_comparisons_are_coerced() {
     const MAIN: &str = r#"
@@ -519,9 +467,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B4/M3: a method that throws only through a call is marked throwing (no false
-/// `E0416`), and the generated crate must actually compile (`!has_errors()` only
-/// checks the passes; the emitted `?` used to be rejected by rustc).
 #[test]
 fn throwing_methods_chains_and_catch_calls_are_accepted() {
     const CHAIN: &str = "class A { m(): number { throw 1; } n(): number { return this.m(); } } \
@@ -537,10 +482,6 @@ fn throwing_methods_chains_and_catch_calls_are_accepted() {
         .expect("emit-rust must populate rust_source");
     check_generated_crate("throwing_methods_chain", &rust);
 
-    // A3: the `catch` body is emitted inside `catch_unwind`, where `?` cannot
-    // leave the enclosing function, so a call to a throwing callee there is a
-    // reported limitation (`E0416`) instead of silently emitted, non-compiling
-    // Rust (it used to be `inner(__ctx)?` inside the closure).
     let out = compile_module(
         "function inner(): number { throw 1; } \
          export function f(): number { try { throw 2; } catch (e) { return inner(); } }",
@@ -559,8 +500,6 @@ fn throwing_methods_chains_and_catch_calls_are_accepted() {
     );
 }
 
-/// A3: `finally` is emitted *outside* the `catch_unwind` closure, so a throwing
-/// call there still propagates with `?` and the generated crate must compile.
 #[test]
 fn throwing_calls_inside_finally_are_propagated() {
     const MAIN_RETURN: &str = r#"
@@ -626,20 +565,13 @@ fn main() {
     }
 }
 
-/// B1: a `throw` whose value is a call the frontend typed as `Type::Error` (a
-/// throwing callee, an unresolved generic, ...) is not a second error type: it
-/// must not produce a false `E0417`, and the emitted crate must compile.
 #[test]
 fn dynamic_first_throws_do_not_conflict() {
     for source in [
-        // The only statically known throw is `throw 1`.
         "function inner(): number { return 1; } \
          export function f(x: number): number { if (x > 0) { throw inner(); } throw 1; }",
-        // `inner` throws too: `throw inner()` propagates its `Result`.
         "function inner(): number { throw 1; } \
          export function f(x: number): number { if (x > 0) { throw inner(); } throw 1; }",
-        // The thrown value is a call the frontend typed as `Error`: the callee's
-        // declared return type (`number`) is the error type.
         "function g(): number { return 1; } export function f(): number { throw g(); }",
     ] {
         let out = compile_module(source);
@@ -661,15 +593,10 @@ fn dynamic_first_throws_do_not_conflict() {
         check_generated_crate("dynamic_throw", &rust);
     }
 }
-/// B5: `E0416`/`E0417` must name the type the way the user wrote it (`number`,
-/// `string`, not `F64`/`String`) and point at the offending call/`throw`, not at
-/// `0..0`.
 #[test]
 fn throw_diagnostics_have_readable_names_and_real_spans() {
     const SOURCE: &str = "function boom(): number { throw 1; } \
          export function f(): number { try { return boom(); } catch (e) { return 0; } }";
-    // B5 (constructor): the message must name the class, not the mangled
-    // `A::constructor` module function, and carry the `new` expression's span.
     const CTOR: &str = "class A { x: number; constructor() { this.x = 1; throw 1; } } \
          export function make(): number { try { const a = new A(); return a.x; } catch (e) { return 0; } }";
     let out = compile_module(SOURCE);
@@ -726,9 +653,6 @@ fn throw_diagnostics_have_readable_names_and_real_spans() {
         "the constructor E0416 must point at `new A()`; got {site:?}"
     );
 }
-/// B3: the AOT target keeps one error type per function, so a function that
-/// throws two different primitive types is rejected instead of emitting a
-/// `Result` whose `Err` arms cannot both type-check.
 #[test]
 fn mixed_throw_types_are_rejected() {
     const SOURCE: &str =
@@ -771,10 +695,6 @@ fn mixed_throw_types_are_rejected() {
     );
 }
 
-/// B3: an optional argument passed to a generic parameter is legal TypeScript
-/// (`T` is inferred with the nullish part), so it must not be a false `P0018`:
-/// the empty `NullishKinds` of a generic parameter mean "unknown", not "not
-/// optional".
 #[test]
 fn optional_arguments_to_generic_parameters_are_accepted() {
     const SOURCE: &str = "function id<T>(x: T): T { return x; } \
@@ -790,9 +710,6 @@ fn optional_arguments_to_generic_parameters_are_accepted() {
         "an optional argument to a generic parameter must not be rejected; got {:?}",
         out.diagnostics
     );
-    // The emitted crate is *not* checked here: `id<T>` is not monomorphized yet,
-    // so the backend emits an undeclared `__generic0` type (`E0425`) - a
-    // separate defect of the monomorphize/backend path, not of this check.
     let rust = out
         .rust_source
         .expect("emit-rust must populate rust_source");
@@ -802,8 +719,6 @@ fn optional_arguments_to_generic_parameters_are_accepted() {
     );
 }
 
-/// B3 must not weaken the real checks: a concrete non-optional target still
-/// rejects an optional value and a bare `undefined` literal.
 #[test]
 fn optional_arguments_to_concrete_targets_are_still_rejected() {
     for source in [
@@ -821,12 +736,6 @@ fn optional_arguments_to_concrete_targets_are_still_rejected() {
     }
 }
 
-/// An unannotated local and a `return` must take the type of the *converted*
-/// value: `g() || 5` yields a non-optional `number`, but its HIR node is still
-/// typed `number | undefined` (and a call's HIR type is `Error`). The local used
-/// to be declared `Option<f64>` while holding an `f64` (`let r: Option<f64> =
-/// Some(__tmp)`), and returning an optional local from a `-> number` function
-/// emitted `return Option<f64>` with no diagnostic.
 #[test]
 fn local_and_return_types_come_from_the_converted_value() {
     const SOURCE: &str = "function g(): number | undefined { return undefined; } \
@@ -858,8 +767,6 @@ fn main() {
     let stdout = run_generated_crate("mir_local_ty", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 
-    // `g()` may be `undefined`, so returning it from `-> number` is a genuine
-    // mismatch: it must be diagnosed instead of emitting `return Option<f64>`.
     let out = compile_module(
         "function g(): number | undefined { return undefined; } \
          export function h(): number { const r = g(); return r; }",
@@ -871,9 +778,6 @@ fn main() {
     );
 }
 
-/// B5/M2: a throwing constructor makes its caller throwing (the `Result` is
-/// propagated, not dropped), and a method call is attributed to the receiver's
-/// class even when another class declares a method with the same name.
 #[test]
 fn throwing_constructors_propagate_and_methods_resolve_by_class() {
     let source = "class A { x: number; constructor() { this.x = 1; throw 1; } } \
@@ -904,10 +808,6 @@ fn throwing_constructors_propagate_and_methods_resolve_by_class() {
     );
 }
 
-/// A free function must not inherit the error type of a same-named *method*: the
-/// fixpoint's `::name` suffix fallback exists for method calls whose receiver
-/// class is not known statically, not for free-function calls. `caller` used to
-/// be emitted as `Result<f64, f64>` because `C::m` throws.
 #[test]
 fn a_free_function_does_not_inherit_a_same_named_methods_error_type() {
     const SOURCE: &str = "class C { m(): number { throw 1; } } \

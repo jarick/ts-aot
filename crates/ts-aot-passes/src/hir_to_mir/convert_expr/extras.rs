@@ -12,8 +12,6 @@ use crate::hir_to_mir::convert_expr::util::{
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
-    /// Wraps a constructor call in `?` when the constructor may throw and the
-    /// enclosing function propagates the same error type.
     fn propagate_constructor_throws(
         &mut self,
         ctor: FunctionId,
@@ -25,9 +23,6 @@ impl ExprConverter {
         let Some((name, callee_throws)) = self.function_id_throws(ctor) else {
             return call;
         };
-        // `function_id_throws` names the constructor's module function
-        // (`A::constructor`): the message must name the class, not the mangled
-        // function.
         let ctor_name = name
             .strip_suffix("::constructor")
             .unwrap_or(name.as_str())
@@ -158,17 +153,10 @@ impl ExprConverter {
             false,
         );
         let ctor = self.method_map.get(&ctor_key).copied();
-        // JavaScript evaluates the callee and then the arguments *before* the
-        // instance exists: an argument whose evaluation has side effects must
-        // therefore run before the field initializers, not just before the
-        // constructor body. Converting the arguments here - ahead of the
-        // initializer loop below - puts every statement an argument emits at
-        // that earlier position, and pins a non-trivial argument value in a
-        // temporary so it is not re-evaluated at the constructor call.
         let ctor_args: Option<Vec<MirExpr>> = if ctor.is_some() {
             let param_tys = self.method_param_tys.get(&ctor_key).cloned();
             let param_optional = self.method_param_optional.get(&ctor_key).cloned();
-            let offset = 1; // the receiver
+            let offset = 1;
             if let Some(optional) = &param_optional {
                 let declared = optional.len().saturating_sub(offset);
                 let required = optional
@@ -195,11 +183,6 @@ impl ExprConverter {
                     .as_ref()
                     .and_then(|tys| tys.get(i + offset).copied());
                 if let Some(param_ty) = expected {
-                    // The ABI type of a defaulted parameter is `Option<T>`, whose
-                    // outer `Option` only marks "an argument was supplied": the
-                    // argument itself is a `T`, which may be nullable. The check
-                    // therefore uses the same type every call site does, or a
-                    // valid `new C(null)` would be reported as a kind mismatch.
                     crate::hir_to_mir::nullish::check_nullish_write(
                         a,
                         crate::hir_to_mir::nullish::argument_check_ty(param_ty, types),
@@ -220,12 +203,6 @@ impl ExprConverter {
                     ctx,
                 );
                 if has_potential_side_effects(&value) {
-                    // The value is pinned in a temporary so that its statement
-                    // precedes the field initializers below and the value is not
-                    // recomputed at the constructor call. A direct call carries a
-                    // dynamic type in MIR (the emitter resolves the real type
-                    // from the callee), so such an argument is declared with the
-                    // type of the parameter it has to satisfy.
                     let mut value_ty = mir_expr_ty(&value);
                     if matches!(types.resolve(value_ty), None | Some(Type::Error))
                         && let Some(param_ty) = expected
@@ -253,10 +230,6 @@ impl ExprConverter {
             }
             Some(materialized)
         } else {
-            // A class with no constructor of its own never converts its
-            // arguments *here*: the fallback arm below decides what happens to
-            // them (an arity error for a user class, side effects for a callee
-            // that is lowered elsewhere), so nothing is converted twice.
             None
         };
         let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
@@ -291,11 +264,6 @@ impl ExprConverter {
             }),
             mutable: true,
         });
-        // JavaScript runs the field initializers and then the constructor body on
-        // the freshly allocated instance; the constructor takes it by mutable
-        // reference (`&mut self`) and returns nothing. The arguments were already
-        // evaluated and materialized above, so the receiver is simply prepended
-        // to them here.
         match (ctor, ctor_args) {
             (Some(ctor), Some(ctor_args)) => {
                 let mut mir_args: Vec<MirExpr> = Vec::with_capacity(ctor_args.len() + 1);
@@ -307,8 +275,6 @@ impl ExprConverter {
                     args: mir_args,
                     ty: void_ty,
                 };
-                // A constructor that may throw returns a `Result`: without this
-                // the value is dropped and the error silently disappears.
                 out.push(MirStmt::Expr(self.propagate_constructor_throws(
                     ctor,
                     call,
@@ -317,9 +283,6 @@ impl ExprConverter {
                     ctx,
                 )));
             }
-            // Only a *user* class declares whether it takes arguments: built-ins
-            // (`Error`, `Map`, ...) accept their own constructor signatures, which
-            // this AOT target lowers elsewhere.
             _ if !args.is_empty() && is_user_class => {
                 ctx.error(
                     "P0004",
@@ -332,11 +295,6 @@ impl ExprConverter {
                     callee.span(),
                 );
             }
-            // The callee is not lowered here, but its arguments are still
-            // JavaScript expressions: evaluate each one for its side effects,
-            // exactly as the callee itself is evaluated above. `convert_call_arg`
-            // with no expectation is the established argument path - the `new`
-            // result's expected type must not leak into an argument.
             _ if !args.is_empty() => {
                 ctx.warning(
                     "E0406",
@@ -566,9 +524,6 @@ impl ExprConverter {
         let value = self.convert_expr(expr, out, shared_struct_ids, shared_next_struct, types, ctx);
         let value_ty = crate::hir_to_mir::convert_expr::util::hir_expr_type_id(expr)
             .or_else(|| self.mir_expr_static_ty(&value, types));
-        // `x!` (and `x as T`) strip the nullish part: the AOT representation is
-        // `Option<T>`, so the value must be unwrapped or the emitted code would
-        // use `Option<T>` where `T` is required.
         let value_is_optional = matches!(
             value_ty.and_then(|t| types.resolve(t)),
             Some(Type::Optional { .. })
@@ -668,8 +623,6 @@ impl ExprConverter {
                     })
             });
         self.expected_ty = None;
-        // A closure body is not a `Result`-returning function of its own, so a
-        // throwing call inside it cannot be propagated (and is reported there).
         let saved_throws = self.current_throws;
         self.current_throws = None;
         let (mir_body, body_locals) = self.convert_block_with_shared_struct_ids(

@@ -126,9 +126,6 @@ pub fn substitute_type(
                 result,
                 Type::Fn {
                     params: new_params,
-                    // Optionality is a property of the *position*, not of the
-                    // parameter type, so substituting a generic argument must
-                    // not change which arguments may be omitted.
                     optional: optional.clone(),
                     ret: new_ret,
                     err: new_err,

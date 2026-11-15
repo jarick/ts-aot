@@ -104,16 +104,7 @@ pub enum MirStmt {
         op: RuntimeOp,
         args: Vec<MirExpr>,
         dest: Option<LocalId>,
-        /// Result type of the runtime call — always the type of the destination
-        /// local (when `dest` is `Some`). For generic runtime ops that need a
-        /// separate serde turbofish argument, store it in `target_ty` instead.
         ty: TypeId,
-        /// Override for the serde turbofish argument used by generic runtime
-        /// calls. `None` for all non-generic ops and for generic ops where the
-        /// serde argument type equals the result type. `Some` only when the
-        /// serde argument type differs from the result type (e.g. `JSON.stringify`,
-        /// where the result is always `JsString` but the serde target is the
-        /// value's static type, e.g. `i64`).
         target_ty: Option<TypeId>,
     },
     Switch {
@@ -286,9 +277,6 @@ pub enum MirExpr {
         error: Box<MirExpr>,
         ty: TypeId,
     },
-    /// `expr?`: the expression yields a `Result` (the call target declares a
-    /// `throws` type) and its error is propagated to the enclosing function,
-    /// which therefore returns a `Result` of the same error type.
     Propagate {
         expr: Box<MirExpr>,
         ty: TypeId,
@@ -325,18 +313,10 @@ pub enum MirExpr {
         base: Box<MirExpr>,
         ty: TypeId,
     },
-    /// Whether an optional value holds a value (`Option::is_some`).
-    ///
-    /// The AOT representation of `T | null` is a plain `Option<T>`, and "is it
-    /// present?" is a *presence* question: it cannot be answered by comparing
-    /// against `null`/`undefined`, which is a question about the nullish *kind*
-    /// (an `undefined`-only optional is never `null`).
     IsSome {
         expr: Box<MirExpr>,
         ty: TypeId,
     },
-    /// The value inside an optional (`Option::unwrap`): the lowering of `x!` and
-    /// of the "present" arm of `??`.
     UnwrapOptional {
         expr: Box<MirExpr>,
         ty: TypeId,

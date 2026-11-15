@@ -1,26 +1,3 @@
-//! Backend regressions around optional comparison and optional coercion.
-//!
-//! Three defects, all of which only show up in the *generated Rust*:
-//!
-//! * two optional operands whose inner types differ (`number | null` vs
-//!   `i64 | null`) lower to `Option<f64> == Option<i64>`, which does not compile
-//!   (E0308). The inner-type check used to run only for the strict operators, so
-//!   the loose `==`/`!=` spelling silently emitted the mismatched comparison;
-//! * a strict comparison against a nullish literal (`x === null`) on an operand
-//!   that admits both `null` and `undefined` cannot be decided: both store as one
-//!   `Option::None`, so `is_none()` answers `true` for an `undefined` value too.
-//!   The HIR→MIR check already reports a *typed* operand (see
-//!   `null_equality_e2e`); this file covers the operand whose type is only known
-//!   after lowering (a call), where the backend check has to decide it instead of
-//!   lowering to `is_none()`;
-//! * coercing an *optional* source into an optional target returned the source
-//!   untouched, so `Option<i64>` was assigned where `Option<f64>` is required
-//!   (E0308). Only the present values need the numeric cast; `None` stays `None`.
-//!
-//! Every accepted case is compiled with `check_generated_crate` and executed with
-//! `run_generated_crate`, so the assertions cover the Rust type and the runtime
-//! value, not just the emitted text.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 
 fn compile(source: &str) -> ts_aot_driver::DriverOutput {
@@ -34,9 +11,6 @@ fn compile(source: &str) -> ts_aot_driver::DriverOutput {
     )
 }
 
-/// Every diagnostic as `code: message`, so a test can tell which side of the
-/// pipeline reported it - a backend diagnostic keeps its specific code
-/// (`P0022`, ...) rather than the generic `E0300`.
 fn diagnostic_messages(source: &str) -> String {
     compile(source)
         .diagnostics
@@ -57,9 +31,6 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// Two optional operands with different inner types cannot be compared as one
-/// `Option<T>`: the Rust types differ. The diagnostic must appear for all four
-/// equality operators, and the matching operator symbol must be in the message.
 #[test]
 fn differing_inner_types_are_rejected_for_all_equality_operators() {
     for (operator, symbol) in [("==", "=="), ("!=", "!="), ("===", "==="), ("!==", "!==")] {
@@ -78,8 +49,6 @@ fn differing_inner_types_are_rejected_for_all_equality_operators() {
     }
 }
 
-/// The same inner type keeps the ordinary `Option` comparison for loose and
-/// strict spelling, and the generated crate compiles.
 #[test]
 fn the_same_inner_type_keeps_the_plain_optional_comparison() {
     const SOURCE: &str = "\
@@ -98,17 +67,10 @@ fn the_same_inner_type_keeps_the_plain_optional_comparison() {
     ts_aot_test_support::check_generated_crate("optional_same_inner", &rust);
 }
 
-/// A strict comparison against a nullish literal needs the operand to admit one
-/// nullish kind. `x: number | null | undefined` admits both, so `x === null` is
-/// undecidable and must be reported; the loose spelling `x == null` stays a
-/// presence test (it is correct for both kinds), and a single-kind operand keeps
-/// the ordinary lowering.
 #[test]
 fn a_strict_nullish_literal_comparison_needs_one_nullish_kind() {
     const BOTH_STRICT: &str = "\
         export function strictNull(x: number | null | undefined): boolean { return x === null; }";
-    // A call carries no type in HIR, so the operand's both-kinds optional is only
-    // known once it is lowered - that is the case the backend check decides.
     const BOTH_STRICT_CALL: &str = "\
         export function strictNullCall(): boolean { \
             const h = (): number | null | undefined => 1; return h() === null; }";
@@ -116,9 +78,6 @@ fn a_strict_nullish_literal_comparison_needs_one_nullish_kind() {
         export function looseNull(x: number | null | undefined): boolean { return x == null; }";
     const SINGLE: &str = "\
         export function strictSingle(x: number | null): boolean { return x === null; }";
-    // The typed operand is rejected by the HIR→MIR check (`null_equality_e2e`
-    // asserts the same shape against the code field, which the driver only
-    // carries in the message for backend diagnostics).
     let messages = diagnostic_messages(BOTH_STRICT);
     assert!(
         messages.contains("compares against a `null`/`undefined` literal"),
@@ -148,10 +107,6 @@ fn a_strict_nullish_literal_comparison_needs_one_nullish_kind() {
     ts_aot_test_support::check_generated_crate("optional_single_kind", &rust);
 }
 
-/// An optional source with a different numeric inner type must be converted
-/// through its present values: `Option<i64>` becomes `Option<f64>` with a
-/// `.map(.. as f64)` rather than being returned untouched (E0308) or wrapped in
-/// another `Option`.
 #[test]
 fn an_optional_source_is_converted_through_its_present_values() {
     const SOURCE: &str = "\

@@ -1,24 +1,3 @@
-//! Regression tests for two review findings in the backend's expression
-//! emission:
-//!
-//! * `UnaryOp::Neg` had a special emission for literal operands (`-1` against a
-//!   float target becomes `-(1.0)`), but every *other* negation fell into the
-//!   same arm and was returned unchanged. `return -y` with `y: i64` from a
-//!   `number` function therefore emitted `-(y)`, i.e. an `i64` where the `f64`
-//!   return type is required (`E0308`). Only a literal operand keeps the
-//!   special emission now; a negation of a typed value is cast from the
-//!   operand's own type, the same coercion the binary operators use.
-//! * `a === b` between two optional operands lowers to Rust's `Option`
-//!   equality, where `null` and `undefined` share one `Option::None`. That is
-//!   JavaScript's answer only while both sides admit the *same* single nullish
-//!   kind; a mismatch (`T | null` vs `T | undefined`) or an operand that admits
-//!   both kinds is now rejected instead of silently answering `None == None`.
-//!
-//! The accepted modules are compiled with `cargo check`
-//! (`check_generated_crate`) and then built and run (`run_generated_crate`), so
-//! the assertions cover real Rust compilation and real values, not the emitted
-//! text alone.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -48,8 +27,6 @@ fn norm(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// All diagnostic messages of a failed compilation, joined for substring
-/// assertions.
 fn messages(source: &str) -> String {
     let out = compile_module(source);
     assert!(
@@ -64,8 +41,6 @@ fn messages(source: &str) -> String {
         .join("\n")
 }
 
-/// `-y` where `y: i64` is returned from a `number` function must be cast to
-/// `f64`; the negated literal (`-5`) keeps its special emission.
 #[test]
 fn negated_i64_value_returned_as_number_is_cast_to_f64() {
     const SOURCE: &str = "export function negLocal(): number { let y: i64 = 5; return -y; } \
@@ -125,8 +100,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Two optionals with the same single nullish kind keep the ordinary `Option`
-/// comparison, which matches JavaScript for every input.
 #[test]
 fn strict_equality_of_two_same_kind_optionals_matches_javascript() {
     const SOURCE: &str = "export function same(a: number | null, b: number | null): boolean { return a === b; } \
@@ -185,9 +158,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// `T | null` compared with `T | undefined` is undecidable in the `Option`
-/// representation (`null === undefined` is `false` in JavaScript, `None ==
-/// None` is `true` in Rust), so it must be reported instead of lowered.
 #[test]
 fn strict_equality_of_different_nullish_kinds_is_reported() {
     let report = messages(
@@ -211,8 +181,6 @@ fn strict_equality_of_different_nullish_kinds_is_reported() {
     );
 }
 
-/// An operand that admits both kinds (`T | null | undefined`) cannot be decided
-/// either: the runtime value may be either nullish kind.
 #[test]
 fn strict_equality_with_a_both_kinds_operand_is_reported() {
     let report = messages(

@@ -103,9 +103,6 @@ fn function_that_can_fall_through_is_reported_as_an_error_not_broken_rust() {
     );
 }
 
-/// The un-inferable return type is reported where the function is, not by the
-/// backend without a location (`E0300` at span `0..0`) and not as a misleading
-/// "could not resolve type annotation" warning.
 #[test]
 fn un_inferable_return_type_is_reported_at_the_function_with_e0402() {
     let out = compile("export function f(x: number) { if (x > 0) { return 1; } }");

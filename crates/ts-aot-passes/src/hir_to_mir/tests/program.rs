@@ -1625,8 +1625,6 @@ fn collect_mutated_globals_marks_only_direct_reassignment() {
         ty: g_ty,
         init: Some(HirExpr::Int(0, Span::default())),
     });
-    // TLA main is lowered to a `HirDecl::Function` (see skeleton.rs), so scanning
-    // functions covers both TLA-main/top-level statements and ordinary functions.
     prog.push_decl(HirDecl::Function(HirFunction {
         name: Atom::new_inline("__tla_main"),
         params: Vec::new(),

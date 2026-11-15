@@ -1,6 +1,5 @@
 use super::common::*;
 
-/// A call to a free function by name, as the body walker emits it.
 fn call_free(name: &str, ty: TypeId) -> HirExpr {
     HirExpr::Call {
         callee: HirCallee::Indirect(Box::new(HirExpr::Global {
@@ -908,10 +907,6 @@ fn infer_throws_types_a_primitive_thrown_expr_by_its_value() {
     );
 }
 
-/// The fixpoint records the free-function declaration the call *selects*, so a
-/// same-named declaration the call does not select cannot supply its error type.
-/// Inside `ns`, `foo()` is `ns::foo`; the module-level `foo` is a different
-/// callee even though it throws.
 #[test]
 fn module_throws_resolves_only_the_selected_free_function() {
     let mut types = TypeTable::new();
@@ -958,9 +953,6 @@ fn module_throws_resolves_only_the_selected_free_function() {
     );
 }
 
-/// A class-qualified `::m` suffix is the fallback for a *method* whose receiver
-/// class is not known statically. A free function must never match it: `m()` is
-/// the module-level `m`, not `C::m`.
 #[test]
 fn module_throws_does_not_match_a_method_suffix_for_a_free_function() {
     let mut types = TypeTable::new();
@@ -1017,10 +1009,6 @@ fn module_throws_does_not_match_a_method_suffix_for_a_free_function() {
     );
 }
 
-/// A method call whose receiver class is not known statically carries only the
-/// bare method name, so the fixpoint matches the class-qualified `::name` keys.
-/// A same-named *free* function must not supply the type instead (the `Method`
-/// variant deliberately skips the direct lookup).
 #[test]
 fn module_throws_matches_an_unresolved_method_by_suffix() {
     let mut types = TypeTable::new();
@@ -1046,8 +1034,6 @@ fn module_throws_matches_an_unresolved_method_by_suffix() {
         extends: None,
         type_params: Vec::new(),
     };
-    // `owner.m()` where the owner's type is unknown (the HIR local is `Error`), so
-    // the call records only the bare method name.
     let caller = HirFunction {
         name: Atom::new_inline("caller"),
         ret: unit_ty(),
@@ -1073,8 +1059,6 @@ fn module_throws_matches_an_unresolved_method_by_suffix() {
         ..Default::default()
     };
 
-    // A *free* function with the same name throws a different error type: the
-    // unresolved method call must take `C::m`'s, not this one's.
     let free_err = types.intern(&Type::String);
     let free_m = HirFunction {
         name: Atom::new_inline("m"),
@@ -1102,11 +1086,6 @@ fn module_throws_matches_an_unresolved_method_by_suffix() {
     );
 }
 
-/// The `throw <call>` seed resolves its callee the way `resolve_callee` does: the
-/// innermost namespace that declares the function wins. `N::Inner::f` throwing
-/// `boom()` selects `N::boom`; looking the fully qualified name up and then the
-/// *bare* one selects the module-level `boom` instead, and the seed is what the
-/// fixpoint starts from - so the wrong function would supply the error type.
 #[test]
 fn a_thrown_call_seeds_the_return_type_of_its_enclosing_namespace() {
     let mut types = TypeTable::new();
@@ -1114,8 +1093,6 @@ fn a_thrown_call_seeds_the_return_type_of_its_enclosing_namespace() {
     let other = types.intern(&Type::String);
     let error_ty = types.intern(&Type::Error);
 
-    // The module-level `boom` the bare-name lookup would find, with a *different*
-    // declared return type.
     let module_boom = HirFunction {
         name: Atom::new_inline("boom"),
         ret: other,
@@ -1124,7 +1101,6 @@ fn a_thrown_call_seeds_the_return_type_of_its_enclosing_namespace() {
         ..Default::default()
     };
     let ns_boom = HirFunction {
-        // The declared return type is what the seed copies into the throws map.
         ret: err,
         throws: Some(err),
         body: vec![HirStmt::Throw { expr: int_lit(1) }],
@@ -1162,9 +1138,6 @@ fn a_thrown_call_seeds_the_return_type_of_its_enclosing_namespace() {
     );
 }
 
-/// The `::name` fallback belongs to a *method* whose receiver class is unknown, so
-/// its prefix has to name a class of this program. A namespace-qualified free
-/// function (`A::m`) ends with the same suffix and must not supply the type.
 #[test]
 fn module_throws_ignores_a_namespace_function_for_an_unresolved_method() {
     let mut types = TypeTable::new();
@@ -1178,8 +1151,6 @@ fn module_throws_ignores_a_namespace_function_for_an_unresolved_method() {
         body: vec![HirStmt::Throw { expr: int_lit(1) }],
         ..Default::default()
     };
-    // `owner.m()` where the owner's type is unknown, so the call records only the
-    // bare method name (`RecordedCallee::Method`).
     let caller = HirFunction {
         name: Atom::new_inline("caller"),
         ret: unit_ty(),

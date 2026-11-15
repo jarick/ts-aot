@@ -1,20 +1,3 @@
-//! The type of a local bound to a `??` with a nullish literal.
-//!
-//! `const r = a ?? null` is valid TypeScript, but the frontend types the
-//! operator - and therefore an unannotated binding - as the left operand's
-//! non-optional inner type (`number` for `a: number | undefined`), because a
-//! `null` literal carries no type of its own. The lowering is nonetheless
-//! optional (`a` may be missing and the fallback really can be yielded), so
-//! `hir_to_mir::convert_stmt::recover_local_ty` has to let the converted
-//! initializer win over that stale non-optional declaration. Otherwise the
-//! generated crate declares `let r: f64 = <Option<f64>>` and `cargo check`
-//! rejects it with E0308.
-//!
-//! The controls pin what must not change: an explicitly optional annotation, an
-//! initializer whose value is a plain value, and the `P0018` report for a `??`
-//! whose optional result is returned from a function declared to return a plain
-//! value.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -44,8 +27,6 @@ fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// The generated Rust of one exported function, so an assertion can be scoped to
-/// it (the module also carries the dispatch helpers and the ABI wrappers).
 fn body_of<'r>(rust: &'r str, name: &str) -> &'r str {
     let start = rust
         .find(&format!("pub fn {name} "))
@@ -63,10 +44,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// The probe: the binding's stale `f64` declaration must give way to the
-/// optional type the initializer actually converted to, or the generated crate
-/// does not compile. Runtime values are compared with JavaScript (`undefined`
-/// becomes `null`, a present value survives).
 #[test]
 fn an_unannotated_nullish_coalesce_binding_takes_the_converted_optional_type() {
     const SOURCE: &str = "export function run(a: number | undefined): number | null { \
@@ -111,9 +88,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The controls: an explicitly optional annotation and an inferred non-optional
-/// value keep their declarations, and a `??` over a typed optional fallback
-/// (`a ?? b`) is unaffected too.
 #[test]
 fn nullish_coalesce_binding_controls_keep_their_declared_types() {
     const SOURCE: &str = "export function annotated(a: number | undefined): number | null { \
@@ -170,9 +144,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The other side of the fix: a local declaration is not a requirement of its
-/// own, but a declared return type is. An optional `??` result returned from a
-/// function declared to return a plain value keeps being reported.
 #[test]
 fn an_optional_coalescing_result_in_a_non_optional_return_is_still_reported() {
     let out =

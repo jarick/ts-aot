@@ -89,10 +89,6 @@ pub(crate) fn convert_function(
     for p in &f.params {
         converter.register_local_name(p.id, p.name.clone());
     }
-    // The error type must be known *before* the body is converted: a call to a
-    // function that may throw is only propagatable when the enclosing function
-    // returns a `Result` of the same error type (`module_throws` propagates the
-    // error type along the call graph for that reason).
     let throws = if f.is_generator {
         None
     } else {
@@ -102,17 +98,9 @@ pub(crate) fn convert_function(
         if inferred.is_some() || f.throws.is_some() {
             inferred
         } else {
-            // Last resort: the frontend types every indirect call as
-            // `Type::Error`, so `throw g()` (or `throw c ? g() : 0`) has no
-            // static type of its own. The value thrown at runtime is what the
-            // expression *yields*, and `expr_type` recovers that from the
-            // callee's declaration and the conditional's branches - without it
-            // the function got `throws = None` and the backend emitted
-            // `return Err(..)` inside a plain (`f64`) function.
             let mut resolve = |expr: &HirExpr, types: &mut TypeTable| {
                 let ty = converter.expr_type(expr, types)?;
                 match types.resolve(ty) {
-                    // A generic parameter is not a concrete error type either.
                     None | Some(Type::Error | Type::GenericParam { .. }) => None,
                     Some(_) => Some(ty),
                 }
@@ -721,9 +709,6 @@ fn convert_struct(
         let mut method_remap: HashMap<FunctionId, FunctionId> = HashMap::new();
         method_remap.insert(FunctionId::from_raw(u32::MAX), id);
         let self_param = LocalId::from_raw(0);
-        // `module_throws` keys methods by their class-qualified name (`A::m`),
-        // so the lookup must use exactly that key - a bare method name resolves
-        // to no entry and the method would look like it never throws.
         let method_key = extend_qualified(
             &qualified_name(namespace_path, c.name.as_str()),
             method.name.as_str(),
@@ -759,8 +744,6 @@ fn convert_struct(
                 self_param,
             }
         } else if name == "constructor" {
-            // A constructor mutates the freshly allocated instance, so the
-            // backend takes the receiver by mutable reference (`&mut self`).
             FunctionKind::Constructor { owner: sid }
         } else {
             FunctionKind::Method {
@@ -876,8 +859,6 @@ fn infer_throws(
     }
 }
 
-/// A human-readable name of a type for the throw diagnostics: the internal
-/// `Type` names (`F64`, `String`) must not leak into user-facing messages.
 pub(super) fn throw_type_name(types: &TypeTable, ty: TypeId) -> String {
     match types.resolve(ty) {
         None | Some(Type::Error) => "an unknown type".to_owned(),
@@ -918,20 +899,11 @@ pub(super) fn throw_type_name(types: &TypeTable, ty: TypeId) -> String {
     }
 }
 
-/// The first `throw` whose value has a different type than `expected`, together
-/// with the span of that `throw`.
-///
-/// The AOT target keeps one error type per function, so a function that throws
-/// both a number and a string would emit `Result<T, f64>` with a `JsString`
-/// `Err` arm - code that cannot compile, reported here instead.
 pub(super) fn conflicting_throw_type(
     body: &[HirStmt],
     expected: TypeId,
     types: &mut TypeTable,
 ) -> Option<(TypeId, Span)> {
-    // An unknown expected type cannot be compared against anything: everything
-    // would "conflict", which is what produced a false `E0417` for a `throw`
-    // whose value is a call the frontend typed as `Type::Error`.
     if matches!(types.resolve(expected), None | Some(Type::Error)) {
         return None;
     }
@@ -947,8 +919,6 @@ pub(super) fn conflicting_throw_type(
         match s {
             HirStmt::Throw { expr } => {
                 let ty = throw_expr_type(expr, types);
-                // A rethrown caught value is dynamic (`catch (e) { throw e; }`):
-                // it is not a second error type, so it does not conflict.
                 if matches!(types.resolve(ty), None | Some(Type::Error)) {
                     return;
                 }
@@ -979,9 +949,6 @@ pub(super) fn conflicting_throw_type(
                 catch,
                 finally,
             } => {
-                // A `throw` inside the `try` body is handled by its `catch` and
-                // does not escape the function. Only a `try` without a `catch`,
-                // and a throwing `catch`/`finally`, escape.
                 if catch.is_none() {
                     visit(body, expected, types, out);
                 }
@@ -1009,13 +976,6 @@ pub(super) fn conflicting_throw_type(
     out
 }
 
-/// The type of a `throw` expression when it is statically known.
-///
-/// A call the frontend could not type (a throwing callee, an unresolved
-/// generic, ...) carries `Type::Error`; taking it as "the" error type produced
-/// a false `E0417` (and a `Result<T, ()>`) whenever the first `throw` of a
-/// function was such a call, so an unknown type is skipped in favour of the
-/// first statically known one.
 fn known_throw_type(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
     let ty = throw_expr_type(expr, types);
     match types.resolve(ty) {
@@ -1024,8 +984,6 @@ fn known_throw_type(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
     }
 }
 
-/// The type of the first `throw` in `body` (declaration order, `if` branches
-/// left to right) for which `resolve` yields a static type.
 fn first_throw_type(
     body: &[HirStmt],
     types: &mut TypeTable,
@@ -1049,11 +1007,6 @@ fn first_throw_type(
             | HirStmt::ForAwaitOf { body, .. }
             | HirStmt::ForIn { body, .. } => check(body, types, resolve),
             HirStmt::Block(stmts) => stmts.iter().find_map(|s| check(s, types, resolve)),
-            // A `throw` in the `try` body of a guarded `try` is handled by its
-            // `catch`, so it is not an escaping error; `catch`/`finally` bodies
-            // carry real escaping `throw`s (a `throw` inside `finally` is emitted
-            // outside the protected region) and are searched - like
-            // `conflicting_throw_type` does.
             HirStmt::Try {
                 body,
                 catch,
@@ -1073,11 +1026,6 @@ fn first_throw_type(
     body.iter().find_map(|s| check(s, types, resolve))
 }
 
-/// The first `throw <call>` operand of `body`.
-///
-/// The frontend leaves a call's HIR type as `Type::Error`, so `body_throws_type`
-/// cannot name the thrown type; the throws fixpoint resolves the operand through
-/// the callee's declared return type instead of skipping the function.
 pub(super) fn thrown_call_operand(body: &[HirStmt]) -> Option<&HirExpr> {
     fn check(s: &HirStmt) -> Option<&HirExpr> {
         match s {
@@ -1117,9 +1065,6 @@ pub(super) fn body_throws_type(body: &[HirStmt], types: &mut TypeTable) -> Optio
 
 fn throw_expr_type(expr: &HirExpr, types: &mut TypeTable) -> TypeId {
     match expr {
-        // A literal has no type of its own, and the old `TypeId::from_raw(0)`
-        // fallback collided with a real interned type (the first one in the
-        // table), so `throw 1` inside a method was typed as the enclosing class.
         HirExpr::Int(..) => types.intern(&Type::F64),
         HirExpr::Float(..) => types.intern(&Type::F64),
         HirExpr::String(..) => types.intern(&Type::String),

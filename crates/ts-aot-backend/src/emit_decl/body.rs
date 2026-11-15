@@ -453,13 +453,6 @@ fn emit_do_while(
     ))
 }
 
-/// Writes a value into a shared (captured) variable.
-///
-/// The environment field holds `Option<T>` (the storage the runtime uses to
-/// detect a read before initialization), so a nullish value resets it to `None`
-/// and anything else is coerced to `T` and wrapped in `Some`. Without this the
-/// write emitted `Some(())`/`Some(<i64>)` for an `Option<f64>` field, i.e. code
-/// that cannot compile.
 fn shared_write_capture(
     value: &MirExpr,
     declared: Option<TypeId>,
@@ -469,11 +462,6 @@ fn shared_write_capture(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let tokens = emit_owned_value(value, ctx, emit_env, body_ctx)?;
-    // The environment field holds `Option<declared type>` (the outer `Option` is
-    // the runtime's "written yet?" marker, which `shared_write_tokens` adds), so
-    // the value must be coerced to the *declared* type - an `Option<f64>` field
-    // of a captured `number | null` needs `Some(Option::None)` for `null`, not
-    // `Some(())`, and `Some(5.0)` for `5`, not `Some(5)`.
     let tokens = match declared {
         Some(declared_ty)
             if !matches!(
@@ -546,9 +534,6 @@ fn emit_stmt(
             {
                 return shared_write_capture(
                     value,
-                    // A closure's own `BodyCtx` has no entry for the captured
-                    // local (it belongs to the enclosing function), so the
-                    // capture table is consulted as well.
                     body_ctx.local_ty(*id).or_else(|| body_ctx.capture_ty(*id)),
                     &acc,
                     ctx,
@@ -561,9 +546,6 @@ fn emit_stmt(
             {
                 return shared_write_capture(
                     value,
-                    // A shared name is a captured local: the module-global table
-                    // does not have it, so the env field's declared type is the
-                    // one to coerce to.
                     body_ctx
                         .shared_ty_for_name(name)
                         .or_else(|| ctx.global_ty(name)),
@@ -676,8 +658,6 @@ fn emit_stmt(
                 Ok(quote!(ts_aot_runtime::__ts_aot_throw(#payload);))
             } else {
                 let tokens = emit_expr(error, ctx, emit_env, body_ctx)?;
-                // The thrown value must have the function's error type
-                // (`throw 1` in a function that throws `f64`).
                 let ty = *err_ty;
                 let tokens = dynamic_string_coerce(error, tokens, ty, emit_env, body_ctx);
                 let tokens = optional_coerce(error, tokens, ty, ctx, emit_env, body_ctx, false)?;
@@ -886,17 +866,6 @@ fn is_durable_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
     durable_global_kind(name, ctx, emit_env).is_some()
 }
 
-/// A function value is emitted as a variant of the enum for its *own* signature
-/// bucket, so a local initialised from a function name is valid only when the
-/// local's declared function type is that same bucket and the bucket has a
-/// variant for the function.
-///
-/// Both failures are possible - parameter bivariance lets `f(x: number)` be
-/// stored in a `(x: number | null) => number` local, whose bucket no declaration
-/// fits, and a declaration is left out of a bucket when its ABI cannot be
-/// adapted (see `fn_value_bucket`) - and both are invalid Rust: the emitted
-/// initialiser is a bare function item where the enum is expected. Report it
-/// instead of emitting that.
 fn check_fn_value_init(
     init: &MirExpr,
     target_ty: TypeId,
@@ -1086,8 +1055,6 @@ fn emit_place_base(
 fn place_base_ty(base: &MirPlaceBase, body_ctx: &BodyCtx) -> Option<TypeId> {
     match base {
         MirPlaceBase::Local(id) => body_ctx.local_ty(*id),
-        // A name-based capture is a `MirPlaceBase::Global` whose declared type
-        // lives in the closure environment, not in the module globals.
         MirPlaceBase::Global(name) => body_ctx.shared_ty_for_name(name),
         other => other.ty(),
     }
@@ -1096,8 +1063,6 @@ fn place_base_ty(base: &MirPlaceBase, body_ctx: &BodyCtx) -> Option<TypeId> {
 fn expr_base_ty(base: &MirExpr, body_ctx: &BodyCtx) -> Option<TypeId> {
     match base {
         MirExpr::Local(id) => body_ctx.local_ty(*id).or_else(|| body_ctx.capture_ty(*id)),
-        // A name-based capture (`x` captured through two levels of closure) is a
-        // `MirExpr::Global` that carries no `TypeId`; the env field does.
         MirExpr::Global(name) => body_ctx.shared_ty_for_name(name),
         other => other.ty(),
     }
@@ -1113,9 +1078,6 @@ fn value_ty(
         MirExpr::Call { callee, .. } => {
             let mir_ty = expr_base_ty(expr, body_ctx);
             match mir_ty.and_then(|t| emit_env.types.resolve(t)) {
-                // A method call through an optional receiver (`c?.m()`) is typed
-                // `T | undefined` by the passes, which is more precise than the
-                // declared return type of the method.
                 Some(Type::Optional { .. }) => mir_ty,
                 _ => ctx.function_ret(*callee).or(mir_ty),
             }
@@ -1128,22 +1090,11 @@ fn value_ty(
             }
         }
         MirExpr::Global(name) => ctx.global_ty(name).or_else(|| expr_base_ty(expr, body_ctx)),
-        // A negation carries the frontend's placeholder type, but the Rust value
-        // it emits has the operand's type (`-y` for `y: i64` is an `i64`). The
-        // binary/argument/return coercions take the operand type to pick a common
-        // numeric type, so `1.5 + -y` widens the negation instead of leaving an
-        // `i64` in an `f64` position. `!` (`UnaryOp::Not`) yields a `bool` and is
-        // deliberately not covered.
         MirExpr::Unary {
             op: UnaryOp::Neg,
             expr: operand,
             ..
         } => value_ty(operand, ctx, emit_env, body_ctx),
-        // `~` is a Rust integer operation (`!`), so its value is an integer even
-        // when the operand's own type is a float. A float operand has no integer
-        // value type to read from the metadata, so that case keeps the
-        // expression's placeholder type like the other arms that do not know the
-        // emitted type.
         MirExpr::Unary {
             op: UnaryOp::BitNot,
             expr: operand,
@@ -1154,12 +1105,6 @@ fn value_ty(
             Some((ty, t)) if is_integer_type(t) => Some(ty),
             _ => expr_base_ty(expr, body_ctx),
         },
-        // A binary arithmetic expression carries the frontend's placeholder type
-        // too, while the Rust expression it emits has the numeric unification of
-        // its operands: a float operand makes the result a float, two integers
-        // keep an integer. Without this the assignment/return/argument
-        // coercions see the placeholder and leave an `i64` where an `f64` is
-        // required (`-(a + b)`, `1.5 + a + b`), which is E0308.
         MirExpr::Binary {
             op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod,
             left,
@@ -1230,10 +1175,6 @@ fn struct_field_type(emit_env: &EmitEnv, ty: TypeId, field: FieldId) -> Option<T
     struct_field_decl_ty(emit_env, id, field)
 }
 
-/// The *declared* type of `field` in `struct_id`, read from the MIR struct
-/// declaration. Unlike the type of an access expression (which the frontend
-/// already flattens to a single `Optional` for `a?.b`), this tells whether the
-/// field itself is nullable - the distinction the optional-chain emission needs.
 fn struct_field_decl_ty(emit_env: &EmitEnv, struct_id: StructId, field: FieldId) -> Option<TypeId> {
     emit_env.program.declarations.iter().find_map(|d| match d {
         MirDecl::Struct(s) if s.id == struct_id => {
@@ -1243,8 +1184,6 @@ fn struct_field_decl_ty(emit_env: &EmitEnv, struct_id: StructId, field: FieldId)
     })
 }
 
-/// The inner type of an `OptionalChain` expression, i.e. the receiver's type
-/// with the `| null`/`| undefined` part stripped (`Optional<C>` -> `C`).
 fn optional_chain_inner_ty(emit_env: &EmitEnv, base: &MirExpr) -> Option<TypeId> {
     let MirExpr::OptionalChain { ty, .. } = base else {
         return None;
@@ -1648,8 +1587,6 @@ fn emit_expr(
             Ok(quote!(ts_aot_runtime::JsString::from(#literal)))
         }
         MirExpr::Local(id) => Ok(body_ctx.local_read(*id)),
-        // `expr?`: the passes only emit this when the enclosing function
-        // declares the same `throws` type, so `?` type-checks directly.
         MirExpr::Propagate { expr, .. } => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(#inner?))
@@ -1676,16 +1613,6 @@ fn emit_expr(
                 let field_id = *field;
                 let field_ty = struct_field_decl_ty(emit_env, struct_id, field_id);
                 let field = ctx.struct_field_ident(struct_id, field_id);
-                // `a?.b` yields exactly one level of absence in JavaScript: when
-                // the field itself is optional (`b: T | null`), `null` and
-                // "`a` was nullish" are the same absent value, so the access must
-                // flatten (`and_then`) instead of nesting (`map` would give
-                // `Option<Option<T>>`). The type of the *access expression* cannot
-                // tell the two apart (the frontend already flattens it), so the
-                // decision comes from the field's declared type. Both `map` and
-                // `and_then` hand the receiver to the closure by shared reference,
-                // so a non-`Copy` field has to be cloned out of it - otherwise the
-                // closure moves the field from behind `&` (E0507).
                 let access = if field_ty.is_some_and(|ty| !is_copy_type(types, ty)) {
                     quote!(o.#field.clone())
                 } else {
@@ -1753,12 +1680,6 @@ fn emit_expr(
             );
             let index = emit_expr(index, ctx, emit_env, body_ctx)?;
             if let Some(map) = optional_chain_map_arm(base, ctx, emit_env, body_ctx)? {
-                // A string receiver is not indexed as a container: `s?.[i]` on a
-                // `string | null` has to use the same string-index helper as the
-                // plain `s[i]` path below. Indexing the emitted `JsString`/`String`
-                // directly would be E0608, and the short-circuit for `None` must
-                // stay (`map` over the receiver's `as_ref()`), so the helper is
-                // called inside the closure.
                 if let Some(inner_ty) = optional_chain_inner_ty(emit_env, base)
                     && matches!(types.resolve(inner_ty), Some(Type::String))
                 {
@@ -1768,19 +1689,12 @@ fn emit_expr(
                         #index as i64,
                     ))));
                 }
-                // Same flattening rule as for fields: an element that is itself
-                // optional (`(T | null)[]`) must not nest the two absences.
-                // The element type comes from the receiver's array type, not from
-                // the access expression, whose type the frontend already flattened.
                 let element_ty = optional_chain_inner_ty(emit_env, base).and_then(|inner| {
                     match types.resolve(inner) {
                         Some(Type::Array { element }) => Some(*element),
                         _ => None,
                     }
                 });
-                // Same clone rule as for `?.field` above: the element comes out of
-                // a shared reference, so a non-`Copy` element type must be cloned
-                // in both the flattening (`and_then`) and the nesting (`map`) arm.
                 let access = if element_ty.is_some_and(|ty| !is_copy_type(types, ty)) {
                     quote!(o[#index as usize].clone())
                 } else {
@@ -1828,9 +1742,6 @@ fn emit_expr(
             let owner_ident = ctx
                 .function_owner(callee_id)
                 .map(|owner| ctx.struct_ident(owner));
-            // `c?.m(...)`: the receiver is an optional value, so the call is
-            // mapped over it and the result is `Option<ret>` (the passes type
-            // the call that way).
             if is_method
                 && let Some(MirExpr::OptionalChain { base, ty }) = args.first()
                 && let Some(owner_ident) = owner_ident.clone()
@@ -1869,20 +1780,10 @@ fn emit_expr(
                 quote!(#callee_ident)
             };
             if is_method && (is_constructor || is_mutating_method) {
-                // A constructor mutates the instance the caller allocated, and a
-                // method that writes a field of `this` mutates the instance it is
-                // called on, so the receiver is borrowed (`&mut self`) instead of
-                // being moved or cloned.
                 let (receiver, rest) = args
                     .split_first()
                     .expect("a method call always carries its receiver");
-                // The receiver must be emitted as a *place*: a value read of `this`
-                // clones it (`&mut (self.clone())` mutates a temporary), while
-                // `local_ref` keeps the borrow (`&mut (self)`, `&mut (c)`).
                 let receiver = match receiver {
-                    // Inside a mutating method `self` is already a `&mut` binding, so
-                    // the place is a reborrow (`&mut (*self)`); `&mut (self)` would
-                    // borrow the binding, which needs `mut self`.
                     MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => {
                         Ok(if body_ctx.self_is_borrowed() {
                             quote!((*self))
@@ -1890,8 +1791,6 @@ fn emit_expr(
                             quote!((self))
                         })
                     }
-                    // A captured (shared) local lives in the closure environment, so
-                    // it has no ident to borrow: it keeps the by-value form.
                     MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
                         Ok(body_ctx.local_ref(*id))
                     }
@@ -1935,18 +1834,11 @@ fn emit_expr(
             }
             if let Some(k) = indirect_callee_fn_kind(callee, ctx, emit_env, body_ctx) {
                 let callee = emit_expr(callee, ctx, emit_env, body_ctx)?;
-                // The generated `__ts_fn_call_k` helper is typed by the `Fn` type
-                // of the callee, so its arguments need the same coercion a direct
-                // call gets: numeric widening and `Some(..)`/`None` for optional
-                // parameters (an omitted `?`-parameter reaches us as `MirExpr::Unit`).
                 let sig = ctx.fn_value_sig(k);
                 let param_tys = sig.params.clone();
                 let param_optional = sig.optional.clone();
                 let mut coerced_args: Vec<MirExpr> = args.clone();
                 while coerced_args.len() < param_tys.len() {
-                    // Only a *declared* optional parameter may be left out: the
-                    // signature's flag, never an `Option` in the ABI type alone -
-                    // `x: T | undefined` without `?` is a required parameter.
                     let index = coerced_args.len();
                     if !param_optional.get(index).copied().unwrap_or(false) {
                         break;
@@ -2598,16 +2490,7 @@ fn emit_binary_expr(
     {
         return Ok(tokens);
     }
-    // Two optional operands are compared with Rust's `Option` equality below,
-    // where `null` and `undefined` share one `Option::None`. That is JavaScript's
-    // answer only while both sides carry the same nullish kinds, so a strict
-    // comparison whose kinds make the `None`/`None` case ambiguous is rejected
-    // instead of silently answering `true`.
     check_optional_strict_equality_kinds(op, left, right, ctx, emit_env, body_ctx)?;
-    // The same `Option` comparison also needs both inner types to be the *same*
-    // Rust type and to implement `PartialEq`; when the metadata cannot supply
-    // that, the emitted `a == b` would not compile (E0308 for two different
-    // numeric inner types, E0369 for a structure without `PartialEq`).
     check_optional_strict_equality_inner_types(op, left, right, ctx, emit_env, body_ctx)?;
     let target = if matches!(
         op,
@@ -2682,16 +2565,6 @@ fn common_numeric_target(
     None
 }
 
-/// The type of the Rust expression a binary arithmetic operator emits: the
-/// numeric unification of its two operands. A float operand makes the result a
-/// float (the wider of the two when both are floats), two integers keep an
-/// integer (the left operand's type). `None` when the operands are not both
-/// numeric, so the caller keeps the expression's placeholder type.
-///
-/// This is the *result* type, unlike [`common_numeric_target`], which reports the
-/// type two operands have to be coerced to and returns `None` when they already
-/// agree. `value_ty` needs the result type to tell the enclosing assignment or
-/// return which coercion to apply to a composite expression.
 fn numeric_binary_result_ty(
     left: Option<TypeId>,
     right: Option<TypeId>,
@@ -2779,29 +2652,15 @@ fn optional_coerce(
         return Ok(tokens);
     };
     let inner = *inner;
-    // A parameter that has a default *and* a nullable declared type is emitted
-    // with a nested ABI type `Option<Option<T>>`: the outer `Option` records
-    // whether an argument was supplied at all (the callee's prologue applies the
-    // default when it is `None`), the inner one is the value's own nullishness.
-    // Coercing into that shape is "coerce one level down, then wrap once more":
-    // a plain value becomes `Some(Some(v))`, a nullable source `Some(v)` and an
-    // explicit `null` stays `Some(None)` instead of collapsing into the outer
-    // `None`, which would silently select the default.
     if matches!(emit_env.types.resolve(inner), Some(Type::Optional { .. })) {
-        // A missing argument reaches us as `MirExpr::Unit` (the passes pad
-        // trailing slots with it, and an explicit `undefined` lowers to the same
-        // node): the outer `None` is what asks the callee for its default.
         if matches!(expr, MirExpr::Unit) {
             return Ok(quote!(::core::option::Option::None));
         }
-        // `null` is *not* a missing argument in JavaScript.
         if matches!(expr, MirExpr::Null { .. }) {
             return Ok(quote!(::core::option::Option::Some(
                 ::core::option::Option::None
             )));
         }
-        // The same distinction for a *call* declared `null`/`void`: it supplies a
-        // nullish argument, and `undefined` (`void`) asks for the default.
         match source_nullish_kind(expr, ctx, emit_env, body_ctx) {
             Some(SourceNullish::Null) => {
                 return Ok(quote!(::core::option::Option::Some(
@@ -2811,7 +2670,6 @@ fn optional_coerce(
             Some(SourceNullish::Undefined) => return Ok(quote!(::core::option::Option::None)),
             None => {}
         }
-        // A source that already has the nested shape needs no extra wrapping.
         if matches!(
             value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)),
             Some(Type::Optional { inner: value, .. })
@@ -2838,9 +2696,6 @@ fn optional_coerce(
             expr, tokens, target, ctx, emit_env, body_ctx, owned,
         ));
     }
-    // A nullish *type* (`void`/`null`) is as nullish as the literal syntax: a call
-    // declared `void` yields `undefined`, so it has to become `None` and not
-    // `Some(())`, which is not an `Option<T>` at all.
     if is_nullish_literal(expr) || source_nullish_kind(expr, ctx, emit_env, body_ctx).is_some() {
         return Ok(quote!(::core::option::Option::None));
     }
@@ -2849,11 +2704,6 @@ fn optional_coerce(
         Some(Type::Optional { .. })
     );
     if source_is_optional {
-        // The source is already an `Option`, so only its present values need the
-        // numeric coercion: `None` stays `None` and `Some(v)` becomes
-        // `Some(v as T)`. Returning the source untouched would leave `Option<i64>`
-        // where `Option<f64>` is required (E0308), while wrapping the whole source
-        // in another `Some` would produce a nested `Option<Option<T>>`.
         let source_inner = value_ty(expr, ctx, emit_env, body_ctx)
             .and_then(|ty| emit_env.types.resolve(ty))
             .and_then(|ty| match ty {
@@ -2891,11 +2741,6 @@ fn is_numeric_type(ty: &Type) -> bool {
     is_float_type(ty) || is_integer_type(ty)
 }
 
-/// Whether converting a value of `source` into `target` needs an `as` cast.
-/// Both must be numeric; a change of kind (integer vs float) or of width
-/// (`i32` vs `i64`) changes the Rust type, so the emitted value has to be cast.
-/// Non-numeric and identical types need no conversion, which keeps the existing
-/// emission for them.
 fn numeric_requires_cast(source: TypeId, target: TypeId, emit_env: &EmitEnv) -> bool {
     if source == target {
         return false;
@@ -2909,19 +2754,12 @@ fn numeric_requires_cast(source: TypeId, target: TypeId, emit_env: &EmitEnv) -> 
     is_numeric_type(source) && is_numeric_type(target)
 }
 
-/// A literal initializer of a `static` must have the static's type: Rust reads
-/// `0` as an integer literal even when the static is an `f64`.
 pub(super) fn coerce_static_init(
     expr: &MirExpr,
     tokens: TokenStream,
     ty: TypeId,
     emit_env: &EmitEnv,
 ) -> TokenStream {
-    // An optional static uses the representation every other optional value
-    // uses: `Option<T>`, with a nullish constant as `None` and any other
-    // constant wrapped in `Some` (and coerced to the inner type). Without this
-    // a `number | null` global emitted `()`/`5` where `Option<f64>` was
-    // declared.
     if let Some(Type::Optional { inner, .. }) = emit_env.types.resolve(ty).cloned() {
         if is_nullish_literal(expr) {
             return quote!(::core::option::Option::None);
@@ -2986,16 +2824,6 @@ fn numeric_coerce_impl(
             Some(t) if is_integer_type(t) => emit_whole_number_literal(*value),
             _ => tokens,
         },
-        // A negated *literal* keeps its special emission: `-1` is emitted as
-        // `-(1)`, and against a float target the literal itself has to be a
-        // float (`-(1.0)`); a negated float literal against an integer target
-        // needs the same `as` cast as the plain float literal above.
-        //
-        // A negation of a typed value must not stop here: its Rust type follows
-        // the operand (`i64` for an `i64` variable), so it takes the ordinary
-        // source-type-driven cast below. Without that, `return -y` from a
-        // `number` function emitted `-(y)` and assigned an `i64` where the
-        // `f64` return type is required (E0308).
         MirExpr::Unary {
             op: UnaryOp::Neg,
             expr: operand,
@@ -3037,13 +2865,6 @@ fn numeric_coerce_impl(
     }
 }
 
-/// The ordinary numeric coercion: cast `tokens` to `target` when the source type
-/// of `value` differs from the target in kind (integer vs float) or - for
-/// [`numeric_coerce_exact`] - in width. `dst` is `emit_env.types.resolve(target)`.
-///
-/// The source type is the *value's* own type and not the enclosing expression's:
-/// a `MirExpr::Unary` or `MirExpr::Binary` carries the frontend's placeholder
-/// type, while the Rust expression's type comes from the operands.
 #[allow(clippy::too_many_arguments)]
 fn numeric_coerce_from_source_ty(
     value: &MirExpr,
@@ -3111,10 +2932,6 @@ fn emit_caught_literal_eq(
     Ok(Some(quote!(#caught == #variant)))
 }
 
-/// The nullish kind a value's *static type* carries, for a value that is not a
-/// literal node: a call declared `void` (or `null`) yields `undefined` (`null`),
-/// which an optional destination stores as `None` - wrapping it in `Some` emitted
-/// `Some(())` for an `Option<f64>`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceNullish {
     Null,
@@ -3195,15 +3012,6 @@ fn emit_nullish_literal_equality(
     };
     let resolved = emit_env.types.resolve(ty);
     if let Some(Type::Optional { nullish, .. }) = resolved {
-        // A strict comparison against `null`/`undefined` is decidable only when
-        // the operand admits a single nullish kind: `null` and `undefined` share
-        // one `Option::None`, so `x === null` and `x === undefined` cannot be
-        // told apart at runtime when the operand allows both. That is exactly
-        // the case `check_optional_strict_equality_kinds` rejects for two
-        // operands, so reject it here too instead of lowering to `is_none()`
-        // (which would answer `true` for an `undefined` value as well). Loose
-        // comparisons keep the presence-test lowering, which is correct for both
-        // kinds.
         if strict && nullish.null && nullish.undefined {
             let op_name = match op {
                 BinaryOp::StrictNe => "!==",
@@ -3269,18 +3077,6 @@ fn emit_nullish_literal_equality(
     })))
 }
 
-/// `x === y` where one side is optional (`T | null`) and the other is a plain
-/// `T`: JavaScript compares the *values*, and a nullish value never equals a
-/// non-nullish one, so the plain side is compared against `Some(..)` of the
-/// optional side instead of emitting `Option<T> == T` (which does not compile).
-/// Whether a value of this type compiles as the operand of Rust's `==`.
-///
-/// The mixed optional comparison below turns `x == y` into
-/// `x.as_ref() == Some(&(y))`, so both sides must have `PartialEq`. Scalars do:
-/// their emitted Rust type is a primitive, `i64` (symbols and dates), `()` (the
-/// nullish types) or `BigIntHandle` (which implements value equality).
-/// Structures, arrays and the runtime handles do not, so they must not enter
-/// this path.
 fn is_rust_comparable_value(ty: &Type) -> bool {
     super::types::is_comparable_primitive(ty)
         || matches!(
@@ -3317,10 +3113,6 @@ fn emit_mixed_optional_equality(
     let inner_resolved = emit_env.types.resolve(inner_ty);
     let plain_resolved = plain_ty.and_then(|t| emit_env.types.resolve(t));
     let plain_matches_inner = match plain_side {
-        // A literal is coerced to the inner type when the comparison is emitted
-        // (`numeric_coerce` below), so the literal's own MIR type does not decide
-        // this: an integer literal compares against an `f64` inner, while an
-        // `i64` *variable* is coerced the same way.
         MirExpr::Bool(_) => matches!(inner_resolved, Some(Type::Bool)),
         MirExpr::Int { .. } | MirExpr::Float { .. } => matches!(
             inner_resolved,
@@ -3328,9 +3120,6 @@ fn emit_mixed_optional_equality(
         ),
         MirExpr::String { .. } => matches!(inner_resolved, Some(Type::String)),
         _ => match (plain_resolved, inner_resolved) {
-            // A struct/array pair used to pass the "same type" check and
-            // emitted `a.as_ref() == Some(&(b.clone()))`, which does not compile
-            // because those types have no `PartialEq`.
             (Some(plain), Some(inner)) => {
                 (inner == plain && is_rust_comparable_value(plain))
                     || (is_numeric_type(plain) && is_numeric_type(inner))
@@ -3339,17 +3128,8 @@ fn emit_mixed_optional_equality(
         },
     };
     if !plain_matches_inner {
-        // Different inner types: either a genuine type error or a pair the
-        // generic path handles; leave it untouched.
         return Ok(None);
     }
-    // JavaScript compares numbers by value, so both sides have to be compared
-    // in their *common* numeric type. Coercing the plain side to the optional's
-    // inner type compared `1` against `(1.5) as i64` for
-    // `i64EqFloat(Some(1))` and answered `true`, while `1 === 1.5` is `false`.
-    // If either side is a float, compare in that float type and widen the
-    // optional's integer inner value to it; two integers keep the integer
-    // comparison, and non-numeric pairs keep the inner type.
     let comparison_ty = match (inner_resolved, plain_resolved) {
         (Some(inner), Some(plain)) if is_integer_type(inner) && is_float_type(plain) => {
             plain_ty.unwrap_or(inner_ty)
@@ -3366,7 +3146,6 @@ fn emit_mixed_optional_equality(
         }
         _ => optional,
     };
-    // Keep the source evaluation order of the two operands.
     let cmp = if optional_is_left {
         quote!(#optional.as_ref() == ::core::option::Option::Some(&(#plain)))
     } else {
@@ -3375,8 +3154,6 @@ fn emit_mixed_optional_equality(
     Ok(Some(if neg { quote!(!(#cmp)) } else { cmp }))
 }
 
-/// The nullish kinds an optional operand can hold, or `None` when the operand is
-/// not a statically known optional value.
 fn optional_operand_kinds(
     expr: &MirExpr,
     ctx: &EmitCtx,
@@ -3389,7 +3166,6 @@ fn optional_operand_kinds(
     }
 }
 
-/// `null`, `undefined` or `null | undefined` for a diagnostic message.
 fn describe_nullish_kinds(kinds: NullishKinds) -> &'static str {
     match (kinds.null, kinds.undefined) {
         (true, true) => "`null | undefined`",
@@ -3399,22 +3175,6 @@ fn describe_nullish_kinds(kinds: NullishKinds) -> &'static str {
     }
 }
 
-/// Reject a strict comparison between two optional operands whose nullish kinds
-/// the `Option<T>` representation cannot tell apart.
-///
-/// `null` and `undefined` both lower to `Option::None`, so `a === b` emitted as
-/// `a == b` answers `true` where JavaScript answers `null === undefined` as
-/// `false`. That is correct while both operands admit the *same* single nullish
-/// kind: each `None` then means the same value on both sides, and the two sides
-/// differ only in the cases where Rust's `Option` equality agrees. It is wrong
-/// when they admit *different* kinds (`T | null` vs `T | undefined`), and
-/// undecidable when an operand admits both (the runtime value could be either),
-/// so both need a diagnostic instead of a silent comparison.
-///
-/// Loose `==`/`!=` keeps the plain lowering: `null == undefined` is `true` in
-/// JavaScript, which is exactly what `None == None` answers. Mixed
-/// optional/plain comparisons and the `null`/`undefined` literal cases are
-/// lowered before this check and never reach it.
 fn check_optional_strict_equality_kinds(
     op: BinaryOp,
     left: &MirExpr,
@@ -3434,8 +3194,6 @@ fn check_optional_strict_equality_kinds(
     };
     let empty = |kinds: NullishKinds| !kinds.null && !kinds.undefined;
     if empty(left_kinds) || empty(right_kinds) {
-        // No operand can be nullish, so there is no `None`/`None` case to get
-        // wrong: `Option` equality is exact.
         return Ok(());
     }
     let op_name = if op == BinaryOp::StrictEq {
@@ -3473,8 +3231,6 @@ fn check_optional_strict_equality_kinds(
     Ok(())
 }
 
-/// The inner type of a statically known optional operand, or `None` when the
-/// operand is not optional.
 fn optional_operand_inner(
     expr: &MirExpr,
     ctx: &EmitCtx,
@@ -3487,29 +3243,6 @@ fn optional_operand_inner(
     }
 }
 
-/// Reject a comparison between two optional operands whose inner types the
-/// ordinary `Option` comparison cannot handle.
-///
-/// `a === b` and `a == b` both lower to Rust's `Option<T> == Option<T>`, which
-/// needs both sides to be the *same* Rust type and that type to implement
-/// `PartialEq`. The metadata leaves two such comparisons undecidable:
-///
-/// * different numeric inner types (`number | null` vs `i64 | null`) emit
-///   `Option<f64> == Option<i64>`, which does not compile at all (E0308). The
-///   review prefers a diagnostic over a numeric unification here, because a
-///   wrong comparison value would be worse than a compile-time rejection;
-/// * an identical but non-comparable inner type (a structure or an array) has no
-///   `PartialEq`, so the comparison is E0369. JavaScript compares such operands
-///   by identity, which the emitted value equality would not express either.
-///
-/// The combinations that stay keep the plain `a == b`: two optional operands with
-/// the same inner primitive/string/`Date`/`Symbol`/`BigInt`/nullish type. The
-/// mixed optional/plain and literal cases are lowered before this check, so only
-/// two optional operands reach it. Both strict and loose equality reach it: the
-/// lowering is the same `Option` comparison, so a pair the Rust types cannot
-/// express is undecidable for either. The operator-specific message spells the
-/// operator the source used. An operand whose inner type the metadata cannot
-/// resolve keeps the existing lowering.
 fn check_optional_strict_equality_inner_types(
     op: BinaryOp,
     left: &MirExpr,
@@ -3534,8 +3267,6 @@ fn check_optional_strict_equality_inner_types(
         emit_env.types.resolve(left_inner),
         emit_env.types.resolve(right_inner),
     ) else {
-        // The metadata does not resolve the inner type, so there is nothing to
-        // decide from: leave the comparison to the generic lowering.
         return Ok(());
     };
     let op_name = match op {
@@ -4365,9 +4096,6 @@ fn emit_array_op_with_element_type(
             let tokens = emit_owned_value(a, ctx, emit_env, body_ctx)?;
             let tokens = numeric_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx);
             Ok::<_, BackendError>(if coerce_optionals {
-                // Array literal elements are values of the element type; a
-                // non-optional one needs `Some(..)` and a `null`/`undefined`
-                // element needs `None`.
                 optional_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx, false)?
             } else {
                 tokens
@@ -4380,8 +4108,6 @@ fn emit_array_op_with_element_type(
     )
 }
 
-/// Element type of an array-typed expression (`T` for `T[]`, `T` for
-/// `(T[] | undefined)`).
 fn array_element_ty(
     expr: &MirExpr,
     ctx: &EmitCtx,
@@ -4596,8 +4322,6 @@ fn emit_try(
             let param_ty_id = body_ctx.local_ty(param);
             let is_any_catch =
                 param_ty_id.is_some_and(|t| matches!(emit_env.types.resolve(t), Some(Type::Error)));
-            // `map_or_default` would be the shortest form, but it is still
-            // unstable on the toolchains this workspace builds with (rust-lang#138099).
             let shared_write = match body_ctx.shared_access_for_local(param) {
                 Some(acc) => shared_write_tokens(&acc, &quote!(#param_ident)),
                 None => TokenStream::default(),

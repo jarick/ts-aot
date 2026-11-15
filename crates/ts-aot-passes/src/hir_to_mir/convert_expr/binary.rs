@@ -26,15 +26,6 @@ fn known_type(ty: Option<TypeId>, types: &TypeTable) -> Option<TypeId> {
 }
 
 impl ExprConverter {
-    /// The statically known type of a converted expression, for the lowerings
-    /// that must know it (`??`, `&&`, `||`, optional chains, `x!`).
-    ///
-    /// `mir_expr_ty` returns a *placeholder* for the node kinds that carry no
-    /// type of their own (`Local`, `Global`, `Bool`, `Unit`), and the
-    /// placeholder is `TypeId::from_raw(0)` - a perfectly valid id - so reading
-    /// it as a type silently yields an unrelated type. Those kinds are resolved
-    /// through the converter's tables instead, and a genuinely unknown type
-    /// stays `None` so the caller can report it rather than mis-lower.
     pub(super) fn mir_expr_static_ty(&self, expr: &MirExpr, types: &TypeTable) -> Option<TypeId> {
         let ty = match expr {
             MirExpr::Local(id) => self
@@ -50,13 +41,6 @@ impl ExprConverter {
         known_type(ty, types)
     }
 
-    /// The statically known type of a HIR operand that carries none of its own.
-    ///
-    /// A module-level reference is typed by its declaration, a call by the
-    /// return type of the callee it names, and a member read by the field of the
-    /// owner's class when HIR leaves it `Error`. Calls and object-literal fields
-    /// have no type on their own node, so a caller that only looked at
-    /// `hir_expr_type_id` used to see `None` for them.
     fn hir_static_ty(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         match expr {
             HirExpr::Global { name, .. } => known_type(self.global_decl_type(name), types),
@@ -79,9 +63,6 @@ impl ExprConverter {
         }
     }
 
-    /// The statically known type of an operand, whichever HIR kind carries it:
-    /// the node's own `ty`, the declaration behind a global/call/member read, or
-    /// the kind of a literal (which never carries a type id of its own).
     pub(super) fn operand_static_ty(
         &self,
         expr: &HirExpr,
@@ -93,8 +74,6 @@ impl ExprConverter {
     }
 }
 
-/// A user-facing name for a type, so diagnostics do not leak the internal
-/// `Debug` form (`Optional { inner: 3, nullish: ... }`, `F64`, `Some(..)`).
 fn type_name(types: &TypeTable, ty: TypeId) -> String {
     fn is_integer(ty: &Type) -> bool {
         matches!(
@@ -134,8 +113,6 @@ fn type_name(types: &TypeTable, ty: TypeId) -> String {
     }
 }
 
-/// The name of a HIR operand's type for a diagnostic, including the literal
-/// kinds that carry no type id of their own.
 fn operand_type_name(expr: &HirExpr, ty: Option<TypeId>, types: &TypeTable) -> String {
     if let Some(ty) = ty {
         return type_name(types, ty);
@@ -171,7 +148,6 @@ fn comparison_op_name(op: HirBinaryOp) -> &'static str {
     }
 }
 
-/// The `T` of a `T | null` / `T | undefined` operand, if it is an optional.
 fn optional_inner(ty: Option<TypeId>, types: &TypeTable) -> Option<TypeId> {
     match types.resolve(ty?) {
         Some(Type::Optional { inner, .. }) => known_type(Some(*inner), types),
@@ -179,8 +155,6 @@ fn optional_inner(ty: Option<TypeId>, types: &TypeTable) -> Option<TypeId> {
     }
 }
 
-/// Whether two types can meet in one Rust expression: the AOT target emits the
-/// same type for both, or numeric values (which the backend coerces).
 fn types_compatible(a: TypeId, b: TypeId, types: &TypeTable) -> bool {
     match (types.resolve(a), types.resolve(b)) {
         (None | Some(Type::Error), _) | (_, None | Some(Type::Error)) => true,
@@ -188,15 +162,11 @@ fn types_compatible(a: TypeId, b: TypeId, types: &TypeTable) -> bool {
     }
 }
 
-/// The empty [`NullishKinds`]: a value that can never be nullish.
 const NO_KINDS: NullishKinds = NullishKinds {
     null: false,
     undefined: false,
 };
 
-/// The nullish kinds a branch that may yield either of two operands can
-/// produce: `a && b` is `a` or `b`, so either one's nullish case can reach the
-/// result.
 fn union_kinds(left: NullishKinds, right: NullishKinds) -> NullishKinds {
     NullishKinds {
         null: left.null || right.null,
@@ -204,12 +174,6 @@ fn union_kinds(left: NullishKinds, right: NullishKinds) -> NullishKinds {
     }
 }
 
-/// The numeric type that can hold both operands when they are spelled
-/// differently: a mixed `int`/`float` pair meets in the float type, so a
-/// fractional operand keeps its fraction (`a ?? 1.5` must not become `1`).
-/// Returns `None` for every other pair, so non-numeric operands - and two
-/// integer spellings, which the backend already coerces between - keep the type
-/// they had.
 fn common_numeric_ty(a: TypeId, b: TypeId, types: &mut TypeTable) -> Option<TypeId> {
     if a == b || !is_numeric_type(a, types) || !is_numeric_type(b, types) {
         return None;
@@ -219,7 +183,6 @@ fn common_numeric_ty(a: TypeId, b: TypeId, types: &mut TypeTable) -> Option<Type
     if !is_float(&a_resolved) && !is_float(&b_resolved) {
         return None;
     }
-    // `f64` holds every `f32` value (and every integer), so it wins over `f32`.
     let float = if matches!(a_resolved, Some(Type::F64)) || matches!(b_resolved, Some(Type::F64)) {
         Type::F64
     } else {
@@ -228,8 +191,6 @@ fn common_numeric_ty(a: TypeId, b: TypeId, types: &mut TypeTable) -> Option<Type
     Some(types.intern(&float))
 }
 
-/// The non-nullish part of an operand that may be optional, so a numeric
-/// fallback can be compared with the type the destination would hold.
 fn optional_value_ty(ty: TypeId, types: &TypeTable) -> TypeId {
     match types.resolve(ty) {
         Some(Type::Optional { inner, .. }) => *inner,
@@ -247,8 +208,6 @@ fn is_nullable_type(ty: Option<&Type>, types: &TypeTable) -> bool {
     }
 }
 
-/// Whether the expression is a literal, i.e. a node whose type is only implied
-/// by the other operand.
 fn is_literal(expr: &HirExpr) -> bool {
     matches!(
         expr,
@@ -256,21 +215,12 @@ fn is_literal(expr: &HirExpr) -> bool {
     )
 }
 
-/// The static type of an operand that is *not* a literal: a literal has no type
-/// of its own and is typed by the other operand instead (`literal_fits`).
 fn literal_free_ty(expr: &HirExpr, ty: Option<TypeId>) -> Option<TypeId> {
     if is_literal(expr) { None } else { ty }
 }
 
-/// Literals carry no type of their own in HIR: they take the other operand's
-/// type when it can represent them.
 fn literal_fits(expr: &HirExpr, ty: TypeId, types: &TypeTable) -> bool {
     match expr {
-        // A literal is *lowered against* this type, not stored in it directly: the
-        // destination is the common numeric type of both operands (`right || 1.5`
-        // over an `int` is an `f64`), so any numeric type accepts a numeric
-        // literal here. A literal that a concrete integer temporary cannot hold is
-        // rejected by `int_literal_fits` before the destination is chosen.
         HirExpr::Int(..) | HirExpr::Float(..) => is_numeric_type(ty, types),
         HirExpr::String(..) => matches!(types.resolve(ty), Some(Type::String)),
         HirExpr::Bool(..) => matches!(types.resolve(ty), Some(Type::Bool)),
@@ -278,8 +228,6 @@ fn literal_fits(expr: &HirExpr, ty: TypeId, types: &TypeTable) -> bool {
     }
 }
 
-/// Whether `value` is representable in the integer type `target` without
-/// wrapping, which is what makes it a valid Rust literal of that type.
 fn int_fits(value: i64, target: &Type) -> bool {
     match target {
         Type::I8 => i8::try_from(value).is_ok(),
@@ -294,16 +242,6 @@ fn int_fits(value: i64, target: &Type) -> bool {
     }
 }
 
-/// Whether an *integer* literal operand is representable in the integer type the
-/// operator is lowered against: `x || 300` over a `u8` yields `300` on one
-/// branch, and a `u8` temporary holding it is an out-of-range Rust literal (the
-/// generated crate is rejected, and truncating it would answer differently from
-/// JavaScript).
-///
-/// A non-literal operand, a float literal and a non-integer type are left to the
-/// numeric widening the lowering already does, so `x || 1.5` over an `int` still
-/// meets in `f64`. `None` is the operand of a lowered compound assignment, which
-/// is never a literal.
 fn int_literal_fits(expr: Option<&HirExpr>, ty: TypeId, types: &TypeTable) -> bool {
     let Some(HirExpr::Int(value, _)) = expr else {
         return true;
@@ -397,12 +335,6 @@ fn is_nullish_hir_literal(expr: &HirExpr) -> bool {
     nullish_literal_kinds(expr).is_some()
 }
 
-/// The nullish kinds of an always-nullish HIR literal (`null`, `undefined`,
-/// `void`), or `None` when the expression is not one.
-///
-/// `null` and `undefined` share the `Option::None` representation, so the kinds
-/// are what keeps `x || null` (`null`-only) apart from `x || undefined`
-/// (`undefined`-only) once the operator's result is optional.
 fn nullish_literal_kinds(expr: &HirExpr) -> Option<NullishKinds> {
     match expr {
         HirExpr::Null(_) => Some(NullishKinds::NULL_ONLY),
@@ -622,11 +554,6 @@ impl ExprConverter {
                 HirBinaryOp::StrictNe => Some("!=="),
                 _ => None,
             } {
-                // A call operand carries no type of its own in HIR (`Type::Error`),
-                // so resolve its declared return type first: otherwise
-                // `f() === null` would be accepted merely because the type is
-                // unknown, even when `f` returns a value that also includes
-                // `undefined`.
                 let resolved_ty = match operand {
                     HirExpr::Call { .. } => self.expr_type(operand, types),
                     _ => None,
@@ -859,15 +786,6 @@ impl ExprConverter {
         }
     }
 
-    /// Rejects comparisons the generated Rust cannot express.
-    ///
-    /// `===`/`!==`/`==`/`!=` against `null`/`undefined` are handled by the
-    /// nullish machinery and folded by the backend, so they are left alone. What
-    /// is left is a comparison where one side is an optional (`T | null`) and
-    /// the other is a non-optional type the AOT target cannot compare against
-    /// `Option<T>`: `g === "0"`, `t === 1`, `b === 1`, and the relational
-    /// operators, which have no optional-aware lowering at all (`g < 5` used to
-    /// emit `Option<f64> < f64`).
     fn check_comparison_operands(
         &self,
         op: HirBinaryOp,
@@ -926,7 +844,6 @@ impl ExprConverter {
         }
     }
 
-    /// The optional type that holds `inner` plus the nullish kinds `nullish`.
     fn optional_type(&self, inner: TypeId, nullish: NullishKinds, types: &mut TypeTable) -> TypeId {
         types.intern(&Type::Optional { inner, nullish })
     }
@@ -997,20 +914,6 @@ impl ExprConverter {
         );
     }
 
-    /// Whether `expected` is nothing more than the frontend's own inference of
-    /// the expression being converted, rather than an independent requirement.
-    ///
-    /// The frontend types `x ?? <nullish literal>` as the non-nullish part of
-    /// `x`, because the literal carries no type of its own, and an unannotated
-    /// binding simply takes that inferred type (`const r = a ?? null` is typed
-    /// `number` for `a: number | undefined` even though the value may be
-    /// `null`). The operator's lowering stays optional, so comparing it with
-    /// the very type that same inference produced rejects valid TypeScript.
-    ///
-    /// A *declared* return type is a requirement of its own even when it
-    /// happens to coincide with the inference (`function f(): number { return a
-    /// ?? null; }` really cannot lower to a plain `f64`), so a return position
-    /// keeps being reported.
     fn expectation_is_the_expression_inference(
         &self,
         expected: Option<TypeId>,
@@ -1019,10 +922,6 @@ impl ExprConverter {
         expected == Some(expr_ty) && self.current_return_ty != expected
     }
 
-    /// Reports a result that may be nullish where the surrounding context (a
-    /// declared return type, an annotation or a parameter) requires a value.
-    /// `expected` is the expectation *of this operator's result*, captured before
-    /// its operands were converted (they are allowed to be optional).
     fn report_optional_result(
         &self,
         op: HirBinaryOp,
@@ -1046,12 +945,6 @@ impl ExprConverter {
             return;
         }
         if is_nullable_type(Some(expected_resolved), types) {
-            // Both sides are optional, but their *kinds* still have to agree: the
-            // result of `g() && 5` over `number | undefined` is never `null`, and
-            // a `number | null` target stores it as the same `Option::None`, so a
-            // `=== null` test on it would answer `true` for a JavaScript
-            // `undefined`. `check_nullish_write_kinds` reports exactly that (and
-            // stays permissive for a target whose kinds are unknown).
             crate::hir_to_mir::nullish::check_nullish_write_kinds(
                 kinds_of_ty(dest_ty, types),
                 expected,
@@ -1080,13 +973,6 @@ impl ExprConverter {
         );
     }
 
-    /// Converts an expression whose type is decided by its *own* position, not
-    /// by the type the enclosing expression must produce.
-    ///
-    /// The operand of `??`, `||`, `&&` or the condition of a conditional is
-    /// allowed to be optional even when the operator's result is not: in
-    /// `return (x || y) ?? 0` and `c ? (x && y) : z` the outer expectation must
-    /// not leak into the nested operator, or it would report a phantom `P0018`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_without_expected(
         &mut self,
@@ -1104,17 +990,6 @@ impl ExprConverter {
         mir
     }
 
-    /// `left ?? right`.
-    ///
-    /// The AOT target represents `T | null` as `Option<T>`, so a nullable
-    /// left-hand side is *unwrapped* and the fallback is evaluated only when
-    /// the value is nullish. A left-hand side that can never be nullish makes
-    /// the whole expression equal to it: JavaScript never evaluates the
-    /// fallback in that case.
-    ///
-    /// The result materialises in a temporary assigned from an `if`, mirroring
-    /// `convert_ternary`, so the statements produced by converting the fallback
-    /// stay inside its branch and are not evaluated unconditionally.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_coalesce(
         &mut self,
@@ -1128,7 +1003,6 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> MirExpr {
         match lhs {
-            // `null ?? x` and `undefined ?? x` are always the fallback.
             HirExpr::Null(_) | HirExpr::Undefined(_) | HirExpr::Unit(_) => {
                 return self.convert_expr(
                     rhs,
@@ -1139,7 +1013,6 @@ impl ExprConverter {
                     ctx,
                 );
             }
-            // A literal cannot be nullish, so the fallback is dead code.
             HirExpr::Int(..) | HirExpr::Float(..) | HirExpr::String(..) | HirExpr::Bool(..) => {
                 return self.convert_expr(
                     lhs,
@@ -1153,11 +1026,6 @@ impl ExprConverter {
             _ => {}
         }
         let lhs_hir_ty = known_type(hir_expr_type_id(lhs), types);
-        // The left-hand side is evaluated once and unconditionally (JavaScript
-        // evaluates it whatever the fallback does). It is *allowed* to be
-        // optional, so the enclosing expectation must not leak into it:
-        // `(x || y) ?? 0` returns a plain `number` even though the `??` operand
-        // may be nullish.
         let left_mir = self.convert_without_expected(
             lhs,
             out,
@@ -1166,10 +1034,6 @@ impl ExprConverter {
             types,
             ctx,
         );
-        // Calls and member reads are untyped in HIR, but the converted MIR
-        // expression knows its type (`c?.m()`, `obj.field`), and a plain call to
-        // a declared function is typed by that declaration (`side() ?? 7` with
-        // `side(): null` is the fallback, not an "unknown type" error).
         let lhs_ty = lhs_hir_ty
             .or_else(|| self.mir_expr_static_ty(&left_mir, types))
             .or_else(|| self.hir_static_ty(lhs, types));
@@ -1188,13 +1052,6 @@ impl ExprConverter {
         )
     }
 
-    /// `left ?? right` where the left operand is already lowered.
-    ///
-    /// `x ??= v` loads `x` into a temporary before the operator is lowered, so
-    /// the left operand has no HIR node to convert: the loaded value is handed
-    /// over as a [`MirExpr`] together with its static type and the span its
-    /// diagnostics use. Resolving a synthetic HIR `Local` through the `LocalId`
-    /// map instead would allocate a fresh, never declared local for it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_coalesce_operand(
         &mut self,
@@ -1210,8 +1067,6 @@ impl ExprConverter {
         ctx: &mut PassContext,
         setter: Option<(ts_aot_core::FunctionId, Vec<MirExpr>, TypeId)>,
     ) -> MirExpr {
-        // The enclosing expectation of the *result*, read after the left operand
-        // was converted (that conversion restores it).
         let expected_ty = self.expected_ty;
         let inner = match lhs_ty.and_then(|t| types.resolve(t)).cloned() {
             Some(Type::Optional { inner, .. })
@@ -1219,11 +1074,6 @@ impl ExprConverter {
             {
                 inner
             }
-            // Always nullish: the value is `undefined`/`void`, never a value, so
-            // the expression is the fallback. The left operand is still
-            // evaluated first (JavaScript evaluates it whatever the fallback
-            // does), and a call is converted to an inline expression - emit it,
-            // or its effects would be lost.
             Some(Type::Null) | Some(Type::Void) => {
                 if has_potential_side_effects(&left_mir) {
                     out.push(MirStmt::Expr(left_mir));
@@ -1254,14 +1104,8 @@ impl ExprConverter {
                 );
                 return left_mir;
             }
-            // Never nullish: `left ?? right` short-circuits to `left`.
             _ => return left_mir,
         };
-        // The fallback's representation is decided before the destination: a
-        // call or a member read carries no type in HIR, so the *converted*
-        // fallback (or the callee's declaration) supplies the type the
-        // destination has to accept. Converting it first also keeps its
-        // statements inside the nullish branch.
         let mut else_stmts: Vec<MirStmt> = Vec::new();
         let right_mir = self.convert_expr(
             rhs,
@@ -1273,11 +1117,6 @@ impl ExprConverter {
         );
         let right_mir =
             self.logical_setter_value(right_mir, setter.clone(), &mut else_stmts, types, rhs, ctx);
-        // A literal has no type of its own in HIR (it is typed by the slot it
-        // fills), while a call or a member read is typed by its converted value
-        // and, failing that, by the callee's declaration. Both are recovered
-        // before the destination is chosen, so the destination can accept what
-        // the fallback branch actually produces.
         let rhs_ty = known_type(hir_expr_type_id(rhs), types).or_else(|| {
             if is_literal(rhs) {
                 None
@@ -1287,17 +1126,10 @@ impl ExprConverter {
         });
         let rhs_ty = match rhs_ty {
             Some(ty) => Some(ty),
-            // A literal keeps no type of its own: it is typed by the destination
-            // (`literal_fits`), and only its *converted* value supplies the
-            // numeric type the common numeric type needs (`1.5` is `f64`).
             None if is_literal(rhs) => None,
             None => self.hir_static_ty(rhs, types),
         };
         let rhs_resolved = rhs_ty.and_then(|t| types.resolve(t)).cloned();
-        // `a ?? null` is `a`: a nullish fallback cannot add a value, because the
-        // AOT target represents it as the same `Option::None` its left operand's
-        // own nullish case produces. `null`/`undefined` literals carry no type
-        // id of their own, so they are classified explicitly.
         let nullish_fallback =
             is_nullish_hir_literal(rhs) || matches!(rhs_resolved, Some(Type::Null | Type::Void));
         let rhs_kinds = if is_nullish_hir_literal(rhs) {
@@ -1305,9 +1137,6 @@ impl ExprConverter {
         } else {
             rhs_ty.map_or(NO_KINDS, |ty| kinds_of_ty(ty, types))
         };
-        // A nullable fallback keeps the optional result: `a ?? b` is `a` when it
-        // is not nullish, otherwise `b` (which may be nullish itself), so the
-        // result's nullish kinds are the fallback's ones.
         let rhs_value_ty = match rhs_ty {
             Some(ty) => Some(optional_value_ty(ty, types)),
             None if is_literal(rhs) => self
@@ -1321,44 +1150,23 @@ impl ExprConverter {
                     rhs_value == inner
                         || (is_numeric_type(inner, types) && is_numeric_type(rhs_value, types))
                 }));
-        // Compatible mixed `int`/`float` operands meet in the common numeric
-        // type, so the fractional fallback keeps its fraction.
         let value_ty = rhs_value_ty
             .and_then(|rhs_value| common_numeric_ty(inner, rhs_value, types))
             .unwrap_or(inner);
-        // A nullish fallback is `Option::None`. When the left operand's
-        // non-nullish part already carries that nullish kind - a nested optional
-        // such as the ABI type `Option<Option<T>>` of a defaulted `x: T | null`
-        // parameter - the result is that part itself; otherwise the nullish
-        // fallback needs its own optional layer to be representable.
         let nullish_fits_inner = nullish_fallback && (rhs_kinds.null || rhs_kinds.undefined) && {
             let inner_kinds = kinds_of_ty(inner, types);
             (!rhs_kinds.null || inner_kinds.null) && (!rhs_kinds.undefined || inner_kinds.undefined)
         };
         let compatible = if nullable_fallback {
-            // A nullish fallback adds no value: `a ?? null` is `a`.
             true
         } else {
             match rhs_ty {
-                // A literal carries no type of its own, so it is the destination
-                // that types it and it has to fit: a string or a bool cannot fill
-                // a numeric `inner`, and an integer literal has to be
-                // representable in it (`a ?? 300` over a `u8 | null` would emit
-                // an out-of-range Rust literal).
                 None if is_literal(rhs) => {
-                    // The literal fills the *value* level of the destination: a
-                    // nested optional (the ABI of a defaulted nullable parameter,
-                    // whose non-nullish part is itself `T | null`) takes it in its
-                    // inner type.
                     let target = optional_value_ty(inner, types);
                     literal_fits(rhs, target, types) && int_literal_fits(Some(rhs), target, types)
                 }
-                // An unknown *non-literal* (a call or a member read the passes
-                // cannot type from HIR) keeps the long-standing permissive path.
                 None => true,
                 Some(ty) => {
-                    // An unresolvable id counts as unknown, not as a mismatch: the
-                    // old check accepted `rhs_resolved == None` for the same reason.
                     rhs_resolved.is_none()
                         || matches!(types.resolve(ty), Some(Type::Error))
                         || rhs_resolved.as_ref() == types.resolve(inner)
@@ -1389,8 +1197,6 @@ impl ExprConverter {
             ty: bool_ty,
         };
         let (dest_ty, then_value) = if nullish_fits_inner {
-            // The result is the value inside the left operand; the nullish
-            // fallback is the `None` its own type already holds.
             (
                 value_ty,
                 MirExpr::UnwrapOptional {
@@ -1399,9 +1205,6 @@ impl ExprConverter {
                 },
             )
         } else if nullable_fallback {
-            // The result stays optional. The left operand's value is re-wrapped
-            // when the common numeric type differs from its own, so the
-            // destination can hold it.
             let then_value = if value_ty == inner {
                 left_place
             } else {
@@ -1421,8 +1224,6 @@ impl ExprConverter {
             )
         };
         let else_value = if nullish_fallback {
-            // A nullish fallback still has to run when the left operand is
-            // nullish, but it contributes `Option::None`.
             if has_potential_side_effects(&right_mir) {
                 else_stmts.push(MirStmt::Expr(right_mir));
             }
@@ -1430,11 +1231,6 @@ impl ExprConverter {
         } else {
             right_mir
         };
-        // A nullish fallback keeps the result optional, so a non-optional
-        // position must be reported here: the converted value is a lowering
-        // temp, which the `return` check cannot see. A binding that merely
-        // adopts the frontend's own inference of this expression is not such a
-        // position (see `expectation_is_the_expression_inference`).
         if !(is_nullish_hir_literal(rhs)
             && self.expectation_is_the_expression_inference(expected_ty, ty))
         {
@@ -1458,13 +1254,6 @@ impl ExprConverter {
         )
     }
 
-    /// `left && right` / `left || right` over operands that are not `bool`.
-    ///
-    /// JavaScript yields one of the *operands* (not a `bool`), so Rust's `||`
-    /// and `&&` cannot be used. The `bool` case is exact with Rust's own
-    /// operators, but only while lowering the right operand produces no
-    /// statements, so it is decided by [`Self::convert_operand_logical_lowered`],
-    /// which can see them.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_operand_logical(
         &mut self,
@@ -1479,15 +1268,8 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> Option<MirExpr> {
         let lhs_hir_ty = self.operand_static_ty(lhs, types);
-        // `null`/`undefined` are always falsy, so the operator is decided by the
-        // left operand alone: `null || x` is `x` and `null && x` is the nullish
-        // literal itself, with the right operand not evaluated at all. This must
-        // be handled before `bind_to_temp`, which would declare a plain-value
-        // temporary of the *other* operand's type (`let tmp: f64 = ();`).
         if nullish_literal_kinds(lhs).is_some() {
             if op == HirBinaryOp::And {
-                // The result *is* the nullish literal, so a surrounding context
-                // that requires a value has no lowering for it.
                 if let Some(expected) = self.expected_ty {
                     crate::hir_to_mir::nullish::check_nullish_write(
                         lhs,
@@ -1517,10 +1299,6 @@ impl ExprConverter {
                 ctx,
             ));
         }
-        // The operands are allowed to be optional whatever the surrounding
-        // context expects from the *result* (see `convert_without_expected`).
-        // The left operand is converted before the right one, whatever branch
-        // lowers them.
         let expected_ty = self.expected_ty;
         let left_mir = self.convert_without_expected(
             lhs,
@@ -1547,12 +1325,6 @@ impl ExprConverter {
         )
     }
 
-    /// The type both operands of `&&`/`||` are lowered against.
-    ///
-    /// `lhs` is `None` when the left operand has no HIR node of its own (an
-    /// already-loaded compound-assignment target): such an operand is never a
-    /// literal, so the arms that test the left operand's literal-ness do not
-    /// apply to it.
     #[allow(clippy::too_many_arguments)]
     fn select_logical_operand_ty(
         &mut self,
@@ -1566,10 +1338,6 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> Option<TypeId> {
         match (lhs_hir_ty, rhs_hir_ty) {
-            // A known common type is the type both branches are lowered against, so
-            // it has to *hold* an integer literal operand: `x || 300` over a `u8`
-            // yields `300` on one branch, and a `u8` temporary holding it is an
-            // out-of-range Rust literal.
             (Some(a), Some(_))
                 if !int_literal_fits(lhs, a, types) || !int_literal_fits(Some(rhs), a, types) =>
             {
@@ -1587,11 +1355,7 @@ impl ExprConverter {
                 None
             }
             (Some(a), Some(_)) => Some(a),
-            // A literal has no type of its own: it takes the other operand's type
-            // when that type can represent it.
             (Some(a), None) if literal_fits(rhs, a, types) => Some(a),
-            // A call or an object-literal field carries no type in HIR at all: it
-            // is lowered against the known side (the backend coerces the value).
             (Some(a), None) if !is_literal(rhs) => Some(a),
             (None, Some(b)) if lhs.is_some_and(|lhs| literal_fits(lhs, b, types)) => Some(b),
             (None, Some(b)) if !lhs.is_some_and(is_literal) => Some(b),
@@ -1617,17 +1381,6 @@ impl ExprConverter {
         }
     }
 
-    /// `left && right` / `left || right` where the left operand is already
-    /// lowered.
-    ///
-    /// `x &&= v` / `x ||= v` load `x` into a temporary before the operator is
-    /// lowered, so the operand has no HIR node to convert: the loaded value is
-    /// handed over as a [`MirExpr`] together with its static type and the span
-    /// its diagnostics use. Resolving a synthetic HIR `Local` through the
-    /// `LocalId` map instead would allocate a fresh, never declared local for it.
-    ///
-    /// Returns `None` for `bool` operands, where the plain `MirExpr::Binary` is
-    /// exact.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_operand_logical_lowered(
         &mut self,
@@ -1651,14 +1404,6 @@ impl ExprConverter {
         let rhs_bool = rhs_hir_ty.is_some_and(|t| matches!(types.resolve(t), Some(Type::Bool)))
             || matches!(rhs, HirExpr::Bool(..));
         if lhs_bool && rhs_bool {
-            // `bool` is the one case Rust's own `||`/`&&` express exactly, and the
-            // right operand stays lazy inside the emitted `a && b`. That is only
-            // exact while lowering the right operand produces no *statements*:
-            // those are appended to the enclosing block (the caller passes `out`
-            // straight through) and would run before the operator. When there are
-            // any, the short circuit is built by hand so they stay in the branch
-            // the operator guards - the way the `??` lowering keeps its fallback
-            // inside the nullish branch.
             let bool_ty = types.intern(&Type::Bool);
             let mut rhs_stmts: Vec<MirStmt> = Vec::new();
             let right_mir = self.convert_without_expected(
@@ -1686,20 +1431,13 @@ impl ExprConverter {
                 });
             }
             let (then_value, then_stmts, else_value, else_stmts) = match op {
-                // `a && b` is `b` when `a` is truthy, and the falsy `a` otherwise.
                 HirBinaryOp::And => (right_mir, rhs_stmts, MirExpr::Bool(false), Vec::new()),
-                // `a || b` is the truthy `a`, and `b` otherwise.
                 _ => (MirExpr::Bool(true), Vec::new(), right_mir, rhs_stmts),
             };
             return Some(self.finish_conditional_value(
                 left_mir, then_value, then_stmts, else_value, else_stmts, bool_ty, out,
             ));
         }
-        // An optional left operand is compared by the truthiness of the value
-        // *inside* it: `null`/`undefined` are falsy, so `a || b` yields the inner
-        // value and `a && b` yields `a` itself. Rust has no such notion for
-        // `Option<T>`, so this case is lowered by hand (including the result type,
-        // which depends on whether the right operand can be nullish).
         if let Some(lhs_ty) = lhs_hir_ty
             && let Some(Type::Optional { inner, .. }) = types.resolve(lhs_ty)
         {
@@ -1722,13 +1460,8 @@ impl ExprConverter {
         let Some(lhs_ty) = self
             .select_logical_operand_ty(op, lhs, lhs_hir_ty, lhs_span, rhs, rhs_hir_ty, types, ctx)
         else {
-            // The diagnostic was reported; the operator yields one of its
-            // operands, so the left operand's value is what is left to return.
             return Some(left_mir);
         };
-        // The left operand may only be typed through the right one (a call, an
-        // object-literal field): an optional left still belongs to the dedicated
-        // lowering, which compares the value inside it.
         if let Some(Type::Optional { inner, .. }) = types.resolve(lhs_ty) {
             let inner = *inner;
             return Some(self.convert_optional_operand_logical(
@@ -1752,22 +1485,12 @@ impl ExprConverter {
             self.report_untruthy_operand(op, "left", lhs_ty, lhs_span, types, ctx);
             return Some(left_place);
         };
-        // A nullish left operand is always falsy and an object-like one always
-        // truthy (a `bool` literal is constant too), so the operator statically
-        // yields one operand alone: `undefined || x` is `x`, `undefined && x` is
-        // the `undefined`. The *other* operand's type must not constrain the result
-        // - no Rust type holds both a `()` and a `number` - and only the operand
-        // the result actually is may be evaluated (`undefined && f()` must not call
-        // `f`). The left operand is already evaluated above, for its effects.
         if let MirExpr::Bool(lhs_truthy) = &truthy {
             let yields_right = match op {
                 HirBinaryOp::Or => !*lhs_truthy,
                 _ => *lhs_truthy,
             };
             if !yields_right {
-                // The result *is* the left operand, and a nullish one has to fit the
-                // destination's nullish kinds: `undefined` stored in a `number | null`
-                // slot would answer `x === null` with `true` (P0019).
                 if let Some(expected) = self.expected_ty {
                     crate::hir_to_mir::nullish::check_nullish_write_kinds(
                         kinds_of_ty(lhs_ty, types),
@@ -1803,44 +1526,25 @@ impl ExprConverter {
         );
         let right_mir =
             self.logical_setter_value(right_mir, setter.clone(), &mut rhs_stmts, types, rhs, ctx);
-        // A `null`/`undefined` right operand is always nullish: `a || null` is a
-        // valid `a | null`, and the literal has to be stored as `Option::None`
-        // rather than coerced into a plain-value temporary (`let tmp: f64 = ();`
-        // cannot compile). The literal's own kinds are what the destination keeps.
         let dest_ty = if let Some(rhs_kinds) = nullish_literal_kinds(rhs) {
-            // `&&` also yields the left operand when it is falsy, so the left
-            // operand's kinds belong to the result as well.
             let nullish = match op {
                 HirBinaryOp::And => union_kinds(kinds_of_ty(lhs_ty, types), rhs_kinds),
                 _ => rhs_kinds,
             };
             self.optional_type(lhs_ty, nullish, types)
         } else {
-            // A call or a member read carries no type in HIR, so the converted
-            // value is what tells whether the right operand can be nullish:
-            // `a || c.m()` must not be typed `Option<T>` when `m` returns a plain
-            // `T`.
             let rhs_static = literal_free_ty(rhs, rhs_hir_ty)
                 .or_else(|| self.mir_expr_static_ty(&right_mir, types));
             match rhs_static.map(|ty| (ty, types.resolve(ty).cloned())) {
-                // `a && b` / `a || b` yields `b` when it is nullish after all, so
-                // the result stays optional even though the left operand is not.
                 Some((rhs_ty, Some(Type::Optional { inner, nullish }))) => {
                     if !types_compatible(lhs_ty, inner, types) {
                         self.report_operand_mismatch(op, lhs_ty, rhs_ty, lhs_span, types, ctx);
                         return Some(left_place);
                     }
-                    // `&&` also yields the left operand, which may be nullish;
-                    // `||` yields the left value only when it is truthy (the left
-                    // operand is not optional here), so the result can hold
-                    // exactly the right operand's nullish kinds.
                     let nullish = match op {
                         HirBinaryOp::And => union_kinds(kinds_of_ty(lhs_ty, types), nullish),
                         _ => nullish,
                     };
-                    // Compatible mixed `int`/`float` operands meet in the common
-                    // numeric type, so a fractional right operand keeps its
-                    // fraction.
                     let value_ty = common_numeric_ty(lhs_ty, inner, types).unwrap_or(lhs_ty);
                     self.optional_type(value_ty, nullish, types)
                 }
@@ -1856,7 +1560,6 @@ impl ExprConverter {
         };
         self.report_optional_result(op, dest_ty, expected_ty, lhs_span, types, ctx);
         Some(if op == HirBinaryOp::And {
-            // `a && b` is `b` when `a` is truthy, otherwise `a` itself.
             self.finish_conditional_value(
                 truthy,
                 right_mir,
@@ -1867,7 +1570,6 @@ impl ExprConverter {
                 out,
             )
         } else {
-            // `a || b` is `a` when it is truthy, otherwise `b`.
             self.finish_conditional_value(
                 truthy,
                 left_place,
@@ -1880,21 +1582,6 @@ impl ExprConverter {
         })
     }
 
-    /// Lowers `a || b` / `a && b` when `a` is optional.
-    ///
-    /// JavaScript compares the value inside the optional by truthiness and
-    /// yields one of the operands, so neither Rust's `||`/`&&` nor a plain
-    /// `Option` comparison expresses it. The inner value is only read when the
-    /// optional is present, because `Option::unwrap` panics otherwise.
-    ///
-    /// The left operand is already lowered (its conversion must precede the
-    /// right operand's), and `lhs_span` stands in for its HIR node in
-    /// diagnostics.
-    ///
-    /// The result type is decided after the right operand is converted, from its
-    /// *converted* type: a call or a member read carries no type in HIR, and
-    /// typing it as `lhs_ty` used to emit `Option<T>` where `T` was required
-    /// (`x || call()` inside a `-> f64` function).
     #[allow(clippy::too_many_arguments)]
     fn convert_optional_operand_logical(
         &mut self,
@@ -1929,7 +1616,6 @@ impl ExprConverter {
         let rhs_hir_ty = self.operand_static_ty(rhs, types);
         let rhs_static =
             literal_free_ty(rhs, rhs_hir_ty).or_else(|| self.mir_expr_static_ty(&right_mir, types));
-        // `a || b` is non-nullish only when `b` cannot be nullish.
         let rhs_fits_inner = match rhs_static {
             Some(rhs_ty) => types_compatible(inner, rhs_ty, types),
             None => literal_fits(rhs, inner, types),
@@ -1957,11 +1643,6 @@ impl ExprConverter {
             }
             return left_place;
         }
-        // The result's nullish kinds come from the branches that can actually
-        // reach it: `&&` also yields the left operand (which may be nullish),
-        // while `||` yields the left value only when it is truthy - never
-        // nullish, as the left operand here is not optional - so only the right
-        // operand's kinds survive.
         let rhs_value_ty = rhs_static.map(|ty| optional_value_ty(ty, types));
         let rhs_kinds = rhs_static.map_or(NO_KINDS, |ty| kinds_of_ty(ty, types));
         let nullish = match op {
@@ -1969,27 +1650,12 @@ impl ExprConverter {
             _ => rhs_kinds,
         };
         let value_ty = match (op, rhs_fits_inner) {
-            // `&&` yields the right operand when the left one is truthy and the
-            // left operand itself otherwise, so the destination has to hold both
-            // the left operand's inner type and the right operand: compatible
-            // mixed `int`/`float` operands meet in the common numeric type, as in
-            // the non-optional lowering and in `||`/`??` (`a && 1.5` over
-            // `a: i64 | null` is `1.5`, not the truncated `1`).
             (HirBinaryOp::And, _) => rhs_value_ty
                 .and_then(|rhs_value| common_numeric_ty(inner, rhs_value, types))
                 .unwrap_or(inner),
-            // `||` over a non-nullish right operand: both branches carry a plain
-            // value, so compatible mixed `int`/`float` operands meet in the
-            // common numeric type and a fractional right operand keeps its
-            // fraction.
             (_, true) => rhs_value_ty
                 .and_then(|rhs_value| common_numeric_ty(inner, rhs_value, types))
                 .unwrap_or(inner),
-            // `||` over a nullable right operand: the "falsy" branch yields that
-            // operand, the "truthy" one the left value, so the destination still
-            // has to hold both - compatible mixed `int`/`float` operands meet in
-            // the common numeric type here too (`x: f64 || y: i64 | null` keeps
-            // the fraction of a truthy `x`).
             (_, false) => rhs_value_ty
                 .and_then(|rhs_value| common_numeric_ty(inner, rhs_value, types))
                 .unwrap_or(inner),
@@ -2009,7 +1675,6 @@ impl ExprConverter {
             init: None,
             mutable: true,
         });
-        // The value inside the optional, read only in the "present" arm.
         let inner_local = self.fresh_local();
         self.push_temp_local(inner_local, inner);
         let inner_mir = MirExpr::Local(inner_local);
@@ -2020,11 +1685,6 @@ impl ExprConverter {
             self.report_untruthy_operand(op, "left", inner, lhs_span, types, ctx);
             return left_place;
         };
-        // The destination holds the common numeric type of the two operands, so
-        // its inner type can differ from the left operand's own: the left
-        // operand is then re-wrapped from the inner value instead of being
-        // assigned as the `Option<inner>` it is stored as (the backend coerces
-        // a scalar, not an optional's inner).
         let left_inner_widened = value_ty != inner;
         let (then_stmts, else_stmts) = if op == HirBinaryOp::And {
             let mut then_stmts = rhs_stmts;
@@ -2032,8 +1692,6 @@ impl ExprConverter {
                 target: MirPlace::Local { id: dest },
                 value: right_mir.clone(),
             });
-            // The "present but falsy" branch yields the left operand's value,
-            // which the enclosing `IsSome` guard has already proved present.
             let value = if left_inner_widened {
                 MirExpr::UnwrapOptional {
                     expr: Box::new(left_place.clone()),
@@ -2059,12 +1717,6 @@ impl ExprConverter {
             });
             (then_stmts, else_stmts)
         };
-        // The branch that runs when the left operand is absent. `&&` yields that
-        // operand, so it repeats the "present but falsy" assignment while the
-        // types match; once the destination's inner type is widened, the left
-        // operand's own `Option<inner>` cannot be assigned into it, so the
-        // destination's `None` is assigned instead (`Unit` lowers to the target's
-        // nullish representation).
         let absent_stmts = if op == HirBinaryOp::And && left_inner_widened {
             vec![MirStmt::Assign {
                 target: MirPlace::Local { id: dest },
@@ -2104,8 +1756,6 @@ impl ExprConverter {
         });
         MirExpr::Local(dest)
     }
-    /// Materialize the RHS once and assign it while still in its short-circuit
-    /// branch. The old getter value never reaches the setter.
     fn logical_setter_value(
         &mut self,
         value: MirExpr,
@@ -2146,12 +1796,6 @@ impl ExprConverter {
         value
     }
 
-    /// JavaScript truthiness of `value` as a MIR condition.
-    ///
-    /// Returns `None` when the truthiness cannot be expressed: a union may hold
-    /// variants with different truthiness (a number `0` is falsy, a string is
-    /// not), and the AOT target has no representation for one anyway. Assuming
-    /// `true` there would silently change what `a || b` yields.
     fn truthy_condition(
         &mut self,
         value: &MirExpr,
@@ -2183,26 +1827,22 @@ impl ExprConverter {
                     ty: bool_ty,
                 }
             }
-            Some(Type::F32 | Type::F64) => {
-                // `x != 0 && x == x`: `NaN` is falsy in JavaScript and is the
-                // only value that is not equal to itself.
-                MirExpr::Binary {
-                    op: BinaryOp::And,
-                    left: Box::new(MirExpr::Binary {
-                        op: BinaryOp::Ne,
-                        left: Box::new(value.clone()),
-                        right: Box::new(MirExpr::Int { value: 0, ty }),
-                        ty: bool_ty,
-                    }),
-                    right: Box::new(MirExpr::Binary {
-                        op: BinaryOp::Eq,
-                        left: Box::new(value.clone()),
-                        right: Box::new(value.clone()),
-                        ty: bool_ty,
-                    }),
+            Some(Type::F32 | Type::F64) => MirExpr::Binary {
+                op: BinaryOp::And,
+                left: Box::new(MirExpr::Binary {
+                    op: BinaryOp::Ne,
+                    left: Box::new(value.clone()),
+                    right: Box::new(MirExpr::Int { value: 0, ty }),
                     ty: bool_ty,
-                }
-            }
+                }),
+                right: Box::new(MirExpr::Binary {
+                    op: BinaryOp::Eq,
+                    left: Box::new(value.clone()),
+                    right: Box::new(value.clone()),
+                    ty: bool_ty,
+                }),
+                ty: bool_ty,
+            },
             Some(
                 Type::I8
                 | Type::I16
@@ -2218,9 +1858,6 @@ impl ExprConverter {
                 right: Box::new(MirExpr::Int { value: 0, ty }),
                 ty: bool_ty,
             },
-            // `0n` is falsy in JavaScript and every other BigInt is truthy: the
-            // always-truthy object rule below must not swallow it, or `0n || 1n`
-            // would keep `0n`.
             Some(Type::BigInt) => {
                 let bigint_ty = types.intern(&Type::BigInt);
                 let dest = self.fresh_local();
@@ -2240,20 +1877,12 @@ impl ExprConverter {
                 });
                 MirExpr::Local(dest)
             }
-            // A union has no single Rust shape, and its variants need not agree
-            // on truthiness: report rather than answer `true`.
             Some(Type::Union { .. }) => return None,
-            // `null` and `undefined` are always falsy, including through a call
-            // that produces them: `f() || 5` over a `void` (or `null`-returning)
-            // `f` is `5`, not the `undefined` the left operand holds.
             Some(Type::Null | Type::Void) => MirExpr::Bool(false),
-            // Objects, arrays, functions, dates ... are always truthy.
             _ => MirExpr::Bool(true),
         })
     }
 
-    /// Assigns the value of a conditional expression through a temporary, the
-    /// way `convert_ternary` does, so both branches are evaluated lazily.
     #[allow(clippy::too_many_arguments)]
     fn finish_conditional_value(
         &mut self,
@@ -2291,8 +1920,6 @@ impl ExprConverter {
         MirExpr::Local(dest)
     }
 
-    /// Binds `value` to a fresh temporary so it can be tested and moved without
-    /// being evaluated twice.
     fn bind_to_temp(&mut self, value: MirExpr, ty: TypeId) -> (MirExpr, Vec<MirStmt>) {
         let temp = self.fresh_local();
         self.push_temp_local(temp, ty);
@@ -2451,17 +2078,6 @@ impl ExprConverter {
 mod tests {
     use super::*;
 
-    /// JavaScript treats `null` and `undefined` as falsy, whether the value comes
-    /// from a literal or from a call that produces one (`f(): void`): the
-    /// condition is `false`, not the always-truthy fallback - which used to keep a
-    /// nullish value alive in `x || y` and to answer `true` for `if (f())`.
-    ///
-    /// The condition is built by a direct call so both types are covered at once;
-    /// the source shape that reaches this arm is a logical expression whose
-    /// operands are *both* nullish (`const w: void = u || v`, see
-    /// `a_nullish_operand_is_falsy_in_a_logical_expression`). A `void`-typed operand
-    /// next to a *value* operand is rejected earlier by the operand-type selection
-    /// (`P0021`) - a separate question from the truthiness itself.
     #[test]
     fn truthiness_of_null_and_void_is_false() {
         let mut converter = ExprConverter::new();
@@ -2483,8 +2099,6 @@ mod tests {
         }
     }
 
-    /// The always-truthy fallback stays for the values that really are always
-    /// truthy, so the nullish arm cannot swallow an object or an array.
     #[test]
     fn truthiness_of_an_object_is_still_true() {
         let mut converter = ExprConverter::new();

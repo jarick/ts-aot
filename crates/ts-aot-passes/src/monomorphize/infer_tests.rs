@@ -31,10 +31,6 @@ fn format_type_args_multiple_joined_with_underscores() {
     );
 }
 
-/// `function id<T>(x: T | undefined)` called with a plain argument: the optional
-/// parameter's inner type is matched against it, so `id(1)` binds `T = number`.
-/// An optional argument keeps the previous behaviour, and a nullish literal binds
-/// no type parameter at all.
 #[test]
 fn optional_parameter_binds_from_a_plain_argument_too() {
     let mut types = TypeTable::new();
@@ -50,7 +46,6 @@ fn optional_parameter_binds_from_a_plain_argument_too() {
         .expect("optional param type");
     let number = types.intern(&Type::F64);
 
-    // `id(1)`: a plain argument binds `T`.
     let mut found = HashMap::new();
     let mut conflicted = HashSet::new();
     bind_param_ty_resolved(
@@ -63,7 +58,6 @@ fn optional_parameter_binds_from_a_plain_argument_too() {
     assert_eq!(found.get(&t).copied(), Some(number));
     assert!(conflicted.is_empty());
 
-    // `id(maybeNumber)`: an optional argument keeps working.
     let maybe = types.intern(&Type::Optional {
         inner: number,
         nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
@@ -79,7 +73,6 @@ fn optional_parameter_binds_from_a_plain_argument_too() {
     );
     assert_eq!(found.get(&t).copied(), Some(number));
 
-    // `id(undefined)`: a nullish value is not a type for `T`.
     let void = types.intern(&Type::Void);
     let mut found = HashMap::new();
     let mut conflicted = HashSet::new();

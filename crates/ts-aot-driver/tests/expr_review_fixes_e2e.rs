@@ -1,23 +1,3 @@
-//! Review fixes in the expression walker (`ts-aot-frontend/src/expr.rs`).
-//!
-//! R1: `a && b` / `a || b` yield one of their operands, so a literal operand
-//! takes the other operand's statically known type when it can represent it. The
-//! literal used to be compared as its own default type, which never matched, so
-//! `x && 1` over an `i64` local stayed `Error` - and the inferred return type of
-//! a closure with no annotation is read from that `Error`, which emitted a
-//! fn-value enum whose `__Uninhabited` variant no constructor could produce.
-//!
-//! R2: `await` and `yield` are call-like suspension points - the continuation
-//! (or the caller that resumes the generator) runs arbitrary code - so a
-//! narrowing of a variable written by a closure of the same body must be
-//! withdrawn exactly like after a plain call.
-//!
-//! R3: `a?.[i]` over an array whose element may itself be nullish flattens into
-//! a single optional: the element's own nullish kinds plus the `undefined` the
-//! short-circuit adds, matching `walk_member`'s `a?.b`. Nesting
-//! `Option<Option<T>>` reported the element's `null` as a plain `undefined` and
-//! let `v === null` lower to `is_none()`, which is also true for `undefined`.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::check_generated_crate;
 
@@ -51,11 +31,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// R1: `() => x && 1` over an `i64` parameter must be inferred as `i64` from the
-/// other operand, not left `Error`. The regression is visible in the generated
-/// crate: with `Error` the returned closure's enum stayed `__Uninhabited` while
-/// the closure literal was built as a second enum, and `cargo check` failed with
-/// `E0308`; a spurious `E0415` warned that the return type could not be inferred.
 #[test]
 fn a_literal_operand_types_an_inferred_closure_return() {
     const SOURCE: &str = "export function mk(x: i64): () => i64 { return () => x && 1; } \
@@ -77,9 +52,6 @@ fn a_literal_operand_types_an_inferred_closure_return() {
     check_generated_crate("literal_operand_closure", &rust);
 }
 
-/// R2: a suspension point withdraws the narrowing of a variable that a closure
-/// of the same body writes. Without the withdrawal the stale narrowed copy was
-/// returned and the program was accepted.
 #[test]
 fn await_and_yield_withdraw_written_captures() {
     for source in [
@@ -95,7 +67,6 @@ fn await_and_yield_withdraw_written_captures() {
              that writes the captured variable); got {diagnostics:?}"
         );
     }
-    // Control: the same bodies without the suspension point keep the narrowing.
     for source in [
         "export async function f(): Promise<number> { let x: number | null = null; \
          const set = () => { x = null; }; x = 1; return x; }",
@@ -110,10 +81,6 @@ fn await_and_yield_withdraw_written_captures() {
     }
 }
 
-/// R3: `a?.[i]` over a nullable element is `T | null | undefined`, so a target
-/// that only allows `null` is rejected with the accurate kinds in the message,
-/// and a strict comparison over both kinds is undecidable. The write target that
-/// allows both kinds stays a single `Option`.
 #[test]
 fn an_optional_element_flattens_into_one_optional() {
     let out = compile_module(

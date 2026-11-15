@@ -20,8 +20,6 @@ use crate::util::{binding_pattern_name, core_span_from_oxc};
 
 const TYPE_RESOLUTION_FAILURE_CODE: &str = "E0400";
 
-/// A function/method without a return type annotation whose body does not
-/// determine the return type.
 pub(crate) const RETURN_TYPE_INFERENCE_CODE: &str = "E0415";
 const UNSUPPORTED_DECL_CODE: &str = "E0300";
 
@@ -761,12 +759,6 @@ impl SkeletonBuilder {
         self.resolve_ts_type(senv, ann.map(|a| &a.type_annotation))
     }
 
-    /// A generator's annotation is its **yield** type in this dialect
-    /// (`function* g(): i64 { yield 1; }`), but the standard TypeScript
-    /// spellings `Generator<T>` / `IterableIterator<T>` / `Iterator<T>` (and
-    /// the `Async*` variants) are accepted and unwrapped to `T` - otherwise the
-    /// annotation resolves to an unknown type and the generator is lowered with
-    /// an error yield type.
     fn resolve_generator_ret_ty(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -795,9 +787,6 @@ impl SkeletonBuilder {
             && let Some(name) = banned_type_name(ts_type)
         {
             let span = core_span_from_oxc(ts_type.span());
-            // `never` is uninhabited (no runtime value can exist), which is a
-            // different reason from the "no `any`/`unknown`" rule and worth
-            // spelling out.
             let detail = if name == "never" {
                 ": no value of that type exists, so nothing can be stored, passed or returned. \
                  Drop the annotation (a function that always throws can return `void`) or use a \
@@ -846,16 +835,6 @@ impl SkeletonBuilder {
 }
 
 impl SkeletonBuilder {
-    /// Return type for a declaration that has no return type annotation.
-    ///
-    /// The body determines the type when every value-returning path agrees on
-    /// one statically known type and the body cannot fall through; a body that
-    /// never returns a value is `void`, and an `async` body wraps the inferred
-    /// type (or `void`) in `Promise`, mirroring the annotated form. Anything
-    /// else - calls or aggregates whose static type the skeleton does not know,
-    /// mixed returns, generators - needs an explicit annotation, which is
-    /// reported here with the declaration's span instead of failing later in the
-    /// backend without a source location.
     fn infer_or_report_return_ty(
         body: &[HirStmt],
         span: CoreSpan,
@@ -880,11 +859,6 @@ impl SkeletonBuilder {
                 senv.types.intern(&Type::Promise { ok, err: None })
             }
             ReturnInference::Inferred(ty) if is_async => {
-                // An async function's result is the *awaited* value, so an
-                // inferred `Promise<T>` (`async function f() { return p; }` with
-                // `p: Promise<T>`) is unwrapped once instead of being wrapped
-                // again into `Promise<Promise<T>>`. Non-Promise results keep
-                // being wrapped as before.
                 let ok = match senv.types.resolve(ty).cloned() {
                     Some(Type::Promise { ok, .. }) => ok,
                     _ => ty,
@@ -964,8 +938,6 @@ fn banned_type_name(ty: &TSType<'_>) -> Option<&'static str> {
     }
 }
 
-/// The TypeScript generator wrapper names whose single type argument is the
-/// yielded type.
 fn is_generator_wrapper(name: &str, is_async: bool) -> bool {
     match name {
         "Generator" | "IterableIterator" | "Iterator" => !is_async,

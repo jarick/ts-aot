@@ -1,13 +1,3 @@
-//! `??`, `||` and `&&` over optional and mixed `int`/`float` operands.
-//!
-//! These operators yield one of their *operands*, so the destination type they
-//! lower into has to hold every branch that can reach it: a compatible mixed
-//! `int`/`float` pair meets in the float type (or a fractional fallback would be
-//! truncated), a nullish fallback decides the optional representation, and the
-//! result's nullish kinds come from the branches that can actually be yielded.
-//! Every generated crate is compiled and its runtime values are compared with
-//! JavaScript.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -37,8 +27,6 @@ fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// The generated Rust of one exported function, so an assertion can be scoped to
-/// it (the module also carries the dispatch helpers and the ABI wrappers).
 fn body_of<'r>(rust: &'r str, name: &str) -> &'r str {
     let start = rust
         .find(&format!("pub fn {name} "))
@@ -56,8 +44,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// R1: a float fallback keeps its fraction. The destination is the common
-/// numeric type of the operands, not the left operand's `i64`.
 #[test]
 fn a_float_fallback_keeps_its_fraction_through_the_common_numeric_type() {
     const SOURCE: &str = "export function c1(a: number | null): number { return a ?? 1.5; } \
@@ -113,8 +99,6 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let norm = normalized(&rust);
-    // `((1.5) as i64)` is the old truncation: the fallback used to be coerced
-    // into the left operand's integer type.
     assert!(
         !norm.contains("(1.5)asi64"),
         "a fractional fallback must not be truncated into the left operand's integer type; got:\n{rust}"
@@ -132,10 +116,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R2: an always-nullish left operand still runs its effects. The left operand
-/// is converted to an inline expression (a call), so dropping it would drop the
-/// call; an effect-free left operand (a `null`-typed local) must not emit
-/// anything.
 #[test]
 fn an_always_nullish_left_operand_keeps_its_effects() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -193,9 +173,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R3: the result's nullish kinds come from the branches that can be yielded.
-/// `&&` also yields the (nullish-capable) left operand, `||` yields the left
-/// value only when it is truthy, so only the right operand's kinds survive.
 #[test]
 fn logical_results_carry_the_nullish_kinds_of_the_reachable_branch() {
     const SOURCE: &str = "export function l1(o: number | null, p: number | undefined): number | null | undefined { \
@@ -256,8 +233,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R4: `0n` is falsy and every other `BigInt` is truthy, so `||`/`&&` must pick
-/// their operand by JavaScript truthiness, not by the always-truthy object rule.
 #[test]
 fn bigint_operands_use_their_javascript_truthiness() {
     const SOURCE: &str = "export function b1(x: bigint): bigint { return x || 1n; } \
@@ -302,12 +277,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R5 + R6: a nullish or nullable fallback decides the destination. `a ?? null`,
-/// `a ?? undefined` and `a ?? f()` (with `f(): number | null`) all have to pick a
-/// destination that accepts the fallback's actual representation - an optional
-/// whose nullish kinds are the *fallback's* - and the declared target type has
-/// to hold those kinds too (`number | null` for a `null` fallback,
-/// `number | undefined` for an `undefined` one; the mismatch is a `P0019`).
 #[test]
 fn a_nullish_fallback_selects_a_destination_that_accepts_it() {
     const SOURCE: &str = "export function f6(a: number | null): number | null { return a ?? null; } \
@@ -371,9 +340,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R6: a nullish fallback is evaluated inside the nullish branch only. The call
-/// returning `null` runs when the left operand is nullish and stays untouched
-/// otherwise.
 #[test]
 fn a_nullish_call_fallback_runs_only_in_the_nullish_branch() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -422,9 +388,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// R6 (diagnostics): a `??` whose result stays optional cannot be returned from
-/// a function declared to return a plain value. The lowering temp is invisible
-/// to the `return` check, so the operator reports it itself.
 #[test]
 fn an_optional_coalescing_result_in_a_non_optional_position_is_reported() {
     let out = compile_module("export function f(a: number | null): number { return a ?? null; }");
@@ -436,19 +399,12 @@ fn an_optional_coalescing_result_in_a_non_optional_position_is_reported() {
         "a nullish `??` result returned as `number` must be a P0018 naming the operator; got {:?}",
         out.diagnostics
     );
-    // The non-nullish fallback stays a plain value.
     assert!(
         codes("export function f(a: number | null): number { return a ?? 1; }").is_empty(),
         "`a ?? 1` is a plain `number`"
     );
 }
 
-/// R6 (known limitation): `a ?? null` over a `string | null` left operand in a
-/// `number | null` function is a TypeScript type error, but this frontend does
-/// not run an assignability check. What is pinned here is the *lowering*: the
-/// operator keeps the left operand's optional representation instead of emitting
-/// `()` into a value slot. The generated crate itself does not compile, because
-/// the mismatched declared return type is unrelated to `??`.
 #[test]
 fn a_mismatched_nullish_fallback_is_lowered_without_being_diagnosed() {
     let out =
@@ -475,12 +431,6 @@ fn a_mismatched_nullish_fallback_is_lowered_without_being_diagnosed() {
     );
 }
 
-/// The right operand of `||=`, `&&=`, `||` and `&&` is evaluated only when the
-/// short circuit reaches it. Rust's own operators keep it lazy, but only while
-/// lowering the operand emits no *statements*: a statement is appended to the
-/// enclosing block and would run before the operator (the `s.length` call used to
-/// be evaluated even when the left operand already decided the result). Such an
-/// operand is guarded by hand instead.
 #[test]
 fn a_statement_producing_right_operand_stays_guarded() {
     const OR_SOURCE: &str =
@@ -502,8 +452,6 @@ fn a_statement_producing_right_operand_stays_guarded() {
         );
     }
 
-    // A right operand whose lowering emits no statements keeps Rust's own
-    // operator, which is lazy by itself.
     let rust =
         rust_of("export function f(x: boolean, n: i64): boolean { x ||= (n > 0); return x; }");
     let flat = normalized(body_of(&rust, "f"));
@@ -513,10 +461,6 @@ fn a_statement_producing_right_operand_stays_guarded() {
     );
 }
 
-/// `||` over a nullable right operand meets in the common numeric type too: the
-/// destination holds the left operand's inner value *and* the right operand's, so
-/// a truthy fractional left value keeps its fraction (the destination used to be
-/// the right operand's `i64`, which truncated `1.5` to `1`).
 #[test]
 fn a_nullable_right_operand_still_meets_in_the_common_numeric_type() {
     const SOURCE: &str =
@@ -567,11 +511,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The fallback of `??` is typed by the destination, so a literal has to fit it: a
-/// string or a bool cannot fill a numeric left-hand side, and an integer literal
-/// has to be representable in it (`a ?? 300` over a `u8 | null` would emit an
-/// out-of-range Rust literal). A literal used to be accepted unconditionally,
-/// because it carries no type of its own.
 #[test]
 fn an_incompatible_literal_fallback_is_rejected() {
     for source in [
@@ -586,8 +525,6 @@ fn an_incompatible_literal_fallback_is_rejected() {
         );
     }
 
-    // Controls: a fitting literal, a call the passes cannot type from HIR and the
-    // two nullish fallbacks keep their long-standing lowering.
     for source in [
         "export function f(a: number | null): number { return a ?? 1.5; }",
         "export function f(a: u8 | null): u8 { return a ?? 1; }",
@@ -604,8 +541,6 @@ fn an_incompatible_literal_fallback_is_rejected() {
     }
 }
 
-/// The generated Rust of a class method, which is emitted inside an `impl` block
-/// and therefore carries no `pub` (unlike `body_of`'s free functions).
 fn method_body_of<'r>(rust: &'r str, name: &str) -> &'r str {
     let start = rust
         .find(&format!("fn {name} <"))
@@ -615,13 +550,6 @@ fn method_body_of<'r>(rust: &'r str, name: &str) -> &'r str {
     &tail[..end]
 }
 
-/// `??=`, `&&=` and `||=` on an accessor are not a Rust binary operator over the
-/// getter's value and the right-hand side: `convert_binop` maps `??` to equality,
-/// so the setter used to receive a comparison result (a `bool` for the `f64` value
-/// type, which the generated crate could not even build) and the right-hand side
-/// ran before the getter's value was inspected. The getter's value now feeds the
-/// same MIR-level lowering a plain target uses, so the right-hand side stays in the
-/// branch the short circuit guards.
 #[test]
 fn an_accessor_compound_update_lowers_like_a_plain_target() {
     const SOURCE: &str = r"
@@ -637,8 +565,6 @@ class Box {
 export function filled(): number { const b = new Box(); b.fill(); return b.value() ?? -1; }
 export function kept(): number { const b = new Box(); b.put(5); b.keep(); return b.value() ?? -1; }
 ";
-    // A static accessor has no receiver, so the setter call takes the value alone;
-    // the lowering itself is the same.
     const STATIC_SOURCE: &str = r"
 class S {
   static get w(): number | null { return 5; }
@@ -649,8 +575,6 @@ export function g(): void { S.fill(); }
 ";
     let rust = rust_of(SOURCE);
 
-    // `??` is a nullish test, not equality, and the fallback is assigned inside the
-    // branch it guards.
     let fill = normalized(method_body_of(&rust, "Box__fill"));
     assert!(
         !fill.contains("as_ref()=="),
@@ -667,18 +591,12 @@ export function g(): void { S.fill(); }
         "the fallback must sit inside the nullish branch; got:\n{fill}"
     );
 
-    // `||=` over a nullable accessor keeps its truthiness test inside the unwrap.
     let keep = normalized(method_body_of(&rust, "Box__keep"));
     assert!(
         keep.contains("is_some") && keep.contains("9.0"),
         "`||=` must test the unwrapped value and keep the fallback; got:\n{keep}"
     );
 
-    // The crate has to build: the equality lowering fed a `bool` into the `f64`
-    // value type. Its runtime effect is not asserted here because a mutating
-    // accessor is emitted as `fn Box__set_w(self, ..)` and called with
-    // `self.clone()`, so the write does not reach the caller's instance (a
-    // separate, pre-existing limitation of the class lowering).
     check_generated_crate("accessor_compound", &rust);
 
     let static_rust = rust_of(STATIC_SOURCE);
@@ -692,7 +610,6 @@ export function g(): void { S.fill(); }
     check_generated_crate("accessor_static_compound", &static_rust);
 }
 
-/// A skipped assignment never passes the nullable getter value to the setter.
 #[test]
 fn an_accessor_logical_update_checks_only_the_rhs_against_its_setter() {
     const NULLISH_RESULT: &str = r"
@@ -703,7 +620,6 @@ class Box {
   drop(): void { this.w &&= 3; }
 }
 ";
-    // A setter that takes the nullish value keeps lowering.
     const NULLABLE_SETTER: &str = r"
 class Maybe {
   v: number | null = null;
@@ -725,10 +641,6 @@ class Maybe {
     );
 }
 
-/// `null` and `undefined` are falsy, and a `void`-typed operand does reach the
-/// truthiness test when both sides are nullish: `u || v` over two `void` values
-/// takes the right one. The always-truthy fallback used to answer `true` there
-/// (`if true` in the generated Rust), which kept the nullish left operand.
 #[test]
 fn a_nullish_operand_is_falsy_in_a_logical_expression() {
     const SOURCE: &str = r"
@@ -747,10 +659,6 @@ export function f(): void { const u: void = nop(); const v: void = nop(); const 
     );
 }
 
-/// A nullish *expression* (a call declared `void`/`null`) is as nullish as the
-/// literal syntax: `undefined || x` is `x` and the operator must not reject the
-/// pair just because no Rust type holds both a `()` and a `number`. The result of
-/// `undefined && x` is the `undefined`, stored as `None` - not `Some(())`.
 #[test]
 fn a_nullish_expression_operand_decides_the_logical_result() {
     const OR_SOURCE: &str = r"
@@ -784,8 +692,6 @@ export function f(): number | undefined { return nop(); }
     );
     check_generated_crate("nullish_expression_operand", &and_rust);
 
-    // A `void` value in an optional position is `None`, not `Some(())`, with or
-    // without an operator around it.
     let return_rust = rust_of(RETURN_SOURCE);
     let return_flat = normalized(body_of(&return_rust, "f"));
     assert!(
@@ -795,9 +701,6 @@ export function f(): number | undefined { return nop(); }
     check_generated_crate("nullish_return", &return_rust);
 }
 
-/// A method that writes a field of `this` mutates the instance it is called on:
-/// the receiver is borrowed (`&mut self`) instead of being taken by value, which
-/// wrote into a clone and silently dropped the mutation.
 #[test]
 fn a_mutating_method_reaches_the_callers_instance() {
     const SOURCE: &str = r"
@@ -822,9 +725,6 @@ fn main() {
     println!("ok");
 }
 "#;
-    // A captured instance has no ident to borrow (it lives in the closure
-    // environment), so it keeps the by-value receiver instead of emitting a
-    // borrow of a local that does not exist.
     const CAPTURED: &str = r"
 class C {
   v: number = 0;
@@ -833,10 +733,6 @@ class C {
 }
 export function f(c: C): number { const g = () => { c.set_(5); }; g(); return c.get_(); }
 ";
-    // A generator method keeps the by-value receiver: its body runs later, so a
-    // `&mut self` borrow would have to outlive the generator. The crate is not
-    // built here because the generator's own `yield 1` coercion (`Generator<f64>`
-    // vs `Generator<{integer}>`) is a separate, pre-existing defect.
     const GENERATOR: &str = r"
 class G {
   v: number = 0;

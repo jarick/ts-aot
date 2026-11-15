@@ -8,9 +8,6 @@ pub fn lower_result(program: &mut MirProgram, types: &mut TypeTable) {
     for decl in &mut program.declarations {
         match decl {
             MirDecl::Function(f) => lower_result_function(f, types),
-            // Methods are nested in the struct declaration: a `throw` in a method
-            // used to be lowered to `return Err(...)` inside a signature that was
-            // never wrapped into `Result`, i.e. code that cannot compile.
             MirDecl::Struct(s) => {
                 for m in &mut s.methods {
                     lower_result_function(m, types);

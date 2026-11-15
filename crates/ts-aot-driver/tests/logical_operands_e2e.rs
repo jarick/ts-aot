@@ -1,14 +1,3 @@
-//! Regression tests for `||` / `&&` over optional operands and for mixed
-//! comparisons against an optional value.
-//!
-//! The blocker was `x || call()` / `x && call()`: HIR carries no type for the
-//! call, so the right operand used to be typed like the (optional) left one and
-//! the generated `Option<T>` was returned where a `T` was declared - invalid
-//! Rust, no diagnostic. The result type now comes from the converted operand
-//! (`mir_expr_static_ty`) and from the callee's declared return type
-//! (`hir_static_ty`), and the cases the AOT target cannot express are reported
-//! (`P0018`/`P0021`) instead of emitted.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -42,8 +31,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// A1: `x || call()` yields the call's value when `x` is nullish or falsy, and
-/// `x && call()` stays optional. Both must compile and match JavaScript.
 #[test]
 fn optional_operand_with_a_call_rhs_keeps_the_non_optional_type() {
     const SOURCE: &str = "function call(): number { return 1; } \
@@ -85,9 +72,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The same call on the *other* side: `call() || x` / `call() && x`. A plain
-/// (non-optional) left operand does not make the result plain when the right one
-/// may be nullish, so the temporary stays `Option<T>` - and must still compile.
 #[test]
 fn a_call_operand_on_either_side_is_typed_from_its_return_type() {
     const SOURCE: &str = "function call(): number { return 1; } \
@@ -127,15 +111,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B7: the callee's declared return type is known statically, so
-/// `g() || 5` (with `g(): number | undefined`) must be lowered, not rejected as
-/// "operand types are not known". The literal does not make the result optional.
-///
-/// `g() && 5` is different: the operator yields its *left* operand when that is
-/// falsy, and `undefined` is falsy, so the result keeps the `undefined` of
-/// `g()` - the declared type has to say `number | undefined`, not `number | null`
-/// (the null-only target is rejected with `P0019` by
-/// `an_undefined_only_result_is_rejected_for_a_null_only_target`).
 #[test]
 fn call_with_a_literal_fallback_is_lowered() {
     const SOURCE: &str = "function g(): number | undefined { return undefined; } \
@@ -172,8 +147,6 @@ fn main() {
     let stdout = run_generated_crate("call_fallback", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 
-    // The review probe: an unannotated local initialised from `g() || 5` must
-    // compile (it used to be rejected with P0021).
     let diagnostics = codes(
         "function g(): number | undefined { return undefined; } \
          export function f(): number { const r = g() || 5; return 1; }",
@@ -184,12 +157,6 @@ fn main() {
     );
 }
 
-/// The two optional sides of the same operator still have to agree on *which*
-/// nullish value they hold: `g() && 5` over `number | undefined` yields the
-/// `undefined` of the left operand when it is falsy, so it can never be `null`
-/// and a `number | null` target must be rejected (`P0019`). The null-only target
-/// is a separate case from the successful declarations above, which keep the
-/// `undefined` their result really has.
 #[test]
 fn an_undefined_only_result_is_rejected_for_a_null_only_target() {
     let null_only = codes(
@@ -202,8 +169,6 @@ fn an_undefined_only_result_is_rejected_for_a_null_only_target() {
          got {null_only:?}"
     );
 
-    // The same result in the type it actually has is accepted, and so is the
-    // both-kinds target that can hold either spelling.
     for source in [
         "function g(): number | undefined { return undefined; } \
          export function andPick(): number | undefined { return g() && 5; }",
@@ -220,9 +185,6 @@ fn an_undefined_only_result_is_rejected_for_a_null_only_target() {
     }
 }
 
-/// A `||`/`&&` result that may be nullish cannot be returned from a function
-/// declared to return a plain value: report it instead of emitting `Option<T>`
-/// where `T` is required.
 #[test]
 fn an_optional_result_in_a_non_optional_position_is_reported() {
     let diagnostics = codes(
@@ -236,8 +198,6 @@ fn an_optional_result_in_a_non_optional_position_is_reported() {
     );
 }
 
-/// The mixed comparisons whose generated Rust could never compile: an optional
-/// operand against a non-optional type it cannot be compared with.
 #[test]
 fn incompatible_mixed_comparisons_are_reported() {
     for (source, code, left, right) in [
@@ -313,8 +273,6 @@ fn incompatible_mixed_comparisons_are_reported() {
     }
 }
 
-/// The comparisons the backend *can* lower must keep working: the optional's
-/// inner type, a numeric literal, two optionals, a string/bool literal.
 #[test]
 fn compatible_mixed_and_optional_comparisons_still_work() {
     const SOURCE: &str = "export function same(x: string | null, y: string): boolean { return x === y; } \
@@ -372,8 +330,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B4: a `null`/`undefined` branch has no type of its own; the conditional must
-/// take the other branch's nullable type instead of failing with E0414.
 #[test]
 fn a_conditional_with_an_undefined_branch_is_typed() {
     const SOURCE: &str = "export function fromParam(c: boolean, x: number | undefined): number | undefined { \
@@ -409,9 +365,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B8: a union has no single Rust representation and its variants disagree on
-/// truthiness, so `x || y` must be reported instead of silently becoming
-/// `if true`.
 #[test]
 fn union_logical_operands_are_reported_not_folded_to_true() {
     let out = compile_module(
@@ -432,9 +385,6 @@ fn union_logical_operands_are_reported_not_folded_to_true() {
     );
 }
 
-/// The lowerings that already worked must keep matching JavaScript: the value
-/// inside an optional left operand decides, a member read and a local on the
-/// right keep the plain result, and `||=` stays short-circuiting.
 #[test]
 fn existing_optional_logical_lowerings_keep_their_values() {
     const SOURCE: &str = "class C { f: number; constructor() { this.f = 3; } } \
@@ -476,16 +426,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A `null`/`undefined` literal is always nullish, on either side.
-///
-/// On the *right* it makes the result optional and keeps its own kinds:
-/// `x || null` is a valid `number | null` (it used to be a `P0021` operand
-/// mismatch), and the literal is stored as `Option::None` rather than coerced
-/// into a plain-value temporary (`let tmp: f64 = ();`, which cannot compile).
-///
-/// On the *left* it decides the operator alone: `null || x` is `x`, `null && x`
-/// is the nullish literal itself, and `x` is not evaluated at all for `&&`. It
-/// must be handled before the plain-value temporary is created.
 #[test]
 fn nullish_literals_on_either_side_match_javascript() {
     const SOURCE: &str = "export function orNull(x: number): number | null { return x || null; } \
@@ -543,9 +483,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// An integer literal has to fit the integer type both branches are lowered
-/// against: `x || 300` over a `u8` may yield `300`, and a `u8` temporary holding
-/// it is an out-of-range Rust literal, which does not compile at all.
 #[test]
 fn an_integer_literal_that_does_not_fit_the_other_operand_is_rejected() {
     let out = compile_module("export function f(x: u8): u8 { return x || 300; }");
@@ -562,8 +499,6 @@ fn an_integer_literal_that_does_not_fit_the_other_operand_is_rejected() {
         out.diagnostics
     );
 
-    // Controls: a literal that fits, a wider integer type and a float operand all
-    // keep their ordinary lowering.
     for source in [
         "export function f(x: u8): u8 { return x || 1; }",
         "export function f(x: i64): i64 { return x || 300; }",

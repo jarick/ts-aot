@@ -38,10 +38,6 @@ impl HirExpr {
         }
     }
 
-    /// Whether this expression carries a static type. Leaf literals
-    /// (`Unit`/`Null`/`Undefined`/`Bool`/`Int`/`Float`/`String`) have no static
-    /// type: `ty()` returns the `TypeId(0)` sentinel for them, which must not be
-    /// mistaken for an interned type.
     #[must_use]
     pub fn has_static_type(&self) -> bool {
         !matches!(
@@ -111,7 +107,6 @@ pub enum HirBinaryOp {
     Ge,
     And,
     Or,
-    /// `??`: nullish coalescing, which is *not* `||` (`0 ?? 1` is `0`).
     Coalesce,
     BitAnd,
     BitOr,

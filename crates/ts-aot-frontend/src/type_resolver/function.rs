@@ -61,10 +61,6 @@ fn resolve_function_params(
     diagnostics: &mut Option<&mut DiagnosticBag>,
 ) -> (Vec<TypeId>, Vec<bool>) {
     let mut out: Vec<TypeId> = Vec::with_capacity(items.len());
-    // Positional, parallel to `out`: a `?`-parameter may be omitted by a caller.
-    // The flags live in the `Fn` type itself so that an indirect call can tell
-    // `(a: T, b?: U) => R` from `(a: T, b: U | undefined) => R`, which have the
-    // same ABI parameter types but differ in which arguments may be omitted.
     let mut optional: Vec<bool> = Vec::with_capacity(items.len());
     for p in items {
         let declared = if let Some(ann) = p.type_annotation.as_deref() {
@@ -85,10 +81,6 @@ fn resolve_function_params(
             }
             types.intern(&Type::Error)
         };
-        // A parameter a caller may omit needs an ABI slot that can say "no
-        // argument", exactly like a `?`/defaulted parameter of a declaration:
-        // `Option<U>`. A *required* parameter keeps its declared type even when
-        // that type admits `undefined` (`b: U | undefined`).
         out.push(if p.optional {
             crate::util::wrap_optional_param(types, declared)
         } else {

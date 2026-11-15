@@ -1,42 +1,17 @@
-//! Nullish-kind (`null` vs `undefined`) compatibility checks.
-//!
-//! The AOT representation of an optional value is a plain `Option<T>`: it can
-//! tell "a value" from "no value", but it cannot tell `null` from `undefined`
-//! at runtime. The type table therefore carries [`NullishKinds`] on
-//! `Type::Optional`, and the backend answers `x === null` / `x === undefined`
-//! from that static information (`Option::is_none()` when the kind admits the
-//! literal, `false`/`true` when it provably does not).
-//!
-//! That static answer is only sound while the runtime value really belongs to
-//! the kind its type claims. A `null` written into a `T | undefined` slot (or
-//! vice versa) is a TypeScript type error, but this frontend does not run a full
-//! assignability check, so it used to be accepted silently and then made
-//! `=== null` / `=== undefined` answer the opposite of JavaScript. These
-//! helpers reject such writes instead of miscompiling them.
-
 use ts_aot_core::{NullishKinds, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 
 use super::convert_expr::util::hir_expr_type_id;
 use crate::PassContext;
 
-/// A nullish value (or an optional value that may be nullish) is used where a
-/// non-optional value is required.
 pub(super) const NULLISH_NARROWING_DIAG: &str = "P0018";
 
-/// The written nullish kind is not part of the target type's kind.
 pub(super) const NULLISH_KIND_MISMATCH_DIAG: &str = "P0019";
 
-/// A strict comparison against `null`/`undefined` whose operand admits both
-/// kinds, so the AOT representation cannot decide the answer.
 pub(super) const NULLISH_UNDECIDABLE_DIAG: &str = "P0020";
 
-/// `??`, `||` or `&&` over an operand whose type the AOT target cannot lower
-/// (unknown type, or a union that is not representable as an optional value).
 pub(super) const LOGICAL_DIAG: &str = "P0021";
 
-/// The nullish kinds a type can hold (`Type::Optional`, and unions that carry
-/// `null`/`undefined` variants directly).
 pub(super) fn kinds_of_ty(ty: TypeId, types: &TypeTable) -> NullishKinds {
     match types.resolve(ty) {
         Some(Type::Optional { nullish, .. }) => *nullish,
@@ -61,15 +36,10 @@ pub(super) fn kinds_of_ty(ty: TypeId, types: &TypeTable) -> NullishKinds {
     }
 }
 
-/// The nullish kinds a value expression can produce: `null`/`undefined`
-/// literals are exact, everything else falls back to its static type.
 pub(super) fn kinds_of_hir(value: &HirExpr, types: &TypeTable) -> NullishKinds {
     match value {
         HirExpr::Null(_) => NullishKinds::NULL_ONLY,
         HirExpr::Unit(_) | HirExpr::Undefined(_) => NullishKinds::UNDEFINED_ONLY,
-        // A conditional yields either branch, so its nullish kinds are the union
-        // of theirs: `b ? x : null` is `null`-capable even when the *declared*
-        // type it is written into only mentions `undefined`.
         HirExpr::Ternary {
             then_branch,
             else_branch,
@@ -92,8 +62,6 @@ pub(super) fn kinds_of_hir(value: &HirExpr, types: &TypeTable) -> NullishKinds {
     }
 }
 
-/// Whether the expression is the `null` / `undefined` literal itself (as opposed
-/// to a typed optional value).
 pub(super) fn is_nullish_literal(value: &HirExpr) -> bool {
     matches!(
         value,
@@ -110,11 +78,6 @@ fn describe(kinds: NullishKinds) -> &'static str {
     }
 }
 
-/// Whether the nullish kinds a type can hold are *unknown* because the type
-/// mentions a generic parameter (or an error/unresolved type), also through an
-/// `Optional`/`Union` wrapper: `T`, `T | null` and `T | undefined` may all admit
-/// the nullish part of an argument depending on how `T` is inferred, so a check
-/// over their `NullishKinds` would be unsound.
 fn nullish_kinds_unknown(ty: TypeId, types: &TypeTable) -> bool {
     match types.resolve(ty) {
         None | Some(Type::Error | Type::GenericParam { .. }) => true,
@@ -126,13 +89,6 @@ fn nullish_kinds_unknown(ty: TypeId, types: &TypeTable) -> bool {
     }
 }
 
-/// The type a call argument is checked against.
-///
-/// A defaulted parameter (`x: T = <default>`) arrives as the hidden `Option<T>`
-/// ABI parameter whose *outer* `Option` is only the "was the argument supplied?"
-/// marker; `T` itself may be nullable. The argument is a value of `T`, and both
-/// `null` (when `T` allows it) and `undefined` (which selects the default) are
-/// acceptable, so the check uses `T | undefined` rather than the marker type.
 pub(super) fn argument_check_ty(target_ty: TypeId, types: &mut TypeTable) -> TypeId {
     let Some(Type::Optional { inner, nullish }) = types.resolve(target_ty).cloned() else {
         return target_ty;
@@ -156,17 +112,6 @@ pub(super) fn argument_check_ty(target_ty: TypeId, types: &mut TypeTable) -> Typ
     })
 }
 
-/// Reject a write of `value` into a slot of type `target_ty` when the nullish
-/// kinds cannot be represented soundly. Returns `false` (and emits a
-/// diagnostic) when the write must not be lowered.
-///
-/// `site` names the position for the message ("this variable", "this
-/// parameter", "the return type of this function", ...).
-///
-/// `allow_nullish_literal` keeps the long-standing relaxed path for *assignment*
-/// targets (a bare `null`/`undefined` literal is lowered as-is with the `E0410`
-/// warning); declaration, return and argument positions have no such warning and
-/// therefore reject the literal instead of emitting `()` where `T` is expected.
 pub(super) fn check_nullish_write(
     value: &HirExpr,
     target_ty: TypeId,
@@ -188,10 +133,6 @@ pub(super) fn check_nullish_write(
     )
 }
 
-/// Like [`check_nullish_write`], for a value whose nullish kinds are already
-/// known: the *converted* value is used by the `return` check, because the HIR
-/// node of a call or `||` carries no type of its own (`Error`), so the HIR form
-/// above cannot see an optional value there.
 pub(super) fn check_nullish_write_kinds(
     source: NullishKinds,
     target_ty: TypeId,
@@ -217,31 +158,17 @@ fn check_nullish_kinds(
     let Some(target) = types.resolve(target_ty) else {
         return true;
     };
-    // An unknown target (a generic parameter, an unresolved/error type, or an
-    // optional/union over one) has no *known* nullish kinds: the empty
-    // `NullishKinds` of `kinds_of_ty` mean "unknown", not "this type cannot hold
-    // nullish". Passing an optional value to `T` is legal TypeScript (`T` is
-    // inferred with the nullish part), and `T | null` may also admit
-    // `undefined` when `T` does - so the check must be permissive instead of
-    // reporting a false `P0018`/`P0019` here.
     if nullish_kinds_unknown(target_ty, types) {
         return true;
     }
     if !source.null && !source.undefined {
         return true;
     }
-    // `void`/`null` targets have no value to carry, so a nullish literal is the
-    // natural (and already supported) lowering.
     if matches!(target, Type::Void | Type::Null) {
         return true;
     }
     let target_kinds = kinds_of_ty(target_ty, types);
     if !target_kinds.null && !target_kinds.undefined {
-        // A bare `null`/`undefined` literal keeps the long-standing relaxed
-        // warning path (`E0410`, emitted by the assignment compatibility check):
-        // it is lowered as-is. An *optional-typed* value has no lowering at all
-        // (the generated Rust would compare/assign `Option<T>` to `T`), so it is
-        // rejected here.
         if allow_nullish_literal && source_is_literal {
             return true;
         }
@@ -284,8 +211,6 @@ fn check_nullish_kinds(
     true
 }
 
-/// Convenience wrapper for the callers that already have the operand's HIR type
-/// (the comparison check itself lives in [`check_nullish_comparison_ty`]).
 #[cfg(test)]
 pub(super) fn check_nullish_comparison(
     operand: &HirExpr,
@@ -296,14 +221,6 @@ pub(super) fn check_nullish_comparison(
     check_nullish_comparison_ty(operand, None, types, ctx, op_name)
 }
 
-/// Reject a strict `=== null` / `!== null` (`undefined` likewise) comparison
-/// whose operand type admits *both* kinds: `Option<T>` cannot tell which one the
-/// runtime value holds, so neither answer is correct for every input.
-///
-/// Unlike the test-only wrapper above, the operand's type is resolved by the
-/// caller when the HIR node carries none of its own - a call operand has
-/// `Type::Error` in HIR, and accepting `f() === null` merely because its type is
-/// unknown is wrong when `f` returns a type that includes `undefined`.
 pub(super) fn check_nullish_comparison_ty(
     operand: &HirExpr,
     resolved_ty: Option<TypeId>,

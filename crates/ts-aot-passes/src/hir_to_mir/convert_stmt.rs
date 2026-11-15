@@ -10,15 +10,6 @@ use crate::PassContext;
 use crate::hir_to_mir::converter::ExprConverter;
 
 impl ExprConverter {
-    /// The statically known type of a converted value, for the places that must
-    /// declare a local or check a `return` against what the backend will emit.
-    ///
-    /// The HIR type of a node is often absent (`Error`) or stale - a call keeps
-    /// `Error`, and `a || b` keeps the left operand's optional type even when the
-    /// lowered value is the non-optional result - so the MIR node's own type is
-    /// consulted first (`Local`/`Global` are resolved through the declared local
-    /// and the module's globals, exactly like `mir_expr_static_ty` does for the
-    /// operator lowerings).
     fn mir_value_static_ty(
         &self,
         expr: &MirExpr,
@@ -50,14 +41,6 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> TypeId {
         let declared_known = !matches!(types.resolve(declared), None | Some(Type::Error));
-        // A `??` over a nullish literal lowers to an optional value, but the
-        // frontend types the expression - and so an unannotated binding's
-        // "declared" type - as the left operand's non-optional inner type:
-        // `const r = a ?? null` over `a: number | undefined` arrives as `number`,
-        // not `number | null`. The converted initializer is authoritative there,
-        // because declaring the stale type emits `let r: f64 = <Option<f64>>`,
-        // which `cargo check` rejects. An optional declaration keeps its own type
-        // (it already accepts the value), as does every other initializer.
         if declared_known
             && !matches!(types.resolve(declared), Some(Type::Optional { .. }))
             && let Some(init) = init
@@ -71,8 +54,6 @@ impl ExprConverter {
         if declared_known {
             return declared;
         }
-        // The converted initializer is authoritative: `let r = g() || 5` holds an
-        // `f64` even though the HIR `||` node is typed `number | undefined`.
         if let Some(init_mir) = init_mir
             && let Some(recovered) = self.mir_value_static_ty(init_mir, locals, types)
         {
@@ -258,10 +239,6 @@ impl ExprConverter {
                     _ => true,
                 };
                 let init_expected_ty = declared_known.then_some(*ty);
-                // The initializer is converted before the local's type is fixed:
-                // the MIR value carries the type the backend will emit, while the
-                // HIR node can be stale (`let r = g() || 5` used to be declared
-                // `Option<f64>` while holding an `f64`).
                 let init_mir = if init_compatible {
                     init.as_ref().map(|e| {
                         let saved_expected_ty = self.expected_ty;
@@ -788,15 +765,6 @@ impl ExprConverter {
                 } else {
                     None
                 };
-                // The HIR type of a local is often `Error`, so the check above
-                // sees nothing for `const r = g(); return r;`. Re-check against
-                // the *user-declared* local's type instead of emitting `return
-                // Option<T>` inside a `-> T` function without a diagnostic.
-                // Lowering temps are not checked yet: several intrinsics are
-                // *declared* wider than the value their runtime call yields
-                // (`Symbol.keyFor` is `string | undefined` while the emitted call
-                // returns the value), and checking them here reports a false
-                // mismatch. Fixing those declarations comes first.
                 let mir_compatible =
                     match (value_mir.as_ref(), value.as_ref(), self.current_return_ty) {
                         (Some(MirExpr::Local(id)), Some(expr), Some(return_ty)) => {
@@ -845,9 +813,6 @@ impl ExprConverter {
                 catch,
                 finally,
             } => {
-                // A callee's error cannot be caught by this AOT target (only the
-                // function's own `throw`s are), so a throwing call inside the
-                // `try` body is reported instead of silently escaping the catch.
                 self.try_depth = self.try_depth.saturating_add(1);
                 let (mir_body, body_locals) = self.convert_single_stmt_with_shared_struct_ids(
                     body,
@@ -858,9 +823,6 @@ impl ExprConverter {
                     ctx,
                 );
                 final_locals.extend(body_locals);
-                // The `catch` body is wrapped in `catch_unwind` by the backend, so
-                // a `?` there cannot leave the enclosing function: it is *inside*
-                // the protected region as far as throw propagation is concerned.
                 let (catch_param, mir_catch) = if let Some(c) = catch {
                     let param = c.binding.as_ref().map(|binding| {
                         let new_id = self.map_local_id(binding.id);
@@ -887,9 +849,6 @@ impl ExprConverter {
                 } else {
                     (None, None)
                 };
-                // The `finally` body is emitted *outside* the `catch_unwind`
-                // closure, so a throwing call there propagates normally: a `?` is
-                // valid again and must not be reported as an un-catchable error.
                 self.try_depth = self.try_depth.saturating_sub(1);
                 let mir_finally = if let Some(fin) = finally {
                     let (fbody, flocals) = self.convert_single_stmt_with_shared_struct_ids(
@@ -941,12 +900,6 @@ impl ExprConverter {
     }
 }
 
-/// Whether the expression is `left ?? <nullish literal>`.
-///
-/// Only this shape is affected by the frontend inference described on
-/// `recover_local_ty`: a `null`/`undefined` literal carries no type of its own,
-/// so the operator - and an unannotated binding taking its type - is typed as
-/// the left operand's non-optional inner type while the lowering stays optional.
 fn is_nullish_coalesce(init: &HirExpr) -> bool {
     matches!(
         init,

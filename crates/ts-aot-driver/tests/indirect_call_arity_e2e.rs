@@ -1,16 +1,3 @@
-//! Arity of an *indirect* (computed) call.
-//!
-//! The right to omit a trailing argument is *declared* by the callee's
-//! signature - a `?`-optional parameter or one with a default value (`?`), which
-//! the frontend records positionally in `Type::Fn::optional`. It is never
-//! inferred from the parameter's type admitting `undefined`: a parameter
-//! declared `b: number | undefined` without `?` is required. The two tests below
-//! pin both halves of that rule down through the whole pipeline, and the first
-//! one also compiles and runs the generated crate to check the value.
-//!
-//! The driver helpers are local copies of `default_parameters_e2e.rs` (and of
-//! the `ts_aot_test_support` crate it imports) so this file is self-contained.
-
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -114,9 +101,6 @@ fn run_generated_crate(package: &str, rust: &str, main: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// A `?`-optional parameter of an indirect callee may be omitted: the flag in
-/// `Type::Fn::optional` allows it, the missing argument becomes `None`, and the
-/// callee's own `b ?? 1` supplies the value - so `f(1)` is `1 + 1 = 2`.
 #[test]
 fn omitting_a_question_mark_optional_parameter_of_an_indirect_callee_is_allowed() {
     const SOURCE: &str = "export function run(): number { \
@@ -153,10 +137,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The same call with the parameter declared `b: number | undefined` (no `?`) is
-/// **required**: its type admits `undefined`, but the signature never declared
-/// the right to omit the argument, so the missing argument is rejected. This is
-/// the evidence that arity comes from `Type::Fn::optional`, not from the type.
 #[test]
 fn omitting_a_required_undefined_typed_parameter_is_rejected_with_p0004() {
     let out = compile_module(

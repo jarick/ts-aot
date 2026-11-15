@@ -1,28 +1,3 @@
-//! A *throwing* method called through an optional chain (`a?.m()` where `m`
-//! throws).
-//!
-//! `a?.m()` is emitted as a `map` over the receiver, so the call yields an
-//! `Option<Result<T, E>>` - not the `Option<T>` its MIR type describes. Applying
-//! `?` (what `MirExpr::Propagate` emits) to that value does not compile: the
-//! enclosing function returns `Result<T, E>`, not `Option<..>`. The lowering
-//! therefore transposes `Option<Result<T, E>>` into `Result<Option<T>, E>`
-//! before propagating:
-//!
-//! ```text
-//! let __mapped: Option<Result<T, E>> = a.as_ref().map(|r| A::m(r));
-//! let mut __value: Option<T>;
-//! if __mapped.is_some() { __value = Some(__mapped.unwrap()?); }
-//! else { __value = None; }
-//! ```
-//!
-//! When the enclosing context cannot propagate at all (a closure body, a `try`
-//! block, a generator or top-level code) the call is rejected with `E0416`
-//! instead of emitting Rust that cannot compile.
-//!
-//! The generated crates are compiled and their runtime results compared with
-//! JavaScript: `a = null` yields the fallback without calling the method, while
-//! a present receiver runs the method and propagates its `throw`.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -48,8 +23,6 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// Whitespace-free Rust, so a shape can be asserted without depending on the
-/// emitter's spacing.
 fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
@@ -94,9 +67,6 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let norm = normalized(&rust);
-    // The mapped-over-the-receiver call is bound as `Option<Result<T, E>>`, and
-    // the `Result` is propagated *inside* the `Some` arm - `?` is never applied
-    // to the `Option<Result<..>>` itself (which would not compile).
     assert!(
         norm.contains("Option<Result<f64,f64>>"),
         "`a?.m()` where `m` throws must bind the mapped call as \
@@ -121,8 +91,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// `?` needs a `Result` to propagate into, and a string-returning throwing
-/// method exercises the non-`Copy` value the transposed `Option` holds.
 #[test]
 fn transposing_keeps_working_for_a_non_copy_optional_result() {
     const SOURCE: &str = "class B { s(): string { throw 1; } } \
@@ -162,9 +130,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A context that returns no `Result` cannot propagate the callee's error, so
-/// the call is reported (`E0416`) instead of emitting a transposition that has
-/// nowhere to send the error - and no Rust is produced at all.
 #[test]
 fn a_throwing_optional_call_outside_a_result_context_is_reported() {
     let closure = format!(

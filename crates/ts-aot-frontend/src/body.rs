@@ -14,29 +14,12 @@ pub(crate) struct FunctionBodyInput<'a, 'b> {
     pub body: Option<&'a FunctionBody<'b>>,
     pub params: &'a [HirParam],
     pub extra_locals: &'a [(Atom, TypeId, HirExpr)],
-    /// The source parameter list, aligned with `params` after skipping
-    /// `item_offset` synthetic leading parameters (`this`).
     pub items: &'a [oxc_ast::ast::FormalParameter<'b>],
-    /// How many leading entries of `params` have no source parameter
-    /// (a method's synthetic `this`).
     pub item_offset: usize,
     pub param_base: u32,
 }
 
 impl SkeletonBuilder {
-    /// Declares the parameters in `scope` and returns the prelude that binds the
-    /// names the body uses, in parameter order:
-    ///
-    /// * a defaulted parameter (`x: T = <default>`) arrives as the hidden
-    ///   `Option<T>` ABI parameter and becomes `let x: T = param ?? <default>;`.
-    ///   The outer `Option` is the "argument supplied?" marker, so `??` applies
-    ///   the default only when the argument is missing (`undefined`) and a
-    ///   supplied `null` is preserved - exactly JavaScript's rule. The default
-    ///   is evaluated per call, only when the argument is missing, and may use
-    ///   the parameters that come before it (JavaScript evaluates defaults left
-    ///   to right). The local keeps the *declared* type `T` (nullable included),
-    ///   so `null` remains a valid value for it;
-    /// * a destructured parameter binds its names from the hidden parameter.
     pub(crate) fn declare_params_with_prelude(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -76,8 +59,6 @@ impl SkeletonBuilder {
                     ty: inner_ty,
                     span,
                 };
-                // A fresh local of the same name: the scope now resolves `x` to
-                // it, so the body never sees the `Option<T>` ABI parameter.
                 let id = LocalId::from_raw(scope.peek_next());
                 scope.set_next(id.raw().saturating_add(1));
                 scope.declare_param(name.as_str(), id, inner_ty);
@@ -88,7 +69,6 @@ impl SkeletonBuilder {
                     init: Some(init_expr),
                 });
             } else if param.name.as_str() == "_" {
-                // A destructured parameter: bind the names it introduced.
                 let mut names: Vec<Atom> = Vec::new();
                 crate::util::collect_binding_names(&item.pattern, &mut names);
                 for name in names {
@@ -98,8 +78,6 @@ impl SkeletonBuilder {
                     else {
                         continue;
                     };
-                    // The recorded initializer is the *property* access built by
-                    // `destructure` (`param.x`), not the parameter itself.
                     let (name, ty, init) = destructured.remove(pos);
                     let id = scope.declare(name.as_str(), ty);
                     prelude.push(HirStmt::Let {
@@ -194,26 +172,9 @@ impl SkeletonBuilder {
     }
 }
 
-/// The effects a loop's *own* code has on the frame around it.
-///
-/// A narrowing created before a loop is a copy materialised once, outside the
-/// loop, so a name the loop writes must lose it: every later iteration (and the
-/// reads after the loop) would otherwise observe the copy taken before the
-/// first iteration. A name the loop never writes keeps its narrowing - the copy
-/// is then the variable's value on every iteration, exactly as after a plain
-/// assignment.
-///
-/// A call (or another effectful expression) can run a closure that writes a
-/// captured variable, and a closure created *inside* the loop is not visible to
-/// the capture machinery before the walk, so any effect withdraws every
-/// narrowing of the frame instead of guessing which one it writes.
 #[derive(Default)]
 pub(crate) struct LoopEffects {
-    /// The names the loop region assigns to (`x = ...`, `x += ...`, `x++`,
-    /// `for (x of ...)`), including the ones written by its nested statements.
     pub(crate) writes: HashSet<String>,
-    /// Whether the loop region can run code the walker cannot attribute (a
-    /// call, `new`, `await`/`yield`, a tagged template, a dynamic import).
     pub(crate) has_effect: bool,
 }
 
@@ -249,15 +210,11 @@ impl LoopEffects {
     pub(crate) fn scan_for_left(&mut self, left: &oxc_ast::ast::ForStatementLeft<'_>) {
         use oxc_ast::ast::{ForStatementLeft, SimpleAssignmentTarget};
         match left {
-            // The loop binding is a *new* local in the walker (`for_binding`),
-            // so it does not write the name it shadows.
             ForStatementLeft::VariableDeclaration(_) => {}
             t @ match_assignment_target!(ForStatementLeft) => {
                 let Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) =
                     t.to_assignment_target().as_simple_assignment_target()
                 else {
-                    // A member target evaluates its object/index (possibly a
-                    // call); a destructuring target is not lowered to a write.
                     self.has_effect = true;
                     return;
                 };
@@ -342,9 +299,6 @@ fn scan_loop_expr(expr: &oxc_ast::ast::Expression<'_>, out: &mut LoopEffects) {
             }
         }
         E::AssignmentExpression(assign) => {
-            // The target is recorded for every compound operator: `&&=`/`||=`/
-            // `??=` may leave the variable untouched, and keeping a narrowing
-            // that a write *may* have invalidated is the unsound direction.
             match assign.left.as_simple_assignment_target() {
                 Some(oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(id)) => {
                     out.writes.insert(id.name.as_str().to_owned());
@@ -435,17 +389,11 @@ fn scan_loop_expr(expr: &oxc_ast::ast::Expression<'_>, out: &mut LoopEffects) {
         E::TSInstantiationExpression(instantiation) => {
             scan_loop_expr(&instantiation.expression, out);
         }
-        // A nested function body runs only when the closure is called; the
-        // writes it performs are attributed when a call is seen instead.
         E::ArrowFunctionExpression(_) | E::FunctionExpression(_) => {}
-        // A class body is walked separately (`build_class`); treat an inline
-        // definition as an effect rather than guess what its static side runs.
         E::ClassExpression(_) => out.has_effect = true,
         other @ match_member_expression!(E) => {
             scan_loop_member(other.to_member_expression(), out);
         }
-        // Anything not modelled here (JSX, V8 intrinsics, ...) may do anything:
-        // withdraw every narrowing of the frame rather than guess.
         _ => out.has_effect = true,
     }
 }
@@ -523,7 +471,6 @@ fn scan_loop_stmt(stmt: &Statement<'_>, out: &mut LoopEffects) {
         | S::ContinueStatement(_) => {}
         other => {
             let Some(decl) = other.as_declaration() else {
-                // An unsupported statement form may do anything.
                 out.has_effect = true;
                 return;
             };
@@ -535,7 +482,6 @@ fn scan_loop_stmt(stmt: &Statement<'_>, out: &mut LoopEffects) {
                         }
                     }
                 }
-                // A nested function/class body runs only when it is called.
                 Declaration::FunctionDeclaration(_) | Declaration::ClassDeclaration(_) => {}
                 _ => {}
             }
@@ -554,17 +500,6 @@ fn collect_binding_names_into(
     }
 }
 
-/// Every name the function body binds, anywhere in its statement tree: the
-/// parameters, and `let`/`const`/`var`, function/class declarations, catch and
-/// loop bindings, including the ones in nested blocks.
-///
-/// The walk of a narrowed statement needs this because a generated `_narrowed_N`
-/// local must not be shadowed by a *later* declaration of the same name inside a
-/// nested block: at the point the narrowing is emitted those declarations are
-/// not in scope yet, but the generated Rust `let` would be shadowed by them.
-/// Nested function bodies are not descended into: they open their own scope in
-/// the generated Rust, and a narrowed local is never captured by a closure, so
-/// their bindings cannot shadow it where it is used.
 fn collect_declared_names(
     stmts: &[Statement<'_>],
     params: &[oxc_ast::ast::FormalParameter<'_>],

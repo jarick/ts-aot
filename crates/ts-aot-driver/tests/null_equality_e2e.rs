@@ -300,10 +300,6 @@ fn nullish_kinds_match_js_semantics_at_runtime() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A type that admits *both* `null` and `undefined` cannot answer a strict
-/// comparison: the AOT representation stores both as `Option::None`, so
-/// `x === null` and `x === undefined` would both have to be true. The compiler
-/// rejects the comparison instead of answering one of them incorrectly.
 #[test]
 fn strict_comparison_of_a_both_kinds_optional_is_rejected() {
     let out = compile_module(
@@ -319,7 +315,6 @@ fn strict_comparison_of_a_both_kinds_optional_is_rejected() {
         out.diagnostics
     );
 
-    // The loose form is fine: `== null` treats `null` and `undefined` alike.
     let loose = compile_module(
         "export function bothLoose(x: number | null | undefined): boolean { return x == null; }",
     );
@@ -336,9 +331,6 @@ fn strict_comparison_of_a_both_kinds_optional_is_rejected() {
     );
 }
 
-/// Writing a `null` into a `T | undefined` slot (and vice versa) used to be
-/// accepted silently, which then made `=== null` / `=== undefined` answer the
-/// opposite of JavaScript. It is now rejected.
 #[test]
 fn nullish_kind_mismatch_writes_are_rejected() {
     let out = compile_module(
@@ -367,9 +359,6 @@ fn nullish_kind_mismatch_writes_are_rejected() {
     );
 }
 
-/// Passing an optional value where the callee requires a non-optional one has
-/// no AOT lowering; it must be reported instead of emitting `Option<T>` where
-/// `T` is expected.
 #[test]
 fn optional_value_into_a_required_parameter_is_rejected() {
     let out = compile_module(
@@ -391,9 +380,6 @@ fn optional_value_into_a_required_parameter_is_rejected() {
     );
 }
 
-/// Comparing an optional value with a plain value used to emit
-/// `Option<T> == T`, which does not compile. JavaScript compares the values, so
-/// the plain side is compared against `Some(..)`.
 #[test]
 fn mixed_optional_and_plain_equality_compiles_and_matches_js() {
     const SOURCE: &str = "export function same(x: string | null, y: string): boolean { return x === y; } \

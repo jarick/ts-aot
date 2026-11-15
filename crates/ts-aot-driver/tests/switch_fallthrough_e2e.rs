@@ -1,15 +1,3 @@
-//! `switch` fallthrough.
-//!
-//! JavaScript runs the statements of every case from the matching label down to
-//! the next `break`/`return`/`throw`/`continue`, so a case that does not end in a
-//! terminator falls into the next one - and an empty case falls into the case
-//! that follows it. The backend emits one Rust `match` arm per case, which has no
-//! implicit fallthrough, so the frontend appends the falling-through case's body
-//! to its arm (a case that already ends in a terminator gets nothing appended).
-//!
-//! These tests compile through the whole pipeline, `cargo check` the generated
-//! crate and run it, comparing every value with the JavaScript answer.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 

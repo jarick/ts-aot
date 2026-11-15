@@ -831,19 +831,11 @@ fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
     match *kind {
         FunctionKind::Method { self_param, .. } => {
             if body_ctx.local_mut(self_param) {
-                // A method that writes a field of `this` mutates the *caller's*
-                // instance: it borrows the receiver (`&mut self`, the way a
-                // constructor does) instead of taking it by value, which wrote into
-                // a clone and silently dropped the mutation.
                 quote!(&mut self,)
             } else {
                 quote!(self,)
             }
         }
-        // A generator method keeps the by-value receiver: its body runs later, so a
-        // `&mut self` borrow would have to outlive the generator and the caller
-        // could not touch the instance until it is dropped. The mutation is lost
-        // there, as it was before the borrowing ABI.
         FunctionKind::GeneratorMethod { self_param, .. } => {
             if body_ctx.local_mut(self_param) {
                 quote!(mut self,)
@@ -851,7 +843,6 @@ fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
                 quote!(self,)
             }
         }
-        // A constructor mutates the instance the caller allocated.
         FunctionKind::Constructor { .. } => quote!(&mut self,),
         _ => TokenStream::new(),
     }

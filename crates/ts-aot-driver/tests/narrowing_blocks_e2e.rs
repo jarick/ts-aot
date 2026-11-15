@@ -1,23 +1,3 @@
-//! Regression tests for the flow-sensitive narrowing defects found in the first
-//! review round (`.review/rev1`).
-//!
-//! The narrowed binding is a *copy* of the variable taken when the assignment
-//! guarantees it is not nullish, so:
-//!
-//! * a braceless body must withdraw that narrowing and write the variable's
-//!   storage (it may not *establish* a new one), while a `switch` case may
-//!   establish one for the rest of *that* case, which is discarded before the
-//!   next case is walked;
-//! * a nested block that declares a shadowing variable must keep its own
-//!   storage, not the outer variable's;
-//! * a call on the right-hand side of an assignment must not steal the target
-//!   that was already walked;
-//! * only a closure that *writes* a captured variable may withdraw a narrowing;
-//! * an optional call (`o.m?.()`, `o?.m()`) or a tagged template is a call too
-//!   and must withdraw it as well;
-//! * the generated `_narrowed_N` binding must avoid every name the body binds,
-//!   including the ones declared later inside a nested block.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -51,11 +31,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// A4: an assignment inside a braceless body (`if`/`while`/`do`) may not create
-/// a narrowing, and one a `switch` case creates ends with that case, but either
-/// of them must still withdraw the narrowing in effect and write the variable's
-/// *storage* - otherwise the narrowed copy is assigned (invalid Rust:
-/// `_narrowed_0 = ()`) and a later read returns a stale value.
 #[test]
 fn braceless_bodies_and_switch_cases_write_the_storage() {
     const SOURCE: &str = "export function fromIf(c: boolean): number | null { \
@@ -93,9 +68,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A4: the braceless assignment must reach the storage that a call reads later.
-/// `read()` only *reads* `x`, so it does not withdraw anything; `x = 2` inside
-/// the braceless body must be visible through the storage afterwards.
 #[test]
 fn braceless_assignment_is_visible_to_a_closure() {
     const SOURCE: &str = "export function f(c: boolean): number { \
@@ -122,9 +94,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A5: a nested block may declare a shadowing variable. The shadowing
-/// assignment must write the *inner* local, never the outer variable's storage
-/// (which the narrowing map used to redirect it to by name).
 #[test]
 fn shadowing_declaration_in_a_nested_block_keeps_its_own_storage() {
     const SOURCE: &str = "export function shadowingOptional(): number { \
@@ -158,8 +127,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A5: a closure over a shadowing variable captures the *inner* variable; the
-/// assignment that follows must not be redirected to the outer storage either.
 #[test]
 fn closure_over_a_shadowing_variable_captures_the_inner_one() {
     const SOURCE: &str = "export function f(): number { \
@@ -186,10 +153,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A6: the left-hand side of an assignment is walked before its right-hand
-/// side. When the right-hand side is a call that withdraws a narrowing, the
-/// target that was already bound to the narrowed copy must still be redirected
-/// to the storage - otherwise the storage keeps its old value.
 #[test]
 fn a_call_on_the_right_hand_side_does_not_steal_the_target() {
     const SOURCE: &str = "function id(v: number): number { return v; } \
@@ -224,9 +187,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B6: only a closure that *writes* a captured variable may withdraw a
-/// narrowing. A closure that only reads it cannot make the narrowing stale, so
-/// an unrelated call must not reject the program with `P0018`.
 #[test]
 fn read_only_captures_do_not_withdraw_narrowings() {
     const SOURCE: &str = "function g(): number { return 1; } \
@@ -260,14 +220,10 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B6 (control): a closure that *writes* the captured variable really can make
-/// the narrowing stale, so calling it must still be rejected - and a later
-/// assignment re-narrows the variable, which is sound again.
 #[test]
 fn written_captures_still_withdraw_narrowings() {
     const WRITE_THROUGH_CALL: &str = "export function f(): number { let x: number | null = null; \
          const setNull = () => { x = null; }; x = 1; setNull(); return x; }";
-    // The write may be performed by a closure nested inside the called one.
     const WRITE_THROUGH_NESTED_CLOSURE: &str = "export function f(): number { let x: number | null = null; \
          const outer = () => { const inner = () => { x = null; }; inner(); }; \
          x = 1; outer(); return x; }";
@@ -309,10 +265,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B7: an optional call (`o.m?.()`, `o?.m()`) and a tagged template are calls
-/// too. They may run a closure that writes a captured variable, so the
-/// narrowing must be withdrawn and the program rejected instead of returning
-/// the stale narrowed copy.
 #[test]
 fn optional_calls_and_tagged_templates_withdraw_written_captures() {
     for source in [
@@ -333,9 +285,6 @@ fn optional_calls_and_tagged_templates_withdraw_written_captures() {
     }
 }
 
-/// B8: the generated `_narrowed_N` binding must not be shadowed by a
-/// declaration of the same name that comes *later* in a nested block: the
-/// collision check only saw the names visible at the narrowing point.
 #[test]
 fn narrowed_binding_avoids_names_declared_later_in_a_nested_block() {
     const SOURCE: &str = "export function f(): number { \
@@ -365,9 +314,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B8: a parameter called `_narrowed_0` is visible at the narrowing point, so
-/// the generated binding must skip that name (the parameter is bound on the
-/// function itself, while the generated binding starts from the same counter).
 #[test]
 fn narrowed_binding_skips_a_visible_parameter_name() {
     let rust = rust_of(
@@ -381,11 +327,6 @@ fn narrowed_binding_skips_a_visible_parameter_name() {
     );
 }
 
-/// A5 + B6: a call of a closure that writes a captured variable must withdraw
-/// *every* narrowing of that variable. A nested block that narrows a shadowing
-/// variable of the same name used to hide the outer variable's narrowing from
-/// the withdrawal (the withdrawal was looked up by name and found the inner
-/// one), so the rest of the function kept reading the stale narrowed copy.
 #[test]
 fn shadowing_narrowing_does_not_hide_the_outer_one_from_a_captured_write() {
     const SOURCE: &str = "export function f(): number { \
@@ -413,10 +354,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B9: an assignment to a narrowed variable writes the variable's *storage* in
-/// every expression context, not only as a statement. `const y = (x = 3)` and
-/// `const y = (x ||= 2)` used to write the narrowed copy, so a closure that reads
-/// the storage observed the value from before the assignment.
 #[test]
 fn assignments_inside_an_initializer_write_the_storage() {
     const SOURCE: &str = "export function plain(): number { \
@@ -447,11 +384,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B10: iterating a *generator* runs its body (`for item in &mut gen`), which can
-/// call a closure that writes a captured variable, so the narrowing of such a
-/// variable is withdrawn before the loop body. A plain array is lowered to a Rust
-/// `for` over a `Vec` and runs no user code, so its narrowing stays valid -
-/// withdrawing it too rejected a correct program.
 #[test]
 fn a_for_of_withdraws_written_captures_only_for_a_generator() {
     const SOURCE: &str = "export function f(it: number[]): number | null { \
@@ -488,19 +420,12 @@ fn main() {
          got {diagnostics:?}"
     );
 
-    // An array cannot run the closure while it is iterated, so the narrowing is
-    // still sound and the generated code has to keep its value.
     let rust = rust_of(SOURCE);
     check_generated_crate("array_iter", &rust);
     let stdout = run_generated_crate("array_iter", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B11: a `switch` case shares the switch's scope frame, so the narrowing it
-/// establishes is discarded before the next case is walked (its binding is
-/// emitted in the first case's arm). Within the case it stays available, up to
-/// and including the `return` that ends it - that used to be rejected, because
-/// every case suppressed narrowing entirely.
 #[test]
 fn a_switch_case_narrows_within_itself_but_not_across_cases() {
     const SOURCE: &str = "export function f(c: i64): number { \
@@ -527,8 +452,6 @@ fn main() {
     let stdout = run_generated_crate("switch_case_narrowing", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 
-    // ... and it must not survive into the next case, whose arm is a different
-    // Rust block.
     let diagnostics = codes(
         "export function f(c: i64): number { let x: number | null = null; \
          switch (c) { case 1: x = 5; break; case 2: return x; default: return 0; } }",
@@ -539,11 +462,6 @@ fn main() {
     );
 }
 
-/// B12: a declaration in a nested block shadows the outer variable, so the loop
-/// that writes the *inner* one must not withdraw the outer narrowing. The
-/// widening used to search the frames by name and would restore the outer
-/// variable's storage binding, which then read as `number | null` and made
-/// `return x` a spurious `P0018`.
 #[test]
 fn a_loop_writing_a_shadowing_variable_keeps_the_outer_narrowing() {
     const SOURCE: &str = "export function f(): number { \

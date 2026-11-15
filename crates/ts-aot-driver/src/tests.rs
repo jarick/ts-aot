@@ -191,11 +191,6 @@ fn e2e_ternary_throwing_call_propagates_throws_to_mir_dump() {
     let text = out
         .mir_text
         .expect("emit-mir must populate mir_text for e2e ternary throws check");
-    // `throws N` must be present (the sentinel-free `unwrap_or_else` above is the
-    // presence check). The id itself cannot be compared against zero: `TypeId`s
-    // are interned per module, so the error type may legitimately be id 0. What
-    // the sentinel bug actually broke was the *type* (it resolved to `()`), so
-    // the Rust signature is what pins this down.
     let _throws_id = parse_throws_id(&text, "f").unwrap_or_else(|| {
         panic!(
             "MIR dump must contain `fn #0 f(c: ...) -> ... throws N` for function f; got:\n{text}"
@@ -313,8 +308,6 @@ fn e2e_tagged_template_string_array_arg_emits_typed_vec_string() {
 #[test]
 fn e2e_array_length_borrows_plain_and_maps_optional_receiver() {
     for src in [
-        // `a?.length` is `i64 | undefined` (JavaScript yields `undefined` when the
-        // chain short-circuits), so the declared type must admit `undefined`.
         "function f(a: i32[] | null): i64 | null | undefined { return a?.length; }",
         "function f(a: i32[] | null): i64 | null | undefined { return a?.len(); }",
     ] {
@@ -1550,9 +1543,6 @@ fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
         "a global receiver must be forwarded without an intermediate by-value temp (a direct \
          clone is used because moving out of a static is E0507), got:\n{rust}"
     );
-    // The setter borrows its receiver, but a global is read through a clone (a
-    // static cannot be borrowed mutably), so the update to the global is still
-    // discarded - the same as before this call became a borrow.
     assert!(
         rust.contains("C__set_y (& mut (g . clone ()) ,"),
         "a global receiver is forwarded to the setter without an intermediate temp, got:\n{rust}"

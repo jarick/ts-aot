@@ -1,15 +1,3 @@
-//! Regression tests for the third review round: loop widening, a narrowed
-//! compound update in an expression position, and the `new` invalidation.
-//!
-//! * a narrowing established *before* a loop survives it when the loop body
-//!   cannot write the variable (and is still withdrawn when it can);
-//! * `x++`/`x += v` of a narrowed variable computes on the narrowed copy, so the
-//!   new value has to be copied back into the storage - when the update is the
-//!   whole expression of a statement slot it is, and a nested one is a blocking
-//!   error instead of silently keeping the stale storage value;
-//! * `new` withdraws the narrowing of a captured variable only when the
-//!   constructor could actually call it.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -35,10 +23,6 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// B1: the narrowed copy is materialised once, outside the loop, and no
-/// iteration can write the variable, so it is still the variable's value when
-/// the loop ends. Before the fix the loop widening withdrew the narrowing of a
-/// variable the body never writes, and every one of these was a false `P0018`.
 #[test]
 fn narrowing_before_a_loop_survives_a_body_without_writes() {
     const SOURCE: &str = "export function whileNoWrite(c: boolean): number { \
@@ -73,10 +57,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B1: the `for..in` arm of the loop widening behaves like the others - a body
-/// that cannot write the variable keeps the narrowing. This is a frontend-only
-/// assertion: the backend does not lower `for..in` over an object literal yet, so
-/// the generated crate would not compile for an unrelated reason.
 #[test]
 fn for_in_without_writes_keeps_the_narrowing() {
     const SOURCE: &str = "export function forInNoWrite(): number { \
@@ -89,10 +69,6 @@ fn for_in_without_writes_keeps_the_narrowing() {
     );
 }
 
-/// B1 control: a loop that *can* write the variable still withdraws the
-/// narrowing (the reads after the loop must see the storage), a conditional
-/// write keeps the writes visible, and a narrowing established *inside* the body
-/// still works.
 #[test]
 fn a_loop_that_writes_still_withdraws_the_narrowing() {
     const SOURCE: &str = "export function whileWrites(): number | null { \
@@ -126,10 +102,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B3: `x++` / `x += 2` as a whole expression statement computes on the narrowed
-/// copy, and the copy has to reach the storage - a closure called afterwards must
-/// observe the *updated* value. `x++` used to write only the copy (6 became 5 for
-/// the closure), and `x += 2` already copied back, so both are pinned here.
 #[test]
 fn a_narrowed_update_statement_copies_the_new_value_back() {
     const SOURCE: &str = "class Holder { v: number; constructor(v: number) { this.v = v; } } \
@@ -160,10 +132,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B3: the same update in a `let`/`const` initializer has a statement slot too,
-/// so `const y = x++` yields the old value (5) while the storage becomes the new
-/// one (6): `h.v + y` is 11, as in JavaScript (it used to be 10). `x += 2` yields
-/// the new value (7) and 7 + 7 = 14 (it used to be 12).
 #[test]
 fn a_narrowed_update_initializer_copies_the_new_value_back() {
     const SOURCE: &str = "class Holder { v: number; constructor(v: number) { this.v = v; } } \
@@ -194,10 +162,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B3: a narrowed update nested in a larger expression has no slot to write the
-/// storage from, so the storage would keep the old value while the narrowed copy
-/// moves on - a program that still compiles and answers differently from
-/// JavaScript. It is therefore a *blocking* `E0500` error, not a warning.
 #[test]
 fn a_nested_narrowed_update_is_rejected() {
     const SOURCE: &str = "class Holder { v: number; constructor(v: number) { this.v = v; } } \
@@ -219,10 +183,6 @@ fn a_nested_narrowed_update_is_rejected() {
     );
 }
 
-/// B3b: two updates of the *same* narrowed local in one expression. Only the
-/// occurrence that is the whole statement slot can be copied back, so the second
-/// one is still reported - the check used to skip every record with that local
-/// id, which silently accepted the stale storage.
 #[test]
 fn a_second_update_of_the_same_local_is_reported() {
     const SOURCE: &str = "export function doubleUpdate(): number { \
@@ -244,9 +204,6 @@ fn a_second_update_of_the_same_local_is_reported() {
     );
 }
 
-/// B4: a class whose constructor and field initializers contain no call cannot
-/// reach the writing closure, so the narrowing of the captured variable survives
-/// `new Holder()` and the function returns 5. It used to be a false `P0018`.
 #[test]
 fn a_constructor_that_cannot_call_keeps_the_narrowing() {
     const SOURCE: &str = "class Holder { n: number; constructor() { this.n = 1; } } \
@@ -274,22 +231,12 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// B4 conservatism: the relaxation only covers a class whose constructor and
-/// field initializers are visible and contain no call. A constructor that *does*
-/// contain a call, and a builtin constructor the frontend cannot inspect
-/// (`new Date()`, `new Map()`), keep withdrawing the narrowing of a captured
-/// variable - the constructor could run the closure, and a stale narrowed copy
-/// would be unsound. `P0018` on `return x` is the conservative rejection.
 #[test]
 fn a_constructor_that_could_call_stays_conservative() {
     for source in [
-        // The constructor calls a function, so the closure passed to (or stored
-        // by) the class could be the one that writes `x`.
         "class Toucher { constructor() { poke(); } } function poke(): void {} \
          export function f(): number { let x: number | null = null; x = 5; \
              const g = (): void => { x = null; }; const t = new Toucher(); return x; }",
-        // A builtin constructor is not a class of this program, so its body is
-        // unknown and the withdrawal is kept.
         "export function f(): number { let x: number | null = null; x = 5; \
              const g = (): void => { x = null; }; const d = new Date(0); return x; }",
     ] {
@@ -307,9 +254,6 @@ fn a_constructor_that_could_call_stays_conservative() {
     }
 }
 
-/// B4 conservatism: a subclass runs its base constructor first, so the base could
-/// call the closure; the frontend does not follow the base chain and keeps the
-/// withdrawal.
 #[test]
 fn a_subclass_constructor_stays_conservative() {
     const SOURCE: &str = "class Base { constructor() {} } \

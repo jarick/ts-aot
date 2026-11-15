@@ -95,15 +95,8 @@ impl SkeletonBuilder {
             let ty = self.resolve_param_ty(senv, param, type_param_map);
             let index = first_param_index.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
             let name = binding_pattern_name(&param.pattern);
-            // `x: T = <default>` makes the argument optional for callers; the body
-            // sees a local of type `T` that `walk_function_body` initialises with
-            // `param ?? <default>` (see `declare_params_with_prelude`).
             let has_default = param.initializer.is_some() && name.is_some();
             if param.initializer.is_some() && name.is_none() {
-                // A destructured parameter has no single ABI slot that could carry
-                // the "was the argument supplied?" marker, so its default cannot be
-                // applied: report it instead of silently dropping it. The argument
-                // stays required, exactly as before.
                 senv.report_unwalked(
                     "a default value on a destructured parameter is not supported by the AOT \
                      target; the default is ignored and the argument stays required",
@@ -123,9 +116,6 @@ impl SkeletonBuilder {
                 let abi_ty = wrap_optional_param(senv.types, ty);
                 params.push(HirParam {
                     id: LocalId::from_raw(index),
-                    // The parameter keeps its name (diagnostics and dumps show
-                    // it); the body's references are bound to the initialised
-                    // local of the same name, which shadows it.
                     name: default_name
                         .clone()
                         .map_or_else(|| Atom::from("_"), Atom::from),
@@ -191,15 +181,7 @@ impl SkeletonBuilder {
     }
 }
 
-/// The ABI type of a parameter the caller may omit: an `Option<T>` that only
-/// `undefined` (`null` stays distinguishable when the annotation had it).
 pub(crate) fn wrap_optional_param(types: &mut TypeTable, ty: TypeId) -> TypeId {
-    // The hidden ABI parameter is `Option<T>` where the *outer* `Option` answers
-    // "was the argument supplied?" and the inner value is the declared type
-    // unchanged. A nullable declared type is therefore **nested**
-    // (`Option<Option<_>>`) rather than flattened: flattening collapses
-    // `f(null)` into "no argument", and a JavaScript default applies only to
-    // `undefined` - a supplied `null` must survive.
     types.intern(&Type::Optional {
         inner: ty,
         nullish: NullishKinds::UNDEFINED_ONLY,
@@ -347,18 +329,10 @@ pub(crate) fn core_span_from_oxc(span: OxcSpan) -> CoreSpan {
     CoreSpan::new(span.start, span.end)
 }
 
-/// What the frontend could work out about a function's return type from its
-/// body alone (used when there is no return type annotation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReturnInference {
-    /// Every value-returning path yields the same, statically known type and the
-    /// body cannot fall through past them.
     Inferred(TypeId),
-    /// The body never returns a value, so the function returns `undefined`.
     Void,
-    /// The body returns values whose type cannot be determined here (or mixes
-    /// value returns with a bare/fall-through return): an explicit annotation is
-    /// required.
     Unknown,
 }
 
@@ -384,8 +358,6 @@ pub(crate) fn infer_function_return_ty(
         return ReturnInference::Void;
     }
     if !stmts.last().is_some_and(HirStmt::is_terminal) {
-        // Falling out of the function returns `undefined`, which the inferred
-        // value type does not describe.
         return ReturnInference::Unknown;
     }
     let first = scan.returns[0];
@@ -406,11 +378,6 @@ fn return_expr_ty(expr: &HirExpr, types: &mut TypeTable, program: &HirProgram) -
     let ty = expr.ty();
     match types.resolve(ty) {
         None | Some(Type::Error) => {
-            // The skeleton does not type every expression up front: a call or a
-            // global read carries `Error` until the callee/global itself is
-            // lowered. Declarations already seen by the frontend still know their
-            // type, which is enough for the common `return helper()` /
-            // `return someGlobal` shapes.
             let declared = match expr {
                 HirExpr::Call { callee, .. } => callee_declared_ret(callee, program),
                 HirExpr::Global { name, .. } => global_declared_ty(name, program),
@@ -478,8 +445,6 @@ fn collect_return_tys(
 ) {
     match stmt {
         HirStmt::Return { value: Some(expr) } => match expr {
-            // `return undefined` (and the synthesized placeholder for an
-            // unsupported construct) is the same as a bare `return`.
             HirExpr::Undefined(_) | HirExpr::Unit(_) => scan.bare_return = true,
             HirExpr::Null(_) => {
                 scan.value_returns = true;

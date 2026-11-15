@@ -20,12 +20,6 @@ use crate::scope::BodyScope;
 use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
 use crate::util::core_span_from_oxc;
 
-/// Return type of a closure that has no return type annotation.
-///
-/// A closure is typed as `Fn(..) -> T`, so an undetermined return type cannot
-/// stay `Error`: the generated Rust would declare `-> ()` and then `return` a
-/// value. Report it with the closure's span when the body returns something the
-/// frontend cannot type.
 fn infer_closure_return_ty(
     body: &[HirStmt],
     span: Span,
@@ -37,9 +31,6 @@ fn infer_closure_return_ty(
         crate::util::ReturnInference::Inferred(ty) => ty,
         crate::util::ReturnInference::Void => senv.types.intern(&Type::Void),
         crate::util::ReturnInference::Unknown => {
-            // A closure can still be typed from its context (an annotated local,
-            // an argument position with an expected `Fn` type), so this is a
-            // warning rather than an error.
             senv.diagnostics.push(Diagnostic::warning(
                 crate::decl::RETURN_TYPE_INFERENCE_CODE,
                 format!(
@@ -63,17 +54,9 @@ pub(crate) fn literal_hir_ty(types: &mut TypeTable, e: &HirExpr) -> Option<TypeI
     })
 }
 
-/// `a && b` / `a || b` yield one of their operands, so both having the same
-/// statically known type makes the result that type (a literal takes the other
-/// operand's type when it can represent it).
 fn logical_operand_ty(senv: &mut SkeletonEnv<'_>, ops: [&HirExpr; 2]) -> TypeId {
     fn literal_fits(expr: &HirExpr, target: &Type) -> bool {
         match expr {
-            // A float literal cannot be written into an integer target without
-            // truncating it, and an integer literal only fits an integer type
-            // whose range holds it: `300` in a `u8` is an out-of-range Rust
-            // literal, and truncating it would answer differently from
-            // JavaScript.
             HirExpr::Int(v, _) => match target {
                 Type::F32 | Type::F64 => true,
                 other => int_fits(*v, other),
@@ -84,8 +67,6 @@ fn logical_operand_ty(senv: &mut SkeletonEnv<'_>, ops: [&HirExpr; 2]) -> TypeId 
             _ => false,
         }
     }
-    /// Whether `value` is representable in the integer type `target` without
-    /// wrapping, which is what makes it a valid Rust literal of that type.
     fn int_fits(value: i64, target: &Type) -> bool {
         match target {
             Type::I8 => i8::try_from(value).is_ok(),
@@ -99,10 +80,6 @@ fn logical_operand_ty(senv: &mut SkeletonEnv<'_>, ops: [&HirExpr; 2]) -> TypeId 
             _ => false,
         }
     }
-    // `HirExpr::ty()` answers `TypeId::from_raw(0)` for the nodes that carry no
-    // type of their own (literals), and id 0 is a *real* interned type in some
-    // modules - so a literal must never be resolved through `ty()`. Ask
-    // `has_static_type()` first and give a literal its type explicitly.
     let lit_f64 = senv.types.intern(&Type::F64);
     let lit_string = senv.types.intern(&Type::String);
     let lit_bool = senv.types.intern(&Type::Bool);
@@ -122,11 +99,6 @@ fn logical_operand_ty(senv: &mut SkeletonEnv<'_>, ops: [&HirExpr; 2]) -> TypeId 
         }
     };
     let resolved = |ty: TypeId| senv.types.resolve(ty).cloned();
-    // A literal is a literal first: it has no type of its own, so it takes the
-    // other operand's type when that type can represent it (`1` is written as
-    // `1.0` or `1i64` where the other operand needs it). This has to be checked
-    // before the resolved-type comparison, otherwise the literal's own default
-    // type is compared against the other operand's and never matches.
     let fits_operand = |literal: &HirExpr, target: TypeId| {
         resolved(target).is_some_and(|t| literal_fits(literal, &t))
     };
@@ -142,19 +114,12 @@ fn index_element_ty(senv: &mut SkeletonEnv, owner_ty: TypeId) -> TypeId {
     let resolved = senv.types.resolve(owner_ty).cloned();
     match resolved {
         Some(Type::Array { element }) => element,
-        // `a?.[i]` is `T | undefined`: the element access is mapped over the
-        // optional owner, and JavaScript yields `undefined` when the chain
-        // short-circuits (never the base's own nullish value).
         Some(Type::Optional { inner, .. }) => {
             let element = match senv.types.resolve(inner).cloned() {
                 Some(Type::Array { element }) => element,
                 Some(Type::String) => senv.types.intern(&Type::String),
                 _ => return senv.error_ty(),
             };
-            // A nullable element flattens into the optional this access already
-            // produces, exactly like `walk_member`'s `a?.b`: the element keeps its
-            // own nullish kinds and the short-circuit adds `undefined`. Wrapping it
-            // again would nest `Option<Option<_>>`, which no other layer expects.
             let (inner, nullish) = match senv.types.resolve(element).cloned() {
                 Some(Type::Optional { inner, nullish }) => (
                     inner,
@@ -193,10 +158,6 @@ impl SkeletonEnv<'_> {
         if let Some((id, ty)) = scope.lookup(name) {
             HirExpr::Local { id, ty, span }
         } else {
-            // A module-level binding is typed by its own declaration: without it
-            // every global reference reached the passes as `Error`, so the
-            // nullish checks (`return g` from a non-null function, `??`, ...)
-            // silently accepted anything.
             let ty = self
                 .capture_type(name)
                 .or_else(|| {
@@ -313,21 +274,12 @@ impl SkeletonBuilder {
             Expression::UnaryExpression(unary) => self.walk_unary(senv, unary, scope),
             Expression::UpdateExpression(update) => self.walk_update(senv, update, scope),
             Expression::CallExpression(call) => {
-                // The call may run a closure that writes a variable captured by
-                // it, so a narrowing of such a variable is no longer valid once
-                // the call returns.
                 let called = self.walk_call(senv, call, scope);
                 self.invalidate_captured_narrowings(scope);
                 called
             }
             Expression::NewExpression(new_expr) => {
                 let created = self.walk_new_expression(senv, new_expr, scope);
-                // A constructor may invoke callbacks (a stored function, a class
-                // field) that write a captured variable, so a narrowing of it is
-                // no longer valid once `new` returns - the later reads must see
-                // the storage the callback wrote. A class whose constructor and
-                // field initializers cannot call anything is proved harmless and
-                // keeps the narrowing.
                 if self.new_may_call_a_callback(senv, new_expr, scope) {
                     self.invalidate_captured_narrowings(scope);
                 }
@@ -338,8 +290,6 @@ impl SkeletonBuilder {
             }
             Expression::ChainExpression(chain) => {
                 let chained = self.walk_chain(senv, chain, scope);
-                // `o?.m()` / `o.m?.()` are calls: like a plain call they may run
-                // a closure that writes a captured variable.
                 if matches!(&chain.expression, ChainElement::CallExpression(_)) {
                     self.invalidate_captured_narrowings(scope);
                 }
@@ -348,9 +298,6 @@ impl SkeletonBuilder {
             Expression::AssignmentExpression(a) => self.walk_assignment(senv, a, scope),
             Expression::AwaitExpression(a) => {
                 let inner = self.walk_expr(senv, &a.argument, scope);
-                // `await` hands control back to the event loop: the continuation
-                // runs arbitrary user code, so a narrowing of a captured variable
-                // may be stale once the awaited value arrives (like a call).
                 self.invalidate_captured_narrowings(scope);
                 let ty = senv.error_ty();
                 HirExpr::Await {
@@ -363,7 +310,6 @@ impl SkeletonBuilder {
             Expression::TemplateLiteral(t) => self.walk_template_literal(senv, t, scope),
             Expression::TaggedTemplateExpression(t) => {
                 let tagged = self.walk_tagged_template_expression(senv, t, scope);
-                // A tagged template calls its tag function.
                 self.invalidate_captured_narrowings(scope);
                 tagged
             }
@@ -569,9 +515,6 @@ impl SkeletonBuilder {
             None => senv.error_ty(),
         };
         let narrowed = self.narrowed_stack.last().cloned().unwrap_or_default();
-        // A closure body runs only when the closure is called, so it is never the
-        // expression of the statement that *creates* the closure: a narrowed
-        // update inside it must not be recorded as that statement's copy back.
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
@@ -632,10 +575,6 @@ impl SkeletonBuilder {
             ret_ty
         };
         let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
-        // The closure's own value type carries which parameters a caller may
-        // omit: `?`-parameters and defaulted ones (`HirParam.optional`, set by
-        // `build_params`), so an indirect call checks the same flags a direct one
-        // does instead of guessing from an `undefined` in the parameter type.
         let param_optional: Vec<bool> = params.iter().map(|p| p.optional).collect();
         let fn_ty = senv.types.intern(&Type::Fn {
             params: param_types,
@@ -695,8 +634,6 @@ impl SkeletonBuilder {
             None => senv.error_ty(),
         };
         let narrowed = self.narrowed_stack.last().cloned().unwrap_or_default();
-        // See the arrow case: a function body is not the creating statement's
-        // own expression, so its narrowed updates get their own copy back.
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
@@ -777,14 +714,10 @@ impl SkeletonBuilder {
                 Some(argument) => self.walk_expr(senv, argument, scope),
                 None => HirExpr::Unit(core_span_from_oxc(y.span)),
             };
-            // A `yield` suspends the generator and the caller resumes it, so the
-            // same captured-narrowing invalidation as a call applies.
             self.invalidate_captured_narrowings(scope);
             return delegated;
         }
         let inner = y.argument.as_ref().map(|a| self.walk_expr(senv, a, scope));
-        // A `yield` suspends the generator and the caller resumes it, so the same
-        // captured-narrowing invalidation as a call applies.
         self.invalidate_captured_narrowings(scope);
         let ty = senv.error_ty();
         HirExpr::Yield {
@@ -1144,12 +1077,7 @@ impl SkeletonBuilder {
         let lhs = self.walk_expr(senv, &l.left, scope);
         let rhs = self.walk_expr(senv, &l.right, scope);
         let op = map_logical_op(l.operator);
-        // `a && b` / `a || b` yield one of their operands: see `logical_operand_ty`.
         let ty = if op == HirBinaryOp::Coalesce {
-            // `a ?? b` yields the non-nullish part of `a`, or `b`; when `b` is
-            // itself nullable the result keeps the shared inner type but takes
-            // the *fallback's* nullish kinds (`T | null ?? T | undefined` is
-            // `T | undefined`, not `T | null`).
             let lhs_ty = lhs.ty();
             let lhs_resolved = senv.types.resolve(lhs_ty).cloned();
             match lhs_resolved {
@@ -1375,9 +1303,6 @@ impl SkeletonBuilder {
                     owner
                 };
                 let prop = s.property.name.as_str();
-                // `c?.x` looks the member up on the *unwrapped* owner type and
-                // yields a nullable result, so the field type must be recovered
-                // from `C` even though the owner is `C | null`.
                 let owner_ty = owner.ty();
                 let (lookup_ty, nullish) = match senv.types.resolve(owner_ty) {
                     Some(ts_aot_core::Type::Optional { inner, nullish }) => {
@@ -1425,10 +1350,6 @@ impl SkeletonBuilder {
                 };
                 let ty = match nullish {
                     Some(_) => {
-                        // `a?.b` yields `undefined` when the chain is short and the
-                        // field's own value otherwise, so a nullable field must be
-                        // flattened into one optional whose kinds are the field's
-                        // plus `undefined` - never a nested `Option<Option<_>>`.
                         let bare = senv.types.resolve(bare_ty).cloned();
                         let (inner, kinds) = match bare {
                             Some(ts_aot_core::Type::Optional { inner, nullish }) => (
@@ -1539,19 +1460,12 @@ impl SkeletonBuilder {
         });
         match compound_op(a.operator) {
             CompoundOp::Assign => HirExpr::Assignment {
-                // The write must reach the variable's storage even when the
-                // assignment sits inside a larger expression.
                 target: Box::new(self.redirect_narrowed_target(target, scope)),
                 value: Box::new(rhs),
                 ty,
                 span: core_span_from_oxc(a.span),
             },
             CompoundOp::Binary(op) => {
-                // `&&=`/`||=`/`??=` may keep a nullish `x`, so the write must
-                // reach the variable's storage rather than the narrowed copy -
-                // in every expression context, exactly like a plain assignment.
-                // Only an arithmetic update needs the narrowed *value* and is
-                // copied back by `finish_statement_expression`.
                 let target = if matches!(
                     op,
                     HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or
@@ -1577,18 +1491,6 @@ impl SkeletonBuilder {
         }
     }
 
-    /// A compound update (`x += 1`, `x++`) of a *narrowed* variable computes on
-    /// the narrowed copy, so its new value still has to be copied back into the
-    /// variable's storage. The copy back is only possible when the update is the
-    /// whole expression of a statement slot, where the statement walker emits it
-    /// right after the statement; the update is recorded here and any other one
-    /// in the same expression is reported (see
-    /// [`crate::stmt::SkeletonBuilder::finish_statement_expression`]) rather than
-    /// silently keeping the stale storage value.
-    ///
-    /// The report is *blocking*: the storage would keep the old value while the
-    /// narrowed copy moves on, so the emitted program would still compile and
-    /// answer differently from JavaScript.
     fn record_narrowed_update(
         &mut self,
         target: &HirExpr,
@@ -1634,9 +1536,6 @@ impl SkeletonBuilder {
     }
 }
 
-/// The local `this` is bound to in a class's bodies: the synthetic first
-/// parameter every instance method gets (`decl.rs`). The scan needs it to tell a
-/// read of the constructed instance's own field from a read of another object's.
 fn class_this_id(class: &ts_aot_ir_hir::HirClass) -> LocalId {
     class
         .methods
@@ -1648,23 +1547,10 @@ fn class_this_id(class: &ts_aot_ir_hir::HirClass) -> LocalId {
                 .find(|param| param.name.as_str() == "this")
                 .map(|param| param.id)
         })
-        // A class with no instance method has no constructor body to scan; the
-        // fallback keeps the scan conservative for a field read it cannot place.
         .unwrap_or_else(|| LocalId::from_raw(u32::MAX))
 }
 
 impl SkeletonBuilder {
-    /// Whether a `new` expression may run code that calls a closure, and so may
-    /// write a variable captured by one.
-    ///
-    /// The constructor and the class field initializers are inspected when the
-    /// callee names a class of this program: a class whose constructor *and*
-    /// field initializers contain no call-like expression, which neither extends
-    /// another class nor declares an accessor (the constructor could invoke a
-    /// getter/setter), cannot reach a callback, so a narrowing of a captured
-    /// variable survives its `new`. Everything else - a builtin (`new Date()`,
-    /// `new Map()`), a dynamic callee, a subclass, or a class whose declaration
-    /// is not visible at this point - keeps the conservative withdrawal.
     fn new_may_call_a_callback(
         &self,
         senv: &SkeletonEnv<'_>,
@@ -1675,8 +1561,6 @@ impl SkeletonBuilder {
             return true;
         };
         let name = id.name.as_str();
-        // A local binding may hold any function (or a class the frontend cannot
-        // resolve here), so only a name that is not in scope is inspected.
         if scope.lookup(name).is_some() {
             return true;
         }
@@ -1694,8 +1578,6 @@ impl SkeletonBuilder {
         else {
             return true;
         };
-        // The base constructor runs first, and an accessor the constructor
-        // touches can run code the scan below cannot see.
         if class.extends.is_some()
             || class.methods.iter().any(|method| {
                 method.name.as_str().starts_with("__get_")
@@ -1721,34 +1603,12 @@ impl SkeletonBuilder {
         search.found
     }
 
-    /// A variable captured by a closure cannot stay narrowed: the closure may
-    /// outlive the narrowing and be called after the variable was set back to a
-    /// nullish value. Its body is built against the variable's own storage (see
-    /// [`capture_type_map`]), and every later statement in the enclosing scope
-    /// sees the storage again as well.
-    /// Records the variables the closure captures and withdraws the narrowings
-    /// they are not part of: the closure body was built against the variable's
-    /// own storage (see [`capture_type_map`]), and a later call of the closure
-    /// may write that storage.
-    ///
-    /// Only the captures the closure **writes** are recorded ([`written_targets`]):
-    /// a closure that merely reads a variable cannot make its narrowing stale,
-    /// and treating such a capture as a write rejected sound programs with
-    /// `P0018`.
     fn withdraw_captured_narrowings(
         &mut self,
         scope: &mut BodyScope,
         captures: &[HirExpr],
         written: &WrittenTargets,
     ) {
-        // A capture is a local of the enclosing body: for a narrowed variable
-        // that is the variable's *storage* local (see [`collect_capture_refs`]),
-        // which is exactly what identifies the variable for the whole body.
-        //
-        // A write performed inside a *nested* closure is still a name reference
-        // at this level, so the captured name is used as a fallback: map each
-        // captured local back to the name it belongs to, resolving a narrowed
-        // name through its storage.
         let mut name_of_id: std::collections::HashMap<LocalId, String> =
             std::collections::HashMap::new();
         for name in scope.names() {
@@ -1776,15 +1636,6 @@ impl SkeletonBuilder {
         }
     }
 
-    /// A call may run a closure that *writes* a captured variable, so every
-    /// narrowing of such a variable is withdrawn once the call returns. The
-    /// storage mapping of the narrowing itself is kept: the left-hand side of an
-    /// assignment whose right-hand side made this call was already walked
-    /// against the narrowed local and still has to reach the storage.
-    ///
-    /// The narrowings are identified by their own locals, so a nested block that
-    /// narrows a *shadowing* variable of the same name cannot hide the outer
-    /// variable's narrowing from the withdrawal.
     pub(super) fn invalidate_captured_narrowings(&mut self, scope: &mut BodyScope) {
         let captured = self.captured_stack.last().cloned().unwrap_or_default();
         if captured.is_empty() {
@@ -1804,14 +1655,6 @@ impl SkeletonBuilder {
     }
 }
 
-/// The type each visible name has *inside* a closure body.
-///
-/// A closure can outlive the statement that narrowed a variable, so a narrowed
-/// name is seen there with the type of its own storage: the narrowed binding is
-/// a snapshot, and the closure may be called after the variable was set back to
-/// a nullish value. The narrowing is recognised through the *local the name is
-/// currently bound to*, so a nested block that shadows the name with its own
-/// declaration keeps its own type.
 fn capture_type_map(
     scope: &BodyScope,
     narrowed: &std::collections::HashMap<LocalId, (LocalId, TypeId)>,
@@ -1831,44 +1674,16 @@ fn capture_type_map(
     map
 }
 
-/// The variables a closure body assigns to (`x = ...`, `x += ...`, `x ??= ...`),
-/// including the writes of the closures nested inside it.
-///
-/// Only these captures can make a flow-sensitive narrowing of the enclosing
-/// variable stale: a call of the closure may write the variable, while a closure
-/// that only reads it can merely observe whatever the narrowing already
-/// guarantees.
-///
-/// A captured variable is written through the variable's own local once the
-/// closure body has been rewritten, but a write performed inside a *nested*
-/// closure is still a name reference at this level (the rewrite does not descend
-/// into it), so both forms are collected.
 struct WrittenTargets {
     ids: std::collections::HashSet<LocalId>,
     names: std::collections::HashSet<String>,
 }
 
-/// Finds a call-like expression: a call, a nested `new`, `await`, `yield` or a
-/// tagged template can run user code, so a constructor that contains one may
-/// reach a closure. A closure *literal* is not called by being created, so its
-/// body is skipped.
-///
-/// Reading a field is call-like too unless the owner is the *constructed
-/// instance*: the scan does not know the owner's class, so `o.value` may run a
-/// `get` accessor of `o`'s class, while `this.value` is a field of the class
-/// being constructed (whose own accessors the caller has already rejected, and
-/// whose field initializers hold literals only).
 struct CallSearch {
     found: bool,
-    /// The local `this` is bound to in the body being scanned. `decl.rs` binds it
-    /// as the synthetic first parameter of every instance method, so the field
-    /// read the scan has to let through is exactly `Local { id: this_id }`.
     this_id: LocalId,
 }
 
-/// Whether a member access reads the constructed instance itself. Only the
-/// outermost owner is compared: `this.a.value` has another class in the middle
-/// (`a`), so it stays conservative.
 fn reads_the_constructed_instance(owner: &HirExpr, this_id: LocalId) -> bool {
     matches!(owner, HirExpr::Local { id, .. } if *id == this_id)
 }
@@ -1885,9 +1700,6 @@ impl Visitor for CallSearch {
             | HirExpr::Yield { .. }
             | HirExpr::Template { tag: Some(_), .. } => self.found = true,
             HirExpr::Closure { .. } => {}
-            // A read of another object's field can run that class's accessor,
-            // which this scan cannot see (`new_may_call_a_callback` only checks
-            // the class it constructs).
             HirExpr::Field { owner, .. }
                 if !reads_the_constructed_instance(owner, self.this_id) =>
             {
@@ -1989,8 +1801,6 @@ fn collect_capture_refs(
     let mut bindings: std::collections::HashMap<String, (LocalId, TypeId)> =
         std::collections::HashMap::new();
     for (name, _) in &search.ordered {
-        // A narrowed variable is captured through its storage, so the closure
-        // keeps observing the variable itself rather than the narrowed snapshot.
         if let Some((id, ty)) = scope.lookup(name.as_str()) {
             let binding = narrowed.get(&id).copied().unwrap_or((id, ty));
             bindings.insert(name.as_str().to_owned(), binding);

@@ -91,7 +91,6 @@ pub fn bind_param_ty_resolved(
                 return;
             };
             match types.resolve(arg_ty).cloned() {
-                // An optional argument matches the parameter's inner type.
                 Some(Type::Optional {
                     inner: arg_inner, ..
                 }) => {
@@ -103,9 +102,6 @@ pub fn bind_param_ty_resolved(
                         types,
                     );
                 }
-                // A plain argument matches it as well: `id(1)` binds `T` for
-                // `function id<T>(x: T | undefined)`. A nullish literal or an
-                // unknown type is not a type for `T`, so it binds nothing.
                 Some(Type::Null | Type::Void | Type::Error) | None => {}
                 Some(_) => {
                     bind_param_ty_resolved(inner_resolved, Some(arg_ty), found, conflicted, types);
@@ -131,8 +127,6 @@ pub fn bind_param_ty_resolved(
             params: fn_params,
             ret,
             err,
-            // Which parameters may be omitted does not constrain inference: the
-            // generic is bound from the parameter *types*.
             optional: _,
         } => {
             if let Some(Type::Fn {

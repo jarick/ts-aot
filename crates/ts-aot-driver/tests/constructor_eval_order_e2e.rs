@@ -1,18 +1,3 @@
-//! `new C(args)` evaluation order.
-//!
-//! JavaScript evaluates the callee, then the arguments, then the field
-//! initializers, and only then the constructor body. The AOT backend lowers the
-//! call as `C::C__constructor(&mut alloc, __ctx, args...)`, so an argument that
-//! is not pinned before the allocation would run *after* the field initializers
-//! (they are emitted as the `StructLiteral` initializer of that allocation).
-//! These tests compile a module through the whole pipeline, look at the emitted
-//! Rust and run the generated crate against the JavaScript result.
-//!
-//! Note: a field initializer with a side effect (or one that reads a global) is
-//! rejected by the frontend today (`E0406`, the field keeps its zero value), so
-//! for such an initializer only the *statement order* can be observed; the
-//! runtime value below it comes from a literal initializer.
-
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
 use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
@@ -38,14 +23,10 @@ fn rust_of(source: &str) -> String {
         .expect("emit-rust must populate rust_source")
 }
 
-/// The generated source without whitespace, which is what the quote-based
-/// backend makes stable across formatting changes.
 fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// The body of `pub fn <name><'a>(...)` from normalized output, cut at the next
-/// top-level function (the dispatch wrapper that always follows).
 fn function_body(rust: &str, name: &str) -> String {
     let norm = normalized(rust);
     let signature = format!("pubfn{name}<'a>(");
@@ -57,8 +38,6 @@ fn function_body(rust: &str, name: &str) -> String {
     tail[..end].to_owned()
 }
 
-/// An argument that calls a function is hoisted into a temporary *before* the
-/// instance is allocated, so its side effects precede the field initializers.
 #[test]
 fn an_argument_is_materialized_before_the_instance_allocation() {
     const SOURCE: &str = "let order: number = 0; \
@@ -98,10 +77,6 @@ fn an_argument_is_materialized_before_the_instance_allocation() {
     );
 }
 
-/// The JavaScript result of the probe above is `2` (`arg()` sets `order` before
-/// the initializer reads it); with the initializer unsupported the AOT target
-/// zero-fills the field, so the argument's side effect is checked through a
-/// literal initializer instead.
 #[test]
 fn an_argument_is_evaluated_before_the_field_initializer_and_the_constructor_body() {
     const SOURCE: &str = "let order: number = 0; \
@@ -129,7 +104,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// The argument is evaluated before the constructor body.
 #[test]
 fn an_argument_runs_before_the_constructor_body() {
     const SOURCE: &str = "let o2: number = 0; \
@@ -164,8 +138,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Control: a constructor without arguments keeps allocating and calling in the
-/// same order, and the field initializer still applies.
 #[test]
 fn a_constructor_without_arguments_is_unchanged() {
     const SOURCE: &str = "class E { v: number = 3; constructor() { } } \
@@ -197,9 +169,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A defaulted parameter reaches the constructor as an `Option`: the argument is
-/// pinned with the parameter's ABI type (`Some(<expr>)`), and it still runs
-/// before the constructor body applies the default.
 #[test]
 fn an_argument_of_a_defaulted_parameter_is_materialized_with_the_parameter_type() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -234,8 +203,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// Several arguments keep their left-to-right order (they are pinned in
-/// sequence), and an omitted defaulted parameter is still padded.
 #[test]
 fn several_arguments_keep_their_order_and_padding() {
     const SOURCE: &str = "let seenTwo: boolean = false; \
@@ -275,14 +242,6 @@ fn main() {
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
-/// A `new` whose callee this target does not lower (`new Error(...)`) still has
-/// to evaluate its arguments: they are ordinary JavaScript expressions whose
-/// side effects are observable. The fallback used to drop them silently, so the
-/// call was lost and the warning with it.
-///
-/// This is a pass-level assertion: the fallback also allocates a struct the
-/// generated crate does not declare (`__struct1`), so the crate would not
-/// compile for an unrelated reason.
 #[test]
 fn arguments_of_an_unlowered_new_are_still_evaluated() {
     const SOURCE: &str = "let hits: number = 0; \
@@ -318,12 +277,6 @@ fn codes(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// A constructor that *reads another object's field* may run that class's
-/// accessor, and the scan of the constructor body cannot see it: it only knows
-/// the class being constructed (whose own accessors are rejected up front), so
-/// `o.value` has to count as call-like. Such a `new` therefore keeps the
-/// conservative withdrawal of the narrowings of captured variables - the closure
-/// `set` may have been reached through the accessor and write `x`.
 #[test]
 fn reading_another_objects_field_makes_a_new_call_like() {
     const SOURCE: &str = "class Box { value: number; constructor() { this.value = 1; } } \
@@ -331,9 +284,6 @@ fn reading_another_objects_field_makes_a_new_call_like() {
          export function f(o: Box): number { \
          let x: number | null = null; const set = (): void => { x = null; }; \
          x = 1; new Holder(o); return x; }";
-    // The control reads the field *outside* the constructor and passes a plain
-    // value, so nothing in the `new` can reach a callback and the narrowing of
-    // the captured variable survives it.
     const CONTROL: &str = "class Box { value: number; constructor() { this.value = 1; } } \
          class Holder { v: number; constructor(v: number) { this.v = v; } } \
          export function f(b: Box): number { \

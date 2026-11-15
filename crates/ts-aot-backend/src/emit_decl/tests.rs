@@ -4069,11 +4069,6 @@ fn optional_chain_field_with_optional_base_emits_as_ref_map() {
     );
 }
 
-/// `c?.n` where the field itself is optional (`n: number | null`) yields exactly
-/// one level of absence in JavaScript ("receiver was nullish" and "the field is
-/// null" are the same absent value), so the emission must flatten with
-/// `and_then`; `map` would nest `Option<Option<T>>` and not type-check against
-/// the flattened return type.
 #[test]
 fn optional_chain_field_with_optional_declared_field_emits_and_then() {
     let mut types = TypeTable::new();
@@ -4132,8 +4127,6 @@ fn optional_chain_field_with_optional_declared_field_emits_and_then() {
     );
 }
 
-/// A non-`Copy` optional field still flattens, but the access inside the closure
-/// must clone out of the shared reference (`o: &C`).
 #[test]
 fn optional_chain_non_copy_optional_field_emits_and_then_with_clone() {
     let mut types = TypeTable::new();
@@ -4192,9 +4185,6 @@ fn optional_chain_non_copy_optional_field_emits_and_then_with_clone() {
     );
 }
 
-/// The same flattening rule for an optional *element*: `arr?.[i]` on a
-/// `(number | null)[]` must not nest, so the element type is read from the
-/// receiver's array type (the access expression's own type is already flattened).
 #[test]
 fn optional_chain_index_with_optional_element_emits_and_then() {
     let mut types = TypeTable::new();

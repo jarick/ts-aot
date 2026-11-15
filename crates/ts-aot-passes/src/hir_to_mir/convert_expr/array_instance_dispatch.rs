@@ -9,8 +9,6 @@ use crate::hir_to_mir::converter::ExprConverter;
 
 use super::util::hir_expr_type_id;
 
-/// Result type of an array `length`/`len` access: `f64`, or `f64 | undefined`
-/// when the receiver is itself optional (`arr?.length`).
 fn array_len_result_ty(types: &mut TypeTable, is_optional: bool) -> TypeId {
     let f64_ty = types.intern(&Type::F64);
     if is_optional {
@@ -23,9 +21,6 @@ fn array_len_result_ty(types: &mut TypeTable, is_optional: bool) -> TypeId {
     }
 }
 
-/// Classifies an array-length receiver: `Some(true)` for an optional array
-/// (`arr?.length`), `Some(false)` for a plain array, `None` otherwise. The
-/// optional receiver is kept optional so the backend can short-circuit.
 fn array_receiver_is_optional(owner: &HirExpr, types: &TypeTable) -> Option<bool> {
     let owner_ty = hir_expr_type_id(owner)?;
     match types.resolve(owner_ty) {

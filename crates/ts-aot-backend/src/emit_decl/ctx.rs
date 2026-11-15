@@ -29,8 +29,6 @@ pub(super) struct EmitCtx {
     function_async: HashSet<FunctionId>,
     function_owner: HashMap<FunctionId, StructId>,
     constructors: HashSet<FunctionId>,
-    /// Methods whose body writes their receiver: they take &mut self and their
-    /// call sites borrow the receiver instead of cloning it.
     pub(super) mutating_methods: HashSet<FunctionId>,
     struct_fields: HashMap<(StructId, FieldId), Ident>,
     struct_field_names: HashMap<StructId, Vec<Atom>>,
@@ -40,16 +38,6 @@ pub(super) struct EmitCtx {
     struct_lifetimes: HashMap<StructId, bool>,
     fn_value_index: HashMap<TypeId, usize>,
     fn_value_sigs: Vec<FnValueSig>,
-    /// Per bucket, `(callee, variant, is_throwing, is_async)`: the Rust item the
-    /// bucket's dispatch arm calls, the enum variant a value is built with, and
-    /// the two call shims that arm needs.
-    ///
-    /// `callee` is normally the declaration's own name. For a declaration whose
-    /// ABI parameter list is one `Option` level *wider* than the bucket's
-    /// (`x: number | null = 7` against `(x: number | null) => ...`) it is a
-    /// generated `FnValueAdapter` instead - the bucket's flat argument has to be
-    /// re-wrapped before the call - and both flags are then `false`, because the
-    /// adapter applies the throwing/async mapping itself.
     fn_value_variants: Vec<Vec<(Atom, Ident, bool, bool)>>,
     fn_value_of_fn: HashMap<Atom, (usize, Ident)>,
     closure_variants: RefCell<HashMap<usize, Vec<ClosureVariantInfo>>>,
@@ -65,9 +53,6 @@ pub(super) type ClosureVariantInfo = (u32, Ident, Vec<TokenStream>);
 
 pub(super) struct FnValueSig {
     pub(super) params: Vec<TypeId>,
-    /// Positional "the caller may omit this argument" flags copied from the
-    /// `Type::Fn` this signature was built from; an indirect call pads a missing
-    /// trailing argument with `undefined` only where a flag is set.
     pub(super) optional: Vec<bool>,
     pub(super) ret: TypeId,
 }
@@ -139,12 +124,6 @@ impl EmitCtx {
         let mut function_owner = HashMap::new();
         let mut constructors = HashSet::new();
         let mut mutating_methods = HashSet::new();
-        // A method that writes a field of `this` mutates the instance it is called
-        // on - directly, or through another mutating method (`this.w ??= 7` calls
-        // the setter). Such a method takes `&mut self` and its call sites borrow the
-        // receiver: the by-value `mut self` wrote into a clone and the mutation was
-        // silently lost. Which methods qualify is a fixpoint, and it has to be the
-        // same predicate the signature is emitted from (`BodyCtx::local_mut`).
         loop {
             let mut changed = false;
             for decl in &program.declarations {
@@ -258,11 +237,6 @@ impl EmitCtx {
             next_closure_id: Cell::new(0),
             used_runtime: Cell::new(false),
         };
-        // The enum and the `__ts_fn_call_k` helper are emitted from
-        // `fn_value_variants` alone and only know the *bucket's* parameter types,
-        // so a declaration registered under a wider ABI gets its argument
-        // re-wrapping through a generated adapter fn, emitted next to the closure
-        // bodies (the same slot `emit_closure_value` uses).
         if !fn_value_adapters.is_empty() {
             let emit_env = EmitEnv { types, program };
             for adapter in &fn_value_adapters {
@@ -381,14 +355,6 @@ impl EmitCtx {
         &self.fn_value_variants[k]
     }
 
-    /// Whether the named global is emitted as a `static mut` (and therefore its
-    /// reads and writes require an `unsafe` block in the generated Rust).
-    ///
-    /// Keyed by the global's MIR name (`MirGlobalDecl::name`). References
-    /// (`MirExpr::Global` / `MirPlace::Global`) carry the same name: HIR→MIR
-    /// never renames a global reference, and a global whose sanitized name would
-    /// collide with another declaration is rejected earlier with `E0503`, so the
-    /// decl name and the reference name cannot diverge in a compiled program.
     pub(super) fn is_mutable_global(&self, name: &Atom) -> bool {
         self.mutable_globals.contains(name)
     }
@@ -435,14 +401,10 @@ impl EmitCtx {
         self.function_owner.get(&id).copied()
     }
 
-    /// A class constructor: its receiver is passed by mutable reference and it
-    /// returns `()` (the instance is built by the caller).
     pub(super) fn function_is_constructor(&self, id: FunctionId) -> bool {
         self.constructors.contains(&id)
     }
 
-    /// A method that mutates the instance it is called on: its receiver is passed
-    /// by mutable reference, so the write reaches the caller's object.
     pub(super) fn function_is_mutating_method(&self, id: FunctionId) -> bool {
         self.mutating_methods.contains(&id)
     }
@@ -455,7 +417,6 @@ impl EmitCtx {
     }
 }
 
-// These flags describe independent emission properties of a function.
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct BodyCtx {
     locals: HashMap<LocalId, Ident>,
@@ -483,11 +444,6 @@ pub(super) struct BodyCtx {
     next_try_id: Cell<u32>,
     next_block_id: Cell<u32>,
     shared_by_id: HashMap<LocalId, SharedAccess>,
-    /// Value types of the enclosing closure's captures. A capture read is a
-    /// `MirExpr::Local` of an outer local, which the closure's own ctx has no
-    /// declaration for, so without this its value type (and therefore every
-    /// type-driven emission decision, e.g. numeric coercion of a literal
-    /// operand) would be unknown.
     capture_tys: HashMap<LocalId, TypeId>,
     shared_by_name: HashMap<Ident, SharedAccess>,
     own_env: Option<OwnEnv>,
@@ -508,11 +464,6 @@ pub(super) struct SharedAccess {
     pub(super) env_type: Ident,
     pub(super) field: Ident,
     pub(super) storage: SharedStorage,
-    /// The declared type of the shared variable. A name-based capture
-    /// (`MirExpr::Global`/`MirPlace::Global` of a variable captured through two
-    /// levels of `ScopeEnv`) carries no type of its own, so this is the only
-    /// place the emitter can learn it; without it the write is emitted without
-    /// the `Option`/numeric coercion the field type requires.
     pub(super) ty: TypeId,
 }
 
@@ -628,8 +579,6 @@ impl BodyCtx {
         let self_param = match f.kind {
             FunctionKind::Method { self_param, .. }
             | FunctionKind::GeneratorMethod { self_param, .. } => Some(self_param),
-            // A constructor's receiver is the first parameter (`this`), the same
-            // convention the passes use for methods.
             FunctionKind::Constructor { .. } => Some(LocalId::from_raw(0)),
             _ => None,
         };
@@ -849,8 +798,6 @@ impl BodyCtx {
         self.own_env.as_ref()
     }
 
-    /// A closure body gets its own scope env for locals of that closure which
-    /// are themselves captured by nested closures.
     pub(super) fn detect_own_env(
         &mut self,
         key: &str,
@@ -932,19 +879,12 @@ impl BodyCtx {
         self.shared_by_name.get(&ident_from(name)).cloned()
     }
 
-    /// The declared type of a variable reached through a name-based capture.
-    ///
-    /// A capture two closure levels deep is emitted as a `MirExpr::Global`/
-    /// `MirPlace::Global` of the captured name, which carries no `TypeId`; the
-    /// env field still knows its declared type.
     pub(super) fn shared_ty_for_name(&self, name: &Atom) -> Option<TypeId> {
         self.shared_by_name.get(&ident_from(name)).map(|acc| acc.ty)
     }
 
     pub(super) fn local_read(&self, id: LocalId) -> TokenStream {
         if Some(id) == self.self_param {
-            // A mutating method holds `&mut self`, so an owned read has to clone:
-            // `return this` must not move out of the borrow.
             return if self.self_is_borrowed {
                 quote!(self.clone())
             } else {
@@ -1089,8 +1029,6 @@ impl BodyCtx {
         self.capture_tys.get(&id).copied()
     }
 
-    /// Records the value type of every capture of the closure whose body this
-    /// ctx emits, so capture reads can be typed like ordinary locals.
     pub(super) fn seed_capture_types(&mut self, captures: &[LocalId], parent: &BodyCtx) {
         for id in captures {
             if let Some(ty) = parent.local_ty(*id).or_else(|| parent.capture_ty(*id)) {
@@ -1479,8 +1417,6 @@ fn place_root_local_id(place: &MirPlace) -> Option<LocalId> {
     }
 }
 
-/// Returns the name of the global at the root of a place, if any
-/// (e.g. `global`, `global.field`, `global[i]`).
 pub(super) fn place_root_global_name(place: &MirPlace) -> Option<&Atom> {
     match place {
         MirPlace::Global(name) => Some(name),
@@ -1784,60 +1720,24 @@ type FnValueRegistry = (
     Vec<FnValueAdapter>,
 );
 
-/// How one bucket argument is adapted for the declaration parameter it feeds.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lift {
-    /// The bucket parameter *is* the declaration's ABI parameter.
     None,
-    /// The declaration's ABI parameter is `Option<bucket parameter>`: the
-    /// argument is always supplied, so wrap it (`Some(__a0)`).
     Wrap,
-    /// Same nesting, but the bucket may also be called *without* this argument,
-    /// which its ABI spells `None` (the call site pads an omitted trailing
-    /// argument with `undefined`, which `optional_coerce` turns into `None`).
-    /// `None` then means "no argument" and has to stay the outer `None`, so that
-    /// the callee's default still applies: `__a0.map(Some)`.
-    ///
-    /// Only a bucket type that admits just `undefined` can use this: `null` and
-    /// "no argument" would both be the flat `None`, so a passed `null` would
-    /// select the default. A bucket type that admits `null` is rejected instead
-    /// of being registered (see [`fn_value_bucket`]).
     WrapIfSupplied,
 }
 
-/// A declaration whose ABI parameter list is one `Option` level *wider* than the
-/// function-value bucket it is registered in.
-///
-/// `f(x: number | null = 7)` is emitted with the nested ABI parameter
-/// `Option<Option<f64>>`: the outer `Option` answers "was an argument supplied?"
-/// (the callee's prologue applies the default when it is `None`) and the inner
-/// one is the value's own nullishness. A function *type* can never spell a
-/// default, so `(x: number | null) => number | null` has the flat parameter
-/// `Option<f64>` and its call sites pass a flat value onward. The bucket arm
-/// therefore cannot call the declaration directly: the generated adapter takes
-/// the bucket's parameters and re-wraps the lifted ones, which is exactly the
-/// "argument supplied" state the nested ABI encodes - a `null` argument reaches
-/// the arm as `None` and becomes `Some(None)`, never the outer `None` that would
-/// select the default.
 struct FnValueAdapter {
-    /// Name of the generated adapter fn; also the callee recorded for the
-    /// bucket's dispatch arm.
     ident: Ident,
-    /// The bucket's parameters, which are the adapter's own parameters.
     params: Vec<TypeId>,
-    /// The bucket's return type.
     ret: TypeId,
-    /// The declaration the adapter forwards to.
     decl: Ident,
-    /// Positional adaptation of the bucket's arguments.
     lifts: Vec<Lift>,
     is_throwing: bool,
     is_async: bool,
 }
 
 impl FnValueAdapter {
-    /// Rust source of `fn __ts_fn_value_lift_N<'a>(ctx, <bucket params>) -> <bucket ret>`
-    /// forwarding to the declaration with the lifted arguments re-wrapped.
     fn emit(&self, emit_env: &EmitEnv<'_>, ctx: &EmitCtx) -> TokenStream {
         let ident = &self.ident;
         let decl = &self.decl;
@@ -1861,8 +1761,6 @@ impl FnValueAdapter {
                 }
             })
             .collect();
-        // The same shims `emit_fn_values` puts around a direct arm call; the
-        // adapter owns them so the bucket only ever sees its own flat signature.
         let mut call = quote!(#decl(__ctx, #(#args),*));
         if self.is_async {
             call = quote!(ts_aot_runtime::__ts_aot_run_or_poll(#call));
@@ -1884,18 +1782,6 @@ impl FnValueAdapter {
     }
 }
 
-/// Whether two types are the *same in the generated Rust* even though they are
-/// distinct `TypeId`s.
-///
-/// Interning keys `Option` types by their nullish kind: `T | null` keeps `null`,
-/// `T | undefined` and `x?: T` accept only `undefined`, so `number | null` and
-/// `number | undefined` are two `TypeId`s - but one `Option<f64>`. The
-/// difference lives in the source language and in `optional_coerce`, not in the
-/// ABI, which is why the bucket for `(x?: number) => number` has to accept a
-/// declaration parameter declared `number | null`. A function type whose
-/// `optional` flags differ is the same ABI too whenever both intern to one
-/// value bucket (that is exactly the enum both emit). Every other type is
-/// compared by `TypeId`, which is structural equality for the rest.
 fn same_abi(
     types: &TypeTable,
     fn_value_index: &HashMap<TypeId, usize>,
@@ -1917,17 +1803,6 @@ fn same_abi(
     }
 }
 
-/// The bucket a declaration's ABI parameter list belongs to, plus the positions
-/// that have to be re-wrapped.
-///
-/// Exact `params`/`ret` equality is tried first, so every declaration that was
-/// registered before is still registered in the very same bucket. A declaration
-/// whose parameter is one `Option` level *above* the bucket's is accepted as
-/// well (see `FnValueAdapter`); the reverse relation never is - a bucket
-/// parameter `Option<T>` against a declaration parameter `T` would let a call
-/// omit an argument the declaration requires. The levels are compared with
-/// `same_abi`, so the bucket's `Option<f64>` is the inner level of `number |
-/// null`'s `Option<Option<f64>>` even though the two intern apart.
 fn fn_value_bucket(
     types: &TypeTable,
     fn_value_index: &HashMap<TypeId, usize>,
@@ -1954,24 +1829,11 @@ fn fn_value_bucket(
             if !same_abi(types, fn_value_index, *inner, *bucket) {
                 return None;
             }
-            // Only an `Option` bucket parameter can carry "no argument" as its
-            // `None`; a bucket safe to call without the argument therefore has to
-            // keep that `None` outside the wrapper.
             let bucket_ty = types.resolve(*bucket);
             let may_omit = s.optional.get(index).copied().unwrap_or(false)
                 && matches!(bucket_ty, Some(Type::Optional { .. }));
             if may_omit && matches!(bucket_ty, Some(Type::Optional { nullish, .. }) if nullish.null)
             {
-                // The flat `Option<T>` ABI cannot express "the caller passed
-                // `null`" and "the caller omitted the argument" at the same time:
-                // both are `None`. `Lift::WrapIfSupplied` maps `None` to the outer
-                // `None`, so a passed `null` would select the callee's default
-                // instead of staying `null`. Reject the registration (the
-                // established unsupported path leaves the declaration out of the
-                // bucket) rather than emit an adapter that miscompiles one of the
-                // two cases. A bucket whose type admits only `undefined` is fine:
-                // an omitted argument and an explicit `undefined` both ask for the
-                // default, so one `None` can mean both.
                 return None;
             }
             lifts.push(if may_omit {
@@ -1987,9 +1849,6 @@ fn fn_value_bucket(
     })
 }
 
-/// A name for a generated adapter that keeps out of the module's value
-/// namespace: the adapter fn is emitted next to the declarations, so it must not
-/// collide with a function, method or global of the program.
 fn next_fn_value_adapter_ident(taken: &mut HashSet<String>, index: usize) -> Ident {
     let mut candidate = format!("__ts_fn_value_lift_{index}");
     let mut suffix = 0u32;
@@ -2074,17 +1933,6 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
             if fn_value_index.contains_key(&id) {
                 continue;
             }
-            // `optional` takes part in `Type`'s `Hash`/`Eq`, so `x?: number` and
-            // `x: number | undefined` intern to two distinct `TypeId`s even though
-            // their ABI is identical (`Option<f64>` either way) and a short vector
-            // means "the rest is required" just like an explicit `false`. Bucketing
-            // by `TypeId` alone therefore left one of the two enums
-            // `__Uninhabited`, while a closure declared with the other spelling was
-            // stored into it (E0308). All signatures that agree on `params`/`ret`
-            // share one bucket, and the bucket keeps the *union* of the omission
-            // flags: padding an omitted argument with `undefined` is always safe,
-            // whereas dropping a pad a caller relied on would emit a call with a
-            // missing argument.
             let k = if let Some(k) = fn_value_sigs
                 .iter()
                 .position(|s| s.params == *params && s.ret == *ret)
@@ -2117,8 +1965,6 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
         vec![Vec::new(); fn_value_sigs.len()];
     let mut fn_value_of_fn: HashMap<Atom, (usize, Ident)> = HashMap::new();
     let mut fn_value_adapters: Vec<FnValueAdapter> = Vec::new();
-    // Generated adapters are emitted next to the declarations, so keep their
-    // names away from every name the program already puts in that namespace.
     let mut taken_idents: HashSet<String> = HashSet::new();
     for decl in &program.declarations {
         match decl {
@@ -2158,13 +2004,6 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
                 Some(Type::Result { ok, .. }) => *ok,
                 _ => f.ret,
             };
-            // A signature is picked by `params`/`ret` alone: a `MirParam` does not
-            // carry the "may be omitted" flag, and it does not have to - the
-            // registry above keeps exactly one bucket per `(params, ret)` pair, so
-            // the position is unique and the bucket's flags already cover every
-            // spelling of the same function type. The ABI parameter may still be
-            // one `Option` level *wider* than the bucket's (a defaulted nullable
-            // parameter), in which case the bucket arm goes through an adapter.
             let Some((k, lifts)) =
                 fn_value_bucket(types, &fn_value_index, &fn_value_sigs, &params, eff_ret)
             else {
@@ -2194,8 +2033,6 @@ fn collect_fn_values(program: &MirProgram, types: &TypeTable) -> FnValueRegistry
                     is_throwing,
                     is_async,
                 });
-                // The adapter owns the throwing/async shims, so the arm must not
-                // apply them a second time.
                 (Atom::from(ident.to_string()), false, false)
             } else {
                 (f.name.clone(), is_throwing, is_async)
@@ -2734,8 +2571,6 @@ fn collect_from_expr(
         | MirExpr::Import { source: expr, .. } => collect_from_expr(expr, types, written, mutating),
         MirExpr::Yield { expr: Some(e), .. } => collect_from_expr(e, types, written, mutating),
         MirExpr::Call { callee, args, .. } => {
-            // The receiver of a mutating method is passed as &mut, so its
-            // binding has to be mut even though the MIR never assigns it.
             if mutating.contains(callee)
                 && let Some(root) = args.first().and_then(expr_root_local_id)
             {

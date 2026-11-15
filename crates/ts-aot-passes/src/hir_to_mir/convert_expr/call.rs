@@ -15,9 +15,6 @@ use crate::hir_to_mir::converter::{
 use crate::hir_to_mir::program::throw_type_name;
 use crate::hir_to_mir::{PLACEHOLDER_FUNCTION, qualified_name};
 
-/// The source span of a call: the callee's own span when the frontend gives it
-/// one (`boom`, `a.m`, `this.m`), widened by the argument list. Using the first
-/// *argument* alone made every argument-less call (`boom()`) report `0..0`.
 fn call_span(callee: &HirCallee, args: &[HirExpr]) -> Span {
     let mut span = match callee {
         HirCallee::Indirect(inner) => inner.span(),
@@ -39,12 +36,8 @@ use super::util::is_pure_place;
 const PROMISE_HANDLER_UNKNOWN_DIAG: &str = "E0508";
 const PROMISE_HANDLER_MISMATCH_DIAG: &str = "E0509";
 
-/// One parameter of a resolvable callee.
 pub(super) struct CalleeParam {
     pub ty: TypeId,
-    /// Whether the caller may omit this argument. For functions and methods it
-    /// is `HirParam.optional`; for a function *value* it is the matching flag of
-    /// its `Type::Fn` signature - never a property of the parameter's ABI type.
     pub optional: bool,
 }
 
@@ -107,10 +100,6 @@ pub(super) fn is_numeric_type(ty: TypeId, types: &TypeTable) -> bool {
     )
 }
 
-/// Whether `callee` is a method invoked through an optional chain (`a?.m(..)`),
-/// which is the call shape the backend emits as a `map` over the receiver
-/// (`recv.as_ref().map(|r| A::m(r))`) and therefore the only shape whose
-/// throwing callee yields an `Option<Result<T, E>>`.
 fn optional_chain_receiver(callee: &HirCallee, types: &TypeTable) -> bool {
     let HirCallee::Indirect(inner) = callee else {
         return false;
@@ -122,11 +111,6 @@ fn optional_chain_receiver(callee: &HirCallee, types: &TypeTable) -> bool {
         && matches!(types.resolve(owner.ty()), Some(Type::Optional { .. }))
 }
 
-/// Whether `result` is a `MirExpr::Call` whose receiver (its first argument) is
-/// the `MirExpr::OptionalChain` the backend maps over, and whose MIR type is the
-/// `Optional<T>` that mapping produces. Together with
-/// [`optional_chain_receiver`] this pins down the call shape that needs
-/// transposing before its error can be propagated.
 fn optional_receiver_call_ok(result: &MirExpr, types: &TypeTable) -> bool {
     let MirExpr::Call { args, ty, .. } = result else {
         return false;
@@ -170,12 +154,6 @@ impl ExprConverter {
         self.propagate_callee_throws(callee, args, result, out, types, ctx)
     }
 
-    /// A call to a function that may throw returns a `Result`, so the caller must
-    /// propagate it (`expr?`) - which is only possible when the enclosing
-    /// function returns a `Result` of the same error type, i.e. when the call
-    /// graph fixpoint (`module_throws`) gave it that error type. Everything else
-    /// is reported instead of emitting code that cannot compile.
-    /// Error type of the module function a converted `MirExpr::Call` refers to.
     pub(super) fn function_id_throws(&self, id: FunctionId) -> Option<(String, TypeId)> {
         let name = self
             .name_to_function
@@ -194,9 +172,6 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        // A free function is resolved by name; any other call target that the
-        // module declares itself (a method, say) is resolved through the
-        // function id of the converted call.
         let named = match callee {
             HirCallee::Indirect(inner) => match inner.as_ref() {
                 HirExpr::Global { name, .. } => self
@@ -216,14 +191,6 @@ impl ExprConverter {
         let name = Atom::from(callee_label);
         let span = call_span(callee, args);
         let callee_name = throw_type_name(types, callee_throws);
-        // `a?.m(..)` with a throwing `m`: the backend emits the call as a `map`
-        // over the optional receiver, so the call yields `Option<Result<T, E>>`
-        // while its MIR type says `Option<T>`. The plain `expr?` that
-        // `MirExpr::Propagate` emits does not type-check on that value, so the
-        // propagation needs the transposing shape (see
-        // `transpose_optional_receiver_call`). Only the receiver mapping is
-        // affected: an optional value that happens to be a *regular* argument
-        // (`f(a?.x)`) is passed through the ABI as usual.
         let transposable =
             optional_chain_receiver(callee, types) && optional_receiver_call_ok(&result, types);
         if self.try_depth > 0 {
@@ -293,25 +260,6 @@ impl ExprConverter {
         }
     }
 
-    /// `a?.m(..)` where `m` throws: the receiver is mapped over, so the call
-    /// produces an `Option<Result<T, E>>`. MIR has no transposing node and the
-    /// backend emits `MirExpr::Propagate` as a plain `expr?` (which cannot be
-    /// applied to an `Option` inside a `Result`-returning function), so the
-    /// transposed value is built from ordinary statements:
-    ///
-    /// ```text
-    /// let __mapped: Option<Result<T, E>> = a.as_ref().map(|r| A::m(r));
-    /// let mut __value: Option<T>;
-    /// if __mapped.is_some() {
-    ///     __value = Some(__mapped.unwrap()?);
-    /// } else {
-    ///     __value = None;
-    /// }
-    /// ```
-    ///
-    /// The expression is then `__value`, i.e. `a?.m()` propagates the callee's
-    /// error and keeps the receiver's absence, and the enclosing function must
-    /// return `Result<T, E>` - which the caller has already checked.
     fn transpose_optional_receiver_call(
         &mut self,
         mapped: MirExpr,
@@ -325,9 +273,6 @@ impl ExprConverter {
             nullish,
         }) = types.resolve(value_ty)
         else {
-            // Not the mapped-over-receiver shape after all: `?` is still wrong,
-            // but there is nothing to transpose, so leave the value as the call
-            // produced it instead of inventing a `Result` out of it.
             return mapped;
         };
         let (ok_ty, nullish) = (*ok_ty, *nullish);
@@ -706,8 +651,6 @@ impl ExprConverter {
             return mir;
         }
         let callee_id = self.resolve_callee(callee, ctx);
-        // Parameters of the callee when this AOT can resolve them: used for arity
-        // diagnostics, missing-argument padding and nullish kind checks.
         let callee_params = self.callee_params(callee, types);
         if let Some(params) = &callee_params {
             let required = params
@@ -797,8 +740,6 @@ impl ExprConverter {
         if let Some(params) = &callee_params
             && mir_args.len() < params.len()
         {
-            // Missing trailing arguments can only be `?`-optional parameters:
-            // omitting a required one is already reported as P0004.
             while mir_args.len() < params.len() {
                 mir_args.push(MirExpr::Unit);
             }
@@ -1160,11 +1101,6 @@ impl ExprConverter {
         self.program.find_function_by_name(name)
     }
 
-    /// Parameters of a callee this AOT can resolve: free functions (by name),
-    /// class methods (by owner type + field name) and function values (by their
-    /// `Fn` type). Returns `None` for anything else (built-in methods, unknown
-    /// globals, ...), so callers never invent an arity for a call they do not
-    /// understand.
     pub(super) fn callee_params(
         &self,
         callee: &HirCallee,
@@ -1209,7 +1145,6 @@ impl ExprConverter {
                 let path = class_index.get(&owner_ty)?;
                 let class = class_at_path(declarations, path.clone())?;
                 let method = class.methods.iter().find(|m| m.name == *field_name)?;
-                // Methods carry a synthetic `this`/`self` parameter first.
                 Some(
                     method
                         .params
@@ -1235,13 +1170,6 @@ impl ExprConverter {
                             .enumerate()
                             .map(|(i, ty)| CalleeParam {
                                 ty: *ty,
-                                // The right to omit an argument is declared by
-                                // the signature's own flag (`?`-parameter or a
-                                // default), never inferred from the parameter
-                                // type: `x: T | undefined` without `?` is a
-                                // required parameter whose value can be
-                                // `undefined`. A short/missing flag vector means
-                                // "required".
                                 optional: fn_ty.fn_param_optional(i),
                             })
                             .collect(),
@@ -1252,7 +1180,6 @@ impl ExprConverter {
         }
     }
 
-    /// A human-readable name for diagnostics about a call.
     pub(super) fn callee_display_name(callee: &HirCallee) -> String {
         match callee {
             HirCallee::Indirect(inner) => match inner.as_ref() {
@@ -1435,8 +1362,6 @@ impl ExprConverter {
         if a == b {
             return Some(a);
         }
-        // `cond ? <optional> : null` (and `: undefined`) is the optional itself:
-        // the nullish kind is already part of the optional representation.
         let nullish = |t: TypeId| matches!(types.resolve(t), Some(Type::Null | Type::Void));
         let optional = |t: TypeId| {
             matches!(
@@ -1550,10 +1475,6 @@ impl ExprConverter {
                 }
                 self.recovered_static_ty(this, types)
             }
-            // An arithmetic or logical *expression* branch: the HIR carries no
-            // type for these (the frontend leaves `Error`), so the type comes
-            // from the operands - which is what a conditional whose branch is
-            // `n * fact(n - 1)` needs.
             HirExpr::Binary {
                 op, lhs, rhs, ty, ..
             } => {
@@ -1573,7 +1494,6 @@ impl ExprConverter {
                     | HirBinaryOp::StrictNe
                     | HirBinaryOp::In
                     | HirBinaryOp::InstanceOf => Some(types.intern(&Type::Bool)),
-                    // `&&`, `||` and `??` yield one of their operands.
                     HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce => match (a, b) {
                         (Some(a), Some(b)) => self.join_expr_types(a, b, types).or(Some(a)),
                         (Some(a), None) | (None, Some(a)) => Some(a),
@@ -1668,8 +1588,6 @@ impl ExprConverter {
         };
         let key = (sid, field_name.clone(), is_static);
         let fid = *self.method_map.get(&key)?;
-        // `c?.m(...)`: the receiver is optional, so the backend maps the call
-        // over it and the result is `ret | undefined`.
         let owner_optional = matches!(types.resolve(owner.ty()), Some(Type::Optional { .. }));
         let chain_receiver =
             owner_optional && matches!(owner.as_ref(), HirExpr::OptionalChain { .. });
@@ -1764,8 +1682,6 @@ impl ExprConverter {
             ));
         }
         if let Some(optional) = &param_optional {
-            // Omitting trailing `?`-optional arguments is allowed; the missing
-            // slots become `Option::None`.
             let expected_args = optional.len().saturating_sub(receiver_offset);
             while mir_args.len() < expected_args + receiver_offset {
                 mir_args.push(MirExpr::Unit);

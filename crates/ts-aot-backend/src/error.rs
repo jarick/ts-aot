@@ -4,24 +4,10 @@ use std::fmt;
 pub enum BackendError {
     NotImplemented(&'static str),
     Internal(String),
-    /// A construct whose meaning the AOT representation cannot express, so the
-    /// emission would silently miscompile it. `code` is the pass-level
-    /// diagnostic code the same situation uses (`P0019` for a nullish-kind
-    /// mismatch, `P0020` for a comparison that admits both kinds, `P0022` for a
-    /// comparison whose optional inner types cannot be compared); the driver
-    /// reports the backend error under that code (see [`BackendError::code`]).
-    UndecidableNullishComparison {
-        code: &'static str,
-        message: String,
-    },
+    UndecidableNullishComparison { code: &'static str, message: String },
 }
 
 impl BackendError {
-    /// The diagnostic code the driver reports this error under.
-    ///
-    /// A construct that maps to an established pass-level diagnostic keeps that
-    /// code (`P0019`/`P0020`/`P0022`), so tooling and tests can match on it; the
-    /// generic emission failures stay `E0300`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
@@ -30,7 +16,6 @@ impl BackendError {
         }
     }
 
-    /// The diagnostic message, without the code prefix [`fmt::Display`] adds.
     #[must_use]
     pub fn message(&self) -> String {
         match self {
