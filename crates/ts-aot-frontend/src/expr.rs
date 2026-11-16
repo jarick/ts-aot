@@ -225,6 +225,7 @@ fn hir_is_string_valued(e: &HirExpr, types: &TypeTable) -> bool {
 const ASSERT_SHIM_METHODS: &[(&str, &str)] = &[
     ("sameValue", "assertSameValue"),
     ("notSameValue", "assertNotSameValue"),
+    ("throws", "assertThrows"),
 ];
 
 impl SkeletonBuilder {
