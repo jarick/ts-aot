@@ -1,5 +1,6 @@
 mod decl;
 mod dump;
+pub use dump::dump_stmts_text;
 mod expr;
 mod program;
 mod stmt;

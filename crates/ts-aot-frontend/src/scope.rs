@@ -1,7 +1,17 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use ts_aot_core::{LocalId, TypeId};
+use ts_aot_ir_hir::{HirParam, HirStmt};
+
+static NEXT_BODY_ID: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ClosureBody {
+    pub(crate) params: Vec<HirParam>,
+    pub(crate) body: Vec<HirStmt>,
+}
 
 #[derive(Clone, Copy)]
 struct LocalEntry {
@@ -20,32 +30,139 @@ pub(crate) struct NarrowingCheckpoint {
 }
 
 pub(crate) struct BodyScope {
+    body_id: u32,
     next_local: Cell<u32>,
     scopes: Vec<HashMap<String, LocalEntry>>,
     predeclared: Vec<HashMap<String, PredeclaredEntry>>,
     narrowings: Vec<HashMap<String, Option<LocalEntry>>>,
+    closure_bodies: Vec<HashMap<LocalId, Vec<ClosureBody>>>,
+    poisoned_closure_bodies: Vec<HashSet<LocalId>>,
 }
 
 impl BodyScope {
     pub(crate) fn new(param_count: u32) -> Self {
         Self {
+            body_id: NEXT_BODY_ID.fetch_add(1, Ordering::Relaxed),
             next_local: Cell::new(param_count),
             scopes: vec![HashMap::new()],
             predeclared: vec![HashMap::new()],
             narrowings: vec![HashMap::new()],
+            closure_bodies: vec![HashMap::new()],
+            poisoned_closure_bodies: vec![HashSet::new()],
         }
+    }
+
+    pub(crate) fn body_id(&self) -> u32 {
+        self.body_id
+    }
+
+    pub(crate) fn depth(&self) -> usize {
+        self.scopes.len()
     }
 
     pub(crate) fn push(&mut self) {
         self.scopes.push(HashMap::new());
         self.predeclared.push(HashMap::new());
         self.narrowings.push(HashMap::new());
+        self.closure_bodies.push(HashMap::new());
+        self.poisoned_closure_bodies.push(HashSet::new());
     }
 
     pub(crate) fn pop(&mut self) {
         self.scopes.pop();
         self.predeclared.pop();
         self.narrowings.pop();
+        self.closure_bodies.pop();
+        self.poisoned_closure_bodies.pop();
+    }
+
+    fn closure_body_frame(
+        &mut self,
+        id: LocalId,
+    ) -> Option<&mut HashMap<LocalId, Vec<ClosureBody>>> {
+        self.closure_bodies
+            .iter_mut()
+            .rev()
+            .find(|frame| frame.contains_key(&id))
+    }
+
+    fn is_closure_body_poisoned(&self, id: LocalId) -> bool {
+        self.poisoned_closure_bodies
+            .iter()
+            .any(|frame| frame.contains(&id))
+    }
+
+    fn binding_frame_index(&self, id: LocalId) -> Option<usize> {
+        self.scopes
+            .iter()
+            .rposition(|frame| frame.values().any(|entry| entry.id == id))
+    }
+
+    fn push_closure_body(
+        frame: &mut HashMap<LocalId, Vec<ClosureBody>>,
+        id: LocalId,
+        body: ClosureBody,
+    ) {
+        let bodies = frame.entry(id).or_default();
+        if !bodies.contains(&body) {
+            bodies.push(body);
+        }
+    }
+
+    pub(crate) fn set_closure_body(&mut self, id: LocalId, body: ClosureBody) {
+        if self.is_closure_body_poisoned(id) {
+            return;
+        }
+        if let Some(frame) = self.closure_body_frame(id) {
+            Self::push_closure_body(frame, id, body);
+            return;
+        }
+        let index = self
+            .binding_frame_index(id)
+            .unwrap_or_else(|| self.closure_bodies.len().saturating_sub(1));
+        if let Some(frame) = self.closure_bodies.get_mut(index) {
+            Self::push_closure_body(frame, id, body);
+        }
+    }
+
+    pub(crate) fn poison_closure_body(&mut self, id: LocalId) {
+        if let Some(frame) = self.closure_body_frame(id) {
+            frame.remove(&id);
+        }
+        let index = self
+            .binding_frame_index(id)
+            .unwrap_or_else(|| self.poisoned_closure_bodies.len().saturating_sub(1));
+        if let Some(frame) = self.poisoned_closure_bodies.get_mut(index) {
+            frame.insert(id);
+        }
+    }
+
+    pub(crate) fn closure_bodies_of_local(&self, id: LocalId) -> Option<Vec<ClosureBody>> {
+        if self.is_closure_body_poisoned(id) {
+            return None;
+        }
+        self.closure_bodies
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(&id).cloned())
+    }
+
+    pub(crate) fn visible_closure_bodies(&self) -> HashMap<LocalId, Vec<ClosureBody>> {
+        let mut out: HashMap<LocalId, Vec<ClosureBody>> = HashMap::new();
+        for frame in &self.closure_bodies {
+            for (id, bodies) in frame {
+                if self.is_closure_body_poisoned(*id) {
+                    continue;
+                }
+                let entry = out.entry(*id).or_default();
+                for body in bodies {
+                    if !entry.contains(body) {
+                        entry.push(body.clone());
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub(crate) fn narrow(&mut self, name: &str, id: LocalId, ty: TypeId) {

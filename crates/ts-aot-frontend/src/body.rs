@@ -107,6 +107,7 @@ impl SkeletonBuilder {
         input: &FunctionBodyInput<'_, '_>,
         is_generator: bool,
         inherit_this_scope: bool,
+        fresh_class_values: bool,
     ) -> (Vec<HirStmt>, u32) {
         let body = input.body;
         let params = input.params;
@@ -122,10 +123,23 @@ impl SkeletonBuilder {
         let Some(body) = body else {
             return (Vec::new(), base);
         };
+        let saved_class_values = if fresh_class_values {
+            Some((
+                std::mem::take(&mut self.class_value_locals),
+                std::mem::take(&mut self.unknown_class_value_locals),
+            ))
+        } else {
+            None
+        };
+        if fresh_class_values {
+            self.pending_capture_class_value_reads.push(Vec::new());
+        }
         let saved_static = self.in_static_method;
         if !inherit_this_scope {
             self.in_static_method = false;
         }
+        let saved_module_init = std::mem::take(&mut self.module_init_depth);
+        let saved_loop_frames = std::mem::take(&mut self.loop_frames);
         self.is_generator_stack.push(is_generator);
         self.narrowed_stack.push(std::collections::HashMap::new());
         self.captured_stack.push(std::collections::HashSet::new());
@@ -146,9 +160,18 @@ impl SkeletonBuilder {
         self.captured_stack.pop();
         self.declared_names_stack.pop();
         self.in_static_method = saved_static;
+        self.module_init_depth = saved_module_init;
+        self.loop_frames = saved_loop_frames;
         if !prelude.is_empty() {
             prelude.append(&mut result);
             result = prelude;
+        }
+        if fresh_class_values {
+            self.verify_capture_class_value_reads(senv);
+        }
+        if let Some((class_values, unknown_class_values)) = saved_class_values {
+            self.class_value_locals = class_values;
+            self.unknown_class_value_locals = unknown_class_values;
         }
         let used = scope.peek_next();
         (result, used)
@@ -612,7 +635,7 @@ fn collect_declared_names_in_stmt(stmt: &Statement<'_>, names: &mut HashSet<Stri
     }
 }
 
-fn predeclare_forward_declarations(
+pub(crate) fn predeclare_forward_declarations(
     stmts: &[Statement<'_>],
     scope: &mut BodyScope,
     error_ty: TypeId,

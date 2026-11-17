@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ts_aot_core::{Atom, LocalId, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
 use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase,
+    ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase, UnaryOp,
 };
 
 use crate::PassContext;
@@ -289,8 +289,14 @@ impl ExprConverter {
                 then,
                 otherwise,
             } => {
-                let cond_mir =
-                    self.convert_expr(cond, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let cond_mir = self.convert_condition(
+                    cond,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let (then_mir, then_locals) = self.convert_stmt_block(
                     then,
                     mutable_locals,
@@ -320,7 +326,7 @@ impl ExprConverter {
             }
             HirStmt::While { cond, body } => {
                 let mut cond_stmts: Vec<MirStmt> = Vec::new();
-                let cond_mir = self.convert_expr(
+                let cond_mir = self.convert_condition(
                     cond,
                     &mut cond_stmts,
                     shared_struct_ids,
@@ -370,7 +376,13 @@ impl ExprConverter {
                 ));
                 inner_stmts.push(MirStmt::Break);
 
-                let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 2);
+                let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 3);
+                loop_body.extend(cond_stmts);
+                loop_body.push(MirStmt::If {
+                    cond: negated_condition(cond_mir, bool_ty),
+                    then_block: MirBlock::with(MirStmt::Break),
+                    else_block: None,
+                });
                 loop_body.push(MirStmt::While {
                     cond: MirExpr::Bool(true),
                     body: MirBlock { stmts: inner_stmts },
@@ -380,7 +392,6 @@ impl ExprConverter {
                     then_block: MirBlock::with(MirStmt::Break),
                     else_block: None,
                 });
-                loop_body.extend(cond_stmts);
 
                 out.push(MirStmt::Let {
                     local: is_break,
@@ -389,7 +400,7 @@ impl ExprConverter {
                     mutable: true,
                 });
                 out.push(MirStmt::While {
-                    cond: cond_mir,
+                    cond: MirExpr::Bool(true),
                     body: MirBlock { stmts: loop_body },
                 });
             }
@@ -404,7 +415,7 @@ impl ExprConverter {
                 );
                 final_locals.extend(body_locals);
                 let mut cond_stmts: Vec<MirStmt> = Vec::new();
-                let cond_mir = self.convert_expr(
+                let cond_mir = self.convert_condition(
                     cond,
                     &mut cond_stmts,
                     shared_struct_ids,
@@ -414,13 +425,6 @@ impl ExprConverter {
                 );
 
                 let bool_ty = types.intern(&Type::Bool);
-                let first_id = self.fresh_local();
-                final_locals.push(MirLocalDecl {
-                    id: first_id,
-                    name: Atom::from(""),
-                    ty: bool_ty,
-                    mutable: true,
-                });
                 let is_break = self.fresh_local();
                 final_locals.push(MirLocalDecl {
                     id: is_break,
@@ -436,15 +440,12 @@ impl ExprConverter {
                     mutable: true,
                 });
 
-                let mut inner_stmts = vec![
-                    assign_bool(first_id, false),
-                    MirStmt::Let {
-                        local: continue_flag,
-                        ty: bool_ty,
-                        init: Some(MirExpr::Bool(false)),
-                        mutable: true,
-                    },
-                ];
+                let mut inner_stmts = vec![MirStmt::Let {
+                    local: continue_flag,
+                    ty: bool_ty,
+                    init: Some(MirExpr::Bool(false)),
+                    mutable: true,
+                }];
                 let continue_count = std::cell::Cell::new(0u32);
                 inner_stmts.extend(rewrite_break_continue_for_loop(
                     body_mir.stmts,
@@ -455,14 +456,7 @@ impl ExprConverter {
                 ));
                 inner_stmts.push(MirStmt::Break);
 
-                let continue_cond = MirExpr::Binary {
-                    op: BinaryOp::Or,
-                    left: Box::new(MirExpr::Local(first_id)),
-                    right: Box::new(cond_mir),
-                    ty: bool_ty,
-                };
-
-                let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 2);
+                let mut loop_body = Vec::with_capacity(inner_stmts.len() + cond_stmts.len() + 3);
                 loop_body.push(MirStmt::While {
                     cond: MirExpr::Bool(true),
                     body: MirBlock { stmts: inner_stmts },
@@ -473,13 +467,12 @@ impl ExprConverter {
                     else_block: None,
                 });
                 loop_body.extend(cond_stmts);
-
-                out.push(MirStmt::Let {
-                    local: first_id,
-                    ty: bool_ty,
-                    init: Some(MirExpr::Bool(true)),
-                    mutable: true,
+                loop_body.push(MirStmt::If {
+                    cond: negated_condition(cond_mir, bool_ty),
+                    then_block: MirBlock::with(MirStmt::Break),
+                    else_block: None,
                 });
+
                 out.push(MirStmt::Let {
                     local: is_break,
                     ty: bool_ty,
@@ -487,7 +480,7 @@ impl ExprConverter {
                     mutable: true,
                 });
                 out.push(MirStmt::While {
-                    cond: continue_cond,
+                    cond: MirExpr::Bool(true),
                     body: MirBlock { stmts: loop_body },
                 });
             }
@@ -1017,6 +1010,21 @@ fn assign_bool(local: LocalId, value: bool) -> MirStmt {
     MirStmt::Assign {
         target: MirPlace::Local { id: local },
         value: MirExpr::Bool(value),
+    }
+}
+
+fn negated_condition(cond: MirExpr, bool_ty: TypeId) -> MirExpr {
+    match cond {
+        MirExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+            ..
+        } => *expr,
+        other => MirExpr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(other),
+            ty: bool_ty,
+        },
     }
 }
 

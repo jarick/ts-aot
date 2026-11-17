@@ -55,6 +55,91 @@ fn assert_capturing_closure_accepted(diagnostics: &ts_aot_core::DiagnosticBag) {
 }
 
 #[test]
+fn not_on_a_class_value_keeps_the_operand_read() {
+    let output = FrontendPass.run(
+        "test.ts",
+        "class C { static k: number = 1; } export function got(): boolean { return !C; }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let func = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Function(f) if f.name == Atom::from("got") => Some(f),
+            _ => None,
+        })
+        .expect("got must be scanned");
+    match func.body.as_slice() {
+        [
+            HirStmt::Return {
+                value: Some(HirExpr::Sequence { exprs, .. }),
+            },
+        ] => {
+            assert!(
+                matches!(exprs.last(), Some(HirExpr::Bool(false, _))),
+                "`!` on a class value is always false, got {exprs:?}"
+            );
+            assert!(
+                matches!(exprs.first(), Some(HirExpr::Global { .. })),
+                "the class-value read must stay sequenced before the constant, got {exprs:?}"
+            );
+        }
+        other => panic!("expected a sequenced return, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_captured_binding_shadowing_a_class_name_is_not_folded_to_false() {
+    let output = FrontendPass.run(
+        "test.ts",
+        "class C { static k: number = 1; } \
+         export function got(): boolean { const C = 0; const f = (): boolean => !C; return f(); }",
+    );
+    assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
+    let func = output
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Function(f) if f.name == Atom::from("got") => Some(f),
+            _ => None,
+        })
+        .expect("got must be scanned");
+    let closure = func
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Let {
+                init: Some(HirExpr::Closure { body, .. }),
+                ..
+            } => Some(body),
+            _ => None,
+        })
+        .expect("the arrow must be lowered into a Closure expression");
+    let negated = closure.iter().any(|stmt| {
+        matches!(
+            stmt,
+            HirStmt::Return {
+                value: Some(HirExpr::Unary {
+                    op: HirUnaryOp::Not,
+                    ..
+                }),
+            } | HirStmt::Expr {
+                expr: HirExpr::Unary {
+                    op: HirUnaryOp::Not,
+                    ..
+                },
+            }
+        )
+    });
+    assert!(
+        negated,
+        "a captured binding shadowing a class name must keep its own truthiness, got {closure:?}"
+    );
+}
+
+#[test]
 fn empty_source_yields_empty_program_without_errors() {
     let output = FrontendPass::new().run("test.ts", "");
     assert!(!output.diagnostics.has_errors(), "{:?}", output.diagnostics);
@@ -4482,7 +4567,7 @@ fn class_expression_named_uses_module_unique_name_not_source_name() {
 }
 
 #[test]
-fn class_expression_in_body_returns_global_reference() {
+fn class_expression_in_body_evaluates_to_an_instance_of_the_anonymous_class() {
     let f = sole_function("function f(): i64 { return class { x: i32; }; }");
     let HirStmt::Return {
         value: Some(ret_expr),
@@ -4491,10 +4576,8 @@ fn class_expression_in_body_returns_global_reference() {
         panic!("expected Return with value, got {:?}", f.body[0]);
     };
     match ret_expr {
-        HirExpr::Global { name, .. } => {
-            assert_eq!(name, Atom::from("__class_m0_0"));
-        }
-        other => panic!("expected Global referencing anon class, got {other:?}"),
+        HirExpr::DefaultConstruct { .. } => {}
+        other => panic!("expected DefaultConstruct of the anon class, got {other:?}"),
     }
 }
 
@@ -4547,8 +4630,8 @@ fn class_expression_assigned_to_local_keeps_class_registered() {
     };
     let init = init.as_ref().expect("const binding must have an init");
     match init {
-        HirExpr::Global { name, .. } => assert_eq!(name, Atom::from("__class_m0_0")),
-        other => panic!("expected Global referencing anon class, got {other:?}"),
+        HirExpr::Int(_, _) => {}
+        other => panic!("expected the anon class's tag, got {other:?}"),
     }
 }
 

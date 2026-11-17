@@ -56,6 +56,97 @@ impl ExprConverter {
         call
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn alloc_class_instance(
+        &mut self,
+        ty: TypeId,
+        struct_id: StructId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> ts_aot_core::LocalId {
+        let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
+        let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
+            .program
+            .class_field_inits
+            .get(&ty)
+            .cloned()
+            .unwrap_or_default();
+        for (fname, init) in init_names {
+            if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
+                let value = self.convert_expr(
+                    &init,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
+                lit_fields.push((fid, value));
+            }
+        }
+        let alloc_id = self.fresh_local();
+        self.push_temp_local(alloc_id, ty);
+        out.push(MirStmt::Let {
+            local: alloc_id,
+            ty,
+            init: Some(MirExpr::StructLiteral {
+                struct_id,
+                fields: lit_fields,
+                ty,
+            }),
+            mutable: true,
+        });
+        alloc_id
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn convert_default_construct(
+        &mut self,
+        ty: TypeId,
+        span: ts_aot_core::Span,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        if let Some(class) = self
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                ts_aot_ir_hir::HirDecl::Class(c) if c.ty == ty => Some(c),
+                _ => None,
+            })
+            && !class.type_params.is_empty()
+        {
+            ctx.error(
+                "E0300",
+                format!(
+                    "`{}` is a generic class expression; generic classes are not specialized \
+                     yet, so its fields would name a type the generated crate does not declare",
+                    class.name.as_str()
+                ),
+                span,
+            );
+            return MirExpr::Unit;
+        }
+        let struct_id = self.lookup_or_alloc_struct_id(ty, shared_struct_ids, shared_next_struct);
+        let alloc_id = self.fresh_local();
+        self.push_temp_local(alloc_id, ty);
+        out.push(MirStmt::Let {
+            local: alloc_id,
+            ty,
+            init: Some(MirExpr::StructLiteral {
+                struct_id,
+                fields: Vec::new(),
+                ty,
+            }),
+            mutable: true,
+        });
+        MirExpr::Local(alloc_id)
+    }
     pub(super) fn convert_new(
         &mut self,
         callee: &HirExpr,
@@ -147,6 +238,28 @@ impl ExprConverter {
             HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name).is_some(),
             _ => false,
         };
+        if let Some(name) = class_name.as_deref()
+            && let Some(class) = self
+                .program
+                .declarations
+                .iter()
+                .find_map(|decl| match decl {
+                    ts_aot_ir_hir::HirDecl::Class(c) if c.name.as_str() == name => Some(c),
+                    _ => None,
+                })
+            && !class.type_params.is_empty()
+        {
+            ctx.error(
+                "E0300",
+                format!(
+                    "`new {name}()` instantiates a generic class; generic classes are not \
+                     specialized yet, so its fields would name a type the generated crate does \
+                     not declare"
+                ),
+                callee.span(),
+            );
+            return MirExpr::Unit;
+        }
         let ctor_key = (
             struct_id,
             ts_aot_core::Atom::new_inline("constructor"),
@@ -232,38 +345,15 @@ impl ExprConverter {
         } else {
             None
         };
-        let mut lit_fields: Vec<(ts_aot_core::FieldId, MirExpr)> = Vec::new();
-        let init_names: Vec<(ts_aot_core::Atom, ts_aot_ir_hir::HirExpr)> = self
-            .program
-            .class_field_inits
-            .get(&ty)
-            .cloned()
-            .unwrap_or_default();
-        for (fname, init) in init_names {
-            if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
-                let value = self.convert_expr(
-                    &init,
-                    out,
-                    shared_struct_ids,
-                    shared_next_struct,
-                    types,
-                    ctx,
-                );
-                lit_fields.push((fid, value));
-            }
-        }
-        let alloc_id = self.fresh_local();
-        self.push_temp_local(alloc_id, ty);
-        out.push(MirStmt::Let {
-            local: alloc_id,
+        let alloc_id = self.alloc_class_instance(
             ty,
-            init: Some(MirExpr::StructLiteral {
-                struct_id,
-                fields: lit_fields,
-                ty,
-            }),
-            mutable: true,
-        });
+            struct_id,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
         match (ctor, ctor_args) {
             (Some(ctor), Some(ctor_args)) => {
                 let mut mir_args: Vec<MirExpr> = Vec::with_capacity(ctor_args.len() + 1);
@@ -398,6 +488,11 @@ impl ExprConverter {
         let base_ty = crate::monomorphize::hir_expr_ty(base, types)
             .or_else(|| self.mir_expr_static_ty(&inner, types))
             .unwrap_or_else(|| types.intern(&Type::Error));
+        if let Some(resolved) = types.resolve(base_ty)
+            && !matches!(resolved, Type::Null | Type::Void | Type::Optional { .. })
+        {
+            return inner;
+        }
         let inner_ty = match types.resolve(base_ty) {
             Some(Type::Optional { inner, .. }) => *inner,
             _ => base_ty,
@@ -593,9 +688,7 @@ impl ExprConverter {
             });
         let ret_ty = closure_ret_ty.unwrap_or(ty);
         let mut mir_params: Vec<MirParam> = Vec::with_capacity(params.len());
-        let param_ids: Vec<LocalId> = (0..params.len())
-            .map(|i| LocalId::from_raw(u32::try_from(i).unwrap_or(u32::MAX)))
-            .collect();
+        let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();
         let snapshot: std::collections::HashMap<LocalId, LocalId> = self.local_map.clone();
         let temp_locals_snapshot: Vec<MirLocalDecl> = std::mem::take(&mut self.temp_locals);
         for (hir_param_id, p) in param_ids.iter().zip(params.iter()) {
@@ -684,8 +777,25 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        let yield_ty = self.current_return_ty.map(|ty| match types.resolve(ty) {
+            Some(Type::Generator { inner, .. }) => *inner,
+            _ => ty,
+        });
         let inner = expr
-            .map(|e| self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx))
+            .map(|e| {
+                let saved = self.expected_ty;
+                self.expected_ty = yield_ty;
+                let value =
+                    self.convert_expr(e, out, shared_struct_ids, shared_next_struct, types, ctx);
+                self.expected_ty = saved;
+                match yield_ty {
+                    Some(target) => {
+                        let value_ty = self.mir_expr_static_ty(&value, types);
+                        super::control::cast_numeric_branch_to_dest(value, value_ty, target, types)
+                    }
+                    None => value,
+                }
+            })
             .map(Box::new);
         MirExpr::Yield { expr: inner, ty }
     }

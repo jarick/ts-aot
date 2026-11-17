@@ -1,4 +1,7 @@
 use ts_aot_driver::{CompileOptions, Driver, DriverOutput, EmitStage};
+use ts_aot_test_support::{check_generated_crate, run_generated_crate};
+
+mod common;
 
 fn compile_rust(source: &str) -> DriverOutput {
     Driver::new().compile_source(
@@ -62,6 +65,23 @@ fn refcell_shared_capture_self_assignment_hoists_value() {
         source.contains("__ts_shared_write"),
         "the assigned value must be evaluated into a local before the mutable borrow; got:\n{source}"
     );
+}
+
+#[test]
+fn a_captured_binding_shadowing_a_class_name_keeps_its_boolean_value() {
+    let out = compile_rust(
+        "class C { static k: number = 1; } \
+         export function run(): boolean { const C = 0; const f = (): boolean => !C; return f(); }",
+    );
+    assert!(!out.has_errors(), "got {:?}", out.diagnostics);
+    let source = out.rust_source.expect("rust_source");
+    let flat = common::normalize_rust(&source);
+    assert!(
+        flat.contains("! ((__tmp") && flat.contains("!= 0))"),
+        "the captured binding must be negated through a truthiness test, not folded to a \
+         class-value false; got:\n{source}"
+    );
+    check_generated_crate("shadowing_capture", &source);
 }
 
 #[test]
@@ -566,4 +586,38 @@ fn shared_array_capture_env_declares_lifetime() {
         norm.contains("Rc<__ScopeEnv0<'a>>"),
         "the Rc env type must propagate the lifetime through closure params and fn-value variants; got:\n{source}"
     );
+}
+
+#[test]
+fn a_local_shadowing_a_class_name_dispatches_the_shadowing_class_instance_method() {
+    const SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         let g = new Counter(); \
+         class D { static bump(): number { g = new Counter(); return 1; } } \
+         class E { bump(): number { return 2; } } \
+         export function got(): number { const D = new E(); g.add(D.bump()); return g.n; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(shadowed_class_instance_method::got(&ctx), 2.0);
+    println!("ok");
+}
+"#;
+    let out = compile_rust(SOURCE);
+    assert!(
+        !out.has_errors(),
+        "a local that shadows a class name must compile and dispatch to its own instance method; \
+         got {:?}",
+        out.diagnostics
+    );
+    let source = out.rust_source.expect("rust_source");
+    check_generated_crate("shadowed_class_instance_method", &source);
+    let stdout = run_generated_crate("shadowed_class_instance_method", &source, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

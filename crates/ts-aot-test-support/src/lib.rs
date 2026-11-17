@@ -46,6 +46,7 @@ fn run_cargo(dir: &Path, args: &[&str]) -> Output {
         .arg("--manifest-path")
         .arg(dir.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target_dir)
+        .env("CARGO_INCREMENTAL", "0")
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .output()

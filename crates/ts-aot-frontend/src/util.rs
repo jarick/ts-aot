@@ -188,6 +188,20 @@ pub(crate) fn wrap_optional_param(types: &mut TypeTable, ty: TypeId) -> TypeId {
     })
 }
 
+pub(crate) fn with_undefined(types: &mut TypeTable, ty: TypeId) -> TypeId {
+    match types.resolve(ty).cloned() {
+        Some(Type::Optional { inner, nullish }) => types.intern(&Type::Optional {
+            inner,
+            nullish: NullishKinds {
+                null: nullish.null,
+                undefined: true,
+            },
+        }),
+        None | Some(Type::Error | Type::Void | Type::Null) => ty,
+        Some(_) => wrap_optional_param(types, ty),
+    }
+}
+
 fn destructure(
     senv: &mut SkeletonEnv,
     pattern: &BindingPattern<'_>,

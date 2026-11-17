@@ -5,6 +5,7 @@ use ts_aot_ir_hir::{HirCallee, HirExpr, ObjectLiteralField};
 
 pub(super) fn rewrite_expr(expr: &mut HirExpr, map: &HashMap<(Atom, Atom), Atom>) {
     match expr {
+        HirExpr::DefaultConstruct { .. } => {}
         HirExpr::Field {
             owner,
             field_name,

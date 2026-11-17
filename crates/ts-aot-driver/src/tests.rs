@@ -1530,7 +1530,7 @@ fn e2e_accessor_compound_update_routes_through_getter_and_setter() {
 }
 
 #[test]
-fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
+fn e2e_accessor_compound_update_captures_the_global_receiver_address() {
     let out = compile(
         "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
          let g: C; \
@@ -1539,13 +1539,23 @@ fn e2e_accessor_compound_update_keeps_global_receiver_without_temp() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__get_y (g . clone () , __ctx)"),
-        "a global receiver must be forwarded without an intermediate by-value temp (a direct \
-         clone is used because moving out of a static is E0507), got:\n{rust}"
+        rust.contains("C__get_y (unsafe { g . clone () } , __ctx)"),
+        "a global receiver is read through a direct clone (moving out of a static is E0507), \
+         got:\n{rust}"
+    );
+    let capture_at = rust
+        .find("addr_of_mut ! (g)")
+        .expect("a global receiver is captured as an address before the arguments run");
+    let call_at = rust
+        .find("C__set_y (& mut (* __ts_receiver) , __ctx")
+        .expect("a global receiver is forwarded to the setter through the captured address");
+    assert!(
+        capture_at < call_at,
+        "the captured address must be taken before the setter runs, got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (& mut (g . clone ()) ,"),
-        "a global receiver is forwarded to the setter without an intermediate temp, got:\n{rust}"
+        !rust.contains("C__set_y (& mut (g) , __ctx"),
+        "the receiver must not be re-read after the arguments, got:\n{rust}"
     );
 }
 

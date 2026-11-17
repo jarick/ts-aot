@@ -209,6 +209,9 @@ pub(crate) fn dump_expr_inline(expr: &HirExpr, d: &mut Dumper) {
         HirExpr::String(atom, _) => d.write(&format!("string({:?})", atom.as_str())),
         HirExpr::Null(_) => d.write("null"),
         HirExpr::Undefined(_) => d.write("undefined"),
+        HirExpr::DefaultConstruct { ty, .. } => {
+            d.write(&format!("default_construct({})", ty.raw()))
+        }
         HirExpr::Local { id, ty, .. } => d.write(&format!("local({}):{}", id.raw(), ty.raw())),
         HirExpr::Global { name, ty, .. } => {
             d.write(&format!("global({}):{}", name.as_str(), ty.raw()))

@@ -7,6 +7,8 @@ mod runtime_op;
 mod tests;
 mod types;
 
+use std::rc::Rc;
+
 use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::{format_ident, quote};
 
@@ -22,7 +24,9 @@ use self::ctx::EmitCtx;
 use self::ctx::EmitEnv;
 use self::ident::ident_from;
 use self::literals::emit_const_expr;
-use self::types::{LifetimeMode, emit_static_type_id, emit_type_id_with_ctx};
+use self::types::{
+    LifetimeMode, emit_static_type_id, emit_type_id_with_ctx, mentions_generic_param,
+};
 use crate::error::BackendError;
 
 pub fn emit_decls(program: &MirProgram, types: &TypeTable) -> Result<TokenStream, BackendError> {
@@ -79,6 +83,14 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
         let enum_name = EmitCtx::fn_value_ident(k);
         let helper = EmitCtx::fn_call_ident(k);
         let sig = ctx.fn_value_sig(k);
+        if sig
+            .params
+            .iter()
+            .any(|ty| mentions_generic_param(*ty, emit_env.types))
+            || mentions_generic_param(sig.ret, emit_env.types)
+        {
+            continue;
+        }
         let variants = ctx.fn_value_variants(k);
         let closure_variants = ctx.closure_variants_for(k);
         let param_tys: Vec<TokenStream> = sig
@@ -161,6 +173,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                 #[derive(Clone)]
                 pub enum #enum_name<'a> {
                     #placeholder,
+                    __Unset,
                     __Phantom(::core::marker::PhantomData<&'a ()>),
                 }
                 impl ::std::fmt::Debug for #enum_name<'_> {
@@ -169,6 +182,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                             #enum_name::#placeholder => {
                                 f.write_str(stringify!(#enum_name::#placeholder))
                             }
+                            #enum_name::__Unset => f.write_str("__Unset"),
                             #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                         }
                     }
@@ -180,6 +194,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                 ) -> #ret {
                     match __f {
                         #enum_name::#placeholder => unreachable!(),
+                        #enum_name::__Unset => unreachable!(),
                         #enum_name::__Phantom(_) => unreachable!(),
                     }
                 }
@@ -190,12 +205,14 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             #[derive(Clone)]
             pub enum #enum_name<'a> {
                 #(#enum_variants,)*
+                __Unset,
                 __Phantom(::core::marker::PhantomData<&'a ()>),
             }
             impl ::std::fmt::Debug for #enum_name<'_> {
                 fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                     match self {
                         #(#debug_arms)*
+                        #enum_name::__Unset => f.write_str("__Unset"),
                         #enum_name::__Phantom(_) => f.write_str("__Phantom"),
                     }
                 }
@@ -207,6 +224,7 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             ) -> #ret {
                 match __f {
                     #(#arms)*
+                    #enum_name::__Unset => unreachable!(),
                     #enum_name::__Phantom(_) => unreachable!(),
                 }
             }
@@ -275,13 +293,105 @@ fn emit_tla_init_entry(program: &MirProgram) -> TokenStream {
     }
 }
 
+fn mentions_generic_through_structs(
+    ty: TypeId,
+    types: &TypeTable,
+    program: &MirProgram,
+    visited: &mut Vec<TypeId>,
+) -> bool {
+    if mentions_generic_param(ty, types) {
+        return true;
+    }
+    if visited.contains(&ty) {
+        return false;
+    }
+    visited.push(ty);
+    match types.resolve(ty) {
+        Some(Type::Struct { id }) => program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                MirDecl::Struct(s) if s.id == *id => Some(s),
+                _ => None,
+            })
+            .is_some_and(|s| {
+                s.fields.iter().any(|field| {
+                    mentions_generic_through_structs(field.ty, types, program, visited)
+                })
+            }),
+        Some(Type::Optional { inner, .. } | Type::Array { element: inner }) => {
+            mentions_generic_through_structs(*inner, types, program, visited)
+        }
+        Some(Type::Promise { ok, err }) => {
+            mentions_generic_through_structs(*ok, types, program, visited)
+                || err.is_some_and(|e| mentions_generic_through_structs(e, types, program, visited))
+        }
+        Some(Type::WeakMap { key, value }) => {
+            mentions_generic_through_structs(*key, types, program, visited)
+                || mentions_generic_through_structs(*value, types, program, visited)
+        }
+        Some(Type::Result { ok, err }) => {
+            mentions_generic_through_structs(*ok, types, program, visited)
+                || mentions_generic_through_structs(*err, types, program, visited)
+        }
+        Some(Type::Union { variants }) => variants
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(Type::Intersection { parts }) => parts
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(Type::Tuple { elements }) => elements
+            .iter()
+            .any(|v| mentions_generic_through_structs(*v, types, program, visited)),
+        Some(
+            Type::Generator { inner, .. }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner },
+        ) => mentions_generic_through_structs(*inner, types, program, visited),
+        Some(Type::Fn { params, ret, .. }) => {
+            params
+                .iter()
+                .any(|p| mentions_generic_through_structs(*p, types, program, visited))
+                || mentions_generic_through_structs(*ret, types, program, visited)
+        }
+        _ => false,
+    }
+}
+
+fn signature_mentions_generic_param(
+    f: &MirFunctionDecl,
+    types: &TypeTable,
+    program: &MirProgram,
+) -> bool {
+    mentions_generic_through_structs(f.ret, types, program, &mut Vec::new())
+        || f.params
+            .iter()
+            .any(|p| mentions_generic_through_structs(p.ty, types, program, &mut Vec::new()))
+}
 fn emit_decl(
     decl: &MirDecl,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     match decl {
+        MirDecl::Function(f)
+            if signature_mentions_generic_param(f, emit_env.types, emit_env.program) =>
+        {
+            Ok((TokenStream::new(), Vec::new()))
+        }
         MirDecl::Function(f) => emit_function_with_ctx(f, ctx, emit_env, None),
+        MirDecl::Struct(s)
+            if s.fields.iter().any(|field| {
+                mentions_generic_through_structs(
+                    field.ty,
+                    emit_env.types,
+                    emit_env.program,
+                    &mut Vec::new(),
+                )
+            }) =>
+        {
+            emit_struct_static_methods(s, ctx, emit_env)
+        }
         MirDecl::Struct(s) => emit_struct_with_ctx(s, ctx, emit_env),
         MirDecl::Global(g) => emit_global_with_ctx(g, ctx, emit_env),
     }
@@ -315,6 +425,7 @@ fn emit_function_with_ctx(
         ident_from(&f.name)
     };
     let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods);
+    body_ctx.set_module_idents(Rc::clone(ctx.module_idents()));
     if is_tla_main {
         body_ctx.set_in_tla_main(true);
     }
@@ -551,6 +662,26 @@ fn pack_return_stmt(ty: TypeId, types: &TypeTable) -> Result<TokenStream, Backen
     Ok(stmt)
 }
 
+fn emit_struct_static_methods(
+    s: &MirStructDecl,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
+    let mut free_fns = TokenStream::new();
+    let mut dispatch_entries: Vec<TokenStream> = Vec::new();
+    for m in &s.methods {
+        if signature_mentions_generic_param(m, emit_env.types, emit_env.program)
+            || !matches!(m.kind, FunctionKind::Plain | FunctionKind::Generator)
+        {
+            continue;
+        }
+        let (m_tokens, m_entries) = emit_function_with_ctx(m, ctx, emit_env, None)?;
+        free_fns.extend(m_tokens);
+        dispatch_entries.extend(m_entries);
+    }
+    Ok((free_fns, dispatch_entries))
+}
+
 fn emit_struct_with_ctx(
     s: &MirStructDecl,
     ctx: &EmitCtx,
@@ -567,6 +698,9 @@ fn emit_struct_with_ctx(
     let mut free_fns = TokenStream::new();
     let mut dispatch_entries: Vec<TokenStream> = Vec::new();
     for m in &s.methods {
+        if signature_mentions_generic_param(m, emit_env.types, emit_env.program) {
+            continue;
+        }
         let is_static = matches!(m.kind, FunctionKind::Plain | FunctionKind::Generator);
         let enclosing = if is_static { None } else { Some(s.id) };
         let (m_tokens, m_entries) = emit_function_with_ctx(m, ctx, emit_env, enclosing)?;
@@ -721,6 +855,13 @@ fn emit_const_default(
             )),
         },
         Some(Type::Optional { .. }) => Ok(quote!(::core::option::Option::None)),
+        Some(Type::Fn { .. }) => match ctx.fn_value_kind(ty) {
+            Some(k) => {
+                let enum_name = EmitCtx::fn_value_ident(k);
+                Ok(quote!(#enum_name::__Unset))
+            }
+            None => Ok(quote!(())),
+        },
         Some(Type::Struct { id }) => {
             emit_struct_const_default(*id, ctx, emit_env, depth + 1, budget, mode)
         }
@@ -763,14 +904,15 @@ fn emit_global_with_ctx(
 ) -> Result<(TokenStream, Vec<TokenStream>), BackendError> {
     let name = ident_from(&g.name);
     let durable = global_durable_kind(g.ty, emit_env);
-    if durable.is_none() && ctx.type_needs_lifetime(g.ty, emit_env.types) {
+
+    let owned = body::owned_array_ty(g.ty, ctx, emit_env);
+    if durable.is_none() && owned.is_none() && ctx.type_needs_lifetime(g.ty, emit_env.types) {
         return Err(BackendError::NotImplemented(
             "global/static declaration: this global's type is arena-backed (it borrows from the \
-             per-call `Ctx<'a>` arena) and has no owned representation, so a `static` cannot store \
-             it; a value written from a function parameter would be rejected, and a stored value \
-             would dangle after the arena resets. Only `string` and `string | null` globals have \
-             an owned representation. Keep the value inside a function, or reduce the global to \
-             a scalar, `string`, or `string | null`",
+             per-call `Ctx<'a>` arena) and has no owned representation, so a `static` cannot hold \
+             it; only an array of lifetime-free elements (`number[]`, `boolean[]`) is stored \
+             owned today. Keep the value inside a function, or reduce the global to a scalar, \
+             `string`, or `string | null`",
         ));
     }
     let ty = match durable {
@@ -778,23 +920,34 @@ fn emit_global_with_ctx(
         Some(DurableGlobal::OptionalString) => {
             quote!(::core::option::Option<::std::string::String>)
         }
-        None => emit_static_type_id(g.ty, emit_env, ctx),
+
+        None => owned
+            .clone()
+            .unwrap_or_else(|| emit_static_type_id(g.ty, emit_env, ctx)),
     };
     let vis = visibility_token(g.visibility);
-    let mutability = if g.mutable { quote!(mut) } else { quote!() };
-    let init = match (&g.init, durable) {
-        (Some(expr), Some(DurableGlobal::OptionalString)) if is_nullish_literal(expr) => {
-            quote!(::core::option::Option::None)
-        }
-        (Some(expr), _) => {
-            let tokens = emit_const_expr(expr, emit_env.types)?;
-            body::coerce_static_init(expr, tokens, g.ty, emit_env)
-        }
-        (None, Some(DurableGlobal::String)) => quote!(::std::string::String::new()),
-        (None, Some(DurableGlobal::OptionalString)) => quote!(::core::option::Option::None),
-        (None, None) => {
-            let mut budget = CONST_DEFAULT_BUDGET;
-            emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+    let mutability = if g.mutable || owned.is_some() {
+        quote!(mut)
+    } else {
+        quote!()
+    };
+    let init = if owned.is_some() {
+        quote!(::std::vec::Vec::new())
+    } else {
+        match (&g.init, durable) {
+            (Some(expr), Some(DurableGlobal::OptionalString)) if is_nullish_literal(expr) => {
+                quote!(::core::option::Option::None)
+            }
+            (Some(expr), _) => {
+                let tokens = emit_const_expr(expr, emit_env.types)?;
+                body::coerce_static_init(expr, tokens, g.ty, emit_env)
+            }
+            (None, Some(DurableGlobal::String)) => quote!(::std::string::String::new()),
+            (None, Some(DurableGlobal::OptionalString)) => quote!(::core::option::Option::None),
+            (None, None) => {
+                let mut budget = CONST_DEFAULT_BUDGET;
+                emit_const_default(g.ty, ctx, emit_env, 0, &mut budget, LifetimeMode::Static)?
+            }
         }
     };
     Ok((

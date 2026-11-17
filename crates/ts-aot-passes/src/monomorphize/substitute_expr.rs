@@ -13,6 +13,10 @@ pub fn substitute_expr(
     result: &mut TypeSubstitutionResult,
 ) -> HirExpr {
     match expr {
+        HirExpr::DefaultConstruct { ty, span } => HirExpr::DefaultConstruct {
+            ty: substitute_type(*ty, mapping, types, result),
+            span: *span,
+        },
         HirExpr::Unit(_)
         | HirExpr::Bool(_, _)
         | HirExpr::Int(_, _)

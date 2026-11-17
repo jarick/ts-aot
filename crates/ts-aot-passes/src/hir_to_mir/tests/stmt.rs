@@ -1148,14 +1148,54 @@ fn convert_block_while_cond_with_side_effects_keeps_cond_as_loop_condition() {
         );
     };
     assert!(
-        matches!(*cond, MirExpr::Call { callee, .. } if callee == FunctionId::from_raw(0)),
-        "MirStmt::While.cond must be the real cond expression (not Bool(true) forever-loop), got {:?}",
+        matches!(*cond, MirExpr::Bool(true)),
+        "the header must be `while true`: the real condition is checked inside the body so the \
+         statements it needs are declared before the first check, got {:?}",
         cond
     );
-    let inner_while_body = match &body.stmts[0] {
-        MirStmt::While { body: inner, .. } => &inner.stmts,
-        other => panic!("expected inner MirStmt::While, got {other:?}"),
+    let MirStmt::If {
+        cond: guard,
+        then_block,
+        ..
+    } = &body.stmts[0]
+    else {
+        panic!(
+            "the loop body must start with the condition check, got {:?}",
+            body.stmts
+        );
     };
+    assert!(
+        matches!(
+            guard,
+            MirExpr::Unary {
+                op: UnaryOp::Not,
+                expr,
+                ..
+            } if matches!(**expr, MirExpr::Call { callee, .. } if callee == FunctionId::from_raw(0))
+        ),
+        "the check must negate the real cond expression, got {guard:?}"
+    );
+    assert!(
+        matches!(then_block.stmts.as_slice(), [MirStmt::Break]),
+        "a false cond must break the loop, got {then_block:?}"
+    );
+    assert_eq!(
+        body.stmts
+            .iter()
+            .map(|s| count_calls_in_stmt(s, FunctionId::from_raw(0).raw()))
+            .sum::<usize>(),
+        1,
+        "the cond call must be evaluated exactly once per iteration, got {:?}",
+        body.stmts
+    );
+    let inner_while_body = body
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::While { body: inner, .. } => Some(&inner.stmts),
+            _ => None,
+        })
+        .expect("the loop body wrapper must still be an inner MirStmt::While");
     assert!(
         inner_while_body
             .iter()
@@ -1174,11 +1214,23 @@ fn convert_block_while_false_does_not_loop_forever() {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
-    let MirStmt::While { cond, .. } = &mir_block.stmts[1] else {
+    let MirStmt::While { cond, body } = &mir_block.stmts[1] else {
         panic!("expected MirStmt::While at index 1");
     };
-    assert!(matches!(*cond, MirExpr::Bool(false)));
-    assert!(!matches!(*cond, MirExpr::Bool(true)));
+    assert!(matches!(*cond, MirExpr::Bool(true)));
+    let MirStmt::If { cond: guard, .. } = &body.stmts[0] else {
+        panic!(
+            "the loop body must start with the condition check, got {:?}",
+            body.stmts
+        );
+    };
+    assert!(
+        matches!(
+            guard,
+            MirExpr::Unary { op: UnaryOp::Not, expr, .. } if matches!(**expr, MirExpr::Bool(false))
+        ),
+        "`while (false)` must break before the body runs, got {guard:?}"
+    );
 }
 
 #[test]
@@ -1209,7 +1261,43 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
         MirStmt::While { body, .. } => body,
         other => panic!("expected MirStmt::While, got {other:?}"),
     };
-    let inner_while = match &outer_while.stmts[0] {
+    let cond_let_idx = outer_while
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::Let { .. }))
+        .expect("cond Let (1-part template) must be present in outer-while body");
+    let check_idx = outer_while
+        .stmts
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::If {
+                    cond: MirExpr::Unary {
+                        op: UnaryOp::Not,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .expect("the outer-while body must check the condition");
+    let inner_while_idx_in_outer = outer_while
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::While { .. }))
+        .expect("expected inner MirStmt::While");
+    assert!(
+        cond_let_idx < check_idx && check_idx < inner_while_idx_in_outer,
+        "cond Let (idx {}) must be declared inside the loop body BEFORE the check (idx {}) and the \
+         wrapper (idx {}), so the first check sees it and every iteration re-evaluates it; got \
+         stmts {:?}",
+        cond_let_idx,
+        check_idx,
+        inner_while_idx_in_outer,
+        outer_while.stmts
+    );
+    let inner_while = match &outer_while.stmts[inner_while_idx_in_outer] {
         MirStmt::While { body: ib, .. } => &ib.stmts,
         other => panic!("expected inner MirStmt::While, got {other:?}"),
     };
@@ -1217,19 +1305,6 @@ fn convert_block_while_continue_re_evaluates_cond_via_inner_wrapper() {
         inner_while.iter().any(|s| matches!(s, MirStmt::Break)),
         "user's Continue must be rewritten to MirStmt::Break targeting the inner wrapper, got {:?}",
         inner_while
-    );
-    let cond_let_idx = outer_while
-        .stmts
-        .iter()
-        .position(|s| matches!(s, MirStmt::Let { .. }))
-        .expect("cond Let (1-part template) must be present in outer-while body");
-    let inner_while_idx_in_outer = 0;
-    assert!(
-        cond_let_idx > inner_while_idx_in_outer,
-        "cond Let (idx {}) must appear AFTER the inner-while wrapper (idx {}) so cond re-evaluates each iteration (1-part template emits Let, not Runtime); got stmts {:?}",
-        cond_let_idx,
-        inner_while_idx_in_outer,
-        outer_while.stmts
     );
 }
 
@@ -1246,23 +1321,38 @@ fn convert_block_while_break_breaks_outer_via_sentinel() {
         MirStmt::While { body, .. } => body,
         other => panic!("expected MirStmt::While at index 1, got {other:?}"),
     };
-    let inner_while = match &outer_while.stmts[0] {
+    let inner_while_idx = outer_while
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::While { .. }))
+        .expect("expected inner MirStmt::While");
+    let inner_while = match &outer_while.stmts[inner_while_idx] {
         MirStmt::While { body: ib, .. } => &ib.stmts,
         other => panic!("expected inner MirStmt::While, got {other:?}"),
     };
-    let has_assign_then_break = inner_while.windows(2).any(|w| {
-        matches!(
-            w[0],
+    let is_break = inner_while
+        .windows(2)
+        .find_map(|w| match &w[0] {
             MirStmt::Assign {
-                target: MirPlace::Local { .. },
+                target: MirPlace::Local { id },
                 value: MirExpr::Bool(true),
-            }
-        ) && matches!(w[1], MirStmt::Break)
-    });
+            } if matches!(w[1], MirStmt::Break) => Some(*id),
+            _ => None,
+        })
+        .expect(
+            "user's Break must be rewritten to is_break=true; Break targeting the inner wrapper",
+        );
     assert!(
-        has_assign_then_break,
-        "user's Break must be rewritten to is_break=true; Break targeting the inner wrapper, got {:?}",
-        inner_while
+        outer_while.stmts.iter().any(|s| matches!(
+            s,
+            MirStmt::If {
+                cond: MirExpr::Local(id),
+                then_block,
+                ..
+            } if *id == is_break && matches!(then_block.stmts.as_slice(), [MirStmt::Break])
+        )),
+        "the is_break sentinel must break the outer loop, got {:?}",
+        outer_while.stmts
     );
 }
 
@@ -1276,10 +1366,9 @@ fn convert_block_dowhile_executes_body_at_least_once() {
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
-    assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
-    let body_stmts = match &mir_block.stmts[2] {
+    let body_stmts = match &mir_block.stmts[1] {
         MirStmt::While { body, .. } => &body.stmts,
-        other => panic!("expected While at index 2, got {other:?}"),
+        other => panic!("expected While at index 1, got {other:?}"),
     };
     let inner_while_body = match &body_stmts[0] {
         MirStmt::While { body: ib, .. } => &ib.stmts,
@@ -1304,11 +1393,10 @@ fn convert_block_dowhile_continue_still_evaluates_cond() {
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
-    assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
-    let while_stmt = &mir_block.stmts[2];
+    let while_stmt = &mir_block.stmts[1];
     let while_body = match while_stmt {
         MirStmt::While { body, .. } => &body.stmts,
-        other => panic!("expected While at index 2, got {other:?}"),
+        other => panic!("expected While at index 1, got {other:?}"),
     };
     let inner_while_body = match &while_body[0] {
         MirStmt::While { body: ib, .. } => &ib.stmts,
@@ -1319,19 +1407,74 @@ fn convert_block_dowhile_continue_still_evaluates_cond() {
         "user's Continue must be rewritten to Break targeting the inner wrapper, got {:?}",
         inner_while_body
     );
-    let cond = match while_stmt {
-        MirStmt::While { cond, .. } => cond,
-        _ => unreachable!(),
+    let MirStmt::If { cond: guard, .. } = while_body.last().expect("non-empty") else {
+        panic!(
+            "the do-while body must end with the condition check, got {:?}",
+            while_body
+        );
     };
     assert!(
         matches!(
-            cond,
-            MirExpr::Binary {
-                op: BinaryOp::Or,
-                ..
-            }
+            guard,
+            MirExpr::Unary { op: UnaryOp::Not, expr, .. } if matches!(**expr, MirExpr::Bool(false))
         ),
-        "while cond must be `__first || cond`, got {cond:?}"
+        "the loop must re-check the cond after the body (and after a Continue), got {guard:?}"
+    );
+}
+
+#[test]
+fn convert_block_dowhile_cond_statements_are_inside_the_body_before_the_check() {
+    let mut c = ExprConverter::new();
+    let mut cx = ctx();
+    let cond = HirExpr::Template {
+        tag: None,
+        expressions: vec![],
+        cooked_parts: vec![None],
+        raw_parts: vec![None],
+        ty: unit_ty(),
+
+        span: Span::default(),
+    };
+    let block = HirBlock(vec![HirStmt::DoWhile {
+        body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
+        cond,
+    }]);
+    let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
+    let outer_body = match &mir_block.stmts[1] {
+        MirStmt::While { body, .. } => body,
+        other => panic!("expected MirStmt::While at index 1, got {other:?}"),
+    };
+    let inner_while_idx = outer_body
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::While { .. }))
+        .expect("expected the body wrapper");
+    let cond_let_idx = outer_body
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::Let { .. }))
+        .expect("the cond statements must be lowered inside the loop body");
+    let check_idx = outer_body
+        .stmts
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::If {
+                    cond: MirExpr::Unary {
+                        op: UnaryOp::Not,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .expect("expected the condition check");
+    assert!(
+        inner_while_idx < cond_let_idx && cond_let_idx < check_idx,
+        "a do-while must run its body first, then evaluate the cond statements, then check them; \
+         got {:?}",
+        outer_body.stmts
     );
 }
 
@@ -1352,40 +1495,44 @@ fn convert_block_while_call_cond_evaluated_once_per_iteration() {
         body: Box::new(HirStmt::Expr { expr: int_lit(0) }),
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
-    let outer_while = mir_block
+    let MirStmt::While { cond, body } = mir_block.stmts.last().expect("non-empty") else {
+        panic!("expected the outer MirStmt::While to be the last statement");
+    };
+    assert!(
+        matches!(*cond, MirExpr::Bool(true)),
+        "the header must be `while true`; the call is checked inside the body so the first check \
+         happens after the call is evaluated, got {cond:?}"
+    );
+    let total = body
         .stmts
         .iter()
-        .find_map(|s| match s {
-            MirStmt::While { cond, .. } => Some(cond),
-            _ => None,
-        })
-        .expect("expected outer MirStmt::While");
-    assert!(
-        matches!(*outer_while, MirExpr::Call { callee, .. } if callee == FunctionId::from_raw(0)),
-        "While.cond must hold the original Call (re-evaluated each iter by the header itself), got {outer_while:?}"
+        .map(|s| count_calls_in_stmt(s, FunctionId::from_raw(0).raw()))
+        .sum::<usize>();
+    assert_eq!(
+        total, 1,
+        "the cond call must be evaluated exactly once per iteration, got {:?}",
+        body.stmts
     );
-    let outer_while_body = match mir_block.stmts.last().expect("non-empty") {
-        MirStmt::While { body, .. } => &body.stmts,
-        other => panic!("expected MirStmt::While, got {other:?}"),
+    let MirStmt::If {
+        cond: guard,
+        then_block,
+        ..
+    } = &body.stmts[0]
+    else {
+        panic!(
+            "the loop body must start with the condition check, got {:?}",
+            body.stmts
+        );
     };
-    let contains_not_call_break = outer_while_body.iter().any(|s| {
-        matches!(
-            s,
-            MirStmt::If {
-                cond: MirExpr::Unary {
-                    op: UnaryOp::Not,
-                    expr,
-                    ..
-                },
-                ..
-            } if matches!(**expr, MirExpr::Call { callee, .. } if callee == FunctionId::from_raw(0))
-        )
-    });
     assert!(
-        !contains_not_call_break,
-        "loop body must NOT contain `if !Call break` (would call the function a second time per iter); got {:?}",
-        outer_while_body
+        matches!(
+            guard,
+            MirExpr::Unary { op: UnaryOp::Not, expr, .. }
+                if matches!(**expr, MirExpr::Call { callee, .. } if callee == FunctionId::from_raw(0))
+        ),
+        "the check must negate the call itself, got {guard:?}"
     );
+    assert!(matches!(then_block.stmts.as_slice(), [MirStmt::Break]));
 }
 
 #[test]
@@ -1398,39 +1545,43 @@ fn convert_block_dowhile_false_runs_body_exactly_once_not_infinite() {
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(matches!(mir_block.stmts[0], MirStmt::Let { .. }));
-    assert!(matches!(mir_block.stmts[1], MirStmt::Let { .. }));
-    let outer_while = match &mir_block.stmts[2] {
+    let (outer_cond, outer_body) = match &mir_block.stmts[1] {
         MirStmt::While { cond, body } => (cond, body),
-        other => panic!("expected MirStmt::While at index 2, got {other:?}"),
+        other => panic!("expected MirStmt::While at index 1, got {other:?}"),
     };
-    let first_id_local = match outer_while.0 {
-        MirExpr::Binary {
-            op: BinaryOp::Or,
-            left,
-            ..
-        } => match left.as_ref() {
-            MirExpr::Local(id) => *id,
-            other => panic!("expected first_id Local, got {other:?}"),
-        },
-        other => panic!("expected first_id || cond_mir, got {other:?}"),
-    };
-    let inner_while = match &outer_while.1.stmts[0] {
-        MirStmt::While { body: ib, .. } => &ib.stmts,
-        other => panic!("expected inner MirStmt::While, got {other:?}"),
-    };
-    let first_id_reset = inner_while.iter().any(|s| {
-        matches!(
-            s,
-            MirStmt::Assign {
-                target: MirPlace::Local { id },
-                value: MirExpr::Bool(false),
-            } if *id == first_id_local
-        )
-    });
+    assert!(matches!(*outer_cond, MirExpr::Bool(true)));
+    let inner_while_idx = outer_body
+        .stmts
+        .iter()
+        .position(|s| matches!(s, MirStmt::While { .. }))
+        .expect("expected inner MirStmt::While");
+    let guard_idx = outer_body
+        .stmts
+        .iter()
+        .position(|s| {
+            matches!(
+                s,
+                MirStmt::If {
+                    cond: MirExpr::Unary {
+                        op: UnaryOp::Not,
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+        .expect("expected the condition check");
     assert!(
-        first_id_reset,
-        "first_id must be reset to false inside the inner wrapper so the next iter's outer-while entry checks cond_mir (and `do {{}} while (false)` doesn't infinite-loop), got inner stmts {:?}",
-        inner_while
+        guard_idx > inner_while_idx,
+        "`do {{}} while (false)` must run the body before the check (and then break), got {:?}",
+        outer_body.stmts
+    );
+    let MirStmt::If { cond: guard, .. } = &outer_body.stmts[guard_idx] else {
+        unreachable!()
+    };
+    assert!(
+        matches!(guard, MirExpr::Unary { expr, .. } if matches!(**expr, MirExpr::Bool(false))),
+        "the check must negate the false cond so the loop runs the body exactly once, got {guard:?}"
     );
 }
 
@@ -2165,45 +2316,43 @@ fn convert_block_dowhile_continue_cond_binary_uses_bool_ty() {
         cx.diagnostics()
     );
 
-    let first_let_ty = match &mir_block.stmts[0] {
+    let is_break_ty = match &mir_block.stmts[0] {
         MirStmt::Let { ty, .. } => *ty,
-        other => panic!("expected first stmt to be MirStmt::Let for first_id, got {other:?}"),
+        other => panic!("expected first stmt to be MirStmt::Let for is_break, got {other:?}"),
     };
-    let second_let_ty = match &mir_block.stmts[1] {
-        MirStmt::Let { ty, .. } => *ty,
-        other => panic!("expected second stmt to be MirStmt::Let for is_break, got {other:?}"),
+    let while_body = match &mir_block.stmts[1] {
+        MirStmt::While { body, .. } => &body.stmts,
+        other => panic!("expected second stmt to be the outer MirStmt::While, got {other:?}"),
     };
-    let outer_while = match &mir_block.stmts[2] {
-        MirStmt::While { cond, .. } => cond,
-        other => panic!("expected third stmt to be outer MirStmt::While, got {other:?}"),
-    };
-    let continue_cond_ty = match outer_while {
-        MirExpr::Binary { ty, .. } => *ty,
-        other => {
-            panic!("outer while cond must be MirExpr::Binary (__first || cond), got {other:?}")
-        }
-    };
+    let guard_ty = while_body
+        .iter()
+        .find_map(|s| match s {
+            MirStmt::If {
+                cond:
+                    MirExpr::Unary {
+                        op: UnaryOp::Not,
+                        ty,
+                        ..
+                    },
+                ..
+            } => Some(*ty),
+            _ => None,
+        })
+        .expect("the do-while body must check the condition");
     assert_ne!(
-        continue_cond_ty,
+        guard_ty,
         TypeId::from_raw(0),
-        "continue_cond Binary ty must be the interned bool_ty, not the default TypeId::from_raw(0); got {continue_cond_ty:?}"
+        "the check's negation ty must be the interned bool_ty, not the default TypeId::from_raw(0); \
+         got {guard_ty:?}"
     );
     assert_eq!(
-        continue_cond_ty, first_let_ty,
-        "continue_cond Binary ty must equal first_id local ty, got {continue_cond_ty:?}"
-    );
-    assert_eq!(
-        continue_cond_ty, second_let_ty,
-        "continue_cond Binary ty must equal is_break local ty, got {continue_cond_ty:?}"
-    );
-    assert_eq!(
-        first_let_ty, second_let_ty,
-        "first_id and is_break locals must share the same ty, got first={first_let_ty:?} is_break={second_let_ty:?}"
+        guard_ty, is_break_ty,
+        "the check's negation ty must equal the is_break local ty, got {guard_ty:?}"
     );
     let expected_bool_ty = types.intern(&Type::Bool);
     assert_eq!(
-        continue_cond_ty, expected_bool_ty,
-        "continue_cond Binary ty must resolve to the bool type, got {continue_cond_ty:?}"
+        guard_ty, expected_bool_ty,
+        "the check's negation ty must resolve to the bool type, got {guard_ty:?}"
     );
 }
 

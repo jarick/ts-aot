@@ -59,6 +59,14 @@ impl ExprConverter {
             },
             HirExpr::Undefined(_) => MirExpr::Unit,
             HirExpr::Local { id, .. } => self.map_local(*id),
+            HirExpr::DefaultConstruct { ty, span } => self.convert_default_construct(
+                *ty,
+                *span,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                ctx,
+            ),
             HirExpr::Global { name, .. } => MirExpr::Global(name.clone()),
             HirExpr::Field {
                 owner,

@@ -16,7 +16,7 @@ use super::ctx::{
 use super::ident::ident_from;
 use super::literals::{emit_float_from_int, emit_whole_number_literal};
 use super::runtime_op::runtime_op_ident;
-use super::types::emit_type_id_with_ctx;
+use super::types::{emit_static_type_id, emit_type_id_with_ctx};
 use super::{DurableGlobal, global_durable_kind};
 use crate::error::BackendError;
 
@@ -227,6 +227,28 @@ fn emit_block_stmts(
         .iter()
         .map(|stmt| emit_stmt(stmt, ctx, emit_env, body_ctx))
         .collect()
+}
+
+fn let_init_tokens(
+    init: &MirExpr,
+    target_ty: TypeId,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    check_fn_value_init(init, target_ty, ctx)?;
+    let init_tokens = emit_owned_value(init, ctx, emit_env, body_ctx)?;
+    let init_tokens = dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
+    let init_tokens =
+        optional_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx, false)?;
+    Ok(numeric_coerce(
+        init,
+        init_tokens,
+        target_ty,
+        ctx,
+        emit_env,
+        body_ctx,
+    ))
 }
 
 fn emit_if_stmt(
@@ -515,15 +537,13 @@ fn emit_stmt(
                 quote!()
             };
             if let Some(init) = init {
-                check_fn_value_init(init, target_ty, ctx)?;
-                let init_tokens = emit_owned_value(init, ctx, emit_env, body_ctx)?;
-                let init_tokens =
-                    dynamic_string_coerce(init, init_tokens, target_ty, emit_env, body_ctx);
-                let init_tokens =
-                    optional_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx, false)?;
-                let init_tokens =
-                    numeric_coerce(init, init_tokens, target_ty, ctx, emit_env, body_ctx);
+                let init_tokens = let_init_tokens(init, target_ty, ctx, emit_env, body_ctx)?;
                 Ok(quote!(let #mutability #name: #ty = #init_tokens;))
+            } else if matches!(
+                emit_env.types.resolve(target_ty),
+                Some(Type::Optional { .. })
+            ) {
+                Ok(quote!(let #mutability #name: #ty = ::core::option::Option::None;))
             } else {
                 Ok(quote!(let #mutability #name: #ty;))
             }
@@ -601,7 +621,7 @@ fn emit_stmt(
                     }
                 }
                 MirPlace::Global(name) => {
-                    if let Some(target_ty) = ctx.global_ty(name) {
+                    let coerced = if let Some(target_ty) = ctx.global_ty(name) {
                         let coerced = optional_coerce(
                             value,
                             value_tokens,
@@ -614,6 +634,11 @@ fn emit_stmt(
                         numeric_coerce(value, coerced, target_ty, ctx, emit_env, body_ctx)
                     } else {
                         value_tokens
+                    };
+                    if is_owned_global(name, ctx, emit_env) {
+                        quote!(#coerced.iter().cloned().collect::<::std::vec::Vec<_>>())
+                    } else {
+                        coerced
                     }
                 }
                 MirPlace::Field { ty, .. } | MirPlace::Index { ty, .. } => {
@@ -866,6 +891,26 @@ fn is_durable_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
     durable_global_kind(name, ctx, emit_env).is_some()
 }
 
+fn is_owned_global(name: &Atom, ctx: &EmitCtx, emit_env: &EmitEnv) -> bool {
+    ctx.global_ty(name)
+        .and_then(|ty| owned_array_ty(ty, ctx, emit_env))
+        .is_some()
+}
+
+pub(super) fn owned_array_ty(ty: TypeId, ctx: &EmitCtx, emit_env: &EmitEnv) -> Option<TokenStream> {
+    if global_durable_kind(ty, emit_env).is_some() {
+        return None;
+    }
+    let Some(Type::Array { element }) = emit_env.types.resolve(ty) else {
+        return None;
+    };
+    if ctx.type_needs_lifetime(*element, emit_env.types) {
+        return None;
+    }
+    let element = emit_static_type_id(*element, emit_env, ctx);
+    Some(quote!(::std::vec::Vec<#element>))
+}
+
 fn check_fn_value_init(
     init: &MirExpr,
     target_ty: TypeId,
@@ -906,7 +951,7 @@ fn emit_global_access(
         return quote!(#enum_name::#variant);
     }
     let ident = ident_from(name);
-    let mutable = ctx.is_mutable_global(name);
+    let mutable = ctx.is_mutable_global(name) || is_owned_global(name, ctx, emit_env);
     let inner = if let Some(kind) = durable_global_kind(name, ctx, emit_env) {
         let base = if mutable {
             quote!((*::core::ptr::addr_of!(#ident)))
@@ -922,6 +967,15 @@ fn emit_global_access(
             DurableGlobal::String => {
                 quote!(ts_aot_runtime::JsString::Valid(__ctx.arena.alloc_str(#base.as_str())))
             }
+        }
+    } else if is_owned_global(name, ctx, emit_env) {
+        if owned {
+            quote!(ts_aot_runtime::bumpalo::collections::Vec::from_iter_in(
+                (*::core::ptr::addr_of!(#ident)).iter().cloned(),
+                __ctx.arena
+            ))
+        } else {
+            quote!(&*::core::ptr::addr_of!(#ident))
         }
     } else if owned
         && ctx
@@ -939,11 +993,19 @@ fn emit_global_access(
     }
 }
 
-fn emit_global_place_base(name: &Atom, body_ctx: &BodyCtx) -> TokenStream {
+fn emit_global_place_base(
+    name: &Atom,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> TokenStream {
     if let Some(tokens) = body_ctx.shared_place_base_for_name(name) {
         return tokens;
     }
     let ident = ident_from(name);
+    if is_owned_global(name, ctx, emit_env) {
+        return quote!((&mut *::core::ptr::addr_of_mut!(#ident)));
+    }
     quote!(#ident)
 }
 
@@ -966,8 +1028,25 @@ fn emit_place_ref_expr(
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     match expr {
-        MirExpr::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
+        MirExpr::Global(name) => Ok(emit_global_place_base(name, ctx, emit_env, body_ctx)),
         _ => emit_expr(expr, ctx, emit_env, body_ctx),
+    }
+}
+
+fn emit_array_slice_arg(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    match expr {
+        MirExpr::Global(name) if is_owned_global(name, ctx, emit_env) => {
+            Ok(emit_global_access(name, ctx, emit_env, body_ctx, false))
+        }
+        other => {
+            let value = emit_expr(other, ctx, emit_env, body_ctx)?;
+            Ok(quote!(&#value))
+        }
     }
 }
 
@@ -1029,7 +1108,7 @@ fn emit_place_base(
     let EmitEnv { types, .. } = emit_env;
     match base {
         MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
-        MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, body_ctx)),
+        MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, ctx, emit_env, body_ctx)),
         MirPlaceBase::Field { base, field, .. } => {
             let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
                 "nested field place: base type unresolved",
@@ -1445,8 +1524,15 @@ fn indirect_callee_fn_kind(
 ) -> Option<usize> {
     let EmitEnv { types, .. } = emit_env;
     let fn_ty = match callee {
-        MirExpr::Local(id) => body_ctx.local_ty(*id)?,
-        MirExpr::Global(name) => return ctx.fn_value_for_name(name).map(|(k, _)| k),
+        MirExpr::Local(id) => body_ctx
+            .local_ty(*id)
+            .or_else(|| body_ctx.capture_ty(*id))?,
+        MirExpr::Global(name) => {
+            if let Some((kind, _)) = ctx.fn_value_for_name(name) {
+                return Some(kind);
+            }
+            body_ctx.shared_ty_for_name(name)?
+        }
         other => other.ty()?,
     };
     if !matches!(types.resolve(fn_ty), Some(Type::Fn { .. })) {
@@ -1728,6 +1814,24 @@ fn emit_expr(
             {
                 return Ok(quote!(#borrowed[#index as usize].clone()));
             }
+            if let MirExpr::Global(base_name) = base.as_ref()
+                && is_owned_global(base_name, ctx, emit_env)
+            {
+                let base = emit_global_access(base_name, ctx, emit_env, body_ctx, false);
+                if expr
+                    .ty()
+                    .is_some_and(|ty| !is_copy_type(emit_env.types, ty))
+                {
+                    return Ok(quote!({
+                        let __ts_index = #index as usize;
+                        (#base)[__ts_index].clone()
+                    }));
+                }
+                return Ok(quote!({
+                    let __ts_index = #index as usize;
+                    (#base)[__ts_index]
+                }));
+            }
             let base = emit_expr(base, ctx, emit_env, body_ctx)?;
             Ok(quote!(#base[#index as usize]))
         }
@@ -1747,13 +1851,14 @@ fn emit_expr(
                 && let Some(owner_ident) = owner_ident.clone()
                 && matches!(emit_env.types.resolve(*ty), Some(Type::Optional { .. }))
             {
-                let receiver = if is_mutating_method {
+                let (receiver, receiver_unsafe) = if is_mutating_method {
                     match base.as_ref() {
-                        MirExpr::Local(id) => body_ctx.local_ref(*id),
-                        other => emit_expr(other, ctx, emit_env, body_ctx)?,
+                        MirExpr::Local(id) => (body_ctx.local_ref(*id), false),
+                        MirExpr::Global(_) => emit_mut_receiver(base, ctx, emit_env, body_ctx)?,
+                        other => (emit_expr(other, ctx, emit_env, body_ctx)?, false),
                     }
                 } else {
-                    emit_expr(base, ctx, emit_env, body_ctx)?
+                    (emit_expr(base, ctx, emit_env, body_ctx)?, false)
                 };
                 let rest = &args[1..];
                 let rest_param_tys = param_tys.map(|tys| &tys[1..]);
@@ -1768,10 +1873,15 @@ fn emit_expr(
                 } else {
                     call
                 };
-                return Ok(if is_mutating_method {
+                let chain = if is_mutating_method {
                     quote!(#receiver.as_mut().map(|__ts_recv| #call))
                 } else {
                     quote!(#receiver.as_ref().map(|__ts_recv| #call))
+                };
+                return Ok(if receiver_unsafe {
+                    quote!(unsafe { #chain })
+                } else {
+                    chain
                 });
             }
             let callee = if let Some(owner_ident) = owner_ident {
@@ -1783,19 +1893,21 @@ fn emit_expr(
                 let (receiver, rest) = args
                     .split_first()
                     .expect("a method call always carries its receiver");
-                let receiver = match receiver {
-                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => {
-                        Ok(if body_ctx.self_is_borrowed() {
+                let (receiver, receiver_unsafe) = match receiver {
+                    MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => (
+                        if body_ctx.self_is_borrowed() {
                             quote!((*self))
                         } else {
                             quote!((self))
-                        })
-                    }
+                        },
+                        false,
+                    ),
                     MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
-                        Ok(body_ctx.local_ref(*id))
+                        (body_ctx.local_ref(*id), false)
                     }
-                    other => emit_expr(other, ctx, emit_env, body_ctx),
-                }?;
+                    MirExpr::Global(_) => emit_mut_receiver(receiver, ctx, emit_env, body_ctx)?,
+                    other => (emit_expr(other, ctx, emit_env, body_ctx)?, false),
+                };
                 let rest = emit_owned_exprs_coerced(
                     rest,
                     param_tys.map(|tys| &tys[1..]),
@@ -1803,7 +1915,23 @@ fn emit_expr(
                     emit_env,
                     body_ctx,
                 )?;
-                return Ok(quote!(#callee(&mut (#receiver), __ctx, #(#rest),*)));
+                if receiver_unsafe {
+                    let receiver_ident = body_ctx.alloc_hoist_ident("__ts_receiver");
+                    let mut binds = Vec::with_capacity(rest.len());
+                    let mut names = Vec::with_capacity(rest.len());
+                    for (index, arg) in rest.iter().enumerate() {
+                        let name = body_ctx.alloc_hoist_ident(&format!("__ts_arg_{index}"));
+                        binds.push(quote!(let #name = #arg;));
+                        names.push(name);
+                    }
+                    return Ok(quote!({
+                        let #receiver_ident = ::core::ptr::addr_of_mut!(#receiver);
+                        #(#binds)*
+                        unsafe { #callee(&mut (*#receiver_ident), __ctx, #(#names),*) }
+                    }));
+                }
+                let call = quote!(#callee(&mut (#receiver), __ctx, #(#rest),*));
+                return Ok(call);
             }
             let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
             let call_args = if is_method {
@@ -1957,6 +2085,13 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
         MirExpr::IsSome { expr, .. } => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            if let Some(ty) = expr_base_ty(expr, body_ctx)
+                && matches!(emit_env.types.resolve(ty), Some(Type::Fn { .. }))
+                && let Some(kind) = ctx.fn_value_kind(ty)
+            {
+                let name = EmitCtx::fn_value_ident(kind);
+                return Ok(quote!(!matches!(#inner, #name::__Unset)));
+            }
             Ok(quote!(#inner.is_some()))
         }
         MirExpr::UnwrapOptional { expr, .. } => {
@@ -2049,6 +2184,7 @@ fn emit_expr(
                 body_ctx.shared_name_map(),
                 body_ctx.shared_id_map(),
             );
+            child_ctx.set_module_idents(std::rc::Rc::clone(ctx.module_idents()));
             child_ctx.inherit_dynamic(body_ctx);
             child_ctx.seed_dynamic(body, params, locals, types);
             child_ctx.seed_move_safe(body, locals);
@@ -2361,6 +2497,7 @@ fn emit_closure_value(
 
     let mut child =
         BodyCtx::for_closure(ret_ty, body_ctx.shared_name_map(), body_ctx.shared_id_map());
+    child.set_module_idents(std::rc::Rc::clone(ctx.module_idents()));
     child.inherit_dynamic(body_ctx);
     child.seed_capture_types(captures, body_ctx);
     child.seed_dynamic(body, params, locals, types);
@@ -3355,6 +3492,51 @@ pub(super) fn emit_float(value: f64) -> TokenStream {
     }
 }
 
+fn typeof_of_optional_inner(ty: TypeId, emit_env: &EmitEnv) -> Option<&'static str> {
+    match emit_env.types.resolve(ty) {
+        Some(
+            Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64,
+        ) => Some("number"),
+        Some(Type::Bool) => Some("boolean"),
+        Some(Type::String) => Some("string"),
+        Some(Type::BigInt) => Some("bigint"),
+        Some(Type::Symbol) => Some("symbol"),
+        Some(
+            Type::Struct { .. }
+            | Type::Array { .. }
+            | Type::Named { .. }
+            | Type::Promise { .. }
+            | Type::Date
+            | Type::ArrayBuffer
+            | Type::WeakMap { .. }
+            | Type::Int8Array
+            | Type::Uint8Array
+            | Type::Uint8ClampedArray
+            | Type::Int16Array
+            | Type::Uint16Array
+            | Type::Int32Array
+            | Type::Uint32Array
+            | Type::Float32Array
+            | Type::Float64Array
+            | Type::Result { .. }
+            | Type::Tuple { .. }
+            | Type::Generator { .. }
+            | Type::GeneratorResult { .. }
+            | Type::AsyncGenYield { .. },
+        ) => Some("object"),
+        _ => None,
+    }
+}
+
 fn emit_typeof(
     expr: &MirExpr,
     ctx: &EmitCtx,
@@ -3370,6 +3552,23 @@ fn emit_typeof(
             __ts_aot_typeof_null()
         ))),
         _ => {
+            if let Some(Type::Optional { inner, nullish }) = value_ty(expr, ctx, emit_env, body_ctx)
+                .and_then(|ty| emit_env.types.resolve(ty))
+                .cloned()
+                && nullish.undefined
+                && !nullish.null
+                && let Some(some_typeof) = typeof_of_optional_inner(inner, emit_env)
+            {
+                let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+                let some_literal = Literal::string(some_typeof);
+                return Ok(quote!(ts_aot_runtime::JsString::from(
+                    if (#inner).is_none() {
+                        "undefined"
+                    } else {
+                        #some_literal
+                    }
+                )));
+            }
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
             Ok(quote!(ts_aot_runtime::JsString::from(__ts_aot_typeof(&#inner))))
         }
@@ -3531,13 +3730,33 @@ fn emit_runtime_call(
             )))
         }
         RuntimeOp::ArrayGetOrDefault => {
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
             let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
-            Ok(quote!(__ts_aot_array_get_or_default::<#element_ty>(
-                &#arr,
-                #idx as i64
-            )))
+            let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            match &args[0] {
+                MirExpr::Global(name) if is_owned_global(name, ctx, emit_env) => {
+                    let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+                    Ok(quote!({
+                        let __ts_index = #idx as i64;
+                        __ts_aot_array_get_or_default::<#element_ty>(#arr, __ts_index)
+                    }))
+                }
+                MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
+                    let place = body_ctx.local_ref(*id);
+                    Ok(quote!({
+                        let __ts_array = &(#place);
+                        let __ts_index = #idx as i64;
+                        __ts_aot_array_get_or_default::<#element_ty>(__ts_array, __ts_index)
+                    }))
+                }
+                other => {
+                    let arr = emit_array_slice_arg(other, ctx, emit_env, body_ctx)?;
+                    Ok(quote!({
+                        let __ts_array = #arr;
+                        let __ts_index = #idx as i64;
+                        __ts_aot_array_get_or_default::<#element_ty>(__ts_array, __ts_index)
+                    }))
+                }
+            }
         }
         RuntimeOp::ArrayIsArray => {
             let value = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -3724,7 +3943,6 @@ fn emit_runtime_call(
         }
         RuntimeOp::TypeOf => emit_typeof(&args[0], ctx, emit_env, body_ctx),
         RuntimeOp::ArrayPush => {
-            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let item = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
             let item = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
                 Some(element) => {
@@ -3733,6 +3951,20 @@ fn emit_runtime_call(
                 }
                 None => item,
             };
+            if let MirExpr::Global(name) = &args[0]
+                && is_owned_global(name, ctx, emit_env)
+            {
+                let ident = ident_from(name);
+                return Ok(quote!(unsafe {
+                    {
+                        let __ts_item = #item;
+                        let __ts_arr = &mut *::core::ptr::addr_of_mut!(#ident);
+                        __ts_arr.push(__ts_item);
+                        i64::try_from(__ts_arr.len()).unwrap_or(0)
+                    }
+                }));
+            }
+            let (arr, needs_unsafe) = emit_mut_receiver(&args[0], ctx, emit_env, body_ctx)?;
             let call = quote!(__ts_aot_array_push(&mut #arr, #item));
             Ok(if needs_unsafe {
                 quote!(unsafe { #call })
@@ -3766,8 +3998,8 @@ fn emit_runtime_call(
                 let base = emit_expr(base, ctx, emit_env, body_ctx)?;
                 return Ok(quote!(#base.as_ref().map(|o| #name(o))));
             }
-            let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
-            Ok(quote!(#name(&#arr)))
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+            Ok(quote!(#name(#arr)))
         }
         RuntimeOp::MathMax | RuntimeOp::MathMin => {
             let name = runtime_op_ident(op)?;
@@ -4195,9 +4427,62 @@ fn emit_switch(
     let prev_break = body_ctx.break_label();
     body_ctx.set_break_label(Some(switch_ident.clone()));
     body_ctx.enter_switch();
-    let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
+    let mut arm_blocks: Vec<&MirBlock> = cases.iter().map(|case| &case.body).collect();
+    if let Some(def) = default {
+        arm_blocks.push(def);
+    }
+    let hoisted = switch_hoisted_locals(&arm_blocks, ctx, emit_env, body_ctx)?;
+    let hoisted_ids: HashSet<LocalId> = hoisted.iter().map(|(local, _)| *local).collect();
+    let mut decls: Vec<TokenStream> = Vec::with_capacity(hoisted.len());
+    for (local, ty) in &hoisted {
+        let name = body_ctx.local_ident(*local);
+        let ty_tokens = emit_type_id_with_ctx(*ty, emit_env, ctx);
+        let mut budget = super::CONST_DEFAULT_BUDGET;
+        let default_tokens = super::emit_const_default(
+            *ty,
+            ctx,
+            emit_env,
+            0,
+            &mut budget,
+            super::types::LifetimeMode::Full,
+        )?;
+        decls.push(quote!(let mut #name: #ty_tokens = #default_tokens;));
+    }
+    let mut case_bodies: Vec<(&ConstValue, Vec<TokenStream>)> = Vec::with_capacity(cases.len());
     for case in cases {
-        let pat = match &case.value {
+        let body_stmts = emit_switch_arm(&case.body, &hoisted_ids, ctx, emit_env, body_ctx)?;
+        case_bodies.push((&case.value, body_stmts));
+    }
+    let default_body = match default {
+        Some(def) => Some(emit_switch_arm(def, &hoisted_ids, ctx, emit_env, body_ctx)?),
+        None => None,
+    };
+    body_ctx.exit_switch();
+    body_ctx.set_break_label(prev_break);
+    let lt = loop_label(&switch_ident);
+    if let Some(kind) = switch_chain_kind(disc, cases, ctx, emit_env, body_ctx) {
+        let disc_ident =
+            body_ctx.alloc_hoist_ident(&format!("__switch_disc_{}", body_ctx.alloc_block_id()));
+        let mut chain = if let Some(stmts) = &default_body {
+            quote!({ #(#stmts)* })
+        } else {
+            quote!({})
+        };
+        for (value, body_stmts) in case_bodies.iter().rev() {
+            let test = switch_case_equality(kind, &disc_ident, value);
+            chain = quote!(if #test { #(#body_stmts)* } else #chain);
+        }
+        return Ok(quote!(
+            #lt: {
+                let #disc_ident = #disc_expr;
+                #(#decls)*
+                #chain
+            }
+        ));
+    }
+    let mut arms: Vec<TokenStream> = Vec::with_capacity(cases.len() + 1);
+    for (value, body_stmts) in &case_bodies {
+        let pat = match value {
             ConstValue::Int(v) => {
                 let lit = Literal::i128_unsuffixed(*v);
                 quote!(#lit)
@@ -4207,19 +4492,184 @@ fn emit_switch(
                 quote!(#lit)
             }
         };
-        let body_stmts = emit_block_stmts(&case.body, ctx, emit_env, body_ctx)?;
         arms.push(quote!(#pat => { #(#body_stmts)* }));
     }
-    if let Some(def) = default {
-        let body_stmts = emit_block_stmts(def, ctx, emit_env, body_ctx)?;
-        arms.push(quote!(_ => { #(#body_stmts)* }));
-    } else {
-        arms.push(quote!(_ => {}));
+    match &default_body {
+        Some(body_stmts) => arms.push(quote!(_ => { #(#body_stmts)* })),
+        None => arms.push(quote!(_ => {})),
     }
-    body_ctx.exit_switch();
-    body_ctx.set_break_label(prev_break);
-    let lt = loop_label(&switch_ident);
-    Ok(quote!(#lt: { match #disc_expr { #(#arms),* } }))
+    if decls.is_empty() {
+        Ok(quote!(#lt: { match #disc_expr { #(#arms),* } }))
+    } else {
+        let disc_ident =
+            body_ctx.alloc_hoist_ident(&format!("__switch_disc_{}", body_ctx.alloc_block_id()));
+        Ok(quote!(
+            #lt: {
+                let #disc_ident = #disc_expr;
+                #(#decls)*
+                match #disc_ident { #(#arms),* }
+            }
+        ))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchChainKind {
+    Float,
+    String,
+}
+
+fn switch_chain_kind(
+    disc: &MirExpr,
+    cases: &[ts_aot_ir_mir::SwitchCase],
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<SwitchChainKind> {
+    let kind = match emit_env
+        .types
+        .resolve(value_ty(disc, ctx, emit_env, body_ctx)?)?
+    {
+        Type::String => SwitchChainKind::String,
+        ty if is_float_type(ty) => SwitchChainKind::Float,
+        _ => return None,
+    };
+    cases
+        .iter()
+        .all(|case| {
+            matches!(
+                (kind, &case.value),
+                (SwitchChainKind::Float, ConstValue::Int(_))
+                    | (SwitchChainKind::String, ConstValue::String(_))
+            )
+        })
+        .then_some(kind)
+}
+
+fn switch_case_equality(kind: SwitchChainKind, disc: &Ident, value: &ConstValue) -> TokenStream {
+    match (kind, value) {
+        (SwitchChainKind::Float, ConstValue::Int(v)) => {
+            #[allow(clippy::cast_precision_loss)]
+            let lit = Literal::f64_unsuffixed(*v as f64);
+            quote!(#disc == #lit)
+        }
+        (SwitchChainKind::String, ConstValue::String(s)) => {
+            let lit = Literal::string(s.as_str());
+            quote!(#disc == ts_aot_runtime::JsString::from(#lit))
+        }
+        (SwitchChainKind::Float, ConstValue::String(_))
+        | (SwitchChainKind::String, ConstValue::Int(_)) => quote!(false),
+    }
+}
+
+fn switch_hoisted_locals(
+    arms: &[&MirBlock],
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Vec<(LocalId, TypeId)>, BackendError> {
+    let mut arm_uses: Vec<HashSet<LocalId>> = Vec::with_capacity(arms.len());
+    let candidates = arms
+        .iter()
+        .flat_map(|arm| arm.stmts.iter())
+        .filter_map(|stmt| {
+            if let MirStmt::Let { local, .. } = stmt {
+                Some(*local)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for arm in arms {
+        let mut counts: std::collections::HashMap<LocalId, (u32, bool)> =
+            std::collections::HashMap::new();
+        super::ctx::count_uses_block(arm, false, &mut counts);
+        let mut uses: HashSet<_> = counts.into_keys().collect();
+        uses.extend(super::ctx::collect_assigned_locals(
+            &arm.stmts,
+            emit_env.types,
+            &candidates,
+        ));
+        arm_uses.push(uses);
+    }
+    let mut hoisted: Vec<(LocalId, TypeId)> = Vec::new();
+    for (index, arm) in arms.iter().enumerate() {
+        for stmt in &arm.stmts {
+            let MirStmt::Let {
+                local, ty, init, ..
+            } = stmt
+            else {
+                continue;
+            };
+            if hoisted.iter().any(|(other, _)| other == local) {
+                continue;
+            }
+            if body_ctx.shared_access_for_local(*local).is_some() {
+                continue;
+            }
+            if matches!(
+                emit_env.types.resolve(*ty),
+                None | Some(Type::Error | Type::Void)
+            ) {
+                continue;
+            }
+            if let Some(init) = init
+                && is_dynamic_expr(init, body_ctx)
+            {
+                continue;
+            }
+            let read_elsewhere = arm_uses
+                .iter()
+                .enumerate()
+                .any(|(other, ids)| other != index && ids.contains(local));
+            if !read_elsewhere {
+                continue;
+            }
+            let mut budget = super::CONST_DEFAULT_BUDGET;
+            if super::emit_const_default(
+                *ty,
+                ctx,
+                emit_env,
+                0,
+                &mut budget,
+                super::types::LifetimeMode::Full,
+            )
+            .is_err()
+            {
+                return Err(BackendError::NotImplemented(
+                    "a `switch` case declares a local that another case reads, and this local's \
+                     type has no default value to hoist the declaration with",
+                ));
+            }
+            hoisted.push((*local, *ty));
+        }
+    }
+    Ok(hoisted)
+}
+
+fn emit_switch_arm(
+    block: &MirBlock,
+    hoisted: &HashSet<LocalId>,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<Vec<TokenStream>, BackendError> {
+    let mut out = Vec::with_capacity(block.stmts.len());
+    for stmt in &block.stmts {
+        match stmt {
+            MirStmt::Let {
+                local, ty, init, ..
+            } if hoisted.contains(local) => {
+                let name = body_ctx.local_ident(*local);
+                if let Some(init) = init {
+                    let value = let_init_tokens(init, *ty, ctx, emit_env, body_ctx)?;
+                    out.push(quote!(#name = #value;));
+                }
+            }
+            other => out.push(emit_stmt(other, ctx, emit_env, body_ctx)?),
+        }
+    }
+    Ok(out)
 }
 
 fn await_helper_path(body_ctx: &BodyCtx) -> TokenStream {

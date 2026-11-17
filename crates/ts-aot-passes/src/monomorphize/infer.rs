@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use ts_aot_core::{GenericParamId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirExpr, HirFunction};
 
+use crate::hir_to_mir::ExprConverter;
+
 use super::substitute::TypeParamMap;
 
 pub fn infer_type_args(
@@ -10,6 +12,7 @@ pub fn infer_type_args(
     args: &[HirExpr],
     explicit_type_args: &[TypeId],
     types: &mut TypeTable,
+    converter: &ExprConverter,
 ) -> Vec<TypeId> {
     if !explicit_type_args.is_empty() {
         if explicit_type_args.len() == generic_fn.type_params.len() {
@@ -25,7 +28,7 @@ pub fn infer_type_args(
     let mut conflicted: HashSet<GenericParamId> = HashSet::new();
     let mut has_resolved_non_generic_param = false;
     for (param, arg) in generic_fn.params.iter().zip(args.iter()) {
-        let arg_ty = hir_expr_ty(arg, types);
+        let arg_ty = argument_ty(arg, converter, types);
         if let Some(param_resolved) = types.resolve(param.ty) {
             if !matches!(param_resolved, Type::GenericParam { .. }) {
                 has_resolved_non_generic_param = true;
@@ -52,7 +55,7 @@ pub fn infer_type_args(
                         && generic_fn.type_params.len() == 1
                         && !conflicted.contains(id)
                     {
-                        args.get(i).and_then(|a| hir_expr_ty(a, types))
+                        args.get(i).and_then(|a| argument_ty(a, converter, types))
                     } else {
                         None
                     }
@@ -60,6 +63,22 @@ pub fn infer_type_args(
                 .unwrap_or_else(|| types.intern(&Type::GenericParam { id: *id }))
         })
         .collect()
+}
+
+fn argument_ty(arg: &HirExpr, converter: &ExprConverter, types: &mut TypeTable) -> Option<TypeId> {
+    let ty = hir_expr_ty(arg, types);
+    if let Some(ty) = ty
+        && !matches!(types.resolve(ty), Some(Type::Error))
+    {
+        return Some(ty);
+    }
+    converter
+        .expr_type(arg, types)
+        .filter(|resolved| {
+            !matches!(types.resolve(*resolved), Some(Type::Error) | None)
+                && type_resolved(*resolved, types)
+        })
+        .or(ty)
 }
 
 pub fn bind_param_ty_resolved(
@@ -235,6 +254,7 @@ pub fn hir_expr_ty(expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         | HirExpr::Field { ty, .. }
         | HirExpr::Index { ty, .. }
         | HirExpr::Call { ty, .. }
+        | HirExpr::DefaultConstruct { ty, .. }
         | HirExpr::Binary { ty, .. }
         | HirExpr::Unary { ty, .. }
         | HirExpr::StructLiteral { ty, .. }

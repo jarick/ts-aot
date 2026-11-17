@@ -12,6 +12,24 @@ fn compile_module(source: &str) -> ts_aot_driver::DriverOutput {
     )
 }
 
+fn crate_rust_of(source: &str) -> String {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        source,
+        &CompileOptions {
+            emit: EmitStage::Crate,
+            module: true,
+        },
+    );
+    assert!(
+        !out.has_errors(),
+        "must compile through the full pipeline; got {:?}",
+        out.diagnostics
+    );
+    out.rust_source
+        .expect("emit-crate must populate rust_source")
+}
+
 fn rust_of(source: &str) -> String {
     let out = compile_module(source);
     assert!(
@@ -25,6 +43,58 @@ fn rust_of(source: &str) -> String {
 
 fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+#[test]
+fn negating_an_absent_optional_is_true() {
+    const SOURCE: &str = "
+export function num(): boolean { const x: number | null = null; return !x; }
+export function str(): boolean { const s: string | null = null; return !s; }
+export function zero(): boolean { const x: number | null = 0; return !x; }
+export function empty(): boolean { const s: string | null = \"\"; return !s; }
+export function present(): boolean { const x: number | null = 3; return !x; }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert!(negated_optional::num(&ctx));
+    assert!(negated_optional::str(&ctx));
+    assert!(negated_optional::zero(&ctx));
+    assert!(negated_optional::empty(&ctx));
+    assert!(!negated_optional::present(&ctx));
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    check_generated_crate("negated_optional", &rust);
+    let stdout = run_generated_crate("negated_optional", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn negating_a_literal_uses_its_own_type() {
+    let rust = rust_of(
+        "export function zero(): boolean { return !0; } \
+         export function text(): boolean { return !\"\"; }",
+    );
+    let zero = body_of(&rust, "zero");
+    assert!(
+        normalized(zero).contains("!=0"),
+        "`!0` must be decided from the literal's own numeric type, not the type-id sentinel; \
+         got:\n{zero}"
+    );
+    let text = body_of(&rust, "text");
+    assert!(
+        normalized(text).contains("StringLen") || normalized(text).contains("string_len"),
+        "`!\"\"` must be decided from the literal's own string type; got:\n{text}"
+    );
 }
 
 fn body_of<'r>(rust: &'r str, name: &str) -> &'r str {
@@ -573,6 +643,21 @@ class S {
 }
 export function g(): void { S.fill(); }
 ";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(accessor_compound::filled(&ctx), 7.0);
+    assert_eq!(accessor_compound::kept(&ctx), 5.0);
+    println!("ok");
+}
+"#;
     let rust = rust_of(SOURCE);
 
     let fill = normalized(method_body_of(&rust, "Box__fill"));
@@ -598,6 +683,8 @@ export function g(): void { S.fill(); }
     );
 
     check_generated_crate("accessor_compound", &rust);
+    let stdout = run_generated_crate("accessor_compound", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 
     let static_rust = rust_of(STATIC_SOURCE);
     let static_fill = normalized(method_body_of(&static_rust, "S__fill"));
@@ -739,8 +826,22 @@ class G {
   *m(): number { this.v = 1; yield 1; }
   get_(): number { return this.v; }
 }
-export function f(g: G): number { const it = g.m(); return g.get_(); }
+export function run(): number { const g = new G(); g.m(); return g.get_(); }
 ";
+    const GENERATOR_MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(mutating_generator::run(&ctx), 0.0);
+    println!("ok");
+}
+"#;
 
     let rust = rust_of(SOURCE);
     let flat = normalized(&rust);
@@ -759,10 +860,134 @@ export function f(g: G): number { const it = g.m(); return g.get_(); }
 
     check_generated_crate("mutating_captured", &rust_of(CAPTURED));
 
-    let generator_flat = normalized(&rust_of(GENERATOR));
+    let generator_rust = rust_of(GENERATOR);
+    let generator_flat = normalized(&generator_rust);
 
     assert!(
         generator_flat.contains("fnG__m<'a>(mutself,"),
         "a generator method keeps the by-value receiver; got:\n{generator_flat}"
     );
+    assert!(
+        generator_flat.contains("yield_((1asf64))"),
+        "`yield 1` is coerced to the generator's `number` yield type; got:\n{generator_flat}"
+    );
+
+    check_generated_crate("mutating_generator", &generator_rust);
+    let stdout = run_generated_crate("mutating_generator", &generator_rust, GENERATOR_MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_mutating_method_on_a_global_writes_the_global() {
+    const GLOBAL_RECEIVER: &str = r"
+class Holder {
+  v: number = 0;
+  set_(x: number): void { this.v = x; }
+  get_(): number { return this.v; }
+}
+let held: Holder = new Holder();
+export function via_global(): number { held.set_(5); return held.get_(); }
+";
+    const GLOBAL_MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(global_receiver::via_global(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(GLOBAL_RECEIVER);
+    let flat = normalized(&rust);
+    let capture_at = flat
+        .find("addr_of_mut!(held)")
+        .expect("the global receiver must be captured as an address before its arguments run");
+    let borrow_at = flat
+        .find("Holder__set_(&mut(*__ts_receiver)")
+        .expect("the setter must run on the captured receiver");
+    assert!(
+        capture_at < borrow_at,
+        "the receiver must be captured before it is borrowed; got:\n{flat}"
+    );
+    assert!(
+        !flat.contains("Holder__set_(&mut(held)"),
+        "the receiver must not be re-read after the arguments; got:\n{flat}"
+    );
+    check_generated_crate("global_receiver", &rust);
+    let stdout = run_generated_crate("global_receiver", &rust, GLOBAL_MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_mutating_method_through_an_optional_chain_writes_the_receiver() {
+    const SOURCE: &str = r"
+class Holder {
+  v: number = 0;
+  set_(x: number): void { this.v = x; }
+  get_(): number { return this.v; }
+}
+let held: Holder | null = new Holder();
+function read_(h: Holder | null): number { return h?.get_() ?? -1; }
+export function via_opt(): number { held?.set_(5); return read_(held); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    // `held: Holder | null = new Holder()` is seeded by the module init, so the
+    // global is `None` until it runs.
+    optional_chain_mutation::__ts_aot_init();
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(optional_chain_mutation::via_opt(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("unsafe{held.as_mut().map("),
+        "the chain borrows the receiver instead of cloning it; got:\n{flat}"
+    );
+    check_generated_crate("optional_chain_mutation", &rust);
+    let stdout = run_generated_crate("optional_chain_mutation", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn negating_nullish_literals_and_nested_not_follow_js_truthiness() {
+    const SOURCE: &str = "export function notNull(): boolean { return !null; } \
+         export function notUndefined(): boolean { return !undefined; } \
+         export function notNotFive(): boolean { return !!5; } \
+         export function notNotZero(): boolean { return !!0; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(not_literals::notNull(&ctx), true);
+    assert_eq!(not_literals::notUndefined(&ctx), true);
+    assert_eq!(not_literals::notNotFive(&ctx), true);
+    assert_eq!(not_literals::notNotZero(&ctx), false);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    check_generated_crate("not_literals", &rust);
+    let stdout = run_generated_crate("not_literals", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

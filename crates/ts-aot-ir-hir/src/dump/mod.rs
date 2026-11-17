@@ -43,6 +43,12 @@ impl Dumper {
     }
 }
 
+pub fn dump_stmts_text(stmts: &[crate::stmt::HirStmt]) -> String {
+    let mut d = Dumper::new();
+    expr::dump_body(stmts, &mut d);
+    d.buf
+}
+
 impl HirProgram {
     pub fn dump_text(&self) -> String {
         let mut d = Dumper::new();

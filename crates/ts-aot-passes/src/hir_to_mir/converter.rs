@@ -351,6 +351,7 @@ pub struct ExprConverter {
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) name_to_function: Arc<HashMap<Atom, FunctionId>>,
+    pub(super) function_params: Arc<HashMap<FunctionId, Vec<(TypeId, bool)>>>,
     pub(super) program: Arc<HirProgram>,
     pub(super) namespace_path: Vec<String>,
     pub(super) next_local: u32,
@@ -396,6 +397,7 @@ impl ExprConverter {
             local_names: HashMap::new(),
             function_remap: remap,
             name_to_function: Arc::new(HashMap::new()),
+            function_params: Arc::new(HashMap::new()),
             program: Arc::new(HirProgram::new(ModuleId::from_raw(0))),
             namespace_path: Vec::new(),
             next_local,
@@ -847,16 +849,16 @@ impl ExprConverter {
                 placeholder
             }
             None => {
-                ctx.warning(
+                ctx.error(
                     "P0010",
                     format!(
-                        "field `{}` is not declared on the static type of the owner; the \
+                        "field `{}` is not declared on the resolved type of the owner; the \
                          access is lowered with a placeholder field",
                         field_name.as_str()
                     ),
                     Span::new(0, 0),
                 );
-                placeholder
+                FieldId::from_raw(u32::MAX)
             }
         }
     }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use oxc_ast::ast::{
     Argument, AssignmentExpression, BinaryExpression, CallExpression, ChainElement,
     ChainExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
@@ -6,19 +8,101 @@ use oxc_ast::ast::{
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
-use oxc_syntax::operator::UpdateOperator;
+use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
 use ts_aot_core::{
     Atom, Diagnostic, FieldId, LocalId, NullishKinds, Span, Type, TypeId, TypeTable,
 };
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirDecl, HirExpr, HirStmt, Visitor, walk_expr};
+use ts_aot_ir_hir::{
+    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirStmt, HirUnaryOp, Visitor, walk_expr,
+};
 
 use crate::body::FunctionBodyInput;
 use crate::ops::{
     CompoundOp, compound_op, map_binary_op, map_logical_op, map_unary_op, number_to_hir,
 };
 use crate::scope::BodyScope;
-use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
+use crate::skeleton::{
+    ClassValueFieldBase, ClassValueFieldState, ClassValuePoisonConstraint, ClassValuePoisonFacts,
+    ClassValuePoisonWrite, PendingGlobalRead, PendingGlobalReceiverCall, ReceiverRef,
+    ReceiverWriteScan, SkeletonBuilder, SkeletonEnv, state_holds_class_value,
+};
 use crate::util::core_span_from_oxc;
+
+const CLASS_VALUE_FIELD_LOGICAL_ASSIGN_CODE: &str = "E0419";
+const CLASS_VALUE_FIELD_LOGICAL_ASSIGN: &str = "logical assignment `&&=` to a class-value field is not supported here: the field is \
+     not provably a class value at this point, so its truthiness test cannot be lowered soundly; \
+     assign the class value with `=`, or make the field provably a class value first";
+
+fn same_number_expr(lhs: &HirExpr, rhs: &HirExpr) -> bool {
+    match (lhs, rhs) {
+        (HirExpr::Int(lhs, _), HirExpr::Int(rhs, _)) => lhs == rhs,
+        (HirExpr::Float(lhs, _), HirExpr::Float(rhs, _)) => lhs == rhs,
+        (HirExpr::Local { id: lhs, .. }, HirExpr::Local { id: rhs, .. }) => lhs == rhs,
+        (HirExpr::Global { name: lhs, .. }, HirExpr::Global { name: rhs, .. }) => lhs == rhs,
+        (
+            HirExpr::Unary {
+                op: HirUnaryOp::Neg,
+                expr: lhs,
+                ..
+            },
+            HirExpr::Unary {
+                op: HirUnaryOp::Neg,
+                expr: rhs,
+                ..
+            },
+        ) => same_number_expr(lhs, rhs),
+        _ => false,
+    }
+}
+
+fn constant_numeric_value(expr: &HirExpr) -> Option<f64> {
+    match expr {
+        #[allow(clippy::cast_precision_loss)]
+        HirExpr::Int(value, _) => Some(*value as f64),
+        HirExpr::Float(bits, _) => Some(f64::from_bits(*bits)),
+        HirExpr::Unary {
+            op: HirUnaryOp::Neg,
+            expr,
+            ..
+        } => Some(-constant_numeric_value(expr)?),
+        HirExpr::Binary { op, lhs, rhs, .. } => {
+            if *op == HirBinaryOp::Sub && same_number_expr(lhs, rhs) {
+                return Some(0.0);
+            }
+            let lhs = constant_numeric_value(lhs)?;
+            let rhs = constant_numeric_value(rhs)?;
+            match op {
+                HirBinaryOp::Add => Some(lhs + rhs),
+                HirBinaryOp::Sub => Some(lhs - rhs),
+                HirBinaryOp::Mul => Some(lhs * rhs),
+                HirBinaryOp::Div => Some(lhs / rhs),
+                HirBinaryOp::Mod => Some(lhs % rhs),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn class_value_definite_branch_writes(
+    writes: &[ClassValuePoisonWrite],
+    branch_depth: u32,
+) -> HashMap<(TypeId, Atom, ClassValueFieldBase), (bool, ClassValuePoisonFacts)> {
+    let mut last: HashMap<(TypeId, Atom, ClassValueFieldBase), &ClassValuePoisonWrite> =
+        HashMap::new();
+    for write in writes {
+        last.insert(
+            (write.owner_ty, write.field.clone(), write.base.clone()),
+            write,
+        );
+    }
+    last.into_iter()
+        .filter(|(_, write)| {
+            (write.plain_assign || write.holds_class_value) && write.depth == branch_depth
+        })
+        .map(|(key, write)| (key, (write.holds_class_value, write.facts)))
+        .collect()
+}
 
 fn infer_closure_return_ty(
     body: &[HirStmt],
@@ -229,6 +313,20 @@ const ASSERT_SHIM_METHODS: &[(&str, &str)] = &[
 ];
 
 impl SkeletonBuilder {
+    fn identifier_expr(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        name: &str,
+        scope: &mut BodyScope,
+        span: Span,
+    ) -> HirExpr {
+        let expr = senv.ident_to_expr(name, scope, span);
+        if let HirExpr::Local { id, .. } = &expr {
+            self.note_switch_case_local_read(*id);
+        }
+        expr
+    }
+
     pub(crate) fn walk_expr(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -243,7 +341,7 @@ impl SkeletonBuilder {
             }
             Expression::NullLiteral(n) => HirExpr::Null(core_span_from_oxc(n.span)),
             Expression::Identifier(id) => {
-                senv.ident_to_expr(id.name.as_str(), scope, core_span_from_oxc(id.span))
+                self.identifier_expr(senv, id.name.as_str(), scope, core_span_from_oxc(id.span))
             }
             Expression::ThisExpression(this_expr) => {
                 if let Some((id, ty)) = scope.lookup("this") {
@@ -317,7 +415,10 @@ impl SkeletonBuilder {
             Expression::ArrayExpression(arr) => self.walk_array_expression(senv, arr, scope),
             Expression::ObjectExpression(obj) => self.walk_object_expression(senv, obj, scope),
             Expression::ConditionalExpression(cond) => {
-                self.walk_conditional_expression(senv, cond, scope)
+                let saved_unknown = self.unknown_class_value_locals.clone();
+                let expr = self.walk_conditional_expression(senv, cond, scope);
+                self.merge_unknown_class_value_locals(saved_unknown);
+                expr
             }
             Expression::SequenceExpression(seq) => self.walk_sequence_expression(senv, seq, scope),
             Expression::ClassExpression(class_expr) => {
@@ -519,6 +620,8 @@ impl SkeletonBuilder {
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
+        let captured_class_values = self.capture_class_value_map(scope, &narrowed);
+        self.capture_class_values.push(captured_class_values);
         let mut body: Vec<HirStmt> = if arrow.expression {
             let inner_base = params
                 .iter()
@@ -534,7 +637,12 @@ impl SkeletonBuilder {
                 &arrow.params.items,
                 0,
             );
-            let mut stmts = self.walk_stmts(senv, &arrow.body.statements, &mut inner_scope);
+            let mut stmts = {
+                let saved_module_init = std::mem::take(&mut self.module_init_depth);
+                let stmts = self.walk_stmts(senv, &arrow.body.statements, &mut inner_scope);
+                self.module_init_depth = saved_module_init;
+                stmts
+            };
             if let Some(HirStmt::Expr { expr }) = stmts.first().cloned() {
                 stmts[0] = HirStmt::Return { value: Some(expr) };
             }
@@ -554,11 +662,13 @@ impl SkeletonBuilder {
                 },
                 false,
                 true,
+                false,
             );
             scope.set_next(used);
             b
         };
         senv.capture_types.pop();
+        self.capture_class_values.pop();
         self.own_statement_expr = outer_statement_expr;
         self.strict = prev_strict;
         let captures = collect_capture_refs(&mut body, scope, &narrowed);
@@ -638,6 +748,8 @@ impl SkeletonBuilder {
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
+        let captured_class_values = self.capture_class_value_map(scope, &narrowed);
+        self.capture_class_values.push(captured_class_values);
         let (mut body, used) = self.walk_function_body(
             senv,
             &FunctionBodyInput {
@@ -650,9 +762,11 @@ impl SkeletonBuilder {
             },
             false,
             false,
+            true,
         );
         scope.set_next(used);
         senv.capture_types.pop();
+        self.capture_class_values.pop();
         self.own_statement_expr = outer_statement_expr;
         self.strict = prev_strict;
         let captures = collect_capture_refs(&mut body, scope, &narrowed);
@@ -876,8 +990,11 @@ impl SkeletonBuilder {
                 HirExpr::String(..) => Some(senv.types.intern(&ts_aot_core::Type::String)),
                 HirExpr::Bool(..) => Some(senv.types.intern(&ts_aot_core::Type::Bool)),
                 _ => {
-                    let t = e.ty();
-                    (t != ts_aot_core::TypeId::from_raw(0)).then_some(t)
+                    if e.has_static_type() {
+                        Some(e.ty())
+                    } else {
+                        None
+                    }
                 }
             };
             let Some(ty) = ty else {
@@ -984,8 +1101,27 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let cond = self.walk_expr(senv, &c.test, scope);
+        let saved_fields = self.snapshot_class_value_field_state();
+        self.enter_class_value_branch();
+        let then_start = self.class_value_poison_writes.len();
         let then_branch = self.walk_expr(senv, &c.consequent, scope);
+        let else_start = self.class_value_poison_writes.len();
+        self.leave_class_value_branch();
+        let then_fields = self.snapshot_class_value_field_state();
+        self.restore_class_value_field_state(&saved_fields);
+        self.enter_class_value_branch();
         let else_branch = self.walk_expr(senv, &c.alternate, scope);
+        let else_end = self.class_value_poison_writes.len();
+        self.leave_class_value_branch();
+        let else_fields = self.snapshot_class_value_field_state();
+        self.join_class_value_field_states(&[then_fields.clone(), else_fields.clone()]);
+        let branch_depth = self.conditional_depth + 1;
+        self.join_class_value_field_poison(
+            &[(then_start, else_start), (else_start, else_end)],
+            &[then_fields, else_fields],
+            &saved_fields,
+            branch_depth,
+        );
         let ty = if hir_is_string_valued(&then_branch, senv.types)
             && hir_is_string_valued(&else_branch, senv.types)
         {
@@ -1021,7 +1157,7 @@ impl SkeletonBuilder {
         }
     }
 
-    fn walk_class_expression(
+    pub(crate) fn walk_class_expression(
         &mut self,
         senv: &mut SkeletonEnv,
         class_expr: &oxc_ast::ast::Class<'_>,
@@ -1031,16 +1167,13 @@ impl SkeletonBuilder {
         let seq = self.next_anon_class_id;
         self.next_anon_class_id = self.next_anon_class_id.saturating_add(1);
         let unique_name = Atom::from(format!("__class_m{module_id}_{seq}"));
-        let mut hir_class = self.build_class(senv, class_expr, false);
+        let mut hir_class = self.build_class(senv, class_expr, false, false);
         hir_class.name = unique_name.clone();
+        let class_ty = hir_class.ty;
+        let span = core_span_from_oxc(class_expr.span);
         senv.program
             .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
-        let ty = senv.error_ty();
-        HirExpr::Global {
-            name: unique_name,
-            ty,
-            span: core_span_from_oxc(class_expr.span),
-        }
+        HirExpr::DefaultConstruct { ty: class_ty, span }
     }
 
     fn walk_binary(
@@ -1050,15 +1183,73 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let lhs = self.walk_expr(senv, &b.left, scope);
+        let lhs_class = self.is_class_value_expr(&lhs, scope.body_id());
         let rhs = self.walk_expr(senv, &b.right, scope);
         let ty = senv.error_ty();
+        let span = core_span_from_oxc(b.span);
         if let Some(op) = map_binary_op(b.operator) {
+            let rhs_class = self.is_class_value_expr(&rhs, scope.body_id());
+            if lhs_class || rhs_class {
+                if matches!(
+                    op,
+                    HirBinaryOp::Eq
+                        | HirBinaryOp::Ne
+                        | HirBinaryOp::StrictEq
+                        | HirBinaryOp::StrictNe
+                ) {
+                    if !(lhs_class && rhs_class) {
+                        let other = if lhs_class { &rhs } else { &lhs };
+                        let Some(value) = Self::class_value_equality_constant(senv, op, other)
+                        else {
+                            senv.report_unsupported(
+                                "E0419",
+                                "comparing a class value with a string or a value of unknown type \
+                                 is not supported; compare against a number, `null`, \
+                                 `undefined`, or another class value",
+                                span,
+                            );
+                            return HirExpr::Bool(false, span);
+                        };
+                        let bool_ty = senv.types.intern(&Type::Bool);
+                        return HirExpr::Sequence {
+                            exprs: vec![lhs, rhs, HirExpr::Bool(value, span)],
+                            ty: bool_ty,
+                            span,
+                        };
+                    }
+                } else if matches!(
+                    op,
+                    HirBinaryOp::Add
+                        | HirBinaryOp::Sub
+                        | HirBinaryOp::Mul
+                        | HirBinaryOp::Div
+                        | HirBinaryOp::Mod
+                        | HirBinaryOp::Lt
+                        | HirBinaryOp::Le
+                        | HirBinaryOp::Gt
+                        | HirBinaryOp::Ge
+                        | HirBinaryOp::BitAnd
+                        | HirBinaryOp::BitOr
+                        | HirBinaryOp::BitXor
+                        | HirBinaryOp::Shl
+                        | HirBinaryOp::Shr
+                        | HirBinaryOp::Usr
+                ) {
+                    senv.report_unsupported(
+                        "E0419",
+                        "arithmetic and ordering comparisons on a class value are not supported; \
+                         a class value is an object, not a number",
+                        span,
+                    );
+                    return HirExpr::Bool(false, span);
+                }
+            }
             HirExpr::Binary {
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 ty,
-                span: core_span_from_oxc(b.span),
+                span,
             }
         } else {
             senv.report_unwalked(
@@ -1076,7 +1267,11 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let lhs = self.walk_expr(senv, &l.left, scope);
+        let saved_unknown = self.unknown_class_value_locals.clone();
+        self.enter_class_value_branch();
         let rhs = self.walk_expr(senv, &l.right, scope);
+        self.leave_class_value_branch();
+        self.merge_unknown_class_value_locals(saved_unknown);
         let op = map_logical_op(l.operator);
         let ty = if op == HirBinaryOp::Coalesce {
             let lhs_ty = lhs.ty();
@@ -1119,17 +1314,158 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let inner = self.walk_expr(senv, &unary.argument, scope);
+        let span = core_span_from_oxc(unary.span);
         match map_unary_op(unary.operator) {
+            Some(HirUnaryOp::Not) if self.is_class_value_expr(&inner, scope.body_id()) => {
+                let ty = senv.types.intern(&Type::Bool);
+                HirExpr::Sequence {
+                    exprs: vec![inner, HirExpr::Bool(false, span)],
+                    ty,
+                    span,
+                }
+            }
+            Some(HirUnaryOp::Not) if self.may_be_class_value_expr(&inner) => {
+                senv.report_unsupported(
+                    "E0419",
+                    "`!` on a binding that may hold either a class value or a plain value is not \
+                     supported; a class value is always truthy, while a plain value is not",
+                    span,
+                );
+                HirExpr::Bool(false, span)
+            }
             Some(op) => {
-                let ty = senv.error_ty();
+                let ty = match op {
+                    HirUnaryOp::Not => senv.types.intern(&Type::Bool),
+                    _ => senv.error_ty(),
+                };
                 HirExpr::Unary {
                     op,
                     expr: Box::new(inner),
                     ty,
-                    span: core_span_from_oxc(unary.span),
+                    span,
                 }
             }
             None => inner,
+        }
+    }
+
+    pub(super) fn is_class_value_expr(&self, expr: &HirExpr, body_id: u32) -> bool {
+        match expr {
+            HirExpr::Local { id, .. } => {
+                let storage = self.class_value_storage(*id);
+                self.class_value_locals.contains_key(&storage)
+                    && !self.unknown_class_value_locals.contains_key(&storage)
+            }
+            HirExpr::Global { name, .. } => {
+                let name = name.as_str();
+                if let Some(id) = self.captured_local_id(name) {
+                    return self.captured_class_value_local(name).is_some()
+                        && !self.unknown_class_value_locals.contains_key(&id);
+                }
+                !self.unknown_class_value_globals.contains(name)
+                    && (self.class_value_globals.contains_key(name)
+                        || self.class_types.contains_key(name))
+            }
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let owner_ty = owner.ty();
+                let base = self.class_value_field_base(owner, body_id);
+                let escaping = base
+                    .as_ref()
+                    .is_none_or(|base| !self.class_value_field_base_is_fresh(base));
+                let unpoisoned = self
+                    .class_value_field_poison_bases
+                    .get(&owner_ty)
+                    .and_then(|fields| fields.get(field_name))
+                    .is_none_or(|bases| {
+                        !bases.unknown_base
+                            && if escaping {
+                                bases.bases.is_empty()
+                            } else {
+                                base.as_ref()
+                                    .is_none_or(|base| !bases.bases.contains_key(base))
+                            }
+                    });
+                let has_candidates = escaping
+                    || base.as_ref().is_some_and(|base| {
+                        !self
+                            .fresh_field_base_classes(base, owner_ty, field_name)
+                            .is_empty()
+                    });
+                unpoisoned
+                    && has_candidates
+                    && self
+                        .class_value_fields
+                        .get(&owner_ty)
+                        .is_some_and(|fields| fields.contains_key(field_name))
+                    && !self
+                        .unknown_class_value_fields
+                        .get(&owner_ty)
+                        .is_some_and(|unknown| unknown.contains(field_name))
+            }
+            _ => false,
+        }
+    }
+
+    fn class_value_equality_constant(
+        senv: &SkeletonEnv<'_>,
+        op: HirBinaryOp,
+        other: &HirExpr,
+    ) -> Option<bool> {
+        let strict = matches!(op, HirBinaryOp::StrictEq | HirBinaryOp::StrictNe);
+        let definitely_primitive = matches!(
+            other,
+            HirExpr::Int(..)
+                | HirExpr::Float(..)
+                | HirExpr::Bool(..)
+                | HirExpr::Null(..)
+                | HirExpr::Undefined(..)
+        ) || matches!(
+            senv.types.resolve(other.ty()),
+            Some(
+                Type::F32
+                    | Type::F64
+                    | Type::I8
+                    | Type::I16
+                    | Type::I32
+                    | Type::I64
+                    | Type::U8
+                    | Type::U16
+                    | Type::U32
+                    | Type::U64
+                    | Type::Bool
+                    | Type::Null
+                    | Type::Void
+            )
+        );
+        if !strict && !definitely_primitive {
+            return None;
+        }
+        Some(matches!(op, HirBinaryOp::Ne | HirBinaryOp::StrictNe))
+    }
+
+    fn may_be_class_value_expr(&self, expr: &HirExpr) -> bool {
+        match expr {
+            HirExpr::Local { id, .. } => self
+                .unknown_class_value_locals
+                .contains_key(&self.class_value_storage(*id)),
+            HirExpr::Global { name, .. } => {
+                let name = name.as_str();
+                if let Some(id) = self.captured_local_id(name) {
+                    return self.unknown_class_value_locals.contains_key(&id);
+                }
+                self.unknown_class_value_globals.contains(name)
+                    && (self.class_value_globals.contains_key(name)
+                        || self.class_types.contains_key(name))
+            }
+            HirExpr::Field {
+                owner, field_name, ..
+            } => self
+                .unknown_class_value_fields
+                .get(&owner.ty())
+                .is_some_and(|unknown| unknown.contains(field_name)),
+            _ => false,
         }
     }
 
@@ -1149,6 +1485,57 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let target = self.walk_simple_target(senv, &update.argument, scope);
+        if let HirExpr::Local { id, .. } = &target {
+            let storage = self.class_value_storage(*id);
+            self.constant_int_locals.remove(&storage);
+            self.forget_class_value_local(storage, None);
+        }
+        if let HirExpr::Global { name, .. } = &target {
+            if let Some(id) = self.captured_local_id(name.as_str()) {
+                let storage = self.class_value_storage(id);
+                self.constant_int_locals.remove(&storage);
+                self.forget_class_value_local(storage, Some(name.as_str()));
+            } else {
+                self.class_value_globals.remove(name.as_str());
+                self.unknown_class_value_globals
+                    .insert(name.as_str().to_owned());
+            }
+        }
+        if let HirExpr::Field {
+            owner, field_name, ..
+        } = &target
+        {
+            let owner_ty = owner.ty();
+            let field_name = field_name.clone();
+            let is_class_value_field = self
+                .class_value_fields
+                .get(&owner_ty)
+                .is_some_and(|fields| fields.contains_key(&field_name));
+            if is_class_value_field {
+                let base = self.class_value_field_base(owner, scope.body_id());
+                let conditional =
+                    !self.class_value_branch_ids.is_empty() || self.try_body_skips == Some(true);
+                self.unknown_class_value_fields
+                    .entry(owner_ty)
+                    .or_default()
+                    .insert(field_name.clone());
+                self.record_class_value_field_poison(
+                    owner_ty,
+                    &field_name,
+                    base,
+                    ClassValuePoisonFacts::default(),
+                    false,
+                );
+                if !conditional
+                    && let Some(classes) = self
+                        .class_value_fields
+                        .get_mut(&owner_ty)
+                        .and_then(|fields| fields.get_mut(&field_name))
+                {
+                    classes.clear();
+                }
+            }
+        }
         let op = match update.operator {
             UpdateOperator::Increment => HirBinaryOp::Add,
             UpdateOperator::Decrement => HirBinaryOp::Sub,
@@ -1163,6 +1550,79 @@ impl SkeletonBuilder {
             ty,
             span: core_span_from_oxc(update.span),
         }
+    }
+
+    fn record_global_receiver_call(
+        &mut self,
+        senv: &SkeletonEnv<'_>,
+        callee: &HirExpr,
+        args: &[HirExpr],
+        span: Span,
+        scope: &BodyScope,
+    ) {
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = callee
+        else {
+            return;
+        };
+        let receiver = match owner.as_ref() {
+            HirExpr::Global { name, .. } => {
+                if self.captured_local_id(name.as_str()).is_some() {
+                    return;
+                }
+                ReceiverRef::Global(name.as_str().to_owned())
+            }
+            HirExpr::Field {
+                owner: inner_owner,
+                field_name: inner_field,
+                ..
+            } => {
+                let HirExpr::Global { name, .. } = inner_owner.as_ref() else {
+                    return;
+                };
+                if self.captured_local_id(name.as_str()).is_some() {
+                    return;
+                }
+                ReceiverRef::StaticField {
+                    class: name.as_str().to_owned(),
+                    field: inner_field.as_str().to_owned(),
+                }
+            }
+            _ => return,
+        };
+        if !Self::method_writes_this(senv, owner.ty(), field_name.as_str()) {
+            return;
+        }
+        let shadowed_locals: std::collections::HashMap<String, Option<TypeId>> = scope
+            .names()
+            .into_iter()
+            .map(|name| {
+                let ty = scope.type_of_visible(&name);
+                (name, ty)
+            })
+            .collect();
+        let mut writer = ReceiverWriteScan::new(
+            receiver.clone(),
+            scope.visible_closure_bodies(),
+            &self.class_types,
+            shadowed_locals,
+        );
+        for arg in args {
+            writer.visit_expr(arg);
+        }
+        let arg_bindings = args.iter().map(|arg| writer.argument_body(arg)).collect();
+        self.pending_global_receiver_calls
+            .push(PendingGlobalReceiverCall {
+                receiver,
+                owner_ty: owner.ty(),
+                method: field_name.as_str().to_owned(),
+                direct_write: writer.direct_write,
+                opaque: writer.opaque,
+                call_sites: writer.call_sites,
+                arg_bindings,
+                span,
+            });
     }
 
     fn walk_call(
@@ -1188,6 +1648,14 @@ impl SkeletonBuilder {
                 }
             }
         }
+        self.record_global_receiver_call(
+            senv,
+            &callee_expr,
+            &args,
+            core_span_from_oxc(call.span),
+            scope,
+        );
+        self.note_may_throw();
         let type_args = if let Some(type_params) = &call.type_arguments {
             let merged = self.merged_type_params();
             type_params
@@ -1257,13 +1725,57 @@ impl SkeletonBuilder {
                 senv.types.intern(&ts_aot_core::Type::Date)
             }
             Expression::Identifier(id) if scope.lookup(id.name.as_str()).is_none() => {
-                match self.class_types.get(id.name.as_str()) {
-                    Some(&class_ty) => class_ty,
-                    None => senv.error_ty(),
+                match self.class_value_globals.get(id.name.as_str()) {
+                    Some(classes)
+                        if classes.len() < 2
+                            && (self.module_lets.contains(id.name.as_str())
+                                || self.module_vars.contains(id.name.as_str())) =>
+                    {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a module-level `let` holding a class value cannot know \
+                             which class to construct; use `const`, or name the class directly",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    Some(classes) if classes.len() > 1 => {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a binding that may hold more than one class value is not \
+                             supported; construct the class by name instead",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    _ => match self.class_types.get(id.name.as_str()) {
+                        Some(&class_ty) => class_ty,
+                        None => senv.error_ty(),
+                    },
                 }
             }
+            Expression::Identifier(id) => match scope.lookup(id.name.as_str()) {
+                Some((local, _)) => match self
+                    .class_value_locals
+                    .get(&self.class_value_storage(local))
+                {
+                    Some(classes) if classes.len() == 1 => classes[0],
+                    Some(_) => {
+                        senv.report_unsupported(
+                            "E0419",
+                            "`new` on a binding that may hold more than one class value is not \
+                             supported; construct the class by name instead",
+                            id.span,
+                        );
+                        senv.error_ty()
+                    }
+                    None => senv.error_ty(),
+                },
+                None => senv.error_ty(),
+            },
             _ => senv.error_ty(),
         };
+        self.note_may_throw();
         HirExpr::New {
             callee: Box::new(callee_expr),
             args,
@@ -1297,6 +1809,29 @@ impl SkeletonBuilder {
                         };
                     }
                 }
+                if let Expression::Identifier(obj) = &s.object
+                    && scope.visible_binding(obj.name.as_str()).is_none()
+                    && !self.module_lets.contains(obj.name.as_str())
+                    && !self.module_vars.contains(obj.name.as_str())
+                    && self.captured_local_id(obj.name.as_str()).is_none()
+                    && !SkeletonBuilder::captured_name_is_visible(senv, obj.name.as_str())
+                    && self
+                        .class_value_globals
+                        .get(obj.name.as_str())
+                        .is_none_or(|classes| classes.len() <= 1)
+                    && let Some(class_ty) = self.class_types.get(obj.name.as_str()).copied()
+                    && let Some((global, ty)) = self
+                        .static_field_globals
+                        .get(&class_ty)
+                        .and_then(|statics| statics.get(&Atom::from(s.property.name.as_str())))
+                        .cloned()
+                {
+                    return HirExpr::Global {
+                        name: global,
+                        ty,
+                        span: core_span_from_oxc(s.span),
+                    };
+                }
                 let owner = self.walk_expr(senv, &s.object, scope);
                 let owner = if s.optional {
                     Self::wrap_optional_chain(owner, core_span_from_oxc(s.object.span()))
@@ -1305,6 +1840,149 @@ impl SkeletonBuilder {
                 };
                 let prop = s.property.name.as_str();
                 let owner_ty = owner.ty();
+                let classified = match &owner {
+                    HirExpr::OptionalChain { base, .. } => base.as_ref(),
+                    other => other,
+                };
+                let class_value_classes = match classified {
+                    HirExpr::Global { name, .. } => {
+                        if SkeletonBuilder::captured_name_is_visible(senv, name.as_str()) {
+                            self.captured_class_values(name.as_str(), s.span)
+                        } else if let Some(classes) =
+                            self.captured_class_values(name.as_str(), s.span)
+                        {
+                            Some(classes)
+                        } else {
+                            let module_classes =
+                                self.class_value_globals.get(name.as_str()).cloned();
+                            let class_name = self
+                                .class_types
+                                .get(name.as_str())
+                                .copied()
+                                .map(|class_ty| vec![class_ty]);
+                            if module_classes.is_some() || class_name.is_some() {
+                                self.pending_class_value_global_reads
+                                    .push(PendingGlobalRead {
+                                        name: name.as_str().to_owned(),
+                                        seen: module_classes.clone().unwrap_or_default(),
+                                        span: s.span,
+                                    });
+                            }
+                            module_classes.or(class_name)
+                        }
+                    }
+                    HirExpr::Local { id, .. } => {
+                        let storage = self.class_value_storage(*id);
+                        let classes = self.class_value_locals.get(&storage).cloned();
+                        if let Some(classes) = &classes
+                            && !self.loop_frames.is_empty()
+                        {
+                            let name = match &s.object {
+                                Expression::Identifier(ident) => {
+                                    Some(ident.name.as_str().to_owned())
+                                }
+                                _ => None,
+                            };
+                            for frame in &mut self.loop_frames {
+                                frame.push(crate::skeleton::PendingLoopRead {
+                                    name: name.clone(),
+                                    id: storage,
+                                    seen: classes.clone(),
+                                    span: s.span,
+                                });
+                            }
+                        }
+                        if let Some(name) = self.unknown_class_value_locals.get(&storage).cloned() {
+                            senv.report_unsupported(
+                                "E0419",
+                                format!(
+                                    "`{name}` held a class value but was reassigned a value that \
+                                     is not one, so a static read through it has no class to \
+                                     select; keep the binding a class value, or name the class \
+                                     directly"
+                                )
+                                .as_str(),
+                                s.span,
+                            );
+                        }
+                        classes
+                    }
+                    HirExpr::DefaultConstruct { ty, .. } => Some(vec![*ty]),
+                    HirExpr::Field {
+                        owner, field_name, ..
+                    } => {
+                        let owner_ty = owner.ty();
+                        let base = self.class_value_field_base(owner, scope.body_id());
+                        let escaping = base
+                            .as_ref()
+                            .is_none_or(|base| !self.class_value_field_base_is_fresh(base));
+                        let blocked = self
+                            .unknown_class_value_fields
+                            .get(&owner_ty)
+                            .is_some_and(|fields| fields.contains(field_name))
+                            || self
+                                .class_value_field_poison_bases
+                                .get(&owner_ty)
+                                .and_then(|fields| fields.get(field_name))
+                                .is_some_and(|bases| {
+                                    bases.unknown_base
+                                        || if escaping {
+                                            !bases.bases.is_empty()
+                                        } else {
+                                            base.as_ref()
+                                                .is_some_and(|base| bases.bases.contains_key(base))
+                                        }
+                                });
+                        if blocked {
+                            senv.report_unsupported(
+                                "E0419",
+                                format!(
+                                    "`{field_name}` is a class-value field that was assigned a \
+                                     value which is not a class value, so a static read through \
+                                     it has no class to select; keep the field a class value"
+                                )
+                                .as_str(),
+                                s.span,
+                            );
+                            None
+                        } else {
+                            let classes = if escaping {
+                                self.class_value_fields
+                                    .get(&owner_ty)
+                                    .and_then(|fields| fields.get(field_name))
+                                    .filter(|classes| !classes.is_empty())
+                                    .cloned()
+                            } else {
+                                let classes = match &base {
+                                    Some(base) => {
+                                        self.fresh_field_base_classes(base, owner_ty, field_name)
+                                    }
+                                    None => {
+                                        self.initial_class_value_field_classes(owner_ty, field_name)
+                                    }
+                                };
+                                (!classes.is_empty()).then_some(classes)
+                            };
+                            if let Some(classes) = &classes {
+                                self.pending_class_value_field_reads.push((
+                                    owner_ty,
+                                    field_name.clone(),
+                                    classes.clone(),
+                                    s.span,
+                                    base.clone(),
+                                ));
+                            }
+                            classes
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(classes) = class_value_classes
+                    && let Some(expr) =
+                        self.static_field_access(&classes, prop, classified, s.span, senv)
+                {
+                    return expr;
+                }
                 let (lookup_ty, nullish) = match senv.types.resolve(owner_ty) {
                     Some(ts_aot_core::Type::Optional { inner, nullish }) => {
                         (*inner, Some(*nullish))
@@ -1406,7 +2084,9 @@ impl SkeletonBuilder {
         chain: &ChainExpression<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
-        match &chain.expression {
+        let saved_unknown = self.unknown_class_value_locals.clone();
+        self.enter_class_value_branch();
+        let walked = match &chain.expression {
             ChainElement::CallExpression(call) => self.walk_call(senv, call, scope),
             ChainElement::TSNonNullExpression(non_null) => {
                 self.walk_expr(senv, &non_null.expression, scope)
@@ -1414,7 +2094,802 @@ impl SkeletonBuilder {
             other @ match_member_expression!(ChainElement) => {
                 self.walk_member(senv, other.to_member_expression(), scope)
             }
+        };
+        self.leave_class_value_branch();
+        self.merge_unknown_class_value_locals(saved_unknown);
+        walked
+    }
+
+    pub(crate) fn class_value_storage(&self, id: LocalId) -> LocalId {
+        self.narrowed_stack
+            .last()
+            .and_then(|frame| frame.get(&id))
+            .map_or(id, |(storage, _)| *storage)
+    }
+
+    fn forget_class_value_local(&mut self, id: LocalId, name: Option<&str>) {
+        if self.class_value_locals.remove(&id).is_some()
+            && let Some(name) = name
+        {
+            self.unknown_class_value_locals.insert(id, name.to_owned());
         }
+    }
+
+    fn class_value_field_base(&self, owner: &HirExpr, body_id: u32) -> Option<ClassValueFieldBase> {
+        match owner {
+            HirExpr::Local { id, .. } => Some(ClassValueFieldBase::Local(
+                body_id,
+                self.class_value_storage(*id),
+            )),
+            HirExpr::Global { name, .. } => {
+                if self.captured_local_id(name.as_str()).is_some() {
+                    return None;
+                }
+                Some(ClassValueFieldBase::Global(name.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn class_value_poison_facts(
+        &self,
+        body_id: u32,
+        rhs: &HirExpr,
+    ) -> ClassValuePoisonFacts {
+        if let Some(value) = constant_numeric_value(rhs) {
+            return ClassValuePoisonFacts {
+                definitely_falsy: value == 0.0,
+                definitely_nullish: false,
+            };
+        }
+        match rhs {
+            HirExpr::Bool(false, _) => ClassValuePoisonFacts {
+                definitely_falsy: true,
+                definitely_nullish: false,
+            },
+            HirExpr::String(text, _) if text.as_str().is_empty() => ClassValuePoisonFacts {
+                definitely_falsy: true,
+                definitely_nullish: false,
+            },
+            HirExpr::Null(_) | HirExpr::Undefined(_) => ClassValuePoisonFacts {
+                definitely_falsy: true,
+                definitely_nullish: true,
+            },
+            HirExpr::Ternary {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let then_facts = self.class_value_poison_facts(body_id, then_branch);
+                let else_facts = self.class_value_poison_facts(body_id, else_branch);
+                ClassValuePoisonFacts {
+                    definitely_falsy: then_facts.definitely_falsy && else_facts.definitely_falsy,
+                    definitely_nullish: then_facts.definitely_nullish
+                        && else_facts.definitely_nullish,
+                }
+            }
+            HirExpr::Local { id, .. } => {
+                let storage = self.class_value_storage(*id);
+                self.class_value_poisoned_locals
+                    .get(&(body_id, *id))
+                    .or_else(|| self.class_value_poisoned_locals.get(&(body_id, storage)))
+                    .copied()
+                    .unwrap_or_default()
+            }
+            HirExpr::Global { name, .. } => {
+                if self.captured_local_id(name.as_str()).is_some() {
+                    return ClassValuePoisonFacts::default();
+                }
+                self.class_value_poisoned_globals
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or_default()
+            }
+            _ => ClassValuePoisonFacts::default(),
+        }
+    }
+
+    pub(super) fn join_class_value_field_poison(
+        &mut self,
+        branches: &[(usize, usize)],
+        branch_states: &[ClassValueFieldState],
+        entry_state: &ClassValueFieldState,
+        branch_depth: u32,
+    ) {
+        let Some((first_start, first_end)) = branches.first().copied() else {
+            return;
+        };
+        let join_branch = self.class_value_write_branch();
+        let first_writes = class_value_definite_branch_writes(
+            &self.class_value_poison_writes[first_start..first_end],
+            branch_depth,
+        );
+        if first_writes.is_empty() {
+            return;
+        }
+        let keys: Vec<(TypeId, Atom, ClassValueFieldBase)> = first_writes.keys().cloned().collect();
+        for key in keys {
+            let mut every_branch_holds_a_class = true;
+            let mut every_branch_wrote = true;
+            let mut joined_facts = ClassValuePoisonFacts {
+                definitely_falsy: true,
+                definitely_nullish: true,
+            };
+            for (index, (start, end)) in branches.iter().enumerate() {
+                let writes = class_value_definite_branch_writes(
+                    &self.class_value_poison_writes[*start..*end],
+                    branch_depth,
+                );
+                let Some(&(holds_class_value, facts)) = writes.get(&key) else {
+                    let clean = branch_states
+                        .get(index)
+                        .is_some_and(|state| state_holds_class_value(state, key.0, &key.1, &key.2));
+                    if clean {
+                        joined_facts.definitely_falsy &= false;
+                        joined_facts.definitely_nullish &= false;
+                        continue;
+                    }
+                    every_branch_wrote = false;
+                    break;
+                };
+                if !holds_class_value
+                    || !self.branch_exits_hold_class(*start, *end, &key, entry_state)
+                {
+                    every_branch_holds_a_class = false;
+                }
+                joined_facts.definitely_falsy &= facts.definitely_falsy;
+                joined_facts.definitely_nullish &= facts.definitely_nullish;
+            }
+            if !every_branch_wrote {
+                every_branch_holds_a_class = false;
+                joined_facts = ClassValuePoisonFacts::default();
+            }
+            let (owner_ty, field, base) = key;
+            if every_branch_holds_a_class {
+                let mut cleared = false;
+                if let Some(bases) = self
+                    .class_value_field_poison_bases
+                    .get_mut(&owner_ty)
+                    .and_then(|fields| fields.get_mut(&field))
+                    && !bases.unknown_base
+                {
+                    bases.bases.remove(&base);
+                    bases.fact_depths.remove(&base);
+                    bases.fact_branches.remove(&base);
+                    cleared = bases.bases.is_empty();
+                }
+                if cleared {
+                    if let Some(fields) = self.class_value_field_poison_bases.get_mut(&owner_ty) {
+                        fields.remove(&field);
+                    }
+                    if let Some(unknown) = self.unknown_class_value_fields.get_mut(&owner_ty) {
+                        unknown.remove(&field);
+                    }
+                }
+                let definitely_a_class = !self
+                    .unknown_class_value_fields
+                    .get(&owner_ty)
+                    .is_some_and(|fields| fields.contains(&field))
+                    && self
+                        .class_value_field_poison_bases
+                        .get(&owner_ty)
+                        .and_then(|fields| fields.get(&field))
+                        .is_none_or(|bases| bases.bases.is_empty() && !bases.unknown_base);
+                if definitely_a_class {
+                    self.record_joined_class_value_field_class_write(
+                        owner_ty,
+                        &field,
+                        base,
+                        branch_depth.saturating_sub(1),
+                    );
+                }
+                continue;
+            }
+            let bases = self
+                .class_value_field_poison_bases
+                .entry(owner_ty)
+                .or_default()
+                .entry(field.clone())
+                .or_default();
+            if !bases.unknown_base {
+                bases.bases.insert(base.clone(), joined_facts);
+                bases
+                    .fact_depths
+                    .insert(base.clone(), branch_depth.saturating_sub(1));
+                bases.fact_branches.insert(base, join_branch);
+            }
+            self.unknown_class_value_fields
+                .entry(owner_ty)
+                .or_default()
+                .insert(field.clone());
+        }
+    }
+
+    fn class_value_write_depth(&self) -> u32 {
+        self.conditional_depth + u32::from(self.try_body_skips == Some(true))
+    }
+
+    fn class_value_field_state_holds_class(
+        &self,
+        owner_ty: TypeId,
+        field: &Atom,
+        base: Option<&ClassValueFieldBase>,
+    ) -> bool {
+        if self
+            .unknown_class_value_fields
+            .get(&owner_ty)
+            .is_some_and(|fields| fields.contains(field))
+        {
+            return false;
+        }
+        let bases = self
+            .class_value_field_poison_bases
+            .get(&owner_ty)
+            .and_then(|fields| fields.get(field));
+        let Some(bases) = bases else {
+            return true;
+        };
+        if bases.unknown_base {
+            return false;
+        }
+        match base {
+            Some(base) => !bases.bases.contains_key(base),
+            None => bases.bases.is_empty(),
+        }
+    }
+
+    pub(super) fn note_may_throw(&mut self) {
+        if let Some(skips) = self.try_body_skips.as_mut() {
+            *skips = true;
+        }
+    }
+
+    pub(super) fn note_may_exit(&mut self, leaves_a_loop: bool) {
+        let breakable = if leaves_a_loop {
+            self.class_value_breakable_depth
+        } else {
+            0
+        };
+        let exit = crate::skeleton::ClassValueExit {
+            position: self.class_value_poison_writes.len(),
+            depth: self.class_value_write_depth(),
+            leaves_a_loop,
+        };
+        if leaves_a_loop {
+            for frame in &mut self.class_value_loop_frames {
+                if breakable <= frame.breakable {
+                    frame.exits.push(exit);
+                }
+            }
+        }
+        if self.class_value_branch_frames.is_empty() {
+            return;
+        }
+        self.class_value_exits.push(exit);
+        for frame in &mut self.class_value_branch_frames {
+            if breakable <= frame.breakable {
+                frame.exits.push(exit);
+            }
+        }
+    }
+
+    pub(super) fn enter_class_value_loop_body(&mut self) {
+        self.class_value_loop_frames
+            .push(crate::skeleton::ClassValueLoopFrame {
+                breakable: self.class_value_breakable_depth,
+                exits: Vec::new(),
+            });
+    }
+
+    pub(super) fn leave_class_value_loop_body(&mut self) {
+        self.class_value_loop_frames.pop();
+    }
+
+    fn class_value_write_may_be_skipped(&self) -> bool {
+        let position = self.class_value_poison_writes.len();
+        self.class_value_loop_frames.iter().any(|frame| {
+            frame
+                .exits
+                .iter()
+                .any(|exit| exit.leaves_a_loop && exit.position <= position)
+        })
+    }
+
+    fn exits_hold_class(
+        &self,
+        start: usize,
+        exits: &[crate::skeleton::ClassValueExit],
+        key: &(TypeId, Atom, ClassValueFieldBase),
+        entry_state: &ClassValueFieldState,
+    ) -> bool {
+        let (owner_ty, field, base) = key;
+        exits.iter().all(|exit| {
+            let last = self.class_value_poison_writes[start..exit.position]
+                .iter()
+                .rev()
+                .find(|write| {
+                    write.owner_ty == *owner_ty && write.field == *field && write.base == *base
+                });
+            match last {
+                Some(write) => write.holds_class_value && write.depth <= exit.depth,
+                None => state_holds_class_value(entry_state, *owner_ty, field, base),
+            }
+        })
+    }
+
+    pub(super) fn degrade_class_value_fields_written_since(
+        &mut self,
+        writes_before: usize,
+        exits_before: usize,
+        entry_state: &ClassValueFieldState,
+    ) {
+        let exits = self.class_value_exits[exits_before..].to_vec();
+        if exits.is_empty() {
+            return;
+        }
+        let mut keys: Vec<(TypeId, Atom, ClassValueFieldBase)> = Vec::new();
+        for write in &self.class_value_poison_writes[writes_before..] {
+            if !write.holds_class_value {
+                continue;
+            }
+            let key = (write.owner_ty, write.field.clone(), write.base.clone());
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        for key in keys {
+            if self.exits_hold_class(writes_before, &exits, &key, entry_state) {
+                continue;
+            }
+            let (owner_ty, field, _) = key;
+            self.unknown_class_value_fields
+                .entry(owner_ty)
+                .or_default()
+                .insert(field.clone());
+            if let Some(classes) = self
+                .class_value_fields
+                .get_mut(&owner_ty)
+                .and_then(|fields| fields.get_mut(&field))
+            {
+                classes.clear();
+            }
+            if let Some(bases) = self
+                .class_value_field_poison_bases
+                .get_mut(&owner_ty)
+                .and_then(|fields| fields.get_mut(&field))
+            {
+                for facts in bases.bases.values_mut() {
+                    *facts = ClassValuePoisonFacts::default();
+                }
+            }
+        }
+    }
+
+    fn branch_exits_hold_class(
+        &self,
+        start: usize,
+        end: usize,
+        key: &(TypeId, Atom, ClassValueFieldBase),
+        entry_state: &ClassValueFieldState,
+    ) -> bool {
+        let Some(record) = self
+            .class_value_branch_records
+            .iter()
+            .rev()
+            .find(|record| record.start == start && record.end == end)
+        else {
+            return true;
+        };
+        self.exits_hold_class(record.start, &record.exits, key, entry_state)
+    }
+
+    fn record_class_value_field_poison(
+        &mut self,
+        owner_ty: TypeId,
+        field: &Atom,
+        base: Option<ClassValueFieldBase>,
+        facts: ClassValuePoisonFacts,
+        plain_assign: bool,
+    ) {
+        let depth = self.class_value_write_depth();
+        let branch = self.class_value_write_branch();
+        let active = self.class_value_branch_ids.clone();
+        let may_be_skipped = self.class_value_write_may_be_skipped();
+        let bases = self
+            .class_value_field_poison_bases
+            .entry(owner_ty)
+            .or_default()
+            .entry(field.clone())
+            .or_default();
+        match base {
+            Some(base) => {
+                let previous_depth = bases.fact_depths.get(&base).copied();
+                let previous_branch = bases.fact_branches.get(&base).copied().flatten();
+                let dominates_previous = active.is_empty()
+                    || match previous_branch {
+                        None => true,
+                        Some(previous) => active.contains(&previous),
+                    };
+                let replaces_previous = plain_assign
+                    && !may_be_skipped
+                    && previous_depth.is_none_or(|previous| depth <= previous)
+                    && dominates_previous;
+                self.class_value_poison_writes.push(ClassValuePoisonWrite {
+                    owner_ty,
+                    field: field.clone(),
+                    base: base.clone(),
+                    facts,
+                    plain_assign,
+                    depth,
+                    holds_class_value: false,
+                    branch,
+                });
+                if replaces_previous {
+                    bases.bases.insert(base.clone(), facts);
+                    bases.fact_depths.insert(base.clone(), depth);
+                    bases.fact_branches.insert(base, branch);
+                } else {
+                    let previous = bases.bases.get(&base).copied().unwrap_or_default();
+                    bases.bases.insert(
+                        base.clone(),
+                        ClassValuePoisonFacts {
+                            definitely_falsy: previous.definitely_falsy && facts.definitely_falsy,
+                            definitely_nullish: previous.definitely_nullish
+                                && facts.definitely_nullish,
+                        },
+                    );
+                    let established = depth;
+                    let merged_branch = match (previous_branch, branch) {
+                        (None, None) => None,
+                        (None, Some(current)) => Some(current),
+                        (Some(previous), Some(current))
+                            if previous == current || active.contains(&previous) =>
+                        {
+                            Some(current)
+                        }
+                        _ => Some(crate::skeleton::MERGED_CLASS_VALUE_BRANCH),
+                    };
+                    bases.fact_depths.insert(base.clone(), established);
+                    bases.fact_branches.insert(base, merged_branch);
+                }
+            }
+            None => bases.unknown_base = true,
+        }
+    }
+
+    fn record_class_value_field_class_write(
+        &mut self,
+        owner_ty: TypeId,
+        field: &Atom,
+        base: Option<ClassValueFieldBase>,
+        plain_assign: bool,
+        restored: bool,
+    ) {
+        let Some(base) = base else {
+            return;
+        };
+        if !plain_assign && !restored {
+            return;
+        }
+        let depth = self.class_value_write_depth();
+        self.class_value_poison_writes.push(ClassValuePoisonWrite {
+            owner_ty,
+            field: field.clone(),
+            base,
+            facts: ClassValuePoisonFacts::default(),
+            plain_assign,
+            depth,
+            holds_class_value: true,
+            branch: self.class_value_write_branch(),
+        });
+    }
+
+    fn record_joined_class_value_field_class_write(
+        &mut self,
+        owner_ty: TypeId,
+        field: &Atom,
+        base: ClassValueFieldBase,
+        depth: u32,
+    ) {
+        self.class_value_poison_writes.push(ClassValuePoisonWrite {
+            owner_ty,
+            field: field.clone(),
+            base,
+            facts: ClassValuePoisonFacts::default(),
+            plain_assign: true,
+            depth,
+            holds_class_value: true,
+            branch: self.class_value_write_branch(),
+        });
+    }
+
+    fn class_value_write_branch(&self) -> Option<u32> {
+        self.class_value_branch_ids.last().copied()
+    }
+
+    fn rebind_class_value_holder_field(
+        &mut self,
+        holder_ty: TypeId,
+        field: &Atom,
+        base: &ClassValueFieldBase,
+        source_base: &ClassValueFieldBase,
+        conditional: bool,
+    ) {
+        let source = self
+            .class_value_field_poison_bases
+            .get(&holder_ty)
+            .and_then(|fields| fields.get(field))
+            .and_then(|bases| bases.bases.get(source_base))
+            .copied();
+        let source_unknown_base = self
+            .class_value_field_poison_bases
+            .get(&holder_ty)
+            .and_then(|fields| fields.get(field))
+            .is_some_and(|bases| bases.unknown_base);
+        let mut source_classes = self
+            .class_value_fields
+            .get(&holder_ty)
+            .and_then(|fields| fields.get(field))
+            .cloned()
+            .unwrap_or_default();
+        if source_classes.is_empty() {
+            source_classes = self.initial_class_value_field_classes(holder_ty, field);
+        }
+        if !conditional {
+            self.clear_class_value_field_base(holder_ty, field, base);
+        }
+        if !source_classes.is_empty() {
+            let target = self
+                .class_value_fields
+                .entry(holder_ty)
+                .or_default()
+                .entry(field.clone())
+                .or_default();
+            for class_ty in &source_classes {
+                if !target.contains(class_ty) {
+                    target.push(*class_ty);
+                }
+            }
+        }
+        if source.is_none() && !source_unknown_base && !source_classes.is_empty() {
+            self.record_class_value_field_class_write(
+                holder_ty,
+                field,
+                Some(base.clone()),
+                true,
+                false,
+            );
+        }
+        if source_unknown_base || source.is_some() {
+            let bases = self
+                .class_value_field_poison_bases
+                .entry(holder_ty)
+                .or_default()
+                .entry(field.clone())
+                .or_default();
+            if source_unknown_base {
+                bases.unknown_base = true;
+            }
+            if let Some(facts) = source {
+                let merged = if conditional {
+                    let previous = bases.bases.get(base).copied().unwrap_or_default();
+                    ClassValuePoisonFacts {
+                        definitely_falsy: previous.definitely_falsy && facts.definitely_falsy,
+                        definitely_nullish: previous.definitely_nullish && facts.definitely_nullish,
+                    }
+                } else {
+                    facts
+                };
+                bases.bases.insert(base.clone(), merged);
+                bases.fact_depths.entry(base.clone()).or_insert(0);
+                bases.fact_branches.insert(
+                    base.clone(),
+                    Some(crate::skeleton::MERGED_CLASS_VALUE_BRANCH),
+                );
+            }
+            self.unknown_class_value_fields
+                .entry(holder_ty)
+                .or_default()
+                .insert(field.clone());
+        }
+    }
+
+    fn class_value_branch_is_active(&self, branch: Option<u32>) -> bool {
+        branch.is_none_or(|branch| self.class_value_branch_ids.contains(&branch))
+    }
+
+    pub(super) fn enter_class_value_branch(&mut self) {
+        let id = self.next_class_value_branch_id;
+        self.next_class_value_branch_id += 1;
+        self.class_value_branch_ids.push(id);
+        self.class_value_branch_frames
+            .push(crate::skeleton::ClassValueBranchFrame {
+                start: self.class_value_poison_writes.len(),
+                breakable: self.class_value_breakable_depth,
+                exits: Vec::new(),
+            });
+        self.conditional_depth += 1;
+    }
+
+    pub(super) fn leave_class_value_branch(&mut self) {
+        self.class_value_branch_ids.pop();
+        if let Some(frame) = self.class_value_branch_frames.pop() {
+            self.class_value_branch_records
+                .push(crate::skeleton::ClassValueBranchRecord {
+                    start: frame.start,
+                    end: self.class_value_poison_writes.len(),
+                    exits: frame.exits,
+                });
+        }
+        self.conditional_depth -= 1;
+    }
+
+    fn forget_class_value_field_poison(
+        &mut self,
+        owner_ty: TypeId,
+        field: &Atom,
+        base: &ClassValueFieldBase,
+        constraint: ClassValuePoisonConstraint,
+    ) -> bool {
+        let depth = self.class_value_write_depth();
+        let active = self.class_value_branch_ids.clone();
+        let known = self
+            .class_value_field_poison_bases
+            .get(&owner_ty)
+            .and_then(|fields| fields.get(field))
+            .is_some_and(|bases| bases.restorable(constraint, depth, &active));
+        if !known {
+            return false;
+        }
+        let restored = self
+            .class_value_field_poison_bases
+            .get_mut(&owner_ty)
+            .and_then(|fields| fields.get_mut(field))
+            .is_some_and(|bases| {
+                bases.bases.remove(base);
+                bases.fact_depths.remove(base);
+                bases.fact_branches.remove(base);
+                bases.bases.is_empty() && !bases.unknown_base
+            });
+        if !restored {
+            return false;
+        }
+        if let Some(fields) = self.class_value_field_poison_bases.get_mut(&owner_ty) {
+            fields.remove(field);
+        }
+        if let Some(unknown) = self.unknown_class_value_fields.get_mut(&owner_ty) {
+            unknown.remove(field);
+        }
+        true
+    }
+
+    fn rhs_final_class_value_classes(&mut self, rhs: &mut HirExpr) -> Option<Vec<TypeId>> {
+        match rhs {
+            HirExpr::DefaultConstruct { ty, span, .. } => {
+                let (class_ty, span) = (*ty, *span);
+                let tag = self.class_value_tag(class_ty);
+                *rhs = HirExpr::Int(tag, span);
+                Some(vec![class_ty])
+            }
+            HirExpr::Global { name, .. } => {
+                let name = name.as_str().to_owned();
+                if self.captured_local_id(name.as_str()).is_some()
+                    || self.module_lets.contains(name.as_str())
+                    || self.module_vars.contains(name.as_str())
+                {
+                    return None;
+                }
+                self.class_value_globals.get(&name).cloned().or_else(|| {
+                    self.class_types
+                        .get(&name)
+                        .copied()
+                        .map(|class_ty| vec![class_ty])
+                })
+            }
+            HirExpr::Local { id, .. } => {
+                let storage = self.class_value_storage(*id);
+                if self.unknown_class_value_locals.contains_key(&storage) {
+                    return None;
+                }
+                self.class_value_locals.get(&storage).cloned()
+            }
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let owner_ty = owner.ty();
+                if self
+                    .unknown_class_value_fields
+                    .get(&owner_ty)
+                    .is_some_and(|fields| fields.contains(field_name))
+                {
+                    return None;
+                }
+                self.class_value_fields
+                    .get(&owner_ty)
+                    .and_then(|fields| fields.get(field_name))
+                    .filter(|classes| !classes.is_empty())
+                    .cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn static_field_access(
+        &mut self,
+        classes: &[TypeId],
+        field: &str,
+        owner: &HirExpr,
+        span: oxc_span::Span,
+        senv: &mut SkeletonEnv,
+    ) -> Option<HirExpr> {
+        let arms: Vec<(TypeId, Atom, TypeId)> = classes
+            .iter()
+            .filter_map(|class_ty| {
+                self.static_field_globals
+                    .get(class_ty)
+                    .and_then(|statics| statics.get(&Atom::from(field)))
+                    .cloned()
+                    .map(|(global, ty)| (*class_ty, global, ty))
+            })
+            .collect();
+        let (_, first_global, first_ty) = arms.first()?.clone();
+        let hir_span = core_span_from_oxc(span);
+        if arms.len() != classes.len() {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "`{field}` is not a static field of every class this value may hold; the \
+                     read is only defined for some of them"
+                )
+                .as_str(),
+                span,
+            );
+        } else if arms.windows(2).any(|pair| pair[0].2 != pair[1].2) {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "static field `{field}` has a different type on the classes this value may \
+                     hold; reading it cannot pick one type"
+                )
+                .as_str(),
+                span,
+            );
+        }
+        if arms.len() == 1 {
+            return Some(HirExpr::Global {
+                name: first_global,
+                ty: first_ty,
+                span: hir_span,
+            });
+        }
+        let bool_ty = senv.types.intern(&ts_aot_core::Type::Bool);
+        let mut expr = HirExpr::Global {
+            name: arms.last()?.1.clone(),
+            ty: arms.last()?.2,
+            span: hir_span,
+        };
+        for (class_ty, global, ty) in arms.iter().rev().skip(1) {
+            let tag = self.class_value_tag(*class_ty);
+            let cond = HirExpr::Binary {
+                op: HirBinaryOp::StrictEq,
+                lhs: Box::new(owner.clone()),
+                rhs: Box::new(HirExpr::Int(tag, hir_span)),
+                ty: bool_ty,
+                span: hir_span,
+            };
+            expr = HirExpr::Ternary {
+                cond: Box::new(cond),
+                then_branch: Box::new(HirExpr::Global {
+                    name: global.clone(),
+                    ty: *ty,
+                    span: hir_span,
+                }),
+                else_branch: Box::new(expr),
+                ty: first_ty,
+                span: hir_span,
+            };
+        }
+        Some(expr)
     }
 
     fn walk_assignment(
@@ -1431,8 +2906,538 @@ impl SkeletonBuilder {
             );
             return self.walk_expr(senv, &a.right, scope);
         };
-        let target = self.walk_simple_target(senv, simple_target, scope);
-        let rhs = self.walk_expr(senv, &a.right, scope);
+        let mut target = self.walk_simple_target(senv, simple_target, scope);
+        if let HirExpr::Index {
+            owner, index, span, ..
+        } = &target
+            && let HirExpr::String(name, _) = index.as_ref()
+            && let Some(field_ty) = senv
+                .program
+                .class_fields
+                .get(&owner.ty())
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|f| f.name.as_str() == name.as_str())
+                        .map(|f| f.ty)
+                })
+        {
+            target = HirExpr::Field {
+                owner: owner.clone(),
+                field: FieldId::from_raw(0),
+                field_name: name.clone(),
+                ty: field_ty,
+                span: *span,
+            };
+        }
+        if matches!(target, HirExpr::Ternary { .. }) {
+            senv.report_unsupported(
+                "E0419",
+                "assigning a static field through a class value that may hold several classes is \
+                 not supported; assign through the class name instead",
+                a.span,
+            );
+        }
+        let mut rhs = self.walk_expr(senv, &a.right, scope);
+        if let HirExpr::Local { id, .. } = &target {
+            if let Some(bodies) = crate::skeleton::closure_bodies_of(&rhs) {
+                for body in bodies {
+                    scope.set_closure_body(*id, body);
+                }
+            } else if crate::skeleton::may_hold_a_callable(&rhs) {
+                scope.poison_closure_body(*id);
+            }
+        }
+        if let HirExpr::Local { id, .. } = &target {
+            let storage = self.class_value_storage(*id);
+            match (a.operator, &rhs) {
+                (AssignmentOperator::Assign, HirExpr::Int(value, _)) => {
+                    self.constant_int_locals.insert(storage, *value);
+                }
+                _ => {
+                    self.constant_int_locals.remove(&storage);
+                }
+            }
+        }
+        let op = compound_op(a.operator);
+        let keeps_old_value = matches!(
+            op,
+            CompoundOp::Binary(HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or)
+        );
+        if let HirExpr::Global { name, .. } = &target {
+            let name = name.as_str().to_owned();
+            if self.captured_class_value_local(name.as_str()).is_some() {
+                let _ = self.rhs_final_class_value_classes(&mut rhs);
+                senv.report_unsupported(
+                    "E0419",
+                    format!(
+                        "assigning a class value captured by a closure is not supported; assign \
+                         `{name}` in the function that declares it"
+                    )
+                    .as_str(),
+                    a.span,
+                );
+            } else if self.captured_local_id(name.as_str()).is_some() {
+            } else {
+                let final_source = if let HirExpr::Global { name: source, .. } = &rhs {
+                    let source = source.as_str().to_owned();
+                    if self.captured_local_id(source.as_str()).is_none()
+                        && !self.module_lets.contains(source.as_str())
+                        && !self.module_vars.contains(source.as_str())
+                    {
+                        self.class_value_globals
+                            .get(source.as_str())
+                            .cloned()
+                            .or_else(|| {
+                                self.class_types
+                                    .get(source.as_str())
+                                    .copied()
+                                    .map(|class_ty| vec![class_ty])
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let tracked: Option<Vec<TypeId>> =
+                    if let HirExpr::DefaultConstruct { ty, span, .. } = &rhs {
+                        let (class_ty, span) = (*ty, *span);
+                        let tag = self.class_value_tag(class_ty);
+                        rhs = HirExpr::Int(tag, span);
+                        Some(vec![class_ty])
+                    } else {
+                        final_source
+                    };
+                match tracked {
+                    Some(classes)
+                        if self.module_lets.contains(&name) || self.module_vars.contains(&name) =>
+                    {
+                        let target_classes = self.class_value_globals.entry(name).or_default();
+                        for class_ty in classes {
+                            if !target_classes.contains(&class_ty) {
+                                target_classes.push(class_ty);
+                            }
+                        }
+                    }
+                    _ => {
+                        self.unknown_class_value_globals.insert(name);
+                    }
+                }
+            }
+        }
+        if let HirExpr::Local { id, .. } = &target {
+            let body_id = scope.body_id();
+            let storage = self.class_value_storage(*id);
+            self.class_value_poisoned_locals.remove(&(body_id, *id));
+            self.class_value_poisoned_locals.remove(&(body_id, storage));
+            let fresh_base = ClassValueFieldBase::Local(body_id, storage);
+            if matches!(op, CompoundOp::Assign) && matches!(rhs, HirExpr::New { .. }) {
+                self.note_fresh_field_base(fresh_base);
+            } else {
+                self.forget_fresh_field_base(&fresh_base);
+            }
+            let id = storage;
+            let name = match simple_target {
+                SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) => {
+                    Some(ident.name.as_str().to_owned())
+                }
+                _ => None,
+            };
+            if matches!(
+                op,
+                CompoundOp::Assign
+                    | CompoundOp::Binary(
+                        HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                    )
+            ) {
+                match &rhs {
+                    HirExpr::DefaultConstruct { ty, span, .. } => {
+                        let (class_ty, span) = (*ty, *span);
+                        let tag = self.class_value_tag(class_ty);
+                        rhs = HirExpr::Int(tag, span);
+                        if !keeps_old_value {
+                            self.unknown_class_value_locals.remove(&id);
+                        }
+                        let classes = self.class_value_locals.entry(id).or_default();
+                        if !classes.contains(&class_ty) {
+                            classes.push(class_ty);
+                        }
+                    }
+                    HirExpr::Local { id: source, .. } => {
+                        let source = self.class_value_storage(*source);
+                        match self.class_value_locals.get(&source).cloned() {
+                            Some(classes) => {
+                                let source_unknown =
+                                    self.unknown_class_value_locals.contains_key(&source);
+                                self.record_loop_class_value_copies(
+                                    &[(source, classes.clone())],
+                                    a.span,
+                                );
+                                if !keeps_old_value {
+                                    self.unknown_class_value_locals.remove(&id);
+                                }
+                                if source_unknown && let Some(target_name) = &name {
+                                    self.unknown_class_value_locals
+                                        .insert(id, target_name.clone());
+                                }
+                                let target_classes = self.class_value_locals.entry(id).or_default();
+                                for class_ty in classes {
+                                    if !target_classes.contains(&class_ty) {
+                                        target_classes.push(class_ty);
+                                    }
+                                }
+                            }
+                            None => {
+                                self.forget_class_value_local(id, name.as_deref());
+                            }
+                        }
+                    }
+                    _ => {
+                        self.forget_class_value_local(id, name.as_deref());
+                    }
+                }
+            } else {
+                self.forget_class_value_local(id, name.as_deref());
+            }
+        }
+        if matches!(op, CompoundOp::Assign)
+            && let HirExpr::Local {
+                id, ty: holder_ty, ..
+            } = &target
+        {
+            let holder_ty = *holder_ty;
+            let body_id = scope.body_id();
+            let storage = self.class_value_storage(*id);
+            let same_holder = matches!(
+                &rhs,
+                HirExpr::Local { id: source, .. } if self.class_value_storage(*source) == storage
+            );
+            if !same_holder {
+                let fields = self.class_value_field_names(holder_ty);
+                if !fields.is_empty() {
+                    let fresh = matches!(
+                        &rhs,
+                        HirExpr::New { ty, .. } | HirExpr::DefaultConstruct { ty, .. }
+                            if *ty == holder_ty
+                    );
+                    let source_base = match &rhs {
+                        HirExpr::Local {
+                            id: source,
+                            ty: source_ty,
+                            ..
+                        } if *source_ty == holder_ty => Some(ClassValueFieldBase::Local(
+                            body_id,
+                            self.class_value_storage(*source),
+                        )),
+                        _ => None,
+                    };
+                    let conditional = !self.class_value_branch_ids.is_empty()
+                        || self.try_body_skips == Some(true);
+                    let base = ClassValueFieldBase::Local(body_id, storage);
+                    for field in fields {
+                        if let Some(source_base) = &source_base {
+                            self.rebind_class_value_holder_field(
+                                holder_ty,
+                                &field,
+                                &base,
+                                source_base,
+                                conditional,
+                            );
+                            continue;
+                        }
+                        if conditional {
+                            let was_a_class = self.class_value_field_state_holds_class(
+                                holder_ty,
+                                &field,
+                                Some(&base),
+                            ) && self
+                                .class_value_fields
+                                .get(&holder_ty)
+                                .and_then(|fields| fields.get(&field))
+                                .is_some_and(|classes| !classes.is_empty());
+                            let initials = if fresh {
+                                self.initial_class_value_field_classes(holder_ty, &field)
+                            } else {
+                                Vec::new()
+                            };
+                            if was_a_class && !initials.is_empty() {
+                                let target_classes = self
+                                    .class_value_fields
+                                    .entry(holder_ty)
+                                    .or_default()
+                                    .entry(field.clone())
+                                    .or_default();
+                                for class_ty in initials {
+                                    if !target_classes.contains(&class_ty) {
+                                        target_classes.push(class_ty);
+                                    }
+                                }
+                                continue;
+                            }
+                            self.clear_class_value_field_base(holder_ty, &field, &base);
+                            self.unknown_class_value_fields
+                                .entry(holder_ty)
+                                .or_default()
+                                .insert(field.clone());
+                            let bases = self
+                                .class_value_field_poison_bases
+                                .entry(holder_ty)
+                                .or_default()
+                                .entry(field.clone())
+                                .or_default();
+                            if !bases.unknown_base {
+                                bases.bases.entry(base.clone()).or_default();
+                                bases.fact_depths.entry(base.clone()).or_insert(0);
+                                bases.fact_branches.insert(
+                                    base.clone(),
+                                    Some(crate::skeleton::MERGED_CLASS_VALUE_BRANCH),
+                                );
+                            }
+                            continue;
+                        }
+                        self.clear_class_value_field_base(holder_ty, &field, &base);
+                        let blocked = self
+                            .unknown_class_value_fields
+                            .get(&holder_ty)
+                            .is_some_and(|unknown| unknown.contains(&field))
+                            || self
+                                .class_value_field_poison_bases
+                                .get(&holder_ty)
+                                .and_then(|fields| fields.get(&field))
+                                .is_some_and(|bases| !bases.bases.is_empty() || bases.unknown_base);
+                        if fresh && !blocked {
+                            let initials =
+                                self.initial_class_value_field_classes(holder_ty, &field);
+                            if initials.is_empty() {
+                                continue;
+                            }
+                            let target_classes = self
+                                .class_value_fields
+                                .entry(holder_ty)
+                                .or_default()
+                                .entry(field.clone())
+                                .or_default();
+                            for class_ty in initials {
+                                if !target_classes.contains(&class_ty) {
+                                    target_classes.push(class_ty);
+                                }
+                            }
+                            self.record_class_value_field_class_write(
+                                holder_ty,
+                                &field,
+                                Some(base.clone()),
+                                true,
+                                false,
+                            );
+                        } else if !fresh {
+                            self.unknown_class_value_fields
+                                .entry(holder_ty)
+                                .or_default()
+                                .insert(field.clone());
+                            if let Some(classes) = self
+                                .class_value_fields
+                                .get_mut(&holder_ty)
+                                .and_then(|fields| fields.get_mut(&field))
+                            {
+                                classes.clear();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut class_value_plain_assign = false;
+        if let HirExpr::Field {
+            owner, field_name, ..
+        } = &target
+        {
+            let owner_ty = owner.ty();
+            let field_name = field_name.clone();
+            let base = self.class_value_field_base(owner, scope.body_id());
+            let is_class_value_field = self
+                .class_value_fields
+                .get(&owner_ty)
+                .is_some_and(|fields| fields.contains_key(&field_name));
+            let self_assign = matches!(
+                op,
+                CompoundOp::Assign
+                    | CompoundOp::Binary(
+                        HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                    )
+            ) && base.as_ref().is_some_and(|base| {
+                matches!(
+                    &rhs,
+                    HirExpr::Field { owner: rhs_owner, field_name: rhs_field, .. }
+                        if *rhs_field == field_name
+                            && self
+                                .class_value_field_base(rhs_owner, scope.body_id())
+                                .as_ref()
+                                == Some(base)
+                )
+            });
+            if is_class_value_field {
+                let proven_class = self
+                    .class_value_poison_writes
+                    .iter()
+                    .rev()
+                    .find(|write| {
+                        write.owner_ty == owner_ty
+                            && write.field == field_name
+                            && base.as_ref().is_none_or(|base| &write.base == base)
+                            && self.class_value_branch_is_active(write.branch)
+                    })
+                    .is_none_or(|write| write.holds_class_value)
+                    && self.class_value_field_state_holds_class(
+                        owner_ty,
+                        &field_name,
+                        base.as_ref(),
+                    );
+                let and_assign = matches!(op, CompoundOp::Binary(HirBinaryOp::And));
+                let proven_class_assign = and_assign && proven_class;
+                class_value_plain_assign = proven_class_assign;
+                let tracked = if self_assign
+                    || !matches!(
+                        op,
+                        CompoundOp::Assign
+                            | CompoundOp::Binary(
+                                HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                            )
+                    ) {
+                    None
+                } else {
+                    self.rhs_final_class_value_classes(&mut rhs)
+                };
+                if proven_class
+                    && matches!(
+                        op,
+                        CompoundOp::Binary(HirBinaryOp::Or | HirBinaryOp::Coalesce)
+                    )
+                {
+                    return target;
+                }
+                let rhs_facts = self.class_value_poison_facts(scope.body_id(), &rhs);
+                let plain_assign = matches!(op, CompoundOp::Assign) || proven_class_assign;
+                if !self_assign {
+                    match tracked {
+                        Some(classes) if !classes.is_empty() => {
+                            let constraint = match op {
+                                CompoundOp::Assign => Some(ClassValuePoisonConstraint::Always),
+                                CompoundOp::Binary(HirBinaryOp::Or) => {
+                                    Some(ClassValuePoisonConstraint::DefinitelyFalsy)
+                                }
+                                CompoundOp::Binary(HirBinaryOp::Coalesce) => {
+                                    Some(ClassValuePoisonConstraint::DefinitelyNullish)
+                                }
+                                CompoundOp::Binary(HirBinaryOp::And) if proven_class => {
+                                    Some(ClassValuePoisonConstraint::Always)
+                                }
+                                _ => None,
+                            };
+                            let restored =
+                                if let (Some(constraint), Some(base)) = (constraint, &base) {
+                                    self.forget_class_value_field_poison(
+                                        owner_ty,
+                                        &field_name,
+                                        base,
+                                        constraint,
+                                    )
+                                } else {
+                                    false
+                                };
+                            self.record_class_value_field_class_write(
+                                owner_ty,
+                                &field_name,
+                                base.clone(),
+                                plain_assign,
+                                restored,
+                            );
+                            if let Some(fresh_base) = base
+                                .as_ref()
+                                .filter(|base| self.class_value_field_base_is_fresh(base))
+                                .cloned()
+                            {
+                                let mut updated = self.fresh_field_base_classes_or_initials(
+                                    &fresh_base,
+                                    owner_ty,
+                                    &field_name,
+                                );
+                                for class_ty in &classes {
+                                    if !updated.contains(class_ty) {
+                                        updated.push(*class_ty);
+                                    }
+                                }
+                                self.set_fresh_field_base_classes(
+                                    &fresh_base,
+                                    owner_ty,
+                                    &field_name,
+                                    updated,
+                                );
+                            }
+                            let target = self
+                                .class_value_fields
+                                .entry(owner_ty)
+                                .or_default()
+                                .entry(field_name.clone())
+                                .or_default();
+                            for class_ty in classes {
+                                if !target.contains(&class_ty) {
+                                    target.push(class_ty);
+                                }
+                            }
+                        }
+                        _ => {
+                            let escaping = base
+                                .as_ref()
+                                .is_none_or(|base| !self.class_value_field_base_is_fresh(base));
+                            if escaping {
+                                self.unknown_class_value_fields
+                                    .entry(owner_ty)
+                                    .or_default()
+                                    .insert(field_name.clone());
+                            } else if let Some(base) = &base {
+                                let unconditional = self.class_value_branch_ids.is_empty()
+                                    && self.try_body_skips != Some(true);
+                                if plain_assign && unconditional {
+                                    self.set_fresh_field_base_classes(
+                                        base,
+                                        owner_ty,
+                                        &field_name,
+                                        Vec::new(),
+                                    );
+                                }
+                            }
+                            let conditional = !self.class_value_branch_ids.is_empty()
+                                || self.try_body_skips == Some(true);
+                            self.record_class_value_field_poison(
+                                owner_ty,
+                                &field_name,
+                                base,
+                                rhs_facts,
+                                plain_assign,
+                            );
+                            if escaping
+                                && plain_assign
+                                && !conditional
+                                && let Some(classes) = self
+                                    .class_value_fields
+                                    .get_mut(&owner_ty)
+                                    .and_then(|fields| fields.get_mut(&field_name))
+                            {
+                                classes.clear();
+                            }
+                        }
+                    }
+                }
+                if and_assign && !proven_class {
+                    senv.report_unsupported(
+                        CLASS_VALUE_FIELD_LOGICAL_ASSIGN_CODE,
+                        CLASS_VALUE_FIELD_LOGICAL_ASSIGN,
+                        a.span,
+                    );
+                }
+            }
+        }
         if !matches!(
             &target,
             HirExpr::Local { .. }
@@ -1466,6 +3471,14 @@ impl SkeletonBuilder {
                 ty,
                 span: core_span_from_oxc(a.span),
             },
+            CompoundOp::Binary(HirBinaryOp::And) if class_value_plain_assign => {
+                HirExpr::Assignment {
+                    target: Box::new(self.redirect_narrowed_target(target, scope)),
+                    value: Box::new(rhs),
+                    ty,
+                    span: core_span_from_oxc(a.span),
+                }
+            }
             CompoundOp::Binary(op) => {
                 let target = if matches!(
                     op,
@@ -1524,7 +3537,7 @@ impl SkeletonBuilder {
         use oxc_ast::ast::SimpleAssignmentTarget as SAT;
         match s {
             SAT::AssignmentTargetIdentifier(id) => {
-                senv.ident_to_expr(id.name.as_str(), scope, core_span_from_oxc(id.span))
+                self.identifier_expr(senv, id.name.as_str(), scope, core_span_from_oxc(id.span))
             }
             m @ match_member_expression!(SimpleAssignmentTarget) => {
                 self.walk_member(senv, m.to_member_expression(), scope)
@@ -1613,7 +3626,7 @@ impl SkeletonBuilder {
         let mut name_of_id: std::collections::HashMap<LocalId, String> =
             std::collections::HashMap::new();
         for name in scope.names() {
-            if let Some((binding, _)) = scope.lookup(&name) {
+            if let Some(binding) = scope.visible_binding(&name) {
                 name_of_id.entry(binding).or_insert_with(|| name.clone());
                 if let Some((storage, _)) = self.narrowed_storage(binding) {
                     name_of_id.entry(storage).or_insert(name);
@@ -1662,7 +3675,7 @@ fn capture_type_map(
 ) -> std::collections::HashMap<String, TypeId> {
     let mut map = std::collections::HashMap::new();
     for name in scope.names() {
-        if let Some((id, _)) = scope.lookup(&name)
+        if let Some(id) = scope.visible_binding(&name)
             && let Some((_, storage_ty)) = narrowed.get(&id)
         {
             map.insert(name, *storage_ty);

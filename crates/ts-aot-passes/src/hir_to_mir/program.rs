@@ -179,6 +179,7 @@ fn build_params(params: &[ts_aot_ir_hir::HirParam]) -> Vec<MirParam> {
 struct PreAssignState<'a> {
     pre_id: u32,
     name_to_function: HashMap<Atom, FunctionId>,
+    function_params: HashMap<FunctionId, Vec<(TypeId, bool)>>,
     struct_id_map: HashMap<TypeId, StructId>,
     method_map: HashMap<(StructId, Atom, bool), FunctionId>,
     method_ret: HashMap<(StructId, Atom, bool), TypeId>,
@@ -248,6 +249,7 @@ pub fn convert_program(
     let mut pre_state = PreAssignState {
         pre_id: 0,
         name_to_function: HashMap::new(),
+        function_params: HashMap::new(),
         struct_id_map: HashMap::new(),
         method_map: HashMap::new(),
         method_ret: HashMap::new(),
@@ -269,6 +271,7 @@ pub fn convert_program(
     let PreAssignState {
         pre_id: _,
         name_to_function,
+        function_params,
         struct_id_map,
         method_map,
         method_ret,
@@ -283,6 +286,7 @@ pub fn convert_program(
     let name_to_function = Arc::new(name_to_function);
     let mut converter = ExprConverter::with_function_remap_and_offset(HashMap::new(), 0);
     converter.name_to_function = Arc::clone(&name_to_function);
+    converter.function_params = Arc::new(function_params);
     converter.set_program(Arc::new(HirProgram::clone(hir)));
     converter.set_program_tables(
         field_id_lookup,
@@ -315,8 +319,14 @@ struct MutatedGlobalCollector<'a> {
 
 impl MutatedGlobalCollector<'_> {
     fn note_target(&mut self, target: &HirExpr) {
-        if let HirExpr::Global { name, .. } = target {
-            self.names.insert(name.clone());
+        match target {
+            HirExpr::Global { name, .. } => {
+                self.names.insert(name.clone());
+            }
+            HirExpr::Field { owner, .. } | HirExpr::Index { owner, .. } => {
+                self.note_target(owner);
+            }
+            _ => {}
         }
     }
 }
@@ -329,6 +339,15 @@ impl Visitor for MutatedGlobalCollector<'_> {
         match expr {
             HirExpr::Assignment { target, .. } | HirExpr::CompoundUpdate { target, .. } => {
                 self.note_target(target);
+            }
+            HirExpr::Call { args, .. } => {
+                let receiver = match args.first() {
+                    Some(HirExpr::OptionalChain { base, .. }) => Some(base.as_ref()),
+                    other => other,
+                };
+                if let Some(HirExpr::Global { name, .. }) = receiver {
+                    self.names.insert(name.clone());
+                }
             }
             _ => {}
         }
@@ -380,6 +399,9 @@ fn pre_assign_ids_recursive(
                     state.seen_names.insert(key.clone());
                     state.seen_sanitized_names.insert(key_sanitized);
                     state.name_to_function.insert(key, id);
+                    state
+                        .function_params
+                        .insert(id, f.params.iter().map(|p| (p.ty, p.optional)).collect());
                 }
             }
             HirDecl::Class(c) => {
@@ -430,6 +452,10 @@ fn pre_assign_ids_recursive(
                         .first()
                         .is_none_or(|p| p.name.as_str() != "this");
                     state.name_to_function.insert(method_key, id);
+                    state.function_params.insert(
+                        id,
+                        method.params.iter().map(|p| (p.ty, p.optional)).collect(),
+                    );
                     state
                         .method_map
                         .insert((sid, method.name.clone(), is_static), id);
