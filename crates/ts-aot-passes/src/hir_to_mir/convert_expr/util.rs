@@ -237,6 +237,54 @@ impl ExprConverter {
         length_mir
     }
 
+    // Capture selection before argument statements, retaining the receiver as a place.
+    pub(super) fn capture_place_indices(
+        &mut self,
+        hir: &HirExpr,
+        place: MirExpr,
+        types: &mut TypeTable,
+        out: &mut Vec<MirStmt>,
+    ) -> MirExpr {
+        match (hir, place) {
+            (
+                HirExpr::Index {
+                    owner,
+                    index: hir_index,
+                    ..
+                },
+                MirExpr::Index { base, index, ty },
+            ) => {
+                let base = self.capture_place_indices(owner, *base, types, out);
+                let index_ty = self
+                    .value_static_ty(hir_index, types)
+                    .or_else(|| self.mir_expr_static_ty(&index, types))
+                    .unwrap_or_else(|| mir_expr_ty(&index));
+                let temp = self.fresh_local();
+                self.push_temp_local_with_mut(temp, index_ty, false);
+                out.push(MirStmt::Let {
+                    local: temp,
+                    ty: index_ty,
+                    init: Some(*index),
+                    mutable: false,
+                });
+                MirExpr::Index {
+                    base: Box::new(base),
+                    index: Box::new(MirExpr::Local(temp)),
+                    ty,
+                }
+            }
+            (HirExpr::Field { owner, .. }, MirExpr::Field { base, field, ty }) => {
+                let base = self.capture_place_indices(owner, *base, types, out);
+                MirExpr::Field {
+                    base: Box::new(base),
+                    field,
+                    ty,
+                }
+            }
+            (_, other) => other,
+        }
+    }
+
     pub(super) fn hoist_effectful_place_parts(
         &mut self,
         hir: &HirExpr,
@@ -315,5 +363,57 @@ impl ExprConverter {
             mutable: false,
         });
         MirExpr::Local(temp)
+    }
+}
+
+#[cfg(test)]
+mod receiver_index_tests {
+    use super::*;
+    use ts_aot_core::{Atom, LocalId};
+
+    #[test]
+    fn capturing_a_string_key_preserves_its_type_and_value() {
+        let mut types = TypeTable::new();
+        let string_ty = types.intern(&Type::String);
+        let owner_ty = types.intern(&Type::Error);
+        let owner = LocalId::from_raw(10);
+        let key = Atom::from("selected");
+        let hir = HirExpr::Index {
+            owner: Box::new(HirExpr::Local {
+                id: owner,
+                ty: owner_ty,
+                span: Span::default(),
+            }),
+            index: Box::new(HirExpr::String(key.clone(), Span::default())),
+            ty: owner_ty,
+            span: Span::default(),
+        };
+        let place = MirExpr::Index {
+            base: Box::new(MirExpr::Local(owner)),
+            index: Box::new(MirExpr::String {
+                id: key.clone(),
+                ty: string_ty,
+            }),
+            ty: owner_ty,
+        };
+        let mut converter = ExprConverter::default();
+        let mut out = Vec::new();
+        let captured = converter.capture_place_indices(&hir, place, &mut types, &mut out);
+        let [
+            MirStmt::Let {
+                local,
+                ty,
+                init: Some(MirExpr::String { id, .. }),
+                ..
+            },
+        ] = out.as_slice()
+        else {
+            panic!("string key must be captured without a numeric cast: {out:?}");
+        };
+        assert_eq!(*ty, string_ty);
+        assert_eq!(id, &key);
+        assert!(matches!(captured, MirExpr::Index { base, index, .. }
+            if matches!(*base, MirExpr::Local(id) if id == owner)
+                && matches!(*index, MirExpr::Local(id) if id == *local)));
     }
 }

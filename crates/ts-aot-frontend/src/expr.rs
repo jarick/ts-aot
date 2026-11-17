@@ -1183,12 +1183,12 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let lhs = self.walk_expr(senv, &b.left, scope);
+        let lhs_class = self.is_class_value_expr(&lhs, scope.body_id());
         let rhs = self.walk_expr(senv, &b.right, scope);
         let ty = senv.error_ty();
         let span = core_span_from_oxc(b.span);
         if let Some(op) = map_binary_op(b.operator) {
-            let lhs_class = self.is_class_value_expr(&lhs);
-            let rhs_class = self.is_class_value_expr(&rhs);
+            let rhs_class = self.is_class_value_expr(&rhs, scope.body_id());
             if lhs_class || rhs_class {
                 if matches!(
                     op,
@@ -1316,7 +1316,7 @@ impl SkeletonBuilder {
         let inner = self.walk_expr(senv, &unary.argument, scope);
         let span = core_span_from_oxc(unary.span);
         match map_unary_op(unary.operator) {
-            Some(HirUnaryOp::Not) if self.is_class_value_expr(&inner) => {
+            Some(HirUnaryOp::Not) if self.is_class_value_expr(&inner, scope.body_id()) => {
                 let ty = senv.types.intern(&Type::Bool);
                 HirExpr::Sequence {
                     exprs: vec![inner, HirExpr::Bool(false, span)],
@@ -1349,7 +1349,7 @@ impl SkeletonBuilder {
         }
     }
 
-    pub(super) fn is_class_value_expr(&self, expr: &HirExpr) -> bool {
+    pub(super) fn is_class_value_expr(&self, expr: &HirExpr, body_id: u32) -> bool {
         match expr {
             HirExpr::Local { id, .. } => {
                 let storage = self.class_value_storage(*id);
@@ -1370,9 +1370,35 @@ impl SkeletonBuilder {
                 owner, field_name, ..
             } => {
                 let owner_ty = owner.ty();
-                self.class_value_fields
+                let base = self.class_value_field_base(owner, body_id);
+                let escaping = base
+                    .as_ref()
+                    .is_none_or(|base| !self.class_value_field_base_is_fresh(base));
+                let unpoisoned = self
+                    .class_value_field_poison_bases
                     .get(&owner_ty)
-                    .is_some_and(|fields| fields.contains_key(field_name))
+                    .and_then(|fields| fields.get(field_name))
+                    .is_none_or(|bases| {
+                        !bases.unknown_base
+                            && if escaping {
+                                bases.bases.is_empty()
+                            } else {
+                                base.as_ref()
+                                    .is_none_or(|base| !bases.bases.contains_key(base))
+                            }
+                    });
+                let has_candidates = escaping
+                    || base.as_ref().is_some_and(|base| {
+                        !self
+                            .fresh_field_base_classes(base, owner_ty, field_name)
+                            .is_empty()
+                    });
+                unpoisoned
+                    && has_candidates
+                    && self
+                        .class_value_fields
+                        .get(&owner_ty)
+                        .is_some_and(|fields| fields.contains_key(field_name))
                     && !self
                         .unknown_class_value_fields
                         .get(&owner_ty)
@@ -1462,6 +1488,18 @@ impl SkeletonBuilder {
         if let HirExpr::Local { id, .. } = &target {
             let storage = self.class_value_storage(*id);
             self.constant_int_locals.remove(&storage);
+            self.forget_class_value_local(storage, None);
+        }
+        if let HirExpr::Global { name, .. } = &target {
+            if let Some(id) = self.captured_local_id(name.as_str()) {
+                let storage = self.class_value_storage(id);
+                self.constant_int_locals.remove(&storage);
+                self.forget_class_value_local(storage, Some(name.as_str()));
+            } else {
+                self.class_value_globals.remove(name.as_str());
+                self.unknown_class_value_globals
+                    .insert(name.as_str().to_owned());
+            }
         }
         if let HirExpr::Field {
             owner, field_name, ..
@@ -3006,51 +3044,61 @@ impl SkeletonBuilder {
                 }
                 _ => None,
             };
-            match &rhs {
-                HirExpr::DefaultConstruct { ty, span, .. } => {
-                    let (class_ty, span) = (*ty, *span);
-                    let tag = self.class_value_tag(class_ty);
-                    rhs = HirExpr::Int(tag, span);
-                    if !keeps_old_value {
-                        self.unknown_class_value_locals.remove(&id);
+            if matches!(
+                op,
+                CompoundOp::Assign
+                    | CompoundOp::Binary(
+                        HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                    )
+            ) {
+                match &rhs {
+                    HirExpr::DefaultConstruct { ty, span, .. } => {
+                        let (class_ty, span) = (*ty, *span);
+                        let tag = self.class_value_tag(class_ty);
+                        rhs = HirExpr::Int(tag, span);
+                        if !keeps_old_value {
+                            self.unknown_class_value_locals.remove(&id);
+                        }
+                        let classes = self.class_value_locals.entry(id).or_default();
+                        if !classes.contains(&class_ty) {
+                            classes.push(class_ty);
+                        }
                     }
-                    let classes = self.class_value_locals.entry(id).or_default();
-                    if !classes.contains(&class_ty) {
-                        classes.push(class_ty);
-                    }
-                }
-                HirExpr::Local { id: source, .. } => {
-                    let source = self.class_value_storage(*source);
-                    match self.class_value_locals.get(&source).cloned() {
-                        Some(classes) => {
-                            let source_unknown =
-                                self.unknown_class_value_locals.contains_key(&source);
-                            self.record_loop_class_value_copies(
-                                &[(source, classes.clone())],
-                                a.span,
-                            );
-                            if !keeps_old_value {
-                                self.unknown_class_value_locals.remove(&id);
-                            }
-                            if source_unknown && let Some(target_name) = &name {
-                                self.unknown_class_value_locals
-                                    .insert(id, target_name.clone());
-                            }
-                            let target_classes = self.class_value_locals.entry(id).or_default();
-                            for class_ty in classes {
-                                if !target_classes.contains(&class_ty) {
-                                    target_classes.push(class_ty);
+                    HirExpr::Local { id: source, .. } => {
+                        let source = self.class_value_storage(*source);
+                        match self.class_value_locals.get(&source).cloned() {
+                            Some(classes) => {
+                                let source_unknown =
+                                    self.unknown_class_value_locals.contains_key(&source);
+                                self.record_loop_class_value_copies(
+                                    &[(source, classes.clone())],
+                                    a.span,
+                                );
+                                if !keeps_old_value {
+                                    self.unknown_class_value_locals.remove(&id);
+                                }
+                                if source_unknown && let Some(target_name) = &name {
+                                    self.unknown_class_value_locals
+                                        .insert(id, target_name.clone());
+                                }
+                                let target_classes = self.class_value_locals.entry(id).or_default();
+                                for class_ty in classes {
+                                    if !target_classes.contains(&class_ty) {
+                                        target_classes.push(class_ty);
+                                    }
                                 }
                             }
-                        }
-                        None => {
-                            self.forget_class_value_local(id, name.as_deref());
+                            None => {
+                                self.forget_class_value_local(id, name.as_deref());
+                            }
                         }
                     }
+                    _ => {
+                        self.forget_class_value_local(id, name.as_deref());
+                    }
                 }
-                _ => {
-                    self.forget_class_value_local(id, name.as_deref());
-                }
+            } else {
+                self.forget_class_value_local(id, name.as_deref());
             }
         }
         if matches!(op, CompoundOp::Assign)
@@ -3211,7 +3259,13 @@ impl SkeletonBuilder {
                 .class_value_fields
                 .get(&owner_ty)
                 .is_some_and(|fields| fields.contains_key(&field_name));
-            let self_assign = base.as_ref().is_some_and(|base| {
+            let self_assign = matches!(
+                op,
+                CompoundOp::Assign
+                    | CompoundOp::Binary(
+                        HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                    )
+            ) && base.as_ref().is_some_and(|base| {
                 matches!(
                     &rhs,
                     HirExpr::Field { owner: rhs_owner, field_name: rhs_field, .. }
@@ -3242,7 +3296,14 @@ impl SkeletonBuilder {
                 let and_assign = matches!(op, CompoundOp::Binary(HirBinaryOp::And));
                 let proven_class_assign = and_assign && proven_class;
                 class_value_plain_assign = proven_class_assign;
-                let tracked = if self_assign {
+                let tracked = if self_assign
+                    || !matches!(
+                        op,
+                        CompoundOp::Assign
+                            | CompoundOp::Binary(
+                                HirBinaryOp::And | HirBinaryOp::Or | HirBinaryOp::Coalesce
+                            )
+                    ) {
                     None
                 } else {
                     self.rhs_final_class_value_classes(&mut rhs)

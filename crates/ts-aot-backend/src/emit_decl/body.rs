@@ -2085,6 +2085,13 @@ fn emit_expr(
         MirExpr::OptionalChain { base, .. } => emit_expr(base, ctx, emit_env, body_ctx),
         MirExpr::IsSome { expr, .. } => {
             let inner = emit_expr(expr, ctx, emit_env, body_ctx)?;
+            if let Some(ty) = expr_base_ty(expr, body_ctx)
+                && matches!(emit_env.types.resolve(ty), Some(Type::Fn { .. }))
+                && let Some(kind) = ctx.fn_value_kind(ty)
+            {
+                let name = EmitCtx::fn_value_ident(kind);
+                return Ok(quote!(!matches!(#inner, #name::__Unset)));
+            }
             Ok(quote!(#inner.is_some()))
         }
         MirExpr::UnwrapOptional { expr, .. } => {
@@ -3502,13 +3509,13 @@ fn typeof_of_optional_inner(ty: TypeId, emit_env: &EmitEnv) -> Option<&'static s
         Some(Type::Bool) => Some("boolean"),
         Some(Type::String) => Some("string"),
         Some(Type::BigInt) => Some("bigint"),
+        Some(Type::Symbol) => Some("symbol"),
         Some(
             Type::Struct { .. }
             | Type::Array { .. }
             | Type::Named { .. }
             | Type::Promise { .. }
             | Type::Date
-            | Type::Symbol
             | Type::ArrayBuffer
             | Type::WeakMap { .. }
             | Type::Int8Array
@@ -4562,11 +4569,28 @@ fn switch_hoisted_locals(
     body_ctx: &BodyCtx,
 ) -> Result<Vec<(LocalId, TypeId)>, BackendError> {
     let mut arm_uses: Vec<HashSet<LocalId>> = Vec::with_capacity(arms.len());
+    let candidates = arms
+        .iter()
+        .flat_map(|arm| arm.stmts.iter())
+        .filter_map(|stmt| {
+            if let MirStmt::Let { local, .. } = stmt {
+                Some(*local)
+            } else {
+                None
+            }
+        })
+        .collect();
     for arm in arms {
         let mut counts: std::collections::HashMap<LocalId, (u32, bool)> =
             std::collections::HashMap::new();
         super::ctx::count_uses_block(arm, false, &mut counts);
-        arm_uses.push(counts.into_keys().collect());
+        let mut uses: HashSet<_> = counts.into_keys().collect();
+        uses.extend(super::ctx::collect_assigned_locals(
+            &arm.stmts,
+            emit_env.types,
+            &candidates,
+        ));
+        arm_uses.push(uses);
     }
     let mut hoisted: Vec<(LocalId, TypeId)> = Vec::new();
     for (index, arm) in arms.iter().enumerate() {

@@ -1751,7 +1751,14 @@ impl ExprConverter {
             ));
         }
         if let Some((recv, mark)) = receiver {
-            let recv = if is_pure_place(&recv) {
+            let recv = if out.len() != mark && is_place(&recv) {
+                let mut hoisted = Vec::new();
+                let recv = self.capture_place_indices(owner, recv, types, &mut hoisted);
+                for (offset, stmt) in hoisted.into_iter().enumerate() {
+                    out.insert(mark + offset, stmt);
+                }
+                recv
+            } else if is_pure_place(&recv) {
                 recv
             } else if is_place(&recv) {
                 let mut hoisted = Vec::new();

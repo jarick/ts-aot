@@ -1959,6 +1959,10 @@ impl ExprConverter {
                 });
                 MirExpr::Local(dest)
             }
+            Some(Type::Fn { .. }) => MirExpr::IsSome {
+                expr: Box::new(value.clone()),
+                ty: bool_ty,
+            },
             Some(Type::Union { .. }) => return None,
             Some(Type::Null | Type::Void) => MirExpr::Bool(false),
             _ => MirExpr::Bool(true),

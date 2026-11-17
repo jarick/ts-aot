@@ -814,6 +814,7 @@ impl Visitor for ReceiverWriteScan<'_> {
                 HirCallee::Runtime { .. } => {}
                 HirCallee::Function(_) | HirCallee::Closure(_) => self.opaque = true,
             },
+            HirExpr::New { .. } => self.opaque = true,
             _ => {}
         }
         walk_expr(self, expr);

@@ -95,6 +95,15 @@ impl ExprConverter {
         if condition_is_already_boolean(cond_ty, types) {
             return value;
         }
+        let temp = self.fresh_local();
+        self.push_temp_local(temp, cond_ty);
+        out.push(MirStmt::Let {
+            local: temp,
+            ty: cond_ty,
+            init: Some(value),
+            mutable: false,
+        });
+        let value = MirExpr::Local(temp);
         self.truthy_condition(&value, cond_ty, out, types)
             .unwrap_or(value)
     }

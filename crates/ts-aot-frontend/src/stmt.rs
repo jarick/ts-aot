@@ -166,7 +166,17 @@ impl SkeletonBuilder {
         target
     }
 
-    fn widen_before_loop(scope: &mut BodyScope, effects: &LoopEffects) {
+    fn widen_before_loop(&mut self, scope: &mut BodyScope, effects: &LoopEffects) {
+        if effects.has_effect {
+            self.constant_int_locals.clear();
+        } else {
+            for name in &effects.writes {
+                if let Some(id) = scope.visible_binding(name) {
+                    self.constant_int_locals
+                        .remove(&self.class_value_storage(id));
+                }
+            }
+        }
         if effects.has_effect {
             for name in scope.names() {
                 Self::widen_binding(scope, &name);
@@ -274,6 +284,16 @@ impl SkeletonBuilder {
                 let constant = match &cond {
                     HirExpr::Bool(true, _) => Some(true),
                     HirExpr::Bool(false, _) => Some(false),
+                    // An immediately preceding boolean initializer cannot have been
+                    // changed before this direct local read. Preserve dead-branch facts.
+                    HirExpr::Local { id, .. } => match out.last() {
+                        Some(HirStmt::Let {
+                            id: declared,
+                            init: Some(HirExpr::Bool(value, _)),
+                            ..
+                        }) if declared == id => Some(*value),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 let joins = constant.is_none() && i.alternate.is_some();
@@ -318,11 +338,7 @@ impl SkeletonBuilder {
                 if constant == Some(true) {
                     self.restore_constant_int_locals(&then_constants);
                 } else if constant.is_none() {
-                    if otherwise.is_some() {
-                        self.intersect_constant_int_locals(&then_constants);
-                    } else {
-                        self.restore_constant_int_locals(&saved_constants);
-                    }
+                    self.intersect_constant_int_locals(&then_constants);
                 }
                 self.join_class_value_field_states(&branch_fields);
                 if joins {
@@ -343,7 +359,7 @@ impl SkeletonBuilder {
                 });
             }
             Statement::WhileStatement(w) => {
-                Self::widen_before_loop(scope, &Self::while_effects(&w.test, &w.body));
+                self.widen_before_loop(scope, &Self::while_effects(&w.test, &w.body));
                 self.loop_frames.push(Vec::new());
                 let saved_unknown = self.unknown_class_value_locals.clone();
                 let cond = self.walk_expr(senv, &w.test, scope);
@@ -359,7 +375,7 @@ impl SkeletonBuilder {
                 out.push(HirStmt::While { cond, body });
             }
             Statement::DoWhileStatement(d) => {
-                Self::widen_before_loop(scope, &Self::while_effects(&d.test, &d.body));
+                self.widen_before_loop(scope, &Self::while_effects(&d.test, &d.body));
                 self.loop_frames.push(Vec::new());
                 let saved_unknown = self.unknown_class_value_locals.clone();
                 let saved_constants = self.snapshot_constant_int_locals();
@@ -375,7 +391,7 @@ impl SkeletonBuilder {
                 out.push(HirStmt::DoWhile { body, cond });
             }
             Statement::ForStatement(f) => {
-                Self::widen_before_loop(scope, &Self::for_effects(f));
+                self.widen_before_loop(scope, &Self::for_effects(f));
                 self.loop_frames.push(Vec::new());
                 let saved_unknown = self.unknown_class_value_locals.clone();
                 let saved_constants = self.snapshot_constant_int_locals();
@@ -389,7 +405,7 @@ impl SkeletonBuilder {
                 self.verify_loop_class_value_reads(senv);
             }
             Statement::ForOfStatement(f) => {
-                Self::widen_before_loop(
+                self.widen_before_loop(
                     scope,
                     &Self::for_binding_effects(&f.left, &f.right, &f.body),
                 );
@@ -406,7 +422,7 @@ impl SkeletonBuilder {
                 self.verify_loop_class_value_reads(senv);
             }
             Statement::ForInStatement(f) => {
-                Self::widen_before_loop(
+                self.widen_before_loop(
                     scope,
                     &Self::for_binding_effects(&f.left, &f.right, &f.body),
                 );
@@ -540,6 +556,7 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) {
         let disc = self.walk_expr(senv, &sw.discriminant, scope);
+        let disc_is_class = self.is_class_value_expr(&disc, scope.body_id());
         let disc_constant = match &disc {
             HirExpr::Local { id, .. } => self
                 .constant_int_locals
@@ -641,12 +658,12 @@ impl SkeletonBuilder {
                 cases[index].body.extend(next);
             }
         }
-        if self.is_class_value_expr(&disc) {
+        if disc_is_class {
             for case in &cases {
                 if case
                     .test
                     .as_ref()
-                    .is_some_and(|test| self.is_class_value_expr(test))
+                    .is_some_and(|test| self.is_class_value_expr(test, scope.body_id()))
                 {
                     senv.report_unsupported(
                         "E0419",
@@ -656,10 +673,31 @@ impl SkeletonBuilder {
                     );
                 }
             }
+            if cases
+                .iter()
+                .filter_map(|case| case.test.as_ref())
+                .any(|test| {
+                    !matches!(
+                        test,
+                        HirExpr::Int(..)
+                            | HirExpr::Float(..)
+                            | HirExpr::Bool(..)
+                            | HirExpr::Null(..)
+                            | HirExpr::Undefined(..)
+                            | HirExpr::String(..)
+                    )
+                })
+            {
+                senv.report_unsupported(
+                    "E0419",
+                    "effectful switch tests on a class value are not supported",
+                    sw.span,
+                );
+            }
             cases.retain(|case| {
                 case.test
                     .as_ref()
-                    .is_none_or(|test| self.is_class_value_expr(test))
+                    .is_none_or(|test| self.is_class_value_expr(test, scope.body_id()))
             });
         }
         scope.pop();
@@ -991,6 +1029,7 @@ impl SkeletonBuilder {
                 }
             }
         }
+        self.widen_before_loop(scope, &Self::for_effects(f));
         self.enter_class_value_branch();
         let cond = match &f.test {
             Some(e) => self.walk_expr(senv, e, scope),
