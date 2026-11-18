@@ -27,10 +27,12 @@ pub(super) fn propagate_generator_types(
     }
     for (f, namespace_path) in functions {
         let mut generator_locals: HashMap<LocalId, TypeId> = HashMap::new();
+        let mut generator_decl_tys: HashMap<LocalId, TypeId> = HashMap::new();
         let mut reported_generator_value_uses: HashSet<(Atom, Span)> = HashSet::new();
         let mut converged = false;
         for _ in 0..MAX_PROPAGATION_PASSES {
             let before = generator_locals.clone();
+            let before_decl = generator_decl_tys.clone();
             let before_reported = reported_generator_value_uses.clone();
             let mut walker = GenTypeWalker {
                 generator_fn_names,
@@ -39,14 +41,19 @@ pub(super) fn propagate_generator_types(
                 method_to_gen_ty: &gen_types.by_method,
                 namespace_path: &namespace_path,
                 generator_locals: std::mem::take(&mut generator_locals),
+                generator_decl_tys: std::mem::take(&mut generator_decl_tys),
                 reported_generator_value_uses: std::mem::take(&mut reported_generator_value_uses),
                 types: &mut *types,
                 ctx: &mut *ctx,
             };
             walker.run(&mut f.body);
             generator_locals = walker.generator_locals;
+            generator_decl_tys = walker.generator_decl_tys;
             reported_generator_value_uses = walker.reported_generator_value_uses;
-            if generator_locals == before && reported_generator_value_uses == before_reported {
+            if generator_locals == before
+                && generator_decl_tys == before_decl
+                && reported_generator_value_uses == before_reported
+            {
                 converged = true;
                 break;
             }
@@ -155,6 +162,7 @@ struct GenTypeWalker<'a> {
     method_to_gen_ty: &'a HashMap<TypeId, HashMap<Atom, TypeId>>,
     namespace_path: &'a [String],
     generator_locals: HashMap<LocalId, TypeId>,
+    generator_decl_tys: HashMap<LocalId, TypeId>,
     reported_generator_value_uses: HashSet<(Atom, Span)>,
     types: &'a mut TypeTable,
     ctx: &'a mut PassContext,
@@ -217,15 +225,17 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
             if let Some(init_expr) = init {
                 self.visit_expr_mut(init_expr);
                 let init_ty = init_expr.ty();
-                if is_generator_type_id(self.types, init_ty)
-                    || matches!(
-                        self.types.resolve(init_ty),
-                        Some(Type::AsyncGenYield { .. })
-                    )
-                {
+                if is_generator_typed(self.types, init_ty) {
                     *ty = init_ty;
                     self.generator_locals.insert(*id, init_ty);
+                    self.generator_decl_tys.insert(*id, init_ty);
                 }
+            } else if let Some(gen_ty) = self
+                .generator_locals
+                .get(id)
+                .or_else(|| self.generator_decl_tys.get(id))
+            {
+                *ty = *gen_ty;
             }
             return;
         }
@@ -301,17 +311,34 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
                 }
             }
             HirExpr::Local { id, ty, .. } => {
-                if let Some(gen_ty) = self.generator_locals.get(id) {
+                if let Some(gen_ty) = self
+                    .generator_locals
+                    .get(id)
+                    .or_else(|| self.generator_decl_tys.get(id))
+                {
                     *ty = *gen_ty;
                 }
             }
-            HirExpr::Assignment { target, value, .. } => {
+            HirExpr::Assignment {
+                target, value, ty, ..
+            } => {
                 self.visit_expr_mut(value);
-                if let HirExpr::Local { id: target_id, .. } = target.as_ref()
-                    && is_generator_type_id(self.types, value.ty())
-                {
-                    let gen_ty = value.ty();
-                    self.generator_locals.insert(*target_id, gen_ty);
+                let gen_ty = if is_generator_typed(self.types, value.ty()) {
+                    *ty = value.ty();
+                    Some(value.ty())
+                } else {
+                    None
+                };
+                if let HirExpr::Local { id: target_id, .. } = target.as_ref() {
+                    match gen_ty {
+                        Some(gen_ty) => {
+                            self.generator_locals.insert(*target_id, gen_ty);
+                            self.generator_decl_tys.insert(*target_id, gen_ty);
+                        }
+                        None => {
+                            self.generator_locals.remove(target_id);
+                        }
+                    }
                 }
                 self.visit_expr_mut(target);
             }
@@ -352,4 +379,17 @@ impl<'a> VisitorMut for GenTypeWalker<'a> {
 
 fn is_generator_type_id(types: &TypeTable, ty: TypeId) -> bool {
     matches!(types.resolve(ty), Some(Type::Generator { .. }))
+}
+
+fn is_generator_typed(types: &TypeTable, ty: TypeId) -> bool {
+    if is_generator_type_id(types, ty) {
+        return true;
+    }
+    match types.resolve(ty) {
+        Some(Type::AsyncGenYield { .. } | Type::GeneratorResult { .. }) => true,
+        Some(Type::Promise { ok, .. }) => {
+            matches!(types.resolve(*ok), Some(Type::AsyncGenYield { .. }))
+        }
+        _ => false,
+    }
 }

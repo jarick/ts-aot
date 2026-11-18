@@ -129,3 +129,45 @@ fn main() {
     let stdout = run_generated_crate("mono_optional_padding", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
+
+#[test]
+fn a_local_bound_to_a_generic_method_call_uses_the_specialized_type() {
+    const SOURCE: &str = "\
+        class K { n<T>(x: T): T { return x; } }\n\
+        const k = new K();\n\
+        class A { n<T>(x: T): T { return x; } }\n\
+        class B { n<T>(x: T): T { return x; } }\n\
+        const a = new A();\n\
+        const b = new B();\n\
+        export function one(): number { const r = k.n(7); return r + 1; }\n\
+        export function text(): string { const r = k.n(7); return `r=${r}`; }\n\
+        export function sum(): number { const r = a.n(7); const s = b.n(8); return r + s; }\n";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host, JsString};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn text(value: JsString<'_>) -> String {
+    value.to_string_lossy()
+}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(mono_generic_method_local::one(&ctx), 8.0);
+    assert_eq!(mono_generic_method_local::sum(&ctx), 15.0);
+    assert_eq!(text(mono_generic_method_local::text(&ctx)), "r=7");
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    assert!(
+        !rust.contains("__generic"),
+        "no generic parameter may survive into a local binding; got:\n{rust}"
+    );
+    check_generated_crate("mono_generic_method_local", &rust);
+    let stdout = run_generated_crate("mono_generic_method_local", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}

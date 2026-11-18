@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use bumpalo::collections::String as BumpString;
+
 use crate::arena::Ctx;
 use crate::string::JsString;
 
@@ -63,11 +65,14 @@ pub fn __ts_aot_symbol_for(key: &JsString<'_>) -> i64 {
 
 #[must_use]
 pub fn __ts_aot_symbol_key_for<'a>(ctx: &Ctx<'a>, sym: i64) -> Option<JsString<'a>> {
-    lock_registry()
-        .reverse
-        .get(&sym)
-        .map(|units| match String::from_utf16(units) {
-            Ok(s) => JsString::Valid(ctx.arena.alloc_str(&s)),
-            Err(_) => JsString::Raw(ctx.arena.alloc_slice_copy(units)),
-        })
+    lock_registry().reverse.get(&sym).map(|units| {
+        let mut out = BumpString::with_capacity_in(units.len(), ctx.arena);
+        for decoded in char::decode_utf16(units.iter().copied()) {
+            match decoded {
+                Ok(c) => out.push(c),
+                Err(_) => return JsString::Raw(ctx.arena.alloc_slice_copy(units)),
+            }
+        }
+        JsString::Valid(out.into_bump_str())
+    })
 }

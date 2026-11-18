@@ -12,9 +12,24 @@ use crate::promise::{
 type BoxedProducer<T> = Pin<Box<dyn Future<Output = Option<T>> + 'static>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GeneratorResult<T> {
-    Yielded(T),
-    Done(Option<T>),
+pub struct GeneratorResult<T> {
+    pub value: Option<T>,
+    pub done: bool,
+}
+
+impl<T> GeneratorResult<T> {
+    #[must_use]
+    pub fn yielded(value: T) -> Self {
+        Self {
+            value: Some(value),
+            done: false,
+        }
+    }
+
+    #[must_use]
+    pub fn done(value: Option<T>) -> Self {
+        Self { value, done: true }
+    }
 }
 
 pub struct Generator<T> {
@@ -26,23 +41,21 @@ impl<T> Generator<T> {
     #[must_use]
     pub fn next(&mut self) -> GeneratorResult<T> {
         if self.finished {
-            return GeneratorResult::Done(None);
+            return GeneratorResult::done(None);
         }
         self.finished = true;
         match self.inner.resume() {
             GeneratorState::Yielded(value) => {
                 self.finished = false;
-                GeneratorResult::Yielded(value)
+                GeneratorResult::yielded(value)
             }
-            GeneratorState::Complete(value) => GeneratorResult::Done(value),
+            GeneratorState::Complete(value) => GeneratorResult::done(value),
         }
     }
 
     fn next_iter(&mut self) -> Option<T> {
-        match self.next() {
-            GeneratorResult::Yielded(value) => Some(value),
-            GeneratorResult::Done(_) => None,
-        }
+        let result = self.next();
+        if result.done { None } else { result.value }
     }
 }
 

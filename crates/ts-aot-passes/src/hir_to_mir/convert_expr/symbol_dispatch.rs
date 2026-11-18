@@ -5,7 +5,6 @@ use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
 use crate::PassContext;
-use crate::hir_to_mir::convert_expr::util::hir_expr_type_id;
 use crate::hir_to_mir::converter::ExprConverter;
 
 use super::globals::{
@@ -77,13 +76,18 @@ impl ExprConverter {
                 )
             })
             .collect();
+        let result_ty = if matches!(types.resolve(ty), None | Some(Type::Error)) {
+            types.intern(&Type::Symbol)
+        } else {
+            ty
+        };
         let dest = self.fresh_local();
-        self.push_temp_local(dest, ty);
+        self.push_temp_local(dest, result_ty);
         out.push(MirStmt::Runtime {
             op: RuntimeOp::SymbolNew,
             args: mir_args,
             dest: Some(dest),
-            ty,
+            ty: result_ty,
             target_ty: None,
         });
         Some(MirExpr::Local(dest))
@@ -146,23 +150,38 @@ impl ExprConverter {
                 }
             }
             SymbolArgKind::Symbol => {
-                let Some(arg_ty) = hir_expr_type_id(&args[0]) else {
-                    ctx.warning(
-                        "E0406",
-                        "Symbol.keyFor() argument must be a Symbol (per ECMAScript spec); \
-                         got expression with unresolvable type. The runtime call was not emitted."
-                            .to_string(),
-                        Span::new(0, 0),
-                    );
-                    return Some(MirExpr::Unit);
-                };
-                if !matches!(types.resolve(arg_ty), Some(Type::Symbol)) {
+                let known = self.operand_static_ty(&args[0], types);
+                let is_symbol =
+                    known.is_some_and(|ty| matches!(types.resolve(ty), Some(Type::Symbol)));
+                let is_literal = matches!(
+                    args[0],
+                    HirExpr::Int(..)
+                        | HirExpr::Float(..)
+                        | HirExpr::String(..)
+                        | HirExpr::Bool(..)
+                        | HirExpr::Null(_)
+                        | HirExpr::Undefined(_)
+                        | HirExpr::Unit(_)
+                );
+                if !is_symbol && (known.is_some() || is_literal) {
+                    let label = if is_literal {
+                        match &args[0] {
+                            HirExpr::Int(..) | HirExpr::Float(..) => "number".to_owned(),
+                            HirExpr::String(..) => "string".to_owned(),
+                            HirExpr::Bool(..) => "boolean".to_owned(),
+                            _ => "null/undefined".to_owned(),
+                        }
+                    } else {
+                        known.map_or_else(
+                            || "unknown".to_owned(),
+                            |arg_ty| type_label(types, arg_ty),
+                        )
+                    };
                     ctx.warning(
                         "E0406",
                         format!(
                             "Symbol.keyFor() argument must be a Symbol (per ECMAScript spec); \
-                             got expression of type `{}`. The runtime call was not emitted.",
-                            type_label(types, arg_ty)
+                             got expression of type `{label}`. The runtime call was not emitted."
                         ),
                         Span::new(0, 0),
                     );
@@ -190,6 +209,8 @@ impl ExprConverter {
                 inner: string_ty,
                 nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
             })
+        } else if matches!(types.resolve(ty), None | Some(Type::Error)) {
+            types.intern(&Type::Symbol)
         } else {
             ty
         };

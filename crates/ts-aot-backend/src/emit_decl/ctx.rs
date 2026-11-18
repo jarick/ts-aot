@@ -11,7 +11,7 @@ use ts_aot_ir_mir::{
     MirPlaceBase, MirProgram, MirStmt, RuntimeOp,
 };
 
-use super::ident::{ident_from, sanitize_ident};
+use super::ident::{bound_local_ident, ident_from, sanitize_ident};
 use super::types::emit_type_id_with_ctx;
 
 pub(super) struct RuntimeCallSpec<'a> {
@@ -36,6 +36,7 @@ pub(super) struct EmitCtx {
     module_idents: Rc<HashSet<Ident>>,
     mutable_globals: HashSet<Atom>,
     function_arity: HashMap<Atom, usize>,
+    function_symbols: HashSet<Atom>,
     global_tys: HashMap<Atom, TypeId>,
     struct_lifetimes: HashMap<StructId, bool>,
     fn_value_index: HashMap<TypeId, usize>,
@@ -158,12 +159,24 @@ impl EmitCtx {
         let mut function_arity = HashMap::new();
         let mut function_params: HashMap<FunctionId, Vec<TypeId>> = HashMap::new();
         let mut module_idents: HashSet<Ident> = HashSet::new();
+        let mut function_symbols: HashSet<Atom> = HashSet::new();
         for decl in &program.declarations {
             module_idents.insert(match decl {
                 MirDecl::Function(f) => ident_from(&f.name),
                 MirDecl::Struct(s) => ident_from(&s.name),
                 MirDecl::Global(g) => ident_from(&g.name),
             });
+            match decl {
+                MirDecl::Function(f) => {
+                    function_symbols.insert(f.name.clone());
+                }
+                MirDecl::Struct(s) => {
+                    for method in &s.methods {
+                        function_symbols.insert(method.name.clone());
+                    }
+                }
+                MirDecl::Global(_) => {}
+            }
         }
         for decl in &program.declarations {
             match decl {
@@ -235,6 +248,7 @@ impl EmitCtx {
             mutable_globals,
             global_tys,
             function_arity,
+            function_symbols,
             struct_lifetimes,
             fn_value_index,
             fn_value_sigs,
@@ -386,6 +400,10 @@ impl EmitCtx {
         self.function_arity.get(name).copied()
     }
 
+    pub(super) fn is_function_symbol(&self, name: &Atom) -> bool {
+        self.function_symbols.contains(name)
+    }
+
     pub(super) fn struct_ident(&self, id: StructId) -> Ident {
         self.struct_names
             .get(&id)
@@ -463,6 +481,7 @@ pub(super) struct BodyCtx {
     capture_tys: HashMap<LocalId, TypeId>,
     shared_by_name: HashMap<Ident, SharedAccess>,
     own_env: Option<OwnEnv>,
+    self_env: Option<SelfEnvField>,
     dynamic_locals: RefCell<HashSet<LocalId>>,
     dynamic_names: RefCell<HashSet<Atom>>,
     move_safe_locals: RefCell<HashSet<LocalId>>,
@@ -484,11 +503,19 @@ pub(super) struct SharedAccess {
 }
 
 #[derive(Clone)]
+pub(super) enum EnvInit {
+    Empty,
+    Param(Ident),
+    Receiver,
+    BorrowedReceiver,
+}
+
+#[derive(Clone)]
 pub(super) struct EnvField {
     pub(super) field: Ident,
     pub(super) ty: TypeId,
     pub(super) storage: SharedStorage,
-    pub(super) param_init: Option<Ident>,
+    pub(super) init: EnvInit,
     pub(super) dynamic: bool,
 }
 
@@ -496,6 +523,13 @@ pub(super) struct OwnEnv {
     pub(super) env_ident: Ident,
     pub(super) env_type: Ident,
     pub(super) fields: Vec<EnvField>,
+}
+
+#[derive(Clone)]
+pub(super) struct SelfEnvField {
+    pub(super) field: Ident,
+    pub(super) ty: TypeId,
+    pub(super) borrowed: bool,
 }
 
 fn shared_read_tokens(acc: &SharedAccess) -> TokenStream {
@@ -530,14 +564,14 @@ pub(super) fn shared_write_tokens(acc: &SharedAccess, value: &TokenStream) -> To
     let field = &acc.field;
     let tmp = format_ident!("__ts_shared_write_{}", field);
     match acc.storage {
-        SharedStorage::Cell => quote! {
+        SharedStorage::Cell => quote! {{
             let #tmp = #value;
             #env.#field.set(Some(#tmp));
-        },
-        SharedStorage::RefCell => quote! {
+        }},
+        SharedStorage::RefCell => quote! {{
             let #tmp = #value;
             *#env.#field.borrow_mut() = Some(#tmp);
-        },
+        }},
     }
 }
 
@@ -591,6 +625,7 @@ impl BodyCtx {
         f: &MirFunctionDecl,
         types: &TypeTable,
         mutating_methods: &HashSet<FunctionId>,
+        module_idents: &Rc<HashSet<Ident>>,
     ) -> Self {
         let self_param = match f.kind {
             FunctionKind::Method { self_param, .. }
@@ -630,19 +665,39 @@ impl BodyCtx {
         let mut locals = HashMap::new();
         let mut locals_ty = HashMap::new();
         let mut locals_mut = HashMap::new();
+        let mut forbidden: HashSet<Ident> = module_idents.as_ref().clone();
+        forbidden.insert(format_ident!("__ctx"));
+        forbidden.insert(format_ident!("__e"));
+        forbidden.insert(format_ident!("_args"));
+        forbidden.insert(format_ident!("__pending_throw"));
+        forbidden.insert(format_ident!("__loop_jump"));
+        for idx in 0..f.params.len() {
+            forbidden.insert(format_ident!("__slot_{idx}"));
+        }
+        forbidden.insert(format_ident!("__env_{}", f.id.raw()));
+        forbidden.insert(format_ident!("__ScopeEnv{}", f.id.raw()));
+        forbidden.insert(format_ident!("__gen_co_{}", f.id.raw()));
+        let mut taken_idents: HashSet<Ident> = HashSet::new();
         for param in &f.params {
             if Some(param.id) != self_param {
-                locals.insert(param.id, ident_from(&param.name));
+                locals.insert(
+                    param.id,
+                    bound_local_ident(&param.name, param.id, &forbidden, &mut taken_idents),
+                );
             }
             locals_ty.insert(param.id, param.ty);
             locals_mut.insert(param.id, written.contains(&param.id));
         }
         for local in &f.body.locals {
-            locals.insert(local.id, ident_from(&local.name));
+            locals.insert(
+                local.id,
+                bound_local_ident(&local.name, local.id, &forbidden, &mut taken_idents),
+            );
             locals_ty.insert(local.id, local.ty);
             locals_mut.insert(local.id, local.mutable || written.contains(&local.id));
         }
-        let reserved_idents = locals.values().cloned().collect::<HashSet<_>>();
+        let mut reserved_idents = locals.values().cloned().collect::<HashSet<_>>();
+        reserved_idents.extend(forbidden);
         let param_ids: HashSet<LocalId> = f
             .params
             .iter()
@@ -662,12 +717,32 @@ impl BodyCtx {
             }
         }
         let move_safe_locals = collect_move_safe_locals(&f.body.block, &f.body.locals);
-        let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
-        for id in collect_captured_locals(&f.body.block) {
-            if Some(id) == self_param {
-                continue;
+        let receiver_is_borrowed = match f.kind {
+            FunctionKind::Constructor { .. } => true,
+            FunctionKind::Method { self_param, .. } => {
+                locals_mut.get(&self_param).copied().unwrap_or(false)
             }
-            let (Some(name), Some(&ty)) = (locals.get(&id), locals_ty.get(&id)) else {
+            _ => false,
+        };
+        let receiver_name = self_param
+            .and_then(|id| f.params.iter().find(|p| p.id == id))
+            .map(|p| ident_from(&p.name));
+        let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
+        let mut receiver_field: Option<(Ident, TypeId)> = None;
+        for id in collect_captured_locals(&f.body.block) {
+            let is_receiver = Some(id) == self_param;
+            let name = if is_receiver {
+                let Some(name) = receiver_name.clone() else {
+                    continue;
+                };
+                name
+            } else {
+                let Some(name) = locals.get(&id) else {
+                    continue;
+                };
+                name.clone()
+            };
+            let Some(&ty) = locals_ty.get(&id) else {
                 continue;
             };
             if fields.iter().any(|(fid, _, _)| *fid == id) {
@@ -675,7 +750,18 @@ impl BodyCtx {
             }
             let storage = shared_storage_for(types.resolve(ty));
             let field = format_ident!("{}_{}", name, id.raw());
-            let param_init = param_ids.contains(&id).then(|| name.clone());
+            let init = if is_receiver {
+                receiver_field = Some((field.clone(), ty));
+                if receiver_is_borrowed {
+                    EnvInit::BorrowedReceiver
+                } else {
+                    EnvInit::Receiver
+                }
+            } else if param_ids.contains(&id) {
+                EnvInit::Param(name.clone())
+            } else {
+                EnvInit::Empty
+            };
             fields.push((
                 id,
                 name.clone(),
@@ -683,7 +769,7 @@ impl BodyCtx {
                     field,
                     ty,
                     storage,
-                    param_init,
+                    init,
                     dynamic: dynamic_ids.contains(&id),
                 },
             ));
@@ -691,6 +777,7 @@ impl BodyCtx {
         let mut shared_by_id: HashMap<LocalId, SharedAccess> = HashMap::new();
         let mut shared_by_name: HashMap<Ident, SharedAccess> = HashMap::new();
         let mut own_env = None;
+        let mut self_env = None;
         if !fields.is_empty() {
             let env_ident = format_ident!("__env_{}", f.id.raw());
             let env_type = format_ident!("__ScopeEnv{}", f.id.raw());
@@ -703,7 +790,27 @@ impl BodyCtx {
                     ty: ef.ty,
                 };
                 shared_by_id.insert(*id, acc.clone());
-                shared_by_name.insert(name.clone(), acc);
+                let lookup_name = f
+                    .params
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map(|p| ident_from(&p.name))
+                    .or_else(|| {
+                        f.body
+                            .locals
+                            .iter()
+                            .find(|l| l.id == *id)
+                            .map(|l| ident_from(&l.name))
+                    })
+                    .unwrap_or_else(|| name.clone());
+                shared_by_name.insert(lookup_name, acc);
+            }
+            if let Some((field, ty)) = receiver_field {
+                self_env = Some(SelfEnvField {
+                    field,
+                    ty,
+                    borrowed: receiver_is_borrowed,
+                });
             }
             own_env = Some(OwnEnv {
                 env_ident,
@@ -716,7 +823,7 @@ impl BodyCtx {
             locals_ty,
             locals_mut,
             reserved_idents,
-            module_idents: Rc::new(HashSet::new()),
+            module_idents: Rc::clone(module_idents),
             self_param,
             self_is_borrowed,
             is_generator,
@@ -741,6 +848,7 @@ impl BodyCtx {
             shared_by_name,
             capture_tys: HashMap::new(),
             own_env,
+            self_env,
             dynamic_locals: RefCell::new(dynamic_ids),
             dynamic_names: RefCell::new(dynamic_names),
             move_safe_locals: RefCell::new(move_safe_locals),
@@ -768,7 +876,15 @@ impl BodyCtx {
             locals: HashMap::new(),
             locals_ty: HashMap::new(),
             locals_mut: HashMap::new(),
-            reserved_idents: HashSet::new(),
+            reserved_idents: [
+                format_ident!("__ctx"),
+                format_ident!("__e"),
+                format_ident!("_args"),
+                format_ident!("__pending_throw"),
+                format_ident!("__loop_jump"),
+            ]
+            .into_iter()
+            .collect(),
             module_idents: Rc::new(HashSet::new()),
             self_param: None,
             self_is_borrowed: false,
@@ -794,6 +910,7 @@ impl BodyCtx {
             capture_tys: HashMap::new(),
             shared_by_name: inherited_names,
             own_env: None,
+            self_env: None,
             dynamic_locals: RefCell::new(HashSet::new()),
             dynamic_names: RefCell::new(HashSet::new()),
             move_safe_locals: RefCell::new(HashSet::new()),
@@ -814,6 +931,10 @@ impl BodyCtx {
 
     pub(super) fn own_env(&self) -> Option<&OwnEnv> {
         self.own_env.as_ref()
+    }
+
+    pub(super) fn self_env(&self) -> Option<&SelfEnvField> {
+        self.self_env.as_ref()
     }
 
     pub(super) fn detect_own_env(
@@ -842,7 +963,11 @@ impl BodyCtx {
             }
             let storage = shared_storage_for(types.resolve(ty));
             let field = format_ident!("{}_{}", name, id.raw());
-            let param_init = param_ids.contains(&id).then(|| name.clone());
+            let init = if param_ids.contains(&id) {
+                EnvInit::Param(self.local_ident(id))
+            } else {
+                EnvInit::Empty
+            };
             let dynamic = self.is_dynamic(id);
             fields.push((
                 id,
@@ -851,7 +976,7 @@ impl BodyCtx {
                     field,
                     ty,
                     storage,
-                    param_init,
+                    init,
                     dynamic,
                 },
             ));
@@ -902,15 +1027,15 @@ impl BodyCtx {
     }
 
     pub(super) fn local_read(&self, id: LocalId) -> TokenStream {
+        if let Some(acc) = self.shared_access_for_local(id) {
+            return shared_read_tokens(&acc);
+        }
         if Some(id) == self.self_param {
             return if self.self_is_borrowed {
                 quote!(self.clone())
             } else {
                 quote!(self)
             };
-        }
-        if let Some(acc) = self.shared_access_for_local(id) {
-            return shared_read_tokens(&acc);
         }
         let ident = self.local_ident(id);
         quote!(#ident)
@@ -922,18 +1047,17 @@ impl BodyCtx {
     }
 
     pub(super) fn local_place_base(&self, id: LocalId) -> TokenStream {
-        if Some(id) == self.self_param {
-            return quote!(self);
-        }
         if let Some(acc) = self.shared_access_for_local(id) {
-            let base = shared_place_base_tokens(&acc);
-            debug_assert!(
-                base.is_some(),
-                "Cell-backed shared local cannot be used as a place base"
-            );
-            if let Some(tokens) = base {
+            if let Some(tokens) = shared_place_base_tokens(&acc) {
                 return tokens;
             }
+            debug_assert!(
+                Some(id) == self.self_param,
+                "Cell-backed shared local cannot be used as a place base"
+            );
+        }
+        if Some(id) == self.self_param {
+            return quote!(self);
         }
         let ident = self.local_ident(id);
         quote!(#ident)
@@ -944,7 +1068,19 @@ impl BodyCtx {
             .and_then(|acc| shared_place_base_tokens(&acc))
     }
 
+    pub(super) fn reserve_ident(&mut self, ident: Ident) {
+        self.reserved_idents.insert(ident);
+    }
     pub(super) fn register_local(&mut self, id: LocalId, name: Ident, ty: TypeId, mutable: bool) {
+        let name = if name == "_" || self.locals.get(&id) == Some(&name) {
+            name
+        } else {
+            let mut candidate = name;
+            while self.is_reserved(&candidate) {
+                candidate = format_ident!("{candidate}_");
+            }
+            candidate
+        };
         self.locals.insert(id, name.clone());
         self.locals_ty.insert(id, ty);
         self.locals_mut.insert(id, mutable);
@@ -1047,6 +1183,11 @@ impl BodyCtx {
     }
 
     pub(super) fn local_ref(&self, id: LocalId) -> TokenStream {
+        if let Some(acc) = self.shared_access_for_local(id)
+            && let Some(tokens) = shared_place_base_tokens(&acc)
+        {
+            return tokens;
+        }
         if Some(id) == self.self_param {
             quote!(self)
         } else {

@@ -710,6 +710,100 @@ impl ExprConverter {
         }
     }
 
+    pub(super) fn chain_owner_ty(&self, expr: &HirExpr, types: &TypeTable) -> Option<TypeId> {
+        let declarations = &self.program.declarations;
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(declarations));
+        let resolve_global = |name: &Atom| self.global_decl_type(name);
+        compute_chain_owner_ty(expr, class_index, declarations, types, &resolve_global)
+    }
+
+    pub(super) fn recovered_owner_ty(&self, owner: &HirExpr, types: &TypeTable) -> Option<TypeId> {
+        let ty = owner.ty();
+        if !matches!(types.resolve(ty), None | Some(Type::Error)) {
+            return Some(ty);
+        }
+        match owner {
+            HirExpr::Call {
+                callee: HirCallee::Indirect(inner),
+                ..
+            } => {
+                if let HirExpr::Global { name, .. } = inner.as_ref() {
+                    let declared = (0..=self.namespace_path.len())
+                        .rev()
+                        .find_map(|depth| {
+                            let probe =
+                                qualified_name(&self.namespace_path[..depth], name.as_str());
+                            self.program.find_function_by_qualified_name(&probe)
+                        })
+                        .or_else(|| self.program.find_function_by_name(name))
+                        .map(|f| f.ret);
+                    return declared
+                        .filter(|ty| !matches!(types.resolve(*ty), None | Some(Type::Error)));
+                }
+                let HirExpr::Field {
+                    owner: receiver,
+                    field_name,
+                    ..
+                } = inner.as_ref()
+                else {
+                    return None;
+                };
+                let static_sid = match receiver.as_ref() {
+                    HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name),
+                    _ => None,
+                };
+                let (sid, is_static) = match static_sid {
+                    Some(sid) => (sid, true),
+                    None => {
+                        let receiver_ty = self.recovered_owner_ty(receiver, types)?;
+                        (self.struct_id_for_ty(receiver_ty, types)?, false)
+                    }
+                };
+                self.method_ret
+                    .get(&(sid, field_name.clone(), is_static))
+                    .copied()
+                    .filter(|ty| !matches!(types.resolve(*ty), None | Some(Type::Error)))
+            }
+            HirExpr::Field {
+                owner: receiver,
+                field_name,
+                ..
+            } => {
+                let receiver_ty = self.recovered_owner_ty(receiver, types)?;
+                let receiver_ty = match types.resolve(receiver_ty) {
+                    Some(Type::Optional { inner, .. }) => *inner,
+                    _ => receiver_ty,
+                };
+                self.declared_field_ty(receiver_ty, field_name)
+            }
+            HirExpr::New { callee, .. } => self.recovered_owner_ty(callee, types),
+            _ => self.chain_owner_ty(owner, types),
+        }
+    }
+
+    pub(super) fn struct_id_for_ty(&self, ty: TypeId, types: &TypeTable) -> Option<StructId> {
+        let ty = match types.resolve(ty) {
+            Some(Type::Optional { inner, .. }) => *inner,
+            _ => ty,
+        };
+        if let Some(&sid) = self.struct_ids.get(&ty) {
+            return Some(sid);
+        }
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(&self.program.declarations));
+        let path = class_index.get(&ty)?;
+        if let Some(key) = class_key_at_path(&self.program.declarations, path)
+            && let Some(&sid) = self.class_struct_by_name.get(&key)
+        {
+            return Some(sid);
+        }
+        let class = class_at_path(&self.program.declarations, path.clone())?;
+        self.lookup_class_struct_by_name(&class.name)
+    }
+
     pub(super) fn owner_struct_id(
         &self,
         owner: &HirExpr,
@@ -740,7 +834,8 @@ impl ExprConverter {
         ctx: &mut PassContext,
     ) -> FieldId {
         let owner_ty = match owner {
-            HirExpr::OptionalChain { .. } | HirExpr::Field { .. } => {
+            HirExpr::Field { .. } => self.recovered_owner_ty(owner, types),
+            HirExpr::OptionalChain { .. } => {
                 let declarations = &self.program.declarations;
                 let class_index = self
                     .class_index
@@ -749,9 +844,10 @@ impl ExprConverter {
                 compute_chain_owner_ty(owner, class_index, declarations, types, &resolve_global)
             }
             HirExpr::Global { name, ty, .. } => Some(self.global_owner_ty(name, *ty, types)),
+            HirExpr::Call { ty, .. } => Some(self.recovered_owner_ty(owner, types).unwrap_or(*ty)),
+            HirExpr::New { ty, .. } => Some(self.recovered_owner_ty(owner, types).unwrap_or(*ty)),
             HirExpr::Local { ty, .. }
             | HirExpr::Index { ty, .. }
-            | HirExpr::Call { ty, .. }
             | HirExpr::Binary { ty, .. }
             | HirExpr::Unary { ty, .. }
             | HirExpr::StructLiteral { ty, .. }
@@ -760,7 +856,6 @@ impl ExprConverter {
             | HirExpr::Await { ty, .. }
             | HirExpr::Yield { ty, .. }
             | HirExpr::Template { ty, .. }
-            | HirExpr::New { ty, .. }
             | HirExpr::Assignment { ty, .. }
             | HirExpr::CompoundUpdate { ty, .. } => Some(*ty),
             HirExpr::TypeAssertion { target, .. } => Some(*target),
@@ -793,7 +888,10 @@ impl ExprConverter {
             );
             return placeholder;
         };
-        if matches!(types.resolve(ty), Some(Type::AsyncGenYield { .. })) {
+        if matches!(
+            types.resolve(ty),
+            Some(Type::AsyncGenYield { .. } | Type::GeneratorResult { .. })
+        ) {
             return match field_name.as_str() {
                 "value" => FieldId::from_raw(0),
                 "done" => FieldId::from_raw(1),
@@ -801,7 +899,7 @@ impl ExprConverter {
                     ctx.warning(
                         "P0012",
                         format!(
-                            "`AsyncGenYield` has no field `{}`; expected `value` or `done`",
+                            "the generator result has no field `{}`; expected `value` or `done`",
                             field_name.as_str()
                         ),
                         Span::new(0, 0),
@@ -987,6 +1085,25 @@ pub(crate) fn class_at_path(declarations: &[HirDecl], path: ClassPath) -> Option
     }
     match current {
         HirDecl::Class(c) => Some(c),
+        _ => None,
+    }
+}
+
+pub(crate) fn class_key_at_path(declarations: &[HirDecl], path: &ClassPath) -> Option<Atom> {
+    let (first, rest) = path.0.split_first()?;
+    let mut current = declarations.get(*first)?;
+    let mut namespaces: Vec<String> = Vec::new();
+    for &idx in rest {
+        match current {
+            HirDecl::Namespace { name, members } => {
+                namespaces.push(name.as_str().to_owned());
+                current = members.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    match current {
+        HirDecl::Class(c) => Some(qualified_name(&namespaces, c.name.as_str())),
         _ => None,
     }
 }

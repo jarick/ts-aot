@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
+use crate::accessor::__ts_aot_throw_range_error;
 use crate::array_buffer::{__ts_aot_array_buffer_new, ArrayBufferHandle};
-use crate::host::__ts_aot_throw;
+use crate::string::JsString;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TypedArrayKind {
@@ -39,9 +40,10 @@ impl TypedArrayKind {
             6 => Self::Uint32,
             7 => Self::Float32,
             8 => Self::Float64,
-            _ => __ts_aot_throw(format!(
-                "RangeError: unknown TypedArray kind id {id} (valid ids 0..=8)"
-            )),
+            _ => {
+                let message = format!("unknown TypedArray kind id {id} (valid ids 0..=8)");
+                __ts_aot_throw_range_error(JsString::from(message.as_str()))
+            }
         }
     }
 }
@@ -100,21 +102,20 @@ impl TypedArrayHandle {
 #[must_use]
 pub fn __ts_aot_typed_array_new(length: i64, kind_id: i64) -> TypedArrayHandle {
     if length < 0 {
-        __ts_aot_throw(format!(
-            "RangeError: TypedArray length {length} is negative"
-        ));
+        let message = format!("TypedArray length {length} is negative");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     }
     let Ok(elem_count) = usize::try_from(length) else {
-        __ts_aot_throw(format!(
-            "RangeError: TypedArray length {length} exceeds platform usize"
-        ));
+        let message = format!("TypedArray length {length} exceeds platform usize");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     };
     let kind = TypedArrayKind::from_id(kind_id);
     let bytes_per_elem = kind.bytes_per_element();
     let Some(total_bytes) = elem_count.checked_mul(bytes_per_elem) else {
-        __ts_aot_throw(format!(
-            "RangeError: TypedArray byte length overflow ({elem_count} elements * {bytes_per_elem} bytes)"
-        ));
+        let message = format!(
+            "TypedArray byte length overflow ({elem_count} elements * {bytes_per_elem} bytes)"
+        );
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     };
     let buffer = __ts_aot_array_buffer_new(i64::try_from(total_bytes).unwrap_or(i64::MAX));
     TypedArrayHandle {

@@ -1,4 +1,6 @@
-use ts_aot_runtime::{__ts_aot_typed_array_new, TypedArrayHandle, TypedArrayKind};
+use ts_aot_runtime::{
+    __ts_aot_typed_array_new, RangeErrorPayload, TypedArrayHandle, TypedArrayKind,
+};
 
 #[test]
 fn typed_array_new_int8_with_length_allocates_zero_filled_buffer() {
@@ -93,11 +95,11 @@ fn typed_array_kind_from_id_with_out_of_range_id_throws_range_error() {
         let _ = TypedArrayKind::from_id(9);
     });
     let err = result.expect_err("from_id(9) must throw (valid ids 0..=8)");
-    let msg = err
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| err.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let msg_text = err
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg = msg_text.as_str();
     assert!(
         msg.contains("RangeError") && msg.contains("kind id 9"),
         "panic payload must contain 'RangeError' and 'kind id 9', got: {msg}"
@@ -110,11 +112,11 @@ fn typed_array_kind_from_id_with_negative_id_throws_range_error() {
         let _ = TypedArrayKind::from_id(-1);
     });
     let err = result.expect_err("from_id(-1) must throw (valid ids 0..=8)");
-    let msg = err
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| err.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let msg_text = err
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg = msg_text.as_str();
     assert!(
         msg.contains("RangeError") && msg.contains("kind id -1"),
         "panic payload must contain 'RangeError' and 'kind id -1', got: {msg}"
@@ -127,11 +129,11 @@ fn typed_array_new_with_invalid_kind_id_throws_range_error() {
         let _ = __ts_aot_typed_array_new(8, 99);
     });
     let err = result.expect_err("__ts_aot_typed_array_new(8, 99) must throw on invalid kind_id");
-    let msg = err
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| err.downcast_ref::<&str>().copied())
-        .unwrap_or("");
+    let msg_text = err
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg = msg_text.as_str();
     assert!(
         msg.contains("RangeError") && msg.contains("kind id 99"),
         "panic payload must contain 'RangeError' and 'kind id 99', got: {msg}"

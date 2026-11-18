@@ -1,5 +1,6 @@
 pub use ts_aot_core::MAX_DENSE_ARRAY_LEN;
 
+mod accessor;
 mod arena;
 mod array;
 mod array_buffer;
@@ -12,6 +13,7 @@ mod json;
 mod map;
 mod math;
 mod module;
+mod number;
 mod object;
 mod promise;
 mod regex;
@@ -22,14 +24,17 @@ mod type_of;
 mod typed_array;
 mod weakmap;
 
+pub use accessor::{
+    __ts_aot_throw_range_error, __ts_aot_throw_type_error, RangeErrorPayload, TypeErrorPayload,
+};
 pub use arena::{Ctx, Host, run_in_arena};
 pub use array::{
     __ts_aot_array_concat, __ts_aot_array_create, __ts_aot_array_create_with_len,
     __ts_aot_array_from, __ts_aot_array_from_length_mapped, __ts_aot_array_from_mapped,
     __ts_aot_array_from_string, __ts_aot_array_get, __ts_aot_array_get_or_default,
-    __ts_aot_array_hole, __ts_aot_array_is_array, __ts_aot_array_is_array_false,
-    __ts_aot_array_len, __ts_aot_array_own_keys, __ts_aot_array_push, __ts_aot_array_set, IsArray,
-    TsArrayMarker,
+    __ts_aot_array_hole, __ts_aot_array_index_of, __ts_aot_array_is_array,
+    __ts_aot_array_is_array_false, __ts_aot_array_len, __ts_aot_array_own_keys,
+    __ts_aot_array_push, __ts_aot_array_set, __ts_aot_array_slice, IsArray, TsArrayMarker,
 };
 pub use array_buffer::{__ts_aot_array_buffer_new, __ts_aot_array_buffer_slice, ArrayBufferHandle};
 pub use bigint::{
@@ -74,6 +79,10 @@ pub use math::{
     __ts_aot_math_sin, __ts_aot_math_sqrt, __ts_aot_math_tan, __ts_aot_math_trunc,
 };
 pub use module::{__ts_aot_dynamic_import, __ts_aot_module_register, ModuleNamespace};
+pub use number::{
+    __ts_aot_number_to_exponential, __ts_aot_number_to_fixed, __ts_aot_number_to_precision,
+    __ts_aot_number_to_string,
+};
 pub use object::{__ts_aot_object_is, SameValue};
 pub use promise::{
     __ts_aot_await, __ts_aot_await_value, __ts_aot_await_value_gen, __ts_aot_await_value_raw,

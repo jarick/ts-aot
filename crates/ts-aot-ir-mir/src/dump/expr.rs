@@ -557,6 +557,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::OpIn => "op_in",
         RuntimeOp::OpInstanceof => "op_instanceof",
         RuntimeOp::HostConsoleLog => "host_console_log",
+        RuntimeOp::ThrowTypeError => "throw_type_error",
         RuntimeOp::MathSqrt => "math_sqrt",
         RuntimeOp::MathAbs => "math_abs",
         RuntimeOp::MathFloor => "math_floor",
@@ -637,6 +638,12 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::BigIntNeq => "bigint_neq",
         RuntimeOp::BigIntToString => "bigint_to_string",
         RuntimeOp::BigIntToNumber => "bigint_to_number",
+        RuntimeOp::NumberToString => "number_to_string",
+        RuntimeOp::NumberToFixed => "number_to_fixed",
+        RuntimeOp::NumberToExponential => "number_to_exponential",
+        RuntimeOp::NumberToPrecision => "number_to_precision",
+        RuntimeOp::ArraySlice => "array_slice",
+        RuntimeOp::ArrayIndexOf => "array_index_of",
     }
 }
 

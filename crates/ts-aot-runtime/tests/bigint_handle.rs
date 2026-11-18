@@ -6,7 +6,7 @@ use ts_aot_runtime::{
     __ts_aot_bigint_neg, __ts_aot_bigint_neq, __ts_aot_bigint_new, __ts_aot_bigint_not,
     __ts_aot_bigint_rem, __ts_aot_bigint_shl, __ts_aot_bigint_shr, __ts_aot_bigint_sub,
     __ts_aot_bigint_to_number, __ts_aot_bigint_to_string, BigIntHandle, BigIntSyntaxError,
-    parse_string_integer_literal,
+    RangeErrorPayload, parse_string_integer_literal,
 };
 
 fn b(s: &str) -> BigIntHandle {
@@ -287,11 +287,11 @@ fn bigint_shl_by_count_above_max_throws_range_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -305,11 +305,11 @@ fn bigint_shr_by_count_above_max_throws_range_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -323,11 +323,11 @@ fn bigint_shr_by_negative_count_above_max_throws_range_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -418,11 +418,11 @@ fn bigint_div_by_zero_throws_range_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -436,11 +436,11 @@ fn bigint_rem_by_zero_throws_range_error() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -545,11 +545,11 @@ fn bigint_to_string_rejects_radix_0() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -563,11 +563,11 @@ fn bigint_to_string_rejects_radix_1() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -581,11 +581,11 @@ fn bigint_to_string_rejects_radix_37() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",
@@ -599,11 +599,11 @@ fn bigint_to_string_rejects_radix_negative() {
     });
     assert!(result.is_err());
     let msg = result.unwrap_err();
-    let msg_str = msg
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| msg.downcast_ref::<&str>().copied())
-        .expect("panic message must be String or &str");
+    let msg_text = msg
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError")
+        .to_string();
+    let msg_str = msg_text.as_str();
     assert!(
         msg_str.contains("RangeError"),
         "Expected RangeError in panic message, got: {msg_str:?}",

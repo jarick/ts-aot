@@ -30,7 +30,7 @@ fn call_span(callee: &HirCallee, args: &[HirExpr]) -> Span {
     span
 }
 
-use super::globals::{array_from_object_literal, array_push_receiver};
+use super::globals::{array_from_object_literal, array_push_receiver, is_global_symbol_reference};
 use super::util::{is_place, is_pure_place};
 
 const PROMISE_HANDLER_UNKNOWN_DIAG: &str = "E0508";
@@ -685,7 +685,11 @@ impl ExprConverter {
                         types,
                         arg.span(),
                         ctx,
-                        &format!("parameter {} of this call", i + 1),
+                        &format!(
+                            "parameter {} of this call to `{}`",
+                            i + 1,
+                            Self::callee_display_name(callee)
+                        ),
                         false,
                     );
                 }
@@ -721,11 +725,25 @@ impl ExprConverter {
             None
         };
         let arg_tys = self.callee_param_tys(callee);
-        let mut mir_args: Vec<MirExpr> = args
-            .iter()
-            .enumerate()
-            .map(|(i, a)| {
-                let expected = arg_tys.as_ref().and_then(|tys| tys.get(i).copied());
+        let apply_array_argument = args
+            .get(1)
+            .is_some_and(|argument| matches!(argument, HirExpr::ArrayLiteral { .. }))
+            && matches!(callee, HirCallee::Indirect(inner)
+                if matches!(inner.as_ref(), HirExpr::Field { owner, field_name, .. }
+                    if field_name.as_str() == "apply"
+                        && matches!(owner.as_ref(), HirExpr::Field { owner: target, .. }
+                            if matches!(target.as_ref(), HirExpr::Field { field_name: prototype, .. }
+                                    if prototype.as_str() == "prototype")
+                                || matches!(target.as_ref(), HirExpr::Global { name, .. }
+                                    if self.name_to_function.contains_key(name)))));
+        let mut mir_args: Vec<MirExpr> = Vec::with_capacity(args.len());
+        let mut arg_marks: Vec<usize> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            arg_marks.push(out.len());
+            let expected = arg_tys.as_ref().and_then(|tys| tys.get(i).copied());
+            let converted = if apply_array_argument && i >= 1 {
+                MirExpr::Unit
+            } else {
                 self.convert_call_arg(
                     a,
                     expected,
@@ -735,8 +753,9 @@ impl ExprConverter {
                     types,
                     ctx,
                 )
-            })
-            .collect();
+            };
+            mir_args.push(converted);
+        }
         if let Some(params) = &callee_params
             && mir_args.len() < params.len()
         {
@@ -752,6 +771,7 @@ impl ExprConverter {
                 args,
                 recv,
                 mir_args.clone(),
+                &arg_marks,
                 ty,
                 out,
                 shared_struct_ids,
@@ -1409,6 +1429,63 @@ impl ExprConverter {
         }
     }
 
+    pub(crate) fn declared_field_ty(&self, owner_ty: TypeId, field_name: &Atom) -> Option<TypeId> {
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(&self.program.declarations));
+        let path = class_index.get(&owner_ty)?;
+        let class = class_at_path(&self.program.declarations, path.clone())?;
+        class
+            .fields
+            .iter()
+            .find(|f| f.name == *field_name)
+            .map(|f| f.ty)
+    }
+
+    pub(crate) fn declared_method_ret_ty(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let static_sid = match owner {
+            HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name),
+            _ => None,
+        };
+        let (sid, is_static) = match static_sid {
+            Some(sid) => (sid, true),
+            None => {
+                let owner_ty = self.recovered_owner_ty(owner, types)?;
+                let owner_ty = match types.resolve(owner_ty) {
+                    Some(Type::Optional { inner, .. }) => *inner,
+                    _ => owner_ty,
+                };
+                (self.struct_id_for_ty(owner_ty, types)?, false)
+            }
+        };
+        self.method_ret
+            .get(&(sid, field_name.clone(), is_static))
+            .copied()
+            .filter(|ty| !matches!(types.resolve(*ty), None | Some(Type::Error)))
+    }
+
+    pub(crate) fn recovered_new_ty(
+        &self,
+        callee: &HirExpr,
+        ty: TypeId,
+        types: &mut TypeTable,
+    ) -> TypeId {
+        if !matches!(types.resolve(ty), None | Some(Type::Error)) {
+            return ty;
+        }
+        match self.expr_type(callee, types) {
+            Some(recovered) if !matches!(types.resolve(recovered), None | Some(Type::Error)) => {
+                recovered
+            }
+            _ => ty,
+        }
+    }
+
     pub(crate) fn expr_type(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         let this = expr;
         match this {
@@ -1469,6 +1546,22 @@ impl ExprConverter {
                                     _ => None,
                                 };
                             }
+                            if is_global_symbol_reference(owner)
+                                && field_name.as_str() == "for"
+                                && args.len() == 1
+                            {
+                                return Some(types.intern(&Type::Symbol));
+                            }
+                            if is_global_symbol_reference(owner)
+                                && field_name.as_str() == "keyFor"
+                                && args.len() == 1
+                            {
+                                let string_ty = types.intern(&Type::String);
+                                return Some(types.intern(&Type::Optional {
+                                    inner: string_ty,
+                                    nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+                                }));
+                            }
                             if matches!(field_name.as_str(), "then" | "catch" | "finally") {
                                 return None;
                             }
@@ -1486,12 +1579,60 @@ impl ExprConverter {
                             return self
                                 .program
                                 .find_function_by_name(name)
-                                .and_then(|f| known_static_ty(f.ret, types));
+                                .and_then(|f| known_static_ty(f.ret, types))
+                                .or_else(|| {
+                                    (name.as_str() == "Symbol").then(|| types.intern(&Type::Symbol))
+                                });
                         }
                         _ => {}
                     }
+                    if let HirExpr::Field {
+                        owner, field_name, ..
+                    } = inner.as_ref()
+                        && let Some(ret) = self.declared_method_ret_ty(owner, field_name, types)
+                    {
+                        let receiver_ty = self.recovered_receiver_ty(owner, types);
+                        let chain_receiver =
+                            matches!(owner.as_ref(), HirExpr::OptionalChain { .. })
+                                && matches!(
+                                    types.resolve(receiver_ty),
+                                    Some(Type::Optional { .. })
+                                );
+                        return Some(if chain_receiver {
+                            types.intern(&Type::Optional {
+                                inner: ret,
+                                nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+                            })
+                        } else {
+                            ret
+                        });
+                    }
                 }
                 self.recovered_static_ty(this, types)
+            }
+            HirExpr::Field {
+                owner,
+                field_name,
+                ty,
+                ..
+            } => {
+                if let Some(known) = known_static_ty(*ty, types) {
+                    return Some(known);
+                }
+                let owner_ty = self.recovered_owner_ty(owner, types)?;
+                let owner_ty = match types.resolve(owner_ty) {
+                    Some(Type::Optional { inner, .. }) => *inner,
+                    _ => owner_ty,
+                };
+                self.declared_field_ty(owner_ty, field_name)
+            }
+            HirExpr::New { callee, ty, .. } => {
+                if let Some(known) = known_static_ty(*ty, types) {
+                    return Some(known);
+                }
+                self.expr_type(callee, types).filter(|recovered| {
+                    !matches!(types.resolve(*recovered), None | Some(Type::Error))
+                })
             }
             HirExpr::Binary {
                 op, lhs, rhs, ty, ..
@@ -1574,13 +1715,8 @@ impl ExprConverter {
     }
 
     fn recovered_receiver_ty(&self, owner: &HirExpr, types: &mut TypeTable) -> TypeId {
-        if matches!(owner, HirExpr::Call { .. })
-            && matches!(types.resolve(owner.ty()), Some(Type::Error) | None)
-        {
-            self.expr_type(owner, types).unwrap_or(owner.ty())
-        } else {
-            owner.ty()
-        }
+        self.recovered_owner_ty(owner, types)
+            .unwrap_or_else(|| owner.ty())
     }
 
     fn receiver_struct_id(
@@ -1716,7 +1852,11 @@ impl ExprConverter {
                         types,
                         arg.span(),
                         ctx,
-                        &format!("parameter {} of this call", i + 1),
+                        &format!(
+                            "parameter {} of this call to `{}`",
+                            i + 1,
+                            field_name.as_str()
+                        ),
                         false,
                     );
                 }

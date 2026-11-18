@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use ts_aot_core::{Atom, FunctionId, TypeId, TypeTable};
 use ts_aot_ir_hir::{
-    HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField,
+    HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField, VisitorMut,
+    walk_expr_mut, walk_stmt_mut,
 };
 
 use crate::PassContext;
@@ -10,7 +11,8 @@ use crate::hir_to_mir::ExprConverter;
 
 use super::MonomorphizeStats;
 use super::infer::{build_mapping, format_type_args, infer_type_args, type_args_resolved};
-use super::substitute::{TypeSubstitutionResult, substitute_func};
+use super::substitute::{TypeParamMap, TypeSubstitutionResult, substitute_func};
+use super::substitute_ty::substitute_type;
 
 type SpecializationKey = (FunctionId, Vec<TypeId>);
 #[derive(Default)]
@@ -43,7 +45,7 @@ pub fn monomorphize(
 
     let mut name_to_generic: HashMap<Atom, FunctionId> = HashMap::new();
     let mut method_to_generic: MethodIndex = MethodIndex::default();
-    let mut method_owner: HashMap<FunctionId, TypeId> = HashMap::new();
+    let mut method_owner: HashMap<FunctionId, (TypeId, bool)> = HashMap::new();
     classify_decls(
         &program.declarations,
         &mut next_fid,
@@ -129,7 +131,7 @@ pub fn monomorphize(
             };
         visit_decl_callees(&mut mono_for_scan, &mut on_callee);
 
-        if let Some(owner_ty) = method_owner.get(&generic_fid).copied() {
+        if let Some((owner_ty, _)) = method_owner.get(&generic_fid).copied() {
             method_specializations.push((owner_ty, mono));
         } else {
             new_decls.push(mono_decl);
@@ -211,7 +213,204 @@ pub fn monomorphize(
         }
     }
 
+    let mut mapping_by_fid: HashMap<FunctionId, TypeParamMap> = HashMap::new();
+    let mut mapping_by_name: HashMap<Atom, TypeParamMap> = HashMap::new();
+    let mut mapping_by_owner: HashMap<(TypeId, Atom, bool), TypeParamMap> = HashMap::new();
+    for ((generic_fid, type_args), mono_fid) in &mono_for_specialization {
+        let Some(generic_fn) = fn_index.get(generic_fid) else {
+            continue;
+        };
+        let mapping = build_mapping(generic_fn, type_args);
+        mapping_by_fid.insert(*mono_fid, mapping.clone());
+        if let Some(&(owner_ty, is_static)) = method_owner.get(generic_fid)
+            && let Some(name) = specialization_names.get(mono_fid)
+        {
+            mapping_by_owner.insert((owner_ty, name.clone(), is_static), mapping.clone());
+            mapping_by_name.insert(name.clone(), mapping);
+        }
+    }
+    repair_specialized_call_types(
+        &mut program.declarations,
+        types,
+        &mapping_by_fid,
+        &mapping_by_name,
+        &mapping_by_owner,
+        &method_to_generic.class_names,
+        &inference,
+    );
+    for inits in program.class_field_inits.values_mut() {
+        for (_, init) in inits.iter_mut() {
+            let mut repair = CallTypeRepair {
+                types: &mut *types,
+                by_fid: &mapping_by_fid,
+                by_name: &mapping_by_name,
+                by_owner: &mapping_by_owner,
+                class_names: &method_to_generic.class_names,
+                converter: &inference,
+                pending: None,
+            };
+            repair.visit_expr_mut(init);
+        }
+    }
+
     stats
+}
+
+struct CallTypeRepair<'a> {
+    types: &'a mut TypeTable,
+    by_fid: &'a HashMap<FunctionId, TypeParamMap>,
+    by_name: &'a HashMap<Atom, TypeParamMap>,
+    by_owner: &'a HashMap<(TypeId, Atom, bool), TypeParamMap>,
+    class_names: &'a HashSet<Atom>,
+    converter: &'a ExprConverter,
+    pending: Option<TypeParamMap>,
+}
+
+impl CallTypeRepair<'_> {
+    fn mapping_of(&mut self, callee: &HirCallee) -> Option<TypeParamMap> {
+        match callee {
+            HirCallee::Function(fid) => self.by_fid.get(fid).cloned(),
+            HirCallee::Indirect(inner) => match inner.as_ref() {
+                HirExpr::Field {
+                    owner, field_name, ..
+                } => {
+                    let is_static = receiver_is_static(owner, self.class_names);
+                    let ty = receiver_class_ty(owner, self.converter, &mut *self.types);
+                    let primary = self
+                        .by_owner
+                        .get(&(ty, field_name.clone(), is_static))
+                        .cloned();
+                    if primary.is_some() {
+                        return primary;
+                    }
+                    self.by_name.get(field_name).cloned()
+                }
+                HirExpr::Global { name, .. } => self.by_name.get(name).cloned(),
+                _ => None,
+            },
+            HirCallee::Closure(_) | HirCallee::Runtime { .. } => None,
+        }
+    }
+
+    fn repair_ty(&mut self, ty: &mut TypeId, mapping: &TypeParamMap) {
+        let mut result = TypeSubstitutionResult::default();
+        let substituted = substitute_type(*ty, mapping, self.types, &mut result);
+        if substituted != *ty {
+            *ty = substituted;
+        }
+    }
+}
+
+impl VisitorMut for CallTypeRepair<'_> {
+    fn visit_stmt_mut(&mut self, stmt: &mut HirStmt) {
+        match stmt {
+            HirStmt::Let { ty, init, .. } => {
+                self.pending = None;
+                if let Some(init) = init.as_mut() {
+                    self.visit_expr_mut(init);
+                }
+                let pending = self.pending.take();
+                if let Some(mapping) = pending {
+                    self.repair_ty(ty, &mapping);
+                }
+            }
+            other => {
+                self.pending = None;
+                walk_stmt_mut(self, other);
+            }
+        }
+    }
+
+    fn visit_expr_mut(&mut self, expr: &mut HirExpr) {
+        match expr {
+            HirExpr::Call {
+                callee, args, ty, ..
+            } => {
+                if let HirCallee::Indirect(inner) = callee {
+                    self.pending = None;
+                    self.visit_expr_mut(inner);
+                }
+                let mapping = self.mapping_of(callee);
+                for arg in args.iter_mut() {
+                    self.pending = None;
+                    self.visit_expr_mut(arg);
+                }
+                self.pending = None;
+                if let Some(mapping) = mapping {
+                    self.repair_ty(ty, &mapping);
+                    self.pending = Some(mapping);
+                }
+            }
+            HirExpr::OptionalChain { base, ty, .. } => {
+                self.pending = None;
+                self.visit_expr_mut(base);
+                if let Some(mapping) = self.pending.take() {
+                    self.repair_ty(ty, &mapping);
+                    self.pending = Some(mapping);
+                }
+            }
+            other => {
+                self.pending = None;
+                walk_expr_mut(self, other);
+            }
+        }
+    }
+}
+
+fn repair_specialized_call_types(
+    decls: &mut [HirDecl],
+    types: &mut TypeTable,
+    by_fid: &HashMap<FunctionId, TypeParamMap>,
+    by_name: &HashMap<Atom, TypeParamMap>,
+    by_owner: &HashMap<(TypeId, Atom, bool), TypeParamMap>,
+    class_names: &HashSet<Atom>,
+    converter: &ExprConverter,
+) {
+    for decl in decls {
+        if let HirDecl::Namespace { members, .. } = decl {
+            repair_specialized_call_types(
+                members,
+                types,
+                by_fid,
+                by_name,
+                by_owner,
+                class_names,
+                converter,
+            );
+            continue;
+        }
+        let mut repair = CallTypeRepair {
+            types: &mut *types,
+            by_fid,
+            by_name,
+            by_owner,
+            class_names,
+            converter,
+            pending: None,
+        };
+        match decl {
+            HirDecl::Function(f) => {
+                for stmt in f.body.iter_mut() {
+                    repair.visit_stmt_mut(stmt);
+                }
+            }
+            HirDecl::Class(c) => {
+                for m in c.methods.iter_mut() {
+                    for stmt in m.body.iter_mut() {
+                        repair.visit_stmt_mut(stmt);
+                    }
+                }
+            }
+            HirDecl::Global {
+                init: Some(expr), ..
+            } => repair.visit_expr_mut(expr),
+            HirDecl::TypeAlias { .. }
+            | HirDecl::Enum { .. }
+            | HirDecl::Interface { .. }
+            | HirDecl::Namespace { .. }
+            | HirDecl::Global { init: None, .. } => {}
+        }
+    }
 }
 
 fn receiver_class_ty(owner: &HirExpr, converter: &ExprConverter, types: &mut TypeTable) -> TypeId {
@@ -344,7 +543,7 @@ fn classify_decls(
     fn_index: &mut HashMap<FunctionId, HirFunction>,
     top_level_names: &mut HashMap<Atom, FunctionId>,
     method_to_generic: &mut MethodIndex,
-    method_owner: &mut HashMap<FunctionId, TypeId>,
+    method_owner: &mut HashMap<FunctionId, (TypeId, bool)>,
     stats: &mut MonomorphizeStats,
 ) {
     for decl in decls {
@@ -372,7 +571,7 @@ fn classify_decls(
                     if !m.type_params.is_empty() && !shadowed_by_field {
                         generic_fn_ids.insert(fid);
                         method_to_generic.insert((c.ty, m.name.clone(), is_static), fid);
-                        method_owner.insert(fid, c.ty);
+                        method_owner.insert(fid, (c.ty, is_static));
                         stats.generic_functions += 1;
                     }
                     fn_index.insert(fid, m.clone());

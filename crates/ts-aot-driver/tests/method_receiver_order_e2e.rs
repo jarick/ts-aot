@@ -56,7 +56,7 @@ fn function_body(rust: &str, name: &str) -> String {
 const ORDER_SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
      let order: number = 0; \
      function make(): Counter { order = order * 10 + 1; return new Counter(); } \
-     function arg(): number | null { order = order * 10 + 2; return 5; } \
+     function arg(): number { order = order * 10 + 2; return 5; } \
      export function got(): number { make().add(arg() ?? 0); return order; }";
 
 #[test]
@@ -94,6 +94,35 @@ fn main() {
          behind the argument statements; got:\n{body}"
     );
     let stdout = run_generated_crate("receiver_order", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn staged_arguments_keep_their_left_to_right_order() {
+    const SOURCE: &str = "class Counter { n: number = 0; add2(a: number, b: number): void { \
+         this.n = this.n + a * 10 + b; } } \
+         export function got(): number { \
+         let x: number = 1; \
+         const bump = (): number => { x = 2; return 3; }; \
+         const c = new Counter(); \
+         c.add2(x, bump()); \
+         return c.n; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(staged_arg_order::got(&ctx), 13.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let stdout = run_generated_crate("staged_arg_order", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
@@ -157,7 +186,7 @@ fn an_index_receiver_computes_the_index_before_the_argument_statements() {
     const SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
          let order: number = 0; \
          function idx(): number { order = order * 10 + 1; return 0; } \
-         function arg(): number | null { order = order * 10 + 2; return 5; } \
+         function arg(): number { order = order * 10 + 2; return 5; } \
          export function got(): number { \
              const arr: Counter[] = [new Counter()]; \
              arr[idx()].add(arg() ?? 0); \
@@ -258,5 +287,205 @@ fn a_reassigned_alias_target_is_not_resolved_to_one_function() {
         "a single alias target must still resolve to its function, so this call stays accepted; \
          got {:?}",
         out.diagnostics
+    );
+}
+
+const REFUSED_PLACE_SOURCES: [(&str, &str); 7] = [
+    (
+        "the argument call replaces the field the receiver was read from",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         class Holder { f: Counter = new Counter(); bump(): number { this.f = new Counter(); \
+         return 5; } } \
+         export function got(): number { const h = new Holder(); h.f.add(h.bump()); \
+         return h.f.n; }",
+    ),
+    (
+        "the argument call replaces the field of `this` the receiver was read from",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         class Holder { f: Counter; constructor() { this.f = new Counter(); } \
+         bump(): number { this.f = new Counter(); return 5; } \
+         run(): number { this.f.add(this.bump()); return this.f.n; } } \
+         export function got(): number { const h = new Holder(); return h.run(); }",
+    ),
+    (
+        "the argument call reassigns the local the receiver was read from",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         export function got(): number { \
+             let c = new Counter(); \
+             const bump = (): number => { c = new Counter(); return 5; }; \
+             c.add(bump()); \
+             return c.n; \
+         }",
+    ),
+    (
+        "the argument call reassigns a loop binding the receiver was read from",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         export function got(): number { \
+             const xs: Counter[] = [new Counter()]; \
+             let total = 0; \
+             for (let c: Counter of xs) { \
+                 const bump = (): number => { c = new Counter(); return 5; }; \
+                 c.add(bump()); \
+                 total = total + c.n; \
+             } \
+             return total; \
+         }",
+    ),
+    (
+        "the argument call reassigns the root through a nested function declaration",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         class Holder { f: Counter = new Counter(); } \
+         export function got(): number { \
+             let h = new Holder(); \
+             function replace(): number { h = new Holder(); return 5; } \
+             h.f.add(replace()); \
+             return h.f.n; \
+         }",
+    ),
+    (
+        "the argument call replaces the array element the receiver was read from",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         export function got(): number { \
+             const arr: Counter[] = [new Counter()]; \
+             const reset = (): number => { arr[0] = new Counter(); return 5; }; \
+             arr[0].add(reset()); \
+             return arr[0].n; \
+         }",
+    ),
+    (
+        "the argument call reassigns a parameter that has a default value",
+        "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         export function got(): number { \
+             function f(c: Counter = new Counter()): number { \
+                 c.add(c = new Counter()); \
+                 return c.n; \
+             } \
+             return f(); \
+         }",
+    ),
+];
+
+#[test]
+fn a_mutable_place_receiver_reassigned_by_the_arguments_is_refused() {
+    for (what, source) in REFUSED_PLACE_SOURCES {
+        let out = compile_module(source);
+        assert!(
+            codes(&out).contains(&"E0419"),
+            "{what}: a receiver read from a mutable place before the arguments run is stale when \
+             the arguments replace that place, so the call must be refused; got {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.rust_source.is_none(),
+            "{what}: a refused call must not emit Rust; got {:?}",
+            out.rust_source
+        );
+    }
+}
+
+const PLACE_SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } \
+     self(): number { return this.n; } } \
+     class Holder { \
+         f: Counter; \
+         g: Counter; \
+         items: number[] = []; \
+         constructor() { this.f = new Counter(); this.g = new Counter(); } \
+         bump(): number { this.f = new Counter(); return 5; } \
+         quiet(): number { return 7; } \
+         compute(): number { this.g.n = this.g.n + 100; return 2; } \
+         other(): number { this.f = new Counter(); return 3; } \
+         read(): number { return this.f.n; } \
+         pushComputed(): number { this.items.push(this.compute()); return this.g.n; } \
+     } \
+     export function got(): number { \
+         const h = new Holder(); \
+         const other = new Holder(); \
+         h.f.add(1); \
+         h.f.add(h.g.self()); \
+         h.f.add(h.quiet()); \
+         h.f.add(other.other()); \
+         h.f.add(h.read()); \
+         h.f.add(h.compute()); \
+         const c = new Counter(); \
+         c.add(c.self()); \
+         const kept = h.f.n; \
+         const seen = h.g.n; \
+         const pushed = h.pushComputed(); \
+         return kept * 1000 + seen + c.n + pushed; \
+     }";
+
+#[test]
+fn a_mutable_place_receiver_survives_arguments_that_do_not_write_it() {
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(place_receiver_safe::got(&ctx), 24300.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(PLACE_SOURCE);
+    let stdout = run_generated_crate("place_receiver_safe", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+const INDEX_PLACE_SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+     class Maker { make(): number { return 2.0; } } \
+     export function got(): number { \
+         const arr: Counter[] = [new Counter()]; \
+         const m = new Maker(); \
+         arr[0].add(m.make()); \
+         arr[0].add(new Counter().n); \
+         return arr[0].n; \
+     }";
+
+#[test]
+fn an_index_place_receiver_accepts_arguments_that_do_not_write_it() {
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(index_place_safe::got(&ctx), 2.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(INDEX_PLACE_SOURCE);
+    let stdout = run_generated_crate("index_place_safe", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+const INDEX_SHARED_SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+     export function got(): number { \
+         const arr: Counter[] = [new Counter(), new Counter()]; \
+         const reset = (): number => { arr[1] = new Counter(); return 5; }; \
+         arr[0].add(reset()); \
+         return arr[0].n; \
+     }";
+
+#[test]
+fn an_index_receiver_on_a_shared_array_is_refused() {
+    let out = compile_module(INDEX_SHARED_SOURCE);
+    assert!(
+        codes(&out).contains(&"E0419"),
+        "an element receiver of a shared array is emitted as a clone, so a mutating call would lose \
+         its write; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused call must not emit Rust; got {:?}",
+        out.rust_source
     );
 }

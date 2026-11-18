@@ -56,7 +56,6 @@ impl ExprConverter {
         call
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn alloc_class_instance(
         &mut self,
         ty: TypeId,
@@ -76,6 +75,12 @@ impl ExprConverter {
             .unwrap_or_default();
         for (fname, init) in init_names {
             if let Some(&fid) = self.field_id_lookup.get(&(struct_id, fname)) {
+                if let Some(pos) = lit_fields.iter().position(|(existing, _)| *existing == fid) {
+                    let (_, prior) = lit_fields.remove(pos);
+                    if has_potential_side_effects(&prior) {
+                        out.push(MirStmt::Expr(prior));
+                    }
+                }
                 let value = self.convert_expr(
                     &init,
                     out,
@@ -101,7 +106,6 @@ impl ExprConverter {
         });
         alloc_id
     }
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_default_construct(
         &mut self,
         ty: TypeId,
@@ -158,6 +162,7 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        let ty = self.recovered_new_ty(callee, ty, types);
         if matches!(callee, HirExpr::Global { name, .. } if name.as_str() == "Array") {
             return self.convert_new_array(
                 callee,
