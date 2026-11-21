@@ -503,6 +503,13 @@ pub enum RuntimeOp {
     BigIntNeq,
     BigIntToString,
     BigIntToNumber,
+    NumberToString,
+    NumberToFixed,
+    NumberToExponential,
+    NumberToPrecision,
+    ArraySlice,
+    ArrayIndexOf,
+    ThrowTypeError,
 }
 
 impl RuntimeOp {

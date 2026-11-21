@@ -1,14 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
     Argument, FunctionBody, Statement, match_assignment_target, match_expression,
     match_member_expression,
 };
-use ts_aot_core::{Atom, LocalId, Type, TypeId};
-use ts_aot_ir_hir::{HirExpr, HirParam, HirStmt};
+use ts_aot_core::{Atom, Diagnostic, LocalId, Span as CoreSpan, Type, TypeId};
+use ts_aot_ir_hir::{HirDecl, HirExpr, HirParam, HirStmt, Visitor, walk_expr};
 
 use crate::scope::BodyScope;
-use crate::skeleton::{SkeletonBuilder, SkeletonEnv};
+use crate::skeleton::{CaptureCheckFrame, LocalGeneratorAlias, SkeletonBuilder, SkeletonEnv};
 
 pub(crate) struct FunctionBodyInput<'a, 'b> {
     pub body: Option<&'a FunctionBody<'b>>,
@@ -17,6 +17,7 @@ pub(crate) struct FunctionBodyInput<'a, 'b> {
     pub items: &'a [oxc_ast::ast::FormalParameter<'b>],
     pub item_offset: usize,
     pub param_base: u32,
+    pub outer_classes: Option<&'a BodyScope>,
 }
 
 impl SkeletonBuilder {
@@ -31,6 +32,7 @@ impl SkeletonBuilder {
     ) -> Vec<HirStmt> {
         for p in params {
             scope.declare_param(p.name.as_str(), p.id, p.ty);
+            self.mutable_locals.insert((scope.body_id(), p.id));
         }
         let mut prelude: Vec<HirStmt> = Vec::new();
         let mut destructured: Vec<(Atom, TypeId, HirExpr)> = extra_locals.to_vec();
@@ -62,6 +64,7 @@ impl SkeletonBuilder {
                 let id = LocalId::from_raw(scope.peek_next());
                 scope.set_next(id.raw().saturating_add(1));
                 scope.declare_param(name.as_str(), id, inner_ty);
+                self.mutable_locals.insert((scope.body_id(), id));
                 prelude.push(HirStmt::Let {
                     id,
                     name: Atom::from(name),
@@ -80,6 +83,7 @@ impl SkeletonBuilder {
                     };
                     let (name, ty, init) = destructured.remove(pos);
                     let id = scope.declare(name.as_str(), ty);
+                    self.mutable_locals.insert((scope.body_id(), id));
                     prelude.push(HirStmt::Let {
                         id,
                         name,
@@ -91,6 +95,7 @@ impl SkeletonBuilder {
         }
         for (name, ty, init) in destructured {
             let id = scope.declare(name.as_str(), ty);
+            self.mutable_locals.insert((scope.body_id(), id));
             prelude.push(HirStmt::Let {
                 id,
                 name,
@@ -123,6 +128,15 @@ impl SkeletonBuilder {
         let Some(body) = body else {
             return (Vec::new(), base);
         };
+        self.body_depth = self.body_depth.saturating_add(1);
+        self.capture_check_frames.push(CaptureCheckFrame::default());
+        self.generator_alias_stack.push(HashMap::new());
+        let this_id = params
+            .iter()
+            .find(|p| p.name.as_str() == "this")
+            .map(|p| p.id);
+        self.this_local_stack.push(this_id);
+        self.this_capture_locals.push(HashSet::new());
         let saved_class_values = if fresh_class_values {
             Some((
                 std::mem::take(&mut self.class_value_locals),
@@ -146,6 +160,9 @@ impl SkeletonBuilder {
         self.declared_names_stack
             .push(collect_declared_names(&body.statements, input.items));
         let mut scope = BodyScope::new(base);
+        if let Some(outer) = input.outer_classes {
+            scope.inherit_classes(outer);
+        }
         let mut prelude = self.declare_params_with_prelude(
             senv,
             &mut scope,
@@ -162,10 +179,15 @@ impl SkeletonBuilder {
         self.in_static_method = saved_static;
         self.module_init_depth = saved_module_init;
         self.loop_frames = saved_loop_frames;
+        self.this_local_stack.pop();
+        self.this_capture_locals.pop();
         if !prelude.is_empty() {
             prelude.append(&mut result);
             result = prelude;
         }
+        let local_generators = self.generator_alias_stack.pop().unwrap_or_default();
+        Self::report_local_generators_before_declaration(senv, &result, &local_generators);
+        self.finish_capture_check_frame(senv, &result, &body.statements);
         if fresh_class_values {
             self.verify_capture_class_value_reads(senv);
         }
@@ -174,7 +196,46 @@ impl SkeletonBuilder {
             self.unknown_class_value_locals = unknown_class_values;
         }
         let used = scope.peek_next();
+        self.body_depth = self.body_depth.saturating_sub(1);
         (result, used)
+    }
+
+    fn report_local_generators_before_declaration(
+        senv: &mut SkeletonEnv,
+        body: &[HirStmt],
+        aliases: &HashMap<String, LocalGeneratorAlias>,
+    ) {
+        if aliases.is_empty() {
+            return;
+        }
+        let mut scan = GeneratorSourceRefScan {
+            aliases,
+            found: None,
+        };
+        for stmt in body {
+            scan.visit_stmt(stmt);
+        }
+        for alias in aliases.values() {
+            for decl in &senv.program.declarations {
+                if let HirDecl::Function(function) = decl
+                    && function.name == alias.lifted
+                {
+                    for stmt in &function.body {
+                        scan.visit_stmt(stmt);
+                    }
+                }
+            }
+        }
+        if let Some((name, span)) = scan.found {
+            senv.diagnostics.push(Diagnostic::error(
+                "E0500",
+                format!(
+                    "the local generator `{name}` is referenced before its declaration; move the \
+                     declaration above the first reference"
+                ),
+                span,
+            ));
+        }
     }
 
     pub(crate) fn walk_block_with_predeclare(
@@ -523,6 +584,23 @@ fn collect_binding_names_into(
     }
 }
 
+struct GeneratorSourceRefScan<'a> {
+    aliases: &'a HashMap<String, LocalGeneratorAlias>,
+    found: Option<(String, CoreSpan)>,
+}
+
+impl Visitor for GeneratorSourceRefScan<'_> {
+    fn visit_expr(&mut self, expr: &HirExpr) {
+        if self.found.is_none()
+            && let HirExpr::Global { name, span, .. } = expr
+            && self.aliases.contains_key(name.as_str())
+        {
+            self.found = Some((name.as_str().to_owned(), *span));
+        }
+        walk_expr(self, expr);
+    }
+}
+
 fn collect_declared_names(
     stmts: &[Statement<'_>],
     params: &[oxc_ast::ast::FormalParameter<'_>],
@@ -654,6 +732,9 @@ fn predeclare_in_decl(
 ) {
     match decl {
         oxc_ast::ast::Declaration::FunctionDeclaration(f) => {
+            if f.generator {
+                return;
+            }
             if let Some(id) = f.id.as_ref() {
                 scope.predeclare(id.name.as_str(), error_ty);
             }

@@ -77,3 +77,11 @@ pub fn run_generated_crate(package: &str, rust: &str, main: &str) -> String {
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
+
+#[track_caller]
+pub fn assert_exact_f64(actual: f64, expected: f64) {
+    assert!(
+        actual.total_cmp(&expected).is_eq(),
+        "expected {expected}, got {actual}"
+    );
+}

@@ -144,7 +144,6 @@ pub(super) fn check_nullish_write_kinds(
     check_nullish_kinds(source, false, target_ty, types, span, ctx, site, false)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_nullish_kinds(
     source: NullishKinds,
     source_is_literal: bool,

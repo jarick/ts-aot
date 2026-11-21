@@ -4,7 +4,9 @@ use std::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Rem, Sub};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive, Zero};
 
+use crate::accessor::__ts_aot_throw_range_error;
 use crate::host::__ts_aot_throw;
+use crate::string::JsString;
 
 #[derive(Debug, Clone)]
 pub struct BigIntHandle {
@@ -199,7 +201,7 @@ impl Div for BigIntHandle {
     type Output = Self;
     fn div(self, rhs: Self) -> Self {
         if rhs.value.is_zero() {
-            __ts_aot_throw("RangeError: Division by zero".to_string())
+            __ts_aot_throw_range_error(JsString::from("Division by zero"))
         }
         Self {
             value: self.value / rhs.value,
@@ -211,7 +213,7 @@ impl Rem for BigIntHandle {
     type Output = Self;
     fn rem(self, rhs: Self) -> Self {
         if rhs.value.is_zero() {
-            __ts_aot_throw("RangeError: Division by zero".to_string())
+            __ts_aot_throw_range_error(JsString::from("Division by zero"))
         }
         Self {
             value: self.value % rhs.value,
@@ -283,7 +285,7 @@ pub fn __ts_aot_bigint_mul(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHand
 #[must_use]
 pub fn __ts_aot_bigint_div(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHandle {
     if rhs.value().is_zero() {
-        __ts_aot_throw("RangeError: Division by zero".to_string())
+        __ts_aot_throw_range_error(JsString::from("Division by zero"))
     }
     BigIntHandle::from_bigint(lhs.value() / rhs.value())
 }
@@ -291,7 +293,7 @@ pub fn __ts_aot_bigint_div(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHand
 #[must_use]
 pub fn __ts_aot_bigint_rem(lhs: &BigIntHandle, rhs: &BigIntHandle) -> BigIntHandle {
     if rhs.value().is_zero() {
-        __ts_aot_throw("RangeError: Division by zero".to_string())
+        __ts_aot_throw_range_error(JsString::from("Division by zero"))
     }
     BigIntHandle::from_bigint(lhs.value() % rhs.value())
 }
@@ -376,12 +378,12 @@ fn bigint_resolved_shift(rhs: &BigIntHandle, original: ShiftDir) -> (ShiftDir, u
             ShiftDir::Right => ShiftDir::Left,
         };
         if matches!(reversed, ShiftDir::Left) && magnitude > BIGINT_MAX_SHIFT {
-            __ts_aot_throw("RangeError: BigInt shift count exceeds maximum".to_string());
+            __ts_aot_throw_range_error(JsString::from("BigInt shift count exceeds maximum"));
         }
         (reversed, magnitude)
     } else {
         if raw.cast_unsigned() > BIGINT_MAX_SHIFT {
-            __ts_aot_throw("RangeError: BigInt shift count exceeds maximum".to_string());
+            __ts_aot_throw_range_error(JsString::from("BigInt shift count exceeds maximum"));
         }
         (original, raw.cast_unsigned())
     }
@@ -418,9 +420,8 @@ pub fn __ts_aot_bigint_to_string(value: &BigIntHandle, radix: Option<i32>) -> St
 fn bigint_validated_radix(radix: Option<i32>) -> u32 {
     let radix = radix.unwrap_or(10);
     if !(2..=36).contains(&radix) {
-        __ts_aot_throw(format!(
-            "RangeError: BigInt.toString() radix must be between 2 and 36, got {radix}"
-        ));
+        let message = format!("BigInt.toString() radix must be between 2 and 36, got {radix}");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     }
     radix.cast_unsigned()
 }

@@ -337,6 +337,10 @@ where
 pub(crate) fn __ts_aot_panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(caught) = payload.downcast_ref::<crate::caught::CaughtValue>() {
         caught.to_string()
+    } else if let Some(e) = payload.downcast_ref::<crate::accessor::TypeErrorPayload>() {
+        e.to_string()
+    } else if let Some(e) = payload.downcast_ref::<crate::accessor::RangeErrorPayload>() {
+        e.to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else if let Some(s) = payload.downcast_ref::<&str>() {

@@ -13,7 +13,8 @@ use ts_aot_runtime::{
     __ts_aot_math_trunc, __ts_aot_op_in, __ts_aot_op_instanceof, __ts_aot_string_char_at,
     __ts_aot_string_from_char_code, __ts_aot_string_from_code_point, __ts_aot_string_index_of,
     __ts_aot_string_len, __ts_aot_string_substring_utf16, __ts_aot_throw, __ts_aot_typeof,
-    __ts_aot_typeof_null, __ts_aot_typeof_unit, Ctx, Host, JsString, TsArrayMarker, run_in_arena,
+    __ts_aot_typeof_null, __ts_aot_typeof_unit, Ctx, Host, JsString, RangeErrorPayload,
+    TsArrayMarker, run_in_arena,
 };
 
 fn js(s: &str) -> JsString<'_> {
@@ -24,6 +25,19 @@ fn with_ctx<R>(f: impl for<'a> FnOnce(&Ctx<'a>) -> R) -> R {
     struct H;
     impl Host for H {}
     run_in_arena(&H, f)
+}
+
+fn assert_range_error(expected: &str, f: impl for<'a> FnOnce(&Ctx<'a>)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_ctx(f)));
+    let payload = result.expect_err("the call must throw");
+    let range = payload
+        .downcast_ref::<RangeErrorPayload>()
+        .expect("the payload must be a typed RangeError");
+    assert!(
+        range.to_string().contains(expected),
+        "expected {expected:?} in the RangeError, got {:?}",
+        range.to_string()
+    );
 }
 
 fn leak(s: JsString<'_>) -> JsString<'static> {
@@ -465,17 +479,15 @@ fn runtime_array_create_with_len_fills_with_default() {
 }
 
 #[test]
-#[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_negative_panics() {
-    with_ctx(|ctx| {
+    assert_range_error("out-of-range length", |ctx| {
         let _v = __ts_aot_array_create_with_len::<i64>(ctx, -1);
     });
 }
 
 #[test]
-#[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_exceeding_max_dense_len_panics() {
-    with_ctx(|ctx| {
+    assert_range_error("out-of-range length", |ctx| {
         let _v = __ts_aot_array_create_with_len::<i64>(
             ctx,
             i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN) + 1,
@@ -484,9 +496,8 @@ fn runtime_array_create_with_len_exceeding_max_dense_len_panics() {
 }
 
 #[test]
-#[should_panic(expected = "out-of-range length")]
 fn runtime_array_create_with_len_at_max_dense_len_boundary_panics() {
-    with_ctx(|ctx| {
+    assert_range_error("out-of-range length", |ctx| {
         let _v = __ts_aot_array_create_with_len::<i64>(
             ctx,
             i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN),
@@ -611,17 +622,15 @@ fn runtime_array_from_length_mapped_calls_mapfn_with_index() {
 }
 
 #[test]
-#[should_panic(expected = "out-of-range length")]
 fn runtime_array_from_length_mapped_negative_length_panics() {
-    with_ctx(|ctx| {
+    assert_range_error("out-of-range length", |ctx| {
         let _v = __ts_aot_array_from_length_mapped::<i64, i64, _>(ctx, -1, |_v, _i| 0);
     });
 }
 
 #[test]
-#[should_panic(expected = "out-of-range length")]
 fn runtime_array_from_length_mapped_at_max_dense_len_boundary_panics() {
-    with_ctx(|ctx| {
+    assert_range_error("out-of-range length", |ctx| {
         let _v = __ts_aot_array_from_length_mapped::<i64, i64, _>(
             ctx,
             i64::from(ts_aot_runtime::MAX_DENSE_ARRAY_LEN),
@@ -780,9 +789,10 @@ fn runtime_string_from_code_point_handles_bmp_and_astral() {
 }
 
 #[test]
-#[should_panic(expected = "RangeError")]
 fn runtime_string_from_code_point_throws_on_negative_code_point() {
-    let _ = from_code_point(&[-1_i64, 65]);
+    assert_range_error("RangeError", |_ctx| {
+        let _ = from_code_point(&[-1_i64, 65]);
+    });
 }
 
 #[test]
@@ -802,9 +812,10 @@ fn runtime_string_from_code_point_preserves_valid_pair_among_surrogates() {
 }
 
 #[test]
-#[should_panic(expected = "RangeError")]
 fn runtime_string_from_code_point_throws_on_code_point_above_max() {
-    let _ = from_code_point(&[0x11_0000_i64]);
+    assert_range_error("RangeError", |_ctx| {
+        let _ = from_code_point(&[0x11_0000_i64]);
+    });
 }
 
 #[test]

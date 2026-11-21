@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
-use crate::host::__ts_aot_throw;
+use crate::accessor::__ts_aot_throw_range_error;
+use crate::string::JsString;
 
 #[derive(Clone)]
 pub struct ArrayBufferHandle {
@@ -28,10 +29,11 @@ impl ArrayBufferHandle {
     pub fn from_slice(data: &[u8]) -> Self {
         let mut bytes: Vec<u8> = Vec::new();
         if bytes.try_reserve_exact(data.len()).is_err() {
-            __ts_aot_throw(format!(
-                "RangeError: ArrayBuffer allocation failed (out of memory) for {} bytes",
+            let message = format!(
+                "ArrayBuffer allocation failed (out of memory) for {} bytes",
                 data.len()
-            ));
+            );
+            __ts_aot_throw_range_error(JsString::from(message.as_str()));
         }
         bytes.extend_from_slice(data);
         ArrayBufferHandle {
@@ -44,20 +46,17 @@ impl ArrayBufferHandle {
 #[must_use]
 pub fn __ts_aot_array_buffer_new(byte_length: i64) -> ArrayBufferHandle {
     if byte_length < 0 {
-        __ts_aot_throw(format!(
-            "RangeError: ArrayBuffer byteLength {byte_length} is negative"
-        ));
+        let message = format!("ArrayBuffer byteLength {byte_length} is negative");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     }
     let Ok(len) = usize::try_from(byte_length) else {
-        __ts_aot_throw(format!(
-            "RangeError: ArrayBuffer byteLength {byte_length} exceeds platform usize"
-        ));
+        let message = format!("ArrayBuffer byteLength {byte_length} exceeds platform usize");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     };
     let mut bytes: Vec<u8> = Vec::new();
     if bytes.try_reserve_exact(len).is_err() {
-        __ts_aot_throw(format!(
-            "RangeError: ArrayBuffer byteLength {len} allocation failed (out of memory)"
-        ));
+        let message = format!("ArrayBuffer byteLength {len} allocation failed (out of memory)");
+        __ts_aot_throw_range_error(JsString::from(message.as_str()));
     }
     bytes.resize(len, 0u8);
     ArrayBufferHandle {

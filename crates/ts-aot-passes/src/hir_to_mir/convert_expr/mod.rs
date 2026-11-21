@@ -114,6 +114,14 @@ impl ExprConverter {
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
                 let field_ty = match types.resolve(owner.ty()) {
+                    Some(Type::GeneratorResult { inner }) => match field_name.as_str() {
+                        "value" => types.intern(&Type::Optional {
+                            inner: *inner,
+                            nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+                        }),
+                        "done" => types.intern(&Type::Bool),
+                        _ => *ty,
+                    },
                     Some(Type::AsyncGenYield { inner }) => match field_name.as_str() {
                         "value" => types.intern(&Type::Optional {
                             inner: *inner,
@@ -122,6 +130,16 @@ impl ExprConverter {
                         "done" => types.intern(&Type::Bool),
                         _ => *ty,
                     },
+                    _ if matches!(types.resolve(*ty), None | Some(Type::Error)) => self
+                        .recovered_owner_ty(owner, types)
+                        .and_then(|owner_ty| {
+                            let owner_ty = match types.resolve(owner_ty) {
+                                Some(Type::Optional { inner, .. }) => *inner,
+                                _ => owner_ty,
+                            };
+                            self.declared_field_ty(owner_ty, field_name)
+                        })
+                        .unwrap_or(*ty),
                     _ => *ty,
                 };
                 MirExpr::Field {

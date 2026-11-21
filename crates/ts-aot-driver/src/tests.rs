@@ -1622,7 +1622,7 @@ fn e2e_accessor_compound_update_preserves_prefix_and_postfix_results() {
 }
 
 #[test]
-fn e2e_accessor_compound_update_rejects_partial_accessors() {
+fn e2e_accessor_compound_update_lowers_partial_accessors() {
     fn codes(out: &DriverOutput) -> String {
         out.diagnostics
             .iter()
@@ -1635,11 +1635,30 @@ fn e2e_accessor_compound_update_rejects_partial_accessors() {
         "class C { get y(): i64 { return 1; } } \
          function f(c: C): i64 { return c.y += 1; }",
     );
-    assert!(read_only.has_errors(), "got {:?}", read_only.diagnostics);
+    assert!(!read_only.has_errors(), "got {:?}", read_only.diagnostics);
     assert!(
-        codes(&read_only).contains("E0411"),
-        "a getter-only accessor must reject a compound update with E0411, got:\n{}",
+        !codes(&read_only).contains("E0411"),
+        "a getter-only accessor must be a run-time TypeError, not a compile-time error; got:\n{}",
         codes(&read_only)
+    );
+    let read_only_rust = read_only.rust_source.expect("rust_source");
+    assert!(
+        read_only_rust.contains("__ts_aot_throw_type_error"),
+        "a compound update of a getter-only accessor must emit the run-time TypeError helper, \
+         got:\n{read_only_rust}"
+    );
+
+    let mir = Driver::new().compile_source(
+        "test.ts",
+        "class C { get y(): i64 { return 1; } } \
+         function f(c: C): i64 { return c.y += 1; }",
+        &CompileOptions::with_emit(EmitStage::Mir),
+    );
+    let mir_text = mir.mir_text.expect("emit-mir must populate mir_text");
+    assert!(
+        mir_text.contains("throw_type_error"),
+        "the MIR of a compound update of a getter-only accessor must contain the runtime error, \
+         got:\n{mir_text}"
     );
 
     let write_only = compile(

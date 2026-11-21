@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{LocalId, NullishKinds, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{
+    Atom, FunctionId, LocalId, NullishKinds, Span, StructId, Type, TypeId, TypeTable,
+};
 use ts_aot_ir_hir::{HirBinaryOp, HirExpr};
-use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt};
+use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp, UnaryOp};
 
 use crate::PassContext;
+use crate::hir_to_mir::convert_expr::binary::mask_shift_count;
 use crate::hir_to_mir::convert_expr::place::{mir_expr_to_place, mir_place_to_expr};
 use crate::hir_to_mir::convert_expr::util::{
     has_potential_side_effects, hir_expr_type_id, is_pure_place, mir_expr_ty,
 };
 use crate::hir_to_mir::converter::ExprConverter;
-use crate::hir_to_mir::nullish::LOGICAL_DIAG;
+use crate::hir_to_mir::nullish::{LOGICAL_DIAG, NULLISH_NARROWING_DIAG, kinds_of_ty};
 use crate::hir_to_mir::ops::convert_binop;
 
 fn condition_is_already_boolean(ty: TypeId, types: &TypeTable) -> bool {
@@ -182,7 +185,6 @@ impl ExprConverter {
         MirExpr::Local(dest)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn joined_branch_ty(
         &self,
         then_branch: &HirExpr,
@@ -500,6 +502,36 @@ impl ExprConverter {
         }
 
         let target_ty = self.assignment_target_ty(target, ty, types);
+        if matches!(
+            op,
+            HirBinaryOp::Add
+                | HirBinaryOp::Sub
+                | HirBinaryOp::Mul
+                | HirBinaryOp::Div
+                | HirBinaryOp::Mod
+                | HirBinaryOp::BitAnd
+                | HirBinaryOp::BitOr
+                | HirBinaryOp::BitXor
+                | HirBinaryOp::Shl
+                | HirBinaryOp::Shr
+        ) && matches!(
+            types.resolve(target_ty),
+            Some(Type::Null | Type::Void | Type::Optional { .. })
+        ) {
+            ctx.error(
+                NULLISH_NARROWING_DIAG,
+                format!(
+                    "the compound update of an optional value cannot be lowered: the target's \
+                     type is `{}`, and the AOT target represents an optional value as \
+                     `Option<T>` and has no arithmetic operator for it; handle the nullish case \
+                     first (for example with `x!` after a check, or by narrowing the target's \
+                     type)",
+                    super::binary::type_name(types, target_ty)
+                ),
+                target.span(),
+            );
+            return MirExpr::Unit;
+        }
         let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
         if !is_assignment_compatible(rhs, rhs_ty, target_ty, types, target.span(), ctx) {
             return MirExpr::Unit;
@@ -619,7 +651,7 @@ impl ExprConverter {
             let post_new_value = MirExpr::Binary {
                 op: convert_binop(op, ctx),
                 left: Box::new(MirExpr::Local(old_temp)),
-                right: Box::new(rhs_for_binop),
+                right: Box::new(mask_shift_count(rhs_for_binop, op, target_ty)),
                 ty: target_ty,
             };
             out.push(MirStmt::Let {
@@ -639,7 +671,7 @@ impl ExprConverter {
             let new_value = MirExpr::Binary {
                 op: convert_binop(op, ctx),
                 left: Box::new(MirExpr::Local(old_temp)),
-                right: Box::new(rhs_for_binop),
+                right: Box::new(mask_shift_count(rhs_for_binop, op, target_ty)),
                 ty: target_ty,
             };
             out.push(MirStmt::Let {
@@ -680,16 +712,21 @@ impl ExprConverter {
         let ((getter_fid, getter_ret_ty, is_static), (setter_fid, value_ty, setter_static)) =
             match (getter, setter) {
                 (Some(getter), Some(setter)) => (getter, setter),
-                (Some(_), None) => {
-                    ctx.error(
-                        "E0411",
-                        format!(
-                            "accessor `{field_name}` is read-only: a compound update requires \
-                             both a getter and a setter"
-                        ),
-                        target.span(),
-                    );
-                    return Some(MirExpr::Unit);
+                (Some(getter), None) => {
+                    return Some(self.convert_read_only_accessor_compound_update(
+                        getter,
+                        op,
+                        rhs,
+                        post,
+                        ty,
+                        owner,
+                        field_name,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    ));
                 }
                 (None, Some(_)) => {
                     ctx.error(
@@ -833,7 +870,7 @@ impl ExprConverter {
             init: Some(MirExpr::Binary {
                 op: convert_binop(op, ctx),
                 left: Box::new(old_for_binop),
-                right: Box::new(rhs_for_binop),
+                right: Box::new(mask_shift_count(rhs_for_binop, op, value_ty)),
                 ty: value_ty,
             }),
             mutable: false,
@@ -854,6 +891,205 @@ impl ExprConverter {
             Some(MirExpr::Local(old_temp))
         } else {
             Some(MirExpr::Local(new_temp))
+        }
+    }
+
+    fn convert_read_only_accessor_compound_update(
+        &mut self,
+        getter: (FunctionId, TypeId, bool),
+        op: HirBinaryOp,
+        rhs: &HirExpr,
+        _post: bool,
+        ty: TypeId,
+        owner: &HirExpr,
+        field_name: &Atom,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let (getter_fid, getter_ret_ty, is_static) = getter;
+        let receiver = self.convert_accessor_receiver(
+            owner,
+            is_static,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        let mut getter_args = Vec::new();
+        if let Some(recv) = &receiver {
+            getter_args.push(recv.clone());
+        }
+        let getter_call = MirExpr::Call {
+            callee: getter_fid,
+            args: getter_args,
+            ty: getter_ret_ty,
+        };
+        let message = format!(
+            "cannot set the get-only accessor `{field_name}`: a compound update requires a setter"
+        );
+        let string_ty = types.intern(&Type::String);
+        let throw = |dest: Option<LocalId>, dest_ty: TypeId| MirStmt::Runtime {
+            op: RuntimeOp::ThrowTypeError,
+            args: vec![MirExpr::String {
+                id: Atom::from(message.clone()),
+                ty: string_ty,
+            }],
+            dest,
+            ty: dest_ty,
+            target_ty: None,
+        };
+
+        if matches!(
+            op,
+            HirBinaryOp::Coalesce | HirBinaryOp::And | HirBinaryOp::Or
+        ) {
+            let old_temp = self.fresh_local();
+            self.push_temp_local(old_temp, getter_ret_ty);
+            out.push(MirStmt::Let {
+                local: old_temp,
+                ty: getter_ret_ty,
+                init: Some(getter_call),
+                mutable: false,
+            });
+            let old_value = MirExpr::Local(old_temp);
+            let short_circuits = self.accessor_short_circuit_keeps_old_value(
+                op,
+                &old_value,
+                getter_ret_ty,
+                out,
+                types,
+            );
+            let Some(short_circuits) = short_circuits else {
+                ctx.error(
+                    LOGICAL_DIAG,
+                    format!(
+                        "the `{}` compound update of the read-only accessor `{field_name}` cannot \
+                         be lowered without evaluating its right-hand side eagerly",
+                        match op {
+                            HirBinaryOp::Coalesce => "??=",
+                            HirBinaryOp::And => "&&=",
+                            _ => "||=",
+                        }
+                    ),
+                    owner.span(),
+                );
+                return MirExpr::Unit;
+            };
+            let mut throw_stmts = Vec::new();
+            let rhs_mir = self.convert_expr(
+                rhs,
+                &mut throw_stmts,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            if has_potential_side_effects(&rhs_mir) {
+                throw_stmts.push(MirStmt::Expr(rhs_mir));
+            }
+            throw_stmts.push(throw(None, types.intern(&Type::Void)));
+            let keeps_old_value = match (op, types.resolve(getter_ret_ty)) {
+                (HirBinaryOp::Coalesce, Some(Type::Optional { inner, .. })) => {
+                    MirExpr::UnwrapOptional {
+                        expr: Box::new(old_value),
+                        ty: *inner,
+                    }
+                }
+                _ => old_value,
+            };
+            out.push(MirStmt::If {
+                cond: short_circuits,
+                then_block: MirBlock::new(),
+                else_block: Some(MirBlock { stmts: throw_stmts }),
+            });
+            return keeps_old_value;
+        }
+
+        let old_temp = self.fresh_local();
+        self.push_temp_local(old_temp, getter_ret_ty);
+        self.map_local_id_inplace(old_temp, old_temp);
+        out.push(MirStmt::Let {
+            local: old_temp,
+            ty: getter_ret_ty,
+            init: Some(getter_call),
+            mutable: false,
+        });
+        let result_ty = match types.resolve(ty) {
+            Some(Type::Error | Type::GenericParam { .. }) | None => getter_ret_ty,
+            _ => ty,
+        };
+        let old_value = HirExpr::Local {
+            id: old_temp,
+            ty: getter_ret_ty,
+            span: owner.span(),
+        };
+        let computed = self.convert_binary(
+            op,
+            &old_value,
+            rhs,
+            result_ty,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
+        if has_potential_side_effects(&computed) {
+            out.push(MirStmt::Expr(computed));
+        }
+        let result_temp = self.fresh_local();
+        self.push_temp_local(result_temp, result_ty);
+        out.push(throw(Some(result_temp), result_ty));
+        MirExpr::Local(result_temp)
+    }
+
+    fn accessor_short_circuit_keeps_old_value(
+        &mut self,
+        op: HirBinaryOp,
+        old_value: &MirExpr,
+        getter_ret_ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+    ) -> Option<MirExpr> {
+        let bool_ty = types.intern(&Type::Bool);
+        match op {
+            HirBinaryOp::And => {
+                let truthy = self.truthy_condition(old_value, getter_ret_ty, out, types)?;
+                Some(MirExpr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(truthy),
+                    ty: bool_ty,
+                })
+            }
+            HirBinaryOp::Or => self.truthy_condition(old_value, getter_ret_ty, out, types),
+            _ => {
+                if matches!(types.resolve(getter_ret_ty), Some(Type::Optional { .. })) {
+                    return Some(MirExpr::IsSome {
+                        expr: Box::new(old_value.clone()),
+                        ty: bool_ty,
+                    });
+                }
+                if matches!(
+                    types.resolve(getter_ret_ty),
+                    Some(Type::Error | Type::GenericParam { .. }) | None
+                ) {
+                    return None;
+                }
+                if let Some(Type::Union { variants }) = types.resolve(getter_ret_ty)
+                    && variants.iter().any(|variant| {
+                        let kinds = kinds_of_ty(*variant, types);
+                        kinds.null || kinds.undefined
+                    })
+                {
+                    return None;
+                }
+                let kinds = kinds_of_ty(getter_ret_ty, types);
+                Some(MirExpr::Bool(!(kinds.null || kinds.undefined)))
+            }
         }
     }
 }

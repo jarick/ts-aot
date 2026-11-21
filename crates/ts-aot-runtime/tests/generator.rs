@@ -12,10 +12,10 @@ async fn simple_producer(co: genawaiter::sync::Co<i64, ()>) -> Option<i64> {
 #[test]
 fn generator_yields_each_value_then_done() {
     let mut g = __ts_aot_generator_new(simple_producer);
-    assert_eq!(g.next(), GeneratorResult::Yielded(1));
-    assert_eq!(g.next(), GeneratorResult::Yielded(2));
-    assert_eq!(g.next(), GeneratorResult::Done(None));
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::yielded(1));
+    assert_eq!(g.next(), GeneratorResult::yielded(2));
+    assert_eq!(g.next(), GeneratorResult::done(None));
+    assert_eq!(g.next(), GeneratorResult::done(None));
 }
 
 #[test]
@@ -24,15 +24,15 @@ fn generator_completion_value_is_preserved_in_done_variant() {
         co.yield_(10).await;
         Some(99)
     });
-    assert_eq!(g.next(), GeneratorResult::Yielded(10));
+    assert_eq!(g.next(), GeneratorResult::yielded(10));
     assert_eq!(
         g.next(),
-        GeneratorResult::Done(Some(99)),
+        GeneratorResult::done(Some(99)),
         "explicit return value must be preserved in the Done variant"
     );
     assert_eq!(
         g.next(),
-        GeneratorResult::Done(None),
+        GeneratorResult::done(None),
         "subsequent next() calls must return Done(None) without the completion value"
     );
 }
@@ -47,10 +47,10 @@ fn generator_controls_flow_across_yields() {
         }
         Some(n)
     });
-    assert_eq!(g.next(), GeneratorResult::Yielded(0));
-    assert_eq!(g.next(), GeneratorResult::Yielded(1));
-    assert_eq!(g.next(), GeneratorResult::Yielded(2));
-    assert_eq!(g.next(), GeneratorResult::Done(Some(3)));
+    assert_eq!(g.next(), GeneratorResult::yielded(0));
+    assert_eq!(g.next(), GeneratorResult::yielded(1));
+    assert_eq!(g.next(), GeneratorResult::yielded(2));
+    assert_eq!(g.next(), GeneratorResult::done(Some(3)));
 }
 
 #[test]
@@ -62,8 +62,8 @@ fn generator_captures_constructor_arguments() {
         })
     };
     let mut g = make(21);
-    assert_eq!(g.next(), GeneratorResult::Yielded(42));
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::yielded(42));
+    assert_eq!(g.next(), GeneratorResult::done(None));
 }
 
 #[test]
@@ -78,11 +78,11 @@ fn generator_next_short_circuits_after_completion() {
     });
 
     POLLS.store(0, Ordering::SeqCst);
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::done(None));
     let polls_after_done = POLLS.load(Ordering::SeqCst);
     assert!(polls_after_done >= 1, "producer must run to completion");
     for _ in 0..5 {
-        assert_eq!(g.next(), GeneratorResult::Done(None));
+        assert_eq!(g.next(), GeneratorResult::done(None));
     }
     assert_eq!(
         POLLS.load(Ordering::SeqCst),
@@ -94,13 +94,13 @@ fn generator_next_short_circuits_after_completion() {
 #[test]
 fn generator_done_with_and_done_are_distinct_variants() {
     assert_ne!(
-        GeneratorResult::Done(None),
-        GeneratorResult::Done(Some(0_i64)),
+        GeneratorResult::done(None),
+        GeneratorResult::done(Some(0_i64)),
         "Done(None) and Done(Some(_)) must be distinguishable"
     );
     assert_ne!(
-        GeneratorResult::Yielded(0_i64),
-        GeneratorResult::Done(Some(0_i64)),
+        GeneratorResult::yielded(0_i64),
+        GeneratorResult::done(Some(0_i64)),
         "Yielded and Done carrying the same value must be distinguishable"
     );
 }
@@ -136,9 +136,9 @@ fn generator_into_iter_into_iter_type_alias_is_usable() {
 #[test]
 fn generator_new_free_fn_constructs_a_working_generator() {
     let mut g = __ts_aot_generator_new(simple_producer);
-    assert_eq!(g.next(), GeneratorResult::Yielded(1));
-    assert_eq!(g.next(), GeneratorResult::Yielded(2));
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::yielded(1));
+    assert_eq!(g.next(), GeneratorResult::yielded(2));
+    assert_eq!(g.next(), GeneratorResult::done(None));
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn generator_into_iter_for_mut_ref_yields_each_value_then_terminates() {
     );
     assert_eq!(
         g.next(),
-        GeneratorResult::Done(None),
+        GeneratorResult::done(None),
         "generator must be finished after a borrowing for-of (completion preserved)"
     );
 }
@@ -181,7 +181,7 @@ fn generator_into_iter_for_mut_ref_handles_empty_generator() {
 #[test]
 fn generator_type_is_usable_as_a_named_binding() {
     let mut g = __ts_aot_generator_new(simple_producer);
-    assert_eq!(g.next(), GeneratorResult::Yielded(1));
+    assert_eq!(g.next(), GeneratorResult::yielded(1));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn generator_iter_mut_returns_each_value() {
     assert_eq!(collected, vec![1, 2], "iter_mut must yield 1, 2 then stop");
     assert_eq!(
         g.next(),
-        GeneratorResult::Done(None),
+        GeneratorResult::done(None),
         "generator must be completed after an iter_mut() borrowing iteration"
     );
 }
@@ -204,10 +204,10 @@ fn generator_iter_mut_partial_iteration_resumes_correctly() {
     let second = g.next();
     assert_eq!(
         second,
-        GeneratorResult::Yielded(2),
+        GeneratorResult::yielded(2),
         "after partial iter, next() via .next() must resume from the second yield"
     );
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::done(None));
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn bare_yield_still_produces_one_item_per_yield_in_mut_ref_iteration() {
     assert_eq!(count, 1, "bare `yield;` must iterate once via &mut");
     assert_eq!(
         g.next(),
-        GeneratorResult::Done(None),
+        GeneratorResult::done(None),
         "generator must be completed after the bare-yield iteration"
     );
 }
@@ -263,7 +263,7 @@ fn generator_after_producer_panic_is_finished() {
     let second = g.next();
     assert_eq!(
         second,
-        GeneratorResult::Done(None),
+        GeneratorResult::done(None),
         "after panic, generator must be finished and return Done(None) without resuming"
     );
 }
@@ -279,14 +279,14 @@ fn generator_accepts_producer_holding_non_send_value_across_await() {
         *counter_for_producer.borrow_mut() += 1;
         None
     });
-    assert_eq!(g.next(), GeneratorResult::Yielded(10));
-    assert_eq!(g.next(), GeneratorResult::Yielded(20));
+    assert_eq!(g.next(), GeneratorResult::yielded(10));
+    assert_eq!(g.next(), GeneratorResult::yielded(20));
     assert_eq!(
         *counter.borrow(),
         1,
         "Rc must survive the first await point and be observable after the producer resumes"
     );
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::done(None));
     assert_eq!(
         *counter.borrow(),
         2,
@@ -303,7 +303,7 @@ fn generator_holding_non_send_value_remains_usable() {
         co.yield_(7).await;
         None
     });
-    assert_eq!(g.next(), GeneratorResult::Yielded(7));
+    assert_eq!(g.next(), GeneratorResult::yielded(7));
     assert_eq!(*counter.borrow(), 1, "Rc must survive the await point");
-    assert_eq!(g.next(), GeneratorResult::Done(None));
+    assert_eq!(g.next(), GeneratorResult::done(None));
 }

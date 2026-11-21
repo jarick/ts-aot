@@ -88,11 +88,13 @@ impl SkeletonBuilder {
         items: &[FormalParameter<'_>],
         first_param_index: u32,
         type_param_map: Option<&TypeParamMap>,
+        hints: Option<&crate::param_infer::ParamHints>,
+        scope: Option<&crate::scope::BodyScope>,
     ) -> (Vec<HirParam>, Vec<(Atom, TypeId, HirExpr)>) {
         let mut params = Vec::with_capacity(items.len());
         let mut extra_locals: Vec<(Atom, TypeId, HirExpr)> = Vec::new();
         for (offset, param) in items.iter().enumerate() {
-            let ty = self.resolve_param_ty(senv, param, type_param_map);
+            let ty = self.resolve_param_ty(senv, param, type_param_map, hints, scope);
             let index = first_param_index.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
             let name = binding_pattern_name(&param.pattern);
             let has_default = param.initializer.is_some() && name.is_some();
@@ -153,8 +155,19 @@ impl SkeletonBuilder {
         senv: &mut SkeletonEnv,
         param: &FormalParameter<'_>,
         type_param_map: Option<&TypeParamMap>,
+        hints: Option<&crate::param_infer::ParamHints>,
+        scope: Option<&crate::scope::BodyScope>,
     ) -> TypeId {
         if param.type_annotation.is_none() {
+            if let Some(name) = binding_pattern_name(&param.pattern)
+                && let Some(ty) = hints.and_then(|hints| hints.get(name.as_str()).copied())
+            {
+                return if param.optional {
+                    wrap_optional_param(senv.types, ty)
+                } else {
+                    ty
+                };
+            }
             let subject = match binding_pattern_name(&param.pattern) {
                 Some(name) => format!("parameter `{name}`"),
                 None => "parameter".to_string(),
@@ -170,8 +183,13 @@ impl SkeletonBuilder {
         }
         let ann = param.type_annotation.as_deref();
         let ty = match type_param_map {
-            Some(map) => self.resolve_ts_type_from_annotation_with_params(senv, ann, Some(map)),
-            None => self.resolve_ts_type_from_annotation(senv, ann),
+            Some(map) => self.resolve_ts_type_from_annotation_with_params_in_scope(
+                senv,
+                ann,
+                Some(map),
+                scope,
+            ),
+            None => self.resolve_ts_type_from_annotation_in_scope(senv, ann, scope),
         };
         if param.optional {
             wrap_optional_param(senv.types, ty)
@@ -303,7 +321,7 @@ fn declare_rest_binding(
     destructure(senv, pattern, base, owner_ty, span, out);
 }
 
-fn struct_field_ty(senv: &SkeletonEnv, owner_ty: TypeId, name: &str) -> Option<TypeId> {
+pub(crate) fn struct_field_ty(senv: &SkeletonEnv, owner_ty: TypeId, name: &str) -> Option<TypeId> {
     fn walk(decls: &[HirDecl], owner_ty: TypeId, name: &str) -> Option<TypeId> {
         for decl in decls {
             match decl {

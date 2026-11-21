@@ -424,7 +424,7 @@ fn emit_function_with_ctx(
     } else {
         ident_from(&f.name)
     };
-    let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods);
+    let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods, ctx.module_idents());
     body_ctx.set_module_idents(Rc::clone(ctx.module_idents()));
     if is_tla_main {
         body_ctx.set_in_tla_main(true);

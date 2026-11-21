@@ -2,7 +2,7 @@ use super::*;
 use crate::PassContext;
 use crate::hir_to_mir::convert_program;
 use ts_aot_core::{
-    Atom, FunctionId, GenericParamId, LocalId, ModuleId, Span, Type, TypeId, TypeTable,
+    Atom, FieldId, FunctionId, GenericParamId, LocalId, ModuleId, Span, Type, TypeId, TypeTable,
 };
 use ts_aot_ir_hir::{
     HirCallee, HirCatchClause, HirClass, HirDecl, HirExpr, HirFunction, HirParam, HirProgram,
@@ -1316,6 +1316,203 @@ fn class_method_body_types_are_substituted_in_mono_copy() {
         found_local_ty,
         Some(i64_ty),
         "Local.ty in class method mono copy must be substituted from T to i64"
+    );
+}
+
+fn class_with_generic_method(
+    class_name: &str,
+    owner_ty: TypeId,
+    method_name: &str,
+    t_ty: TypeId,
+    param_id: GenericParamId,
+) -> HirClass {
+    HirClass {
+        name: Atom::from(class_name),
+        ty: owner_ty,
+        fields: vec![],
+        methods: vec![HirFunction {
+            name: Atom::from(method_name),
+            params: vec![
+                HirParam {
+                    optional: false,
+                    id: LocalId::from_raw(0),
+                    name: Atom::from("this"),
+                    ty: owner_ty,
+                },
+                HirParam {
+                    optional: false,
+                    id: LocalId::from_raw(1),
+                    name: Atom::from("x"),
+                    ty: t_ty,
+                },
+            ],
+            ret: t_ty,
+            throws: None,
+            body: vec![HirStmt::Return {
+                value: Some(HirExpr::Local {
+                    span: Span::default(),
+                    id: LocalId::from_raw(1),
+                    ty: t_ty,
+                }),
+            }],
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            type_params: vec![param_id],
+            async_info: None,
+        }],
+        extends: None,
+        type_params: vec![],
+        ..Default::default()
+    }
+}
+
+fn let_of_generic_method_call(
+    receiver: &str,
+    local_name: &str,
+    local_id: u32,
+    owner_ty: TypeId,
+    method_name: &str,
+    call_ty: TypeId,
+    arg: HirExpr,
+) -> HirStmt {
+    HirStmt::Let {
+        id: LocalId::from_raw(local_id),
+        name: Atom::from(local_name),
+        ty: call_ty,
+        init: Some(HirExpr::Call {
+            span: Span::default(),
+            callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                owner: Box::new(HirExpr::Global {
+                    name: Atom::from(receiver),
+                    ty: owner_ty,
+                    span: Span::default(),
+                }),
+                field: FieldId::from_raw(0),
+                field_name: Atom::from(method_name),
+                ty: call_ty,
+                span: Span::default(),
+            })),
+            args: vec![arg],
+            type_args: vec![],
+            ty: call_ty,
+        }),
+    }
+}
+
+fn let_ty_of(func: &HirFunction, local_name: &str) -> Option<TypeId> {
+    func.body.iter().find_map(|stmt| match stmt {
+        HirStmt::Let { name, ty, .. } if name.as_str() == local_name => Some(*ty),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_local_bound_to_a_generic_method_call_gets_the_specialized_type() {
+    let (mut program, mut types, mut ctx) = setup();
+    let owner_ty = types.intern(&Type::Named {
+        symbol: Atom::from("K"),
+    });
+    let t_ty = types.intern(&Type::GenericParam {
+        id: GenericParamId::from_raw(0),
+    });
+    program.push_decl(HirDecl::Class(class_with_generic_method(
+        "K",
+        owner_ty,
+        "n",
+        t_ty,
+        GenericParamId::from_raw(0),
+    )));
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![let_of_generic_method_call(
+            "k",
+            "r",
+            5,
+            owner_ty,
+            "n",
+            t_ty,
+            HirExpr::Int(7, Span::default()),
+        )],
+    )));
+
+    monomorphize(&mut program, &mut types, &mut ctx);
+
+    let i64_ty = types.intern(&Type::I64);
+    let caller = find_fn(&program, "caller").expect("caller");
+    assert_eq!(
+        let_ty_of(caller, "r"),
+        Some(i64_ty),
+        "the local's declared type must be substituted with the specialization's mapping"
+    );
+}
+
+#[test]
+fn same_named_generic_methods_keep_their_own_mappings() {
+    let (mut program, mut types, mut ctx) = setup();
+    let a_ty = types.intern(&Type::Named {
+        symbol: Atom::from("A"),
+    });
+    let b_ty = types.intern(&Type::Named {
+        symbol: Atom::from("B"),
+    });
+    let a_t = types.intern(&Type::GenericParam {
+        id: GenericParamId::from_raw(0),
+    });
+    let b_t = types.intern(&Type::GenericParam {
+        id: GenericParamId::from_raw(1),
+    });
+    program.push_decl(HirDecl::Class(class_with_generic_method(
+        "A",
+        a_ty,
+        "n",
+        a_t,
+        GenericParamId::from_raw(0),
+    )));
+    program.push_decl(HirDecl::Class(class_with_generic_method(
+        "B",
+        b_ty,
+        "n",
+        b_t,
+        GenericParamId::from_raw(1),
+    )));
+    program.push_decl(HirDecl::Function(simple_fn(
+        "caller",
+        vec![
+            let_of_generic_method_call(
+                "a",
+                "r",
+                10,
+                a_ty,
+                "n",
+                a_t,
+                HirExpr::Int(7, Span::default()),
+            ),
+            let_of_generic_method_call(
+                "b",
+                "s",
+                11,
+                b_ty,
+                "n",
+                b_t,
+                HirExpr::Int(8, Span::default()),
+            ),
+        ],
+    )));
+
+    monomorphize(&mut program, &mut types, &mut ctx);
+
+    let i64_ty = types.intern(&Type::I64);
+    let caller = find_fn(&program, "caller").expect("caller");
+    assert_eq!(
+        let_ty_of(caller, "r"),
+        Some(i64_ty),
+        "A's local must use A's own specialization mapping"
+    );
+    assert_eq!(
+        let_ty_of(caller, "s"),
+        Some(i64_ty),
+        "B's local must use B's own specialization mapping"
     );
 }
 

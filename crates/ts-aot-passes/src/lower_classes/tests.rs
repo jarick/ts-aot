@@ -1,6 +1,6 @@
 use super::*;
 use ts_aot_core::{Atom, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirClass, HirField, HirFunction, HirParam, HirStmt};
+use ts_aot_ir_hir::{HirCallee, HirClass, HirField, HirFunction, HirParam, HirStmt};
 
 fn setup() -> (HirProgram, TypeTable, PassContext) {
     let types = TypeTable::new();
@@ -52,6 +52,34 @@ fn class_with_fields_and_methods(
         type_params: Vec::new(),
         pre_pass_ty: None,
     }
+}
+
+fn method_with_name(name: &str, receiver: &str, receiver_ty: TypeId, ret: TypeId) -> HirFunction {
+    HirFunction {
+        name: Atom::new_inline(name),
+        params: vec![HirParam {
+            optional: false,
+            id: ts_aot_core::LocalId::from_raw(0),
+            name: Atom::new_inline(receiver),
+            ty: receiver_ty,
+        }],
+        ret,
+        throws: None,
+        body: vec![HirStmt::Return { value: None }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }
+}
+
+fn instance_method(name: &str, receiver_ty: TypeId, ret: TypeId) -> HirFunction {
+    method_with_name(name, "this", receiver_ty, ret)
+}
+
+fn static_method(name: &str, ret: TypeId) -> HirFunction {
+    method_with_name(name, "self", TypeId::from_raw(0), ret)
 }
 
 fn find_class<'a>(program: &'a HirProgram, name: &str) -> &'a HirClass {
@@ -612,7 +640,7 @@ fn multiple_independent_class_pairs_all_flatten() {
 }
 
 #[test]
-fn parent_field_with_same_name_as_child_field_is_kept_twice() {
+fn parent_field_with_same_name_as_child_field_is_shadowed() {
     let (mut program, mut types, mut ctx) = setup();
     program.push_decl(HirDecl::Class(class_with_fields_and_methods(
         "Parent",
@@ -630,7 +658,9 @@ fn parent_field_with_same_name_as_child_field_is_kept_twice() {
     let stats = lower_classes(&mut program, &mut types, &mut ctx);
 
     let c = find_class(&program, "Child");
-    assert_eq!(c.fields.len(), 2);
+    assert_eq!(c.fields.len(), 1);
+    assert_eq!(c.fields[0].name.as_str(), "x");
+    assert_eq!(c.fields[0].ty, TypeId::from_raw(2));
     assert_eq!(stats.inherited_fields, 1);
 }
 
@@ -1002,4 +1032,390 @@ fn inherited_methods_order_with_closest_ancestor_override() {
         TypeId::from_raw(20),
         "P.shared wins over GP.shared"
     );
+}
+
+fn super_name(owner: &str, prop: &str) -> String {
+    format!("__super_{}_{}_{}", owner.chars().count(), owner, prop)
+}
+
+fn super_calling_method(name: &str, owner: &str, prop: &str, class_ty: TypeId) -> HirFunction {
+    let span = ts_aot_core::Span::new(0, 0);
+    HirFunction {
+        name: Atom::new_inline(name),
+        params: vec![HirParam {
+            optional: false,
+            id: ts_aot_core::LocalId::from_raw(0),
+            name: Atom::new_inline("this"),
+            ty: class_ty,
+        }],
+        ret: TypeId::from_raw(0),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                    owner: Box::new(HirExpr::Local {
+                        id: ts_aot_core::LocalId::from_raw(0),
+                        ty: class_ty,
+                        span,
+                    }),
+                    field: ts_aot_core::FieldId::from_raw(0),
+                    field_name: Atom::from(super_name(owner, prop)),
+                    ty: TypeId::from_raw(0),
+                    span,
+                })),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                ty: TypeId::from_raw(0),
+                span,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    }
+}
+
+#[test]
+fn an_overridden_super_method_is_cloned_into_the_child_with_the_child_this_type() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(11);
+    base.methods
+        .push(instance_method("m", base.ty, TypeId::from_raw(90)));
+    base.methods.push(static_method("m", TypeId::from_raw(91)));
+    let base_mark = base.methods[0].ret;
+    program.push_decl(HirDecl::Class(base));
+
+    let mut child = class_with_fields_and_methods("Child", vec![], vec![], Some("Base"));
+    child.ty = TypeId::from_raw(12);
+    child
+        .methods
+        .push(super_calling_method("m", "Base", "m", child.ty));
+    program.push_decl(HirDecl::Class(child));
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Child");
+    let clone = c
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == super_name("Base", "m"))
+        .expect("the parent method body must be cloned into the child");
+    assert_eq!(
+        clone.ret, base_mark,
+        "the clone must carry the parent instance method's body/return marker"
+    );
+    assert_eq!(
+        clone.params[0].name.as_str(),
+        "this",
+        "the inherited receiver stays an instance `this`, even if a static method shares the name"
+    );
+    assert_eq!(
+        clone.params[0].ty,
+        TypeId::from_raw(12),
+        "the cloned `this` must be retyped to the child class"
+    );
+    assert!(!ctx.has_errors());
+}
+
+#[test]
+fn a_two_level_super_chain_clones_every_ancestor_body_transitively() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(21);
+    base.methods
+        .push(instance_method("m", base.ty, TypeId::from_raw(95)));
+    let base_mark = base.methods[0].ret;
+    program.push_decl(HirDecl::Class(base));
+
+    let mut mid = class_with_fields_and_methods("Mid", vec![], vec![], Some("Base"));
+    mid.ty = TypeId::from_raw(22);
+    mid.methods
+        .push(super_calling_method("m", "Base", "m", mid.ty));
+    program.push_decl(HirDecl::Class(mid));
+
+    let mut child = class_with_fields_and_methods("Child", vec![], vec![], Some("Mid"));
+    child.ty = TypeId::from_raw(23);
+    child
+        .methods
+        .push(super_calling_method("m", "Mid", "m", child.ty));
+    program.push_decl(HirDecl::Class(child));
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Child");
+    let names: Vec<String> = c
+        .methods
+        .iter()
+        .map(|m| m.name.as_str().to_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == &super_name("Mid", "m")),
+        "the direct parent body must be cloned, got {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == &super_name("Base", "m")),
+        "the body reachable through the parent's own super call must be cloned too, got {names:?}"
+    );
+    for name in [super_name("Mid", "m"), super_name("Base", "m")] {
+        let clone = c.methods.iter().find(|m| m.name.as_str() == name).unwrap();
+        assert_eq!(
+            clone.params[0].name.as_str(),
+            "this",
+            "every transitively cloned receiver must stay an instance `this`"
+        );
+        assert_eq!(clone.params[0].ty, TypeId::from_raw(23));
+    }
+    let base_clone = c
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == super_name("Base", "m"))
+        .unwrap();
+    assert_eq!(
+        base_clone.ret, base_mark,
+        "the cloned base body keeps its return marker after retyping"
+    );
+    assert!(!ctx.has_errors());
+}
+
+#[test]
+fn a_subclass_keeps_the_parent_instance_method_when_a_static_method_shares_its_name() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(31);
+    base.methods
+        .push(instance_method("m", base.ty, TypeId::from_raw(5)));
+    base.methods.push(static_method("m", TypeId::from_raw(9)));
+    program.push_decl(HirDecl::Class(base));
+
+    let mut child = class_with_fields_and_methods("Child", vec![], vec![], Some("Base"));
+    child.ty = TypeId::from_raw(32);
+    program.push_decl(HirDecl::Class(child));
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Child");
+    let instance = c
+        .methods
+        .iter()
+        .filter(|m| m.name.as_str() == "m")
+        .find(|m| {
+            m.params
+                .first()
+                .is_some_and(|param| param.name.as_str() == "this")
+        })
+        .expect("the inherited instance method must survive a same-named static method");
+    assert_eq!(
+        instance.ret,
+        TypeId::from_raw(5),
+        "the instance return marker must identify the surviving instance method"
+    );
+    assert_eq!(
+        instance.params[0].ty,
+        TypeId::from_raw(32),
+        "the inherited instance receiver must be retyped to the child class"
+    );
+    let stat = c
+        .methods
+        .iter()
+        .filter(|m| m.name.as_str() == "m")
+        .find(|m| {
+            m.params
+                .first()
+                .is_some_and(|param| param.name.as_str() != "this")
+        })
+        .expect("the inherited static method must survive too");
+    assert_eq!(
+        stat.ret,
+        TypeId::from_raw(9),
+        "the static return marker must identify the surviving static method"
+    );
+    assert!(!ctx.has_errors());
+}
+
+#[test]
+fn a_super_call_clones_the_instance_method_when_a_static_method_is_declared_first() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(41);
+    base.methods.push(static_method("m", TypeId::from_raw(9)));
+    base.methods
+        .push(instance_method("m", base.ty, TypeId::from_raw(5)));
+    program.push_decl(HirDecl::Class(base));
+
+    let mut child = class_with_fields_and_methods("Child", vec![], vec![], Some("Base"));
+    child.ty = TypeId::from_raw(42);
+    child
+        .methods
+        .push(super_calling_method("m", "Base", "m", child.ty));
+    program.push_decl(HirDecl::Class(child));
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Child");
+    let clone = c
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == super_name("Base", "m"))
+        .expect("the super clone must exist");
+    assert_eq!(
+        clone.ret,
+        TypeId::from_raw(5),
+        "the instance method must be cloned, not the static one declared first"
+    );
+    assert_eq!(
+        clone.params[0].ty,
+        TypeId::from_raw(42),
+        "the cloned `this` must be retyped to the child class"
+    );
+    assert!(!ctx.has_errors());
+}
+
+#[test]
+fn a_super_clone_ignores_a_decoy_class_whose_name_extends_the_owner_name() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(51);
+    base.methods
+        .push(instance_method("Sub_m", base.ty, TypeId::from_raw(5)));
+    program.push_decl(HirDecl::Class(base));
+
+    let mut decoy = class_with_fields_and_methods("Base_Sub", vec![], vec![], None);
+    decoy.ty = TypeId::from_raw(52);
+    decoy
+        .methods
+        .push(instance_method("m", decoy.ty, TypeId::from_raw(9)));
+    program.push_decl(HirDecl::Class(decoy));
+
+    let mut child = class_with_fields_and_methods("Leaf", vec![], vec![], Some("Base"));
+    child.ty = TypeId::from_raw(53);
+    child
+        .methods
+        .push(super_calling_method("Sub_m", "Base", "Sub_m", child.ty));
+    program.push_decl(HirDecl::Class(child));
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Leaf");
+    let clone = c
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == super_name("Base", "Sub_m"))
+        .expect("the clone must exist");
+    assert_eq!(
+        clone.ret,
+        TypeId::from_raw(5),
+        "the clone must come from `Base.Sub_m`, not from the decoy `Base_Sub.m`"
+    );
+    assert_eq!(
+        clone.params[0].ty,
+        TypeId::from_raw(53),
+        "the cloned `this` must be retyped to the child class"
+    );
+    assert!(!ctx.has_errors());
+}
+
+#[test]
+fn an_own_field_init_is_spliced_after_the_super_call_and_dropped_from_field_inits() {
+    let (mut program, mut types, mut ctx) = setup();
+    let mut base = class_with_fields_and_methods("Base", vec![], vec![], None);
+    base.ty = TypeId::from_raw(10);
+    program.push_decl(HirDecl::Class(base));
+
+    let mut child = class_with_fields_and_methods("Child", vec![("x", 30)], vec![], Some("Base"));
+    child.ty = TypeId::from_raw(20);
+    let span = ts_aot_core::Span::new(0, 0);
+    child.methods.push(HirFunction {
+        name: Atom::new_inline("constructor"),
+        params: vec![HirParam {
+            optional: false,
+            id: ts_aot_core::LocalId::from_raw(0),
+            name: Atom::new_inline("this"),
+            ty: child.ty,
+        }],
+        ret: TypeId::from_raw(0),
+        throws: None,
+        body: vec![HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+                    owner: Box::new(HirExpr::Local {
+                        id: ts_aot_core::LocalId::from_raw(0),
+                        ty: child.ty,
+                        span,
+                    }),
+                    field: ts_aot_core::FieldId::from_raw(0),
+                    field_name: Atom::from(super_name("Base", "constructor")),
+                    ty: TypeId::from_raw(0),
+                    span,
+                })),
+                args: Vec::new(),
+                type_args: Vec::new(),
+                ty: TypeId::from_raw(0),
+                span,
+            },
+        }],
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        type_params: Vec::new(),
+        async_info: None,
+    });
+    program.push_decl(HirDecl::Class(child));
+    let child_ty = TypeId::from_raw(20);
+    program
+        .class_field_inits
+        .insert(child_ty, vec![(Atom::from("x"), HirExpr::Int(7, span))]);
+
+    lower_classes(&mut program, &mut types, &mut ctx);
+
+    let c = find_class(&program, "Child");
+    let ctor = c
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "constructor")
+        .expect("the child constructor must survive lowering");
+    let super_kept = matches!(
+        &ctor.body[0],
+        HirStmt::Expr {
+            expr: HirExpr::Call {
+                callee: HirCallee::Indirect(_),
+                ..
+            }
+        }
+    );
+    assert!(super_kept, "the super call must remain the first stmt");
+    let spliced_ok = match &ctor.body[1] {
+        HirStmt::Expr {
+            expr: HirExpr::Assignment { target, value, .. },
+        } => match (target.as_ref(), value.as_ref()) {
+            (
+                HirExpr::Field {
+                    field_name,
+                    ty: field_ty,
+                    ..
+                },
+                HirExpr::Int(7, _),
+            ) => field_name.as_str() == "x" && *field_ty == TypeId::from_raw(30),
+            _ => false,
+        },
+        _ => false,
+    };
+    assert!(
+        spliced_ok,
+        "the relocatable field init must be spliced after the super call as this.x = 7"
+    );
+    assert_eq!(
+        ctor.body.len(),
+        2,
+        "super call plus exactly one spliced field init"
+    );
+    assert!(
+        !program
+            .class_field_inits
+            .contains_key(&TypeId::from_raw(20)),
+        "the hoisted init must be removed from class_field_inits"
+    );
+    assert!(!ctx.has_errors());
 }

@@ -13,7 +13,8 @@ use ts_aot_core::{
     Atom, Diagnostic, FieldId, LocalId, NullishKinds, Span, Type, TypeId, TypeTable,
 };
 use ts_aot_ir_hir::{
-    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirStmt, HirUnaryOp, Visitor, walk_expr,
+    HirBinaryOp, HirCallee, HirClass, HirDecl, HirExpr, HirFunction, HirStmt, HirUnaryOp, Visitor,
+    walk_expr,
 };
 
 use crate::body::FunctionBodyInput;
@@ -24,7 +25,7 @@ use crate::scope::BodyScope;
 use crate::skeleton::{
     ClassValueFieldBase, ClassValueFieldState, ClassValuePoisonConstraint, ClassValuePoisonFacts,
     ClassValuePoisonWrite, PendingGlobalRead, PendingGlobalReceiverCall, ReceiverRef,
-    ReceiverWriteScan, SkeletonBuilder, SkeletonEnv, state_holds_class_value,
+    ReceiverWriteScan, SkeletonBuilder, SkeletonEnv, StaticMethodCapture, state_holds_class_value,
 };
 use crate::util::core_span_from_oxc;
 
@@ -320,6 +321,21 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
         span: Span,
     ) -> HirExpr {
+        if scope.lookup(name).is_none()
+            && !SkeletonBuilder::captured_name_is_visible(senv, name)
+            && let Some(alias) = self.visible_generator_alias(name)
+        {
+            let ty = if self.in_callee_position {
+                alias.call_ty
+            } else {
+                alias.fn_ty
+            };
+            return HirExpr::Global {
+                name: alias.lifted,
+                ty,
+                span,
+            };
+        }
         let expr = senv.ident_to_expr(name, scope, span);
         if let HirExpr::Local { id, .. } = &expr {
             self.note_switch_case_local_read(*id);
@@ -350,6 +366,12 @@ impl SkeletonBuilder {
                         ty,
                         span: core_span_from_oxc(this_expr.span),
                     }
+                } else if let Some(ty) = senv.capture_type("this") {
+                    HirExpr::Global {
+                        name: Atom::new_inline("this"),
+                        ty,
+                        span: core_span_from_oxc(this_expr.span),
+                    }
                 } else {
                     let message = if self.in_static_method {
                         "`this` in a static method is not supported in this AOT target (a \
@@ -369,6 +391,7 @@ impl SkeletonBuilder {
             }
             Expression::ParenthesizedExpression(p) => self.walk_expr(senv, &p.expression, scope),
             Expression::BinaryExpression(b) => self.walk_binary(senv, b, scope),
+            Expression::PrivateInExpression(p) => self.walk_private_in(senv, p, scope),
             Expression::LogicalExpression(l) => self.walk_logical(senv, l, scope),
             Expression::UnaryExpression(unary) => self.walk_unary(senv, unary, scope),
             Expression::UpdateExpression(update) => self.walk_update(senv, update, scope),
@@ -472,7 +495,7 @@ impl SkeletonBuilder {
             }
             Expression::ArrowFunctionExpression(arrow) => self.walk_arrow(senv, arrow, scope),
             Expression::FunctionExpression(func) => {
-                self.walk_function_expression(senv, func, scope)
+                self.walk_function_expression(senv, func, scope, false)
             }
             Expression::TSAsExpression(as_expr) => {
                 let expr = self.walk_expr(senv, &as_expr.expression, scope);
@@ -605,23 +628,48 @@ impl SkeletonBuilder {
         self.strict = prev_strict || crate::util::body_has_use_strict(Some(&arrow.body));
         let merged = self.merged_type_params();
         let param_base = scope.peek_next();
-        let (params, extra_locals) =
-            self.build_params_and_locals(senv, &arrow.params.items, param_base, merged.as_ref());
         let ret_ty = match arrow.return_type.as_deref() {
             Some(ann) => match merged.as_ref() {
-                Some(map) => {
-                    self.resolve_ts_type_from_annotation_with_params(senv, Some(ann), Some(map))
-                }
-                None => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+                Some(map) => self.resolve_ts_type_from_annotation_with_params_in_scope(
+                    senv,
+                    Some(ann),
+                    Some(map),
+                    Some(scope),
+                ),
+                None => self.resolve_ts_type_from_annotation_in_scope(senv, Some(ann), Some(scope)),
             },
             None => senv.error_ty(),
         };
+        let ret_hint = crate::param_infer::return_hint_ty(
+            senv,
+            arrow.return_type.is_some().then_some(ret_ty),
+            arrow.r#async,
+            false,
+        );
+        let hints = Self::infer_param_hints(
+            senv,
+            Some(&arrow.body),
+            &arrow.params.items,
+            ret_hint,
+            None,
+            arrow.expression,
+            Some(scope),
+        );
+        let (params, extra_locals) = self.build_params_and_locals(
+            senv,
+            &arrow.params.items,
+            param_base,
+            merged.as_ref(),
+            Some(&hints),
+            Some(scope),
+        );
         let narrowed = self.narrowed_stack.last().cloned().unwrap_or_default();
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
         let captured_class_values = self.capture_class_value_map(scope, &narrowed);
         self.capture_class_values.push(captured_class_values);
+        self.push_pending_closure_captures(scope, &narrowed);
         let mut body: Vec<HirStmt> = if arrow.expression {
             let inner_base = params
                 .iter()
@@ -629,6 +677,7 @@ impl SkeletonBuilder {
                 .max()
                 .map_or(param_base, |m| m.saturating_add(1));
             let mut inner_scope = BodyScope::new(inner_base);
+            inner_scope.inherit_classes(scope);
             let mut prelude = self.declare_params_with_prelude(
                 senv,
                 &mut inner_scope,
@@ -637,12 +686,14 @@ impl SkeletonBuilder {
                 &arrow.params.items,
                 0,
             );
+            self.body_depth = self.body_depth.saturating_add(1);
             let mut stmts = {
                 let saved_module_init = std::mem::take(&mut self.module_init_depth);
                 let stmts = self.walk_stmts(senv, &arrow.body.statements, &mut inner_scope);
                 self.module_init_depth = saved_module_init;
                 stmts
             };
+            self.body_depth = self.body_depth.saturating_sub(1);
             if let Some(HirStmt::Expr { expr }) = stmts.first().cloned() {
                 stmts[0] = HirStmt::Return { value: Some(expr) };
             }
@@ -659,6 +710,7 @@ impl SkeletonBuilder {
                     items: &arrow.params.items,
                     item_offset: 0,
                     param_base,
+                    outer_classes: Some(scope),
                 },
                 false,
                 true,
@@ -671,7 +723,8 @@ impl SkeletonBuilder {
         self.capture_class_values.pop();
         self.own_statement_expr = outer_statement_expr;
         self.strict = prev_strict;
-        let captures = collect_capture_refs(&mut body, scope, &narrowed);
+        let mut captures = collect_capture_refs(&mut body, scope, &narrowed);
+        self.finish_pending_closure_captures(&mut captures);
         let written = written_targets(&body);
         self.withdraw_captured_narrowings(scope, &captures, &written);
         let ret_ty = if arrow.return_type.is_none() && !arrow.r#async {
@@ -705,20 +758,32 @@ impl SkeletonBuilder {
         }
     }
 
-    fn walk_function_expression(
+    pub(crate) fn walk_function_expression(
         &mut self,
         senv: &mut SkeletonEnv,
         func: &oxc_ast::ast::Function<'_>,
         scope: &mut BodyScope,
+        self_binding: bool,
     ) -> HirExpr {
         let span = core_span_from_oxc(func.span);
-        let unsupported = func.r#async || func.generator || func.type_parameters.is_some();
+        if func.generator && func.type_parameters.is_none() {
+            return self.walk_generator_function_expression(senv, func, scope);
+        }
+        let unsupported = func.generator || func.type_parameters.is_some();
         if unsupported {
             senv.report_unwalked(
                 "function expression form is not supported by the body walker",
                 func.span,
             );
             return HirExpr::Unit(span);
+        }
+        if func.r#async {
+            senv.diagnostics.push(Diagnostic::warning(
+                "E0502",
+                "async function expressions are lowered as synchronous closures in this AOT \
+                 target; `await` results are not resolved before yielding",
+                core_span_from_oxc(func.span),
+            ));
         }
         if func.params.rest.is_some() {
             senv.report_unwalked(
@@ -733,23 +798,58 @@ impl SkeletonBuilder {
         self.strict = strict;
         let merged = self.merged_type_params();
         let param_base = scope.peek_next();
-        let (params, extra_locals) =
-            self.build_params_and_locals(senv, &func.params.items, param_base, merged.as_ref());
         let ret_ty = match func.return_type.as_deref() {
             Some(ann) => match merged.as_ref() {
-                Some(map) => {
-                    self.resolve_ts_type_from_annotation_with_params(senv, Some(ann), Some(map))
-                }
-                None => self.resolve_ts_type_from_annotation(senv, Some(ann)),
+                Some(map) => self.resolve_ts_type_from_annotation_with_params_in_scope(
+                    senv,
+                    Some(ann),
+                    Some(map),
+                    Some(scope),
+                ),
+                None => self.resolve_ts_type_from_annotation_in_scope(senv, Some(ann), Some(scope)),
             },
             None => senv.error_ty(),
         };
+        let ret_hint = crate::param_infer::return_hint_ty(
+            senv,
+            func.return_type.is_some().then_some(ret_ty),
+            func.r#async,
+            func.generator,
+        );
+        let hints = Self::infer_param_hints(
+            senv,
+            func.body.as_deref(),
+            &func.params.items,
+            ret_hint,
+            None,
+            false,
+            Some(scope),
+        );
+        let (params, extra_locals) = self.build_params_and_locals(
+            senv,
+            &func.params.items,
+            param_base,
+            merged.as_ref(),
+            Some(&hints),
+            Some(scope),
+        );
+        if self_binding && let Some(id) = func.id.as_ref() {
+            let self_ty = senv.types.intern(&Type::Fn {
+                params: params.iter().map(|p| p.ty).collect(),
+                optional: params.iter().map(|p| p.optional).collect(),
+                ret: ret_ty,
+                err: None,
+            });
+            scope.predeclare_typed(id.name.as_str(), self_ty);
+        }
         let narrowed = self.narrowed_stack.last().cloned().unwrap_or_default();
         let outer_statement_expr = self.own_statement_expr;
         self.own_statement_expr = false;
         senv.capture_types.push(capture_type_map(scope, &narrowed));
+        let shadowed_this = Self::shadow_this_captures(senv);
         let captured_class_values = self.capture_class_value_map(scope, &narrowed);
         self.capture_class_values.push(captured_class_values);
+        self.push_pending_closure_captures(scope, &narrowed);
         let (mut body, used) = self.walk_function_body(
             senv,
             &FunctionBodyInput {
@@ -759,6 +859,7 @@ impl SkeletonBuilder {
                 items: &func.params.items,
                 item_offset: 0,
                 param_base,
+                outer_classes: Some(scope),
             },
             false,
             false,
@@ -766,10 +867,12 @@ impl SkeletonBuilder {
         );
         scope.set_next(used);
         senv.capture_types.pop();
+        Self::restore_this_captures(senv, shadowed_this);
         self.capture_class_values.pop();
         self.own_statement_expr = outer_statement_expr;
         self.strict = prev_strict;
-        let captures = collect_capture_refs(&mut body, scope, &narrowed);
+        let mut captures = collect_capture_refs(&mut body, scope, &narrowed);
+        self.finish_pending_closure_captures(&mut captures);
         let written = written_targets(&body);
         self.withdraw_captured_narrowings(scope, &captures, &written);
         let ret_ty = if func.return_type.is_none() && !func.r#async && !func.generator {
@@ -800,6 +903,208 @@ impl SkeletonBuilder {
             body,
             ty: fn_ty,
             span,
+        }
+    }
+
+    pub(crate) fn walk_generator_function_expression(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        func: &oxc_ast::ast::Function<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let span = core_span_from_oxc(func.span);
+        if func.params.rest.is_some() {
+            senv.report_unwalked(
+                "rest parameters (...args) are not supported in this AOT target; the rest \
+                 binding is ignored",
+                func.span,
+            );
+        }
+        let strict = self.strict || crate::util::body_has_use_strict(func.body.as_deref());
+        crate::util::validate_unique_param_bindings(senv, &func.params, strict);
+        let prev_strict = self.strict;
+        self.strict = strict;
+        let element_ty = if func.return_type.is_some() {
+            let annotation = func.return_type.as_deref();
+            let resolved =
+                self.resolve_ts_type_from_annotation_in_scope(senv, annotation, Some(scope));
+            generator_element_ty(self, senv, annotation, resolved, func.r#async, scope)
+        } else {
+            senv.error_ty()
+        };
+        let ret_hint = crate::param_infer::return_hint_ty(
+            senv,
+            func.return_type.is_some().then_some(element_ty),
+            func.r#async,
+            true,
+        );
+        let hints = Self::infer_param_hints(
+            senv,
+            func.body.as_deref(),
+            &func.params.items,
+            ret_hint,
+            None,
+            false,
+            None,
+        );
+        let param_base = scope.peek_next();
+        let (params, extra_locals) = self.build_params_and_locals(
+            senv,
+            &func.params.items,
+            param_base,
+            None,
+            Some(&hints),
+            Some(scope),
+        );
+        let narrowed = self.narrowed_stack.last().cloned().unwrap_or_default();
+        let outer_statement_expr = self.own_statement_expr;
+        self.own_statement_expr = false;
+        senv.capture_types.push(capture_type_map(scope, &narrowed));
+        let shadowed_this = Self::shadow_this_captures(senv);
+        let captured_class_values = self.capture_class_value_map(scope, &narrowed);
+        self.capture_class_values.push(captured_class_values);
+        self.push_pending_closure_captures(scope, &narrowed);
+        let (mut body, used) = self.walk_function_body(
+            senv,
+            &FunctionBodyInput {
+                body: func.body.as_deref(),
+                params: &params,
+                extra_locals: &extra_locals,
+                items: &func.params.items,
+                item_offset: 0,
+                param_base,
+                outer_classes: Some(scope),
+            },
+            true,
+            false,
+            true,
+        );
+        scope.set_next(used);
+        senv.capture_types.pop();
+        Self::restore_this_captures(senv, shadowed_this);
+        self.capture_class_values.pop();
+        self.own_statement_expr = outer_statement_expr;
+        self.strict = prev_strict;
+        let mut captures = collect_capture_refs(&mut body, scope, &narrowed);
+        self.finish_pending_closure_captures(&mut captures);
+        let written = written_targets(&body);
+        self.withdraw_captured_narrowings(scope, &captures, &written);
+        if !captures.is_empty() {
+            senv.report_unsupported(
+                "E0500",
+                "a generator function expression that reads a variable of the enclosing \
+                 function is not supported in this AOT target; hoist the generator to module \
+                 scope and pass the value as an argument instead",
+                func.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let element_ty = if func.return_type.is_some() {
+            element_ty
+        } else {
+            infer_generator_element_ty(&body, senv.types).unwrap_or(element_ty)
+        };
+        let name = self.fresh_generator_expr_name(senv);
+        let param_types: Vec<TypeId> = params.iter().map(|p| p.ty).collect();
+        let param_optional: Vec<bool> = params.iter().map(|p| p.optional).collect();
+        let wrapper_params = params.clone();
+        senv.program.push_decl(HirDecl::Function(HirFunction {
+            name: name.clone(),
+            params,
+            ret: element_ty,
+            throws: None,
+            body,
+            is_async: func.r#async,
+            is_generator: true,
+            is_exported: false,
+            type_params: Vec::new(),
+            async_info: None,
+        }));
+        let generator_ty = senv.types.intern(&Type::Generator {
+            inner: element_ty,
+            is_async: func.r#async,
+        });
+        let fn_ty = senv.types.intern(&Type::Fn {
+            params: param_types,
+            optional: param_optional,
+            ret: generator_ty,
+            err: None,
+        });
+        if self.in_callee_position {
+            return HirExpr::Global {
+                name,
+                ty: generator_ty,
+                span,
+            };
+        }
+        let args: Vec<HirExpr> = wrapper_params
+            .iter()
+            .map(|param| HirExpr::Local {
+                id: param.id,
+                ty: param.ty,
+                span,
+            })
+            .collect();
+        let call = HirExpr::Call {
+            callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                name,
+                ty: generator_ty,
+                span,
+            })),
+            args,
+            type_args: Vec::new(),
+            ty: generator_ty,
+            span,
+        };
+        let wrapper_name = self.fresh_generator_expr_name(senv);
+        senv.program.push_decl(HirDecl::Function(HirFunction {
+            name: wrapper_name.clone(),
+            params: wrapper_params,
+            ret: generator_ty,
+            throws: None,
+            body: vec![HirStmt::Return { value: Some(call) }],
+            is_async: false,
+            is_generator: false,
+            is_exported: false,
+            type_params: Vec::new(),
+            async_info: None,
+        }));
+        HirExpr::Global {
+            name: wrapper_name,
+            ty: fn_ty,
+            span,
+        }
+    }
+
+    fn fresh_generator_expr_name(&mut self, senv: &SkeletonEnv<'_>) -> Atom {
+        loop {
+            let id = self.next_closure_id;
+            self.next_closure_id = self.next_closure_id.saturating_add(1);
+            let name = Atom::from(format!(
+                "__ts_aot_genexpr_m{}_{id}",
+                senv.program.module.raw()
+            ));
+            if !declares_name(senv.program, &name) {
+                return name;
+            }
+        }
+    }
+
+    fn shadow_this_captures(senv: &mut SkeletonEnv) -> Vec<(usize, TypeId)> {
+        let mut shadowed = Vec::new();
+        for (index, frame) in senv.capture_types.iter_mut().enumerate() {
+            if let Some(ty) = frame.remove("this") {
+                shadowed.push((index, ty));
+            }
+        }
+        shadowed
+    }
+
+    fn restore_this_captures(senv: &mut SkeletonEnv, shadowed: Vec<(usize, TypeId)>) {
+        for (index, ty) in shadowed {
+            if let Some(frame) = senv.capture_types.get_mut(index) {
+                frame.insert("this".to_owned(), ty);
+            }
         }
     }
 
@@ -1013,7 +1318,9 @@ impl SkeletonBuilder {
         let element_ty = if inconclusive {
             senv.error_ty()
         } else {
-            inferred.unwrap_or_else(|| senv.error_ty())
+            inferred
+                .or_else(|| self.array_literal_hints.get(&arr.span.start).copied())
+                .unwrap_or_else(|| senv.error_ty())
         };
         let ty = if matches!(
             senv.types.resolve(element_ty),
@@ -1161,15 +1468,14 @@ impl SkeletonBuilder {
         &mut self,
         senv: &mut SkeletonEnv,
         class_expr: &oxc_ast::ast::Class<'_>,
-        _scope: &mut BodyScope,
+        scope: &mut BodyScope,
     ) -> HirExpr {
-        let module_id = senv.program.module.raw();
-        let seq = self.next_anon_class_id;
-        self.next_anon_class_id = self.next_anon_class_id.saturating_add(1);
-        let unique_name = Atom::from(format!("__class_m{module_id}_{seq}"));
-        let mut hir_class = self.build_class(senv, class_expr, false, false);
+        let unique_name = self.fresh_anon_class_name(senv);
+        let mut hir_class = self.build_class(senv, class_expr, false, false, Some(scope));
         hir_class.name = unique_name.clone();
+        self.register_static_methods(senv, &hir_class, &unique_name);
         let class_ty = hir_class.ty;
+        self.walk_local_class_field_inits(senv, class_expr, class_ty, scope);
         let span = core_span_from_oxc(class_expr.span);
         senv.program
             .push_decl(ts_aot_ir_hir::HirDecl::Class(hir_class));
@@ -1577,7 +1883,7 @@ impl SkeletonBuilder {
                 owner: inner_owner,
                 field_name: inner_field,
                 ..
-            } => {
+            } if matches!(inner_owner.as_ref(), HirExpr::Global { .. }) => {
                 let HirExpr::Global { name, .. } = inner_owner.as_ref() else {
                     return;
                 };
@@ -1589,8 +1895,59 @@ impl SkeletonBuilder {
                     field: inner_field.as_str().to_owned(),
                 }
             }
-            _ => return,
+            other => match Self::place_receiver_ref(other, scope) {
+                Some(receiver) => receiver,
+                None => return,
+            },
         };
+        self.record_pending_receiver_call(senv, receiver, owner, field_name, args, span, scope);
+    }
+
+    fn place_receiver_ref(place: &HirExpr, scope: &BodyScope) -> Option<ReceiverRef> {
+        let (root_id, fields) = Self::place_chain(place)?;
+        let this_local = scope.lookup("this").map(|(id, _)| id);
+        let root = if Some(root_id) == this_local {
+            "this".to_owned()
+        } else {
+            scope.name_of_local(root_id)?
+        };
+        Some(ReceiverRef::Path {
+            root,
+            root_id,
+            body_id: scope.body_id(),
+            fields,
+        })
+    }
+
+    fn place_chain(place: &HirExpr) -> Option<(LocalId, Vec<String>)> {
+        match place {
+            HirExpr::Local { id, .. } => Some((*id, Vec::new())),
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let (root, mut fields) = Self::place_chain(owner)?;
+                fields.push(field_name.as_str().to_owned());
+                Some((root, fields))
+            }
+            HirExpr::Index { owner, .. } => {
+                let (root, mut fields) = Self::place_chain(owner)?;
+                fields.push(crate::skeleton::INDEX_PATH_COMPONENT.to_owned());
+                Some((root, fields))
+            }
+            _ => None,
+        }
+    }
+
+    fn record_pending_receiver_call(
+        &mut self,
+        senv: &SkeletonEnv<'_>,
+        receiver: ReceiverRef,
+        owner: &HirExpr,
+        field_name: &Atom,
+        args: &[HirExpr],
+        span: Span,
+        scope: &BodyScope,
+    ) {
         if !Self::method_writes_this(senv, owner.ty(), field_name.as_str()) {
             return;
         }
@@ -1602,12 +1959,20 @@ impl SkeletonBuilder {
                 (name, ty)
             })
             .collect();
+        let this_local = scope.lookup("this").map(|(id, _)| id);
+        let this_place = match (&receiver, this_local) {
+            (ReceiverRef::Path { root_id, .. }, Some(this_id)) if *root_id == this_id => {
+                Some(Vec::new())
+            }
+            _ => None,
+        };
         let mut writer = ReceiverWriteScan::new(
             receiver.clone(),
             scope.visible_closure_bodies(),
             &self.class_types,
             shadowed_locals,
         );
+        writer.enter_receiver_scope(this_local, this_place, true);
         for arg in args {
             writer.visit_expr(arg);
         }
@@ -1631,7 +1996,27 @@ impl SkeletonBuilder {
         call: &CallExpression<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
+        if matches!(call.callee, Expression::Super(_)) {
+            let lowered = self.walk_super_call(senv, call, scope);
+            self.note_may_throw();
+            return lowered;
+        }
+        let previous_callee_position = self.in_callee_position;
+        self.in_callee_position = true;
         let callee_expr = self.walk_expr(senv, &call.callee, scope);
+        self.in_callee_position = previous_callee_position;
+        let callee_expr = self.resolve_static_method_callee(
+            senv,
+            callee_expr,
+            core_span_from_oxc(call.callee.span()),
+            scope,
+        );
+        let static_method_name = match &callee_expr {
+            HirExpr::Global { name, .. } if self.static_method_captures.contains_key(name) => {
+                Some(name.clone())
+            }
+            _ => None,
+        };
         let callee_expr = if call.optional {
             Self::wrap_optional_chain(callee_expr, core_span_from_oxc(call.callee.span()))
         } else {
@@ -1646,6 +2031,70 @@ impl SkeletonBuilder {
                 _ => {
                     senv.report_unwalked("spread argument is not supported", arg.span());
                 }
+            }
+        }
+        if let Some(static_name) = static_method_name.as_ref()
+            && let Some(captures) = self.static_method_captures.get(static_name).cloned()
+        {
+            let name = static_name.as_str();
+            let span = core_span_from_oxc(call.callee.span());
+            let source_arity = self
+                .static_method_globals
+                .values()
+                .flat_map(|methods| methods.values())
+                .find(|(global, _, _)| global == static_name)
+                .and_then(|(_, _, fn_ty)| match senv.types.resolve(*fn_ty) {
+                    Some(ts_aot_core::Type::Fn { params, .. }) => {
+                        Some(params.len().saturating_sub(captures.len()))
+                    }
+                    _ => None,
+                });
+            if let Some(source_arity) = source_arity {
+                while args.len() < source_arity {
+                    args.push(HirExpr::Undefined(span));
+                }
+            }
+            for StaticMethodCapture {
+                source,
+                local,
+                body_id,
+                ty: _,
+            } in captures
+            {
+                let bound = if scope.body_id() == body_id {
+                    scope.lookup(source.as_str())
+                } else {
+                    None
+                };
+                let in_scope = bound.is_some_and(|(bound, _)| {
+                    bound == local
+                        || self
+                            .narrowed_storage(bound)
+                            .is_some_and(|(storage_id, _)| storage_id == local)
+                });
+                if !in_scope {
+                    senv.report_unsupported(
+                        "E0419",
+                        format!(
+                            "the static method `{name}` reads `{source}`, a local variable of the \
+                             function that declares the class, so it can only be called in that \
+                             function while that variable is in scope; call it there or pass the \
+                             value as a parameter",
+                            source = source.as_str()
+                        )
+                        .as_str(),
+                        call.callee.span(),
+                    );
+                    return HirExpr::Unit(core_span_from_oxc(call.span));
+                }
+                let Some((bound_id, bound_ty)) = bound else {
+                    return HirExpr::Unit(core_span_from_oxc(call.span));
+                };
+                args.push(HirExpr::Local {
+                    id: bound_id,
+                    ty: bound_ty,
+                    span,
+                });
             }
         }
         self.record_global_receiver_call(
@@ -1679,9 +2128,77 @@ impl SkeletonBuilder {
                     senv.types
                         .intern(&ts_aot_core::Type::Array { element: string_ty })
                 } else {
-                    senv.error_ty()
+                    let owner_ty = match senv.types.resolve(owner.ty()) {
+                        Some(ts_aot_core::Type::Optional { inner, .. }) => *inner,
+                        _ => owner.ty(),
+                    };
+                    let static_receiver = matches!(
+                        owner.as_ref(),
+                        HirExpr::Global { name, .. }
+                            if self.class_types.contains_key(name.as_str())
+                    );
+                    let declared = class_method_ret_in_program(
+                        senv,
+                        owner_ty,
+                        field_name.as_str(),
+                        static_receiver,
+                    )
+                    .or_else(|| {
+                        self.class_method_rets
+                            .get(&(owner_ty, field_name.clone(), static_receiver))
+                            .copied()
+                    })
+                    .or_else(|| match owner.as_ref() {
+                        HirExpr::Global { name, .. } => self
+                            .class_types
+                            .get(name.as_str())
+                            .and_then(|class_ty| self.static_method_globals.get(class_ty))
+                            .and_then(|methods| methods.get(field_name))
+                            .map(|(_, ret, _)| *ret),
+                        _ => None,
+                    });
+                    match declared {
+                        Some(ty)
+                            if !matches!(
+                                senv.types.resolve(ty),
+                                None | Some(ts_aot_core::Type::Error | ts_aot_core::Type::Void)
+                            ) =>
+                        {
+                            ty
+                        }
+                        _ => senv.error_ty(),
+                    }
                 }
             }
+            HirExpr::Local { ty, .. } => match senv.types.resolve(*ty) {
+                Some(ts_aot_core::Type::Fn { ret, .. })
+                    if !matches!(
+                        senv.types.resolve(*ret),
+                        None | Some(ts_aot_core::Type::Error | ts_aot_core::Type::Void)
+                    ) =>
+                {
+                    *ret
+                }
+                _ => senv.error_ty(),
+            },
+            HirExpr::Global { ty, .. } => match senv.types.resolve(*ty) {
+                Some(ts_aot_core::Type::Fn { ret, .. })
+                    if !matches!(
+                        senv.types.resolve(*ret),
+                        None | Some(ts_aot_core::Type::Error | ts_aot_core::Type::Void)
+                    ) =>
+                {
+                    *ret
+                }
+                _ if !matches!(
+                    senv.types.resolve(*ty),
+                    None | Some(ts_aot_core::Type::Error)
+                ) =>
+                {
+                    *ty
+                }
+                _ => senv.error_ty(),
+            },
             _ => senv.error_ty(),
         };
         HirExpr::Call {
@@ -1690,6 +2207,177 @@ impl SkeletonBuilder {
             type_args,
             ty,
             span: core_span_from_oxc(call.span),
+        }
+    }
+
+    fn walk_super_member(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        s: &oxc_ast::ast::StaticMemberExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        self.walk_super_property(
+            senv,
+            &Atom::from(s.property.name.as_str()),
+            core_span_from_oxc(s.span),
+            s.span,
+            scope,
+        )
+    }
+
+    fn walk_super_property(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        prop: &Atom,
+        span: Span,
+        raw_span: oxc_span::Span,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let Some(parent_name) = self.current_super_class.clone() else {
+            senv.report_unsupported(
+                "E0500",
+                "`super` is only supported inside a method of a class that extends another class",
+                raw_span,
+            );
+            return HirExpr::Unit(span);
+        };
+        if super_class_decl(senv, &parent_name).is_none() {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "the parent class `{}` must be declared before the class that calls \
+                     `super.{prop}()`",
+                    parent_name.as_str()
+                )
+                .as_str(),
+                raw_span,
+            );
+            return HirExpr::Unit(span);
+        }
+        if !self.in_callee_position {
+            senv.report_unsupported(
+                "E0500",
+                "`super.<member>` is only supported as a direct call `super.m(...)` in this AOT \
+                 target; a `super` reference reads the parent's prototype (accessors and \
+                 prototype properties), which is not modelled, and an instance field of the \
+                 parent is not visible through `super` at all",
+                raw_span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let Some((owner_name, method)) = super_ancestor_declaring_method(senv, &parent_name, prop)
+        else {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`super.{prop}` must name an instance method of the parent class \
+                     `{}`",
+                    parent_name.as_str()
+                )
+                .as_str(),
+                raw_span,
+            );
+            return HirExpr::Unit(span);
+        };
+        let ret = method.ret;
+        let Some((this_id, this_ty)) = scope.lookup("this") else {
+            senv.report_unsupported(
+                "E0500",
+                "`super` inside a nested closure is not supported in this AOT target",
+                raw_span,
+            );
+            return HirExpr::Unit(span);
+        };
+        let field_name = super_method_name(&owner_name, prop);
+        if let Some(class_ty) = self.current_class_ty {
+            self.class_method_rets
+                .insert((class_ty, field_name.clone(), false), ret);
+        }
+        HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: this_id,
+                ty: this_ty,
+                span,
+            }),
+            field: FieldId::from_raw(0),
+            field_name,
+            ty: ret,
+            span,
+        }
+    }
+
+    fn walk_super_call(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        call: &CallExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let span = core_span_from_oxc(call.span);
+        let mut args = Vec::with_capacity(call.arguments.len());
+        for arg in &call.arguments {
+            match arg {
+                arg @ match_expression!(Argument) => {
+                    args.push(self.walk_expr(senv, arg.to_expression(), scope));
+                }
+                _ => {
+                    senv.report_unwalked(
+                        "spread argument is not supported in `super()`",
+                        arg.span(),
+                    );
+                }
+            }
+        }
+        let Some(parent) = self.current_super_class.clone() else {
+            senv.report_unsupported(
+                "E0500",
+                "`super()` is only supported inside the constructor of a derived class",
+                call.span,
+            );
+            return HirExpr::Unit(span);
+        };
+        let constructor = Atom::from("constructor");
+        if let Some((owner_name, method)) =
+            super_ancestor_declaring_method(senv, &parent, &constructor)
+        {
+            let ret = method.ret;
+            let Some((this_id, this_ty)) = scope.lookup("this") else {
+                senv.report_unsupported(
+                    "E0500",
+                    "`super()` inside a nested closure is not supported in this AOT target",
+                    call.span,
+                );
+                return HirExpr::Unit(span);
+            };
+            let field_name = super_method_name(&owner_name, &constructor);
+            if let Some(class_ty) = self.current_class_ty {
+                self.class_method_rets
+                    .insert((class_ty, field_name.clone(), false), ret);
+            }
+            let callee = HirExpr::Field {
+                owner: Box::new(HirExpr::Local {
+                    id: this_id,
+                    ty: this_ty,
+                    span,
+                }),
+                field: FieldId::from_raw(0),
+                field_name,
+                ty: ret,
+                span,
+            };
+            return HirExpr::Call {
+                callee: HirCallee::Indirect(Box::new(callee)),
+                args,
+                type_args: Vec::new(),
+                ty: ret,
+                span,
+            };
+        }
+        let ty = senv.types.intern(&Type::Void);
+        args.push(HirExpr::Unit(span));
+        HirExpr::Sequence {
+            exprs: args,
+            ty,
+            span,
         }
     }
 
@@ -1725,33 +2413,78 @@ impl SkeletonBuilder {
                 senv.types.intern(&ts_aot_core::Type::Date)
             }
             Expression::Identifier(id) if scope.lookup(id.name.as_str()).is_none() => {
-                match self.class_value_globals.get(id.name.as_str()) {
-                    Some(classes)
-                        if classes.len() < 2
-                            && (self.module_lets.contains(id.name.as_str())
-                                || self.module_vars.contains(id.name.as_str())) =>
-                    {
-                        senv.report_unsupported(
-                            "E0419",
-                            "`new` on a module-level `let` holding a class value cannot know \
+                let class_binding = scope.visible_class(id.name.as_str());
+                let captured_shadows = match (
+                    class_binding.as_ref(),
+                    self.captured_local_id(id.name.as_str()),
+                ) {
+                    (Some(binding), Some(local)) => !self
+                        .class_value_locals
+                        .get(&self.class_value_storage(local))
+                        .is_some_and(|classes| classes.contains(&binding.ty)),
+                    _ => false,
+                };
+                if let Some(binding) = class_binding
+                    && !captured_shadows
+                {
+                    binding.ty
+                } else {
+                    match self.class_value_globals.get(id.name.as_str()) {
+                        Some(classes)
+                            if classes.len() < 2
+                                && (self.module_lets.contains(id.name.as_str())
+                                    || self.module_vars.contains(id.name.as_str())) =>
+                        {
+                            senv.report_unsupported(
+                                "E0419",
+                                "`new` on a module-level `let` holding a class value cannot know \
                              which class to construct; use `const`, or name the class directly",
-                            id.span,
-                        );
-                        senv.error_ty()
-                    }
-                    Some(classes) if classes.len() > 1 => {
-                        senv.report_unsupported(
-                            "E0419",
-                            "`new` on a binding that may hold more than one class value is not \
+                                id.span,
+                            );
+                            senv.error_ty()
+                        }
+                        Some(classes) if classes.len() > 1 => {
+                            senv.report_unsupported(
+                                "E0419",
+                                "`new` on a binding that may hold more than one class value is not \
                              supported; construct the class by name instead",
-                            id.span,
-                        );
-                        senv.error_ty()
+                                id.span,
+                            );
+                            senv.error_ty()
+                        }
+                        _ => match self
+                            .captured_class_values(id.name.as_str(), id.span)
+                            .as_deref()
+                        {
+                            Some([class_ty]) => *class_ty,
+                            Some(_) => {
+                                senv.report_unsupported(
+                                    "E0419",
+                                    "`new` on a binding that may hold more than one class value is \
+                                 not supported; construct the class by name instead",
+                                    id.span,
+                                );
+                                senv.error_ty()
+                            }
+                            None => {
+                                if self.captured_local_id(id.name.as_str()).is_some() {
+                                    senv.report_unsupported(
+                                        "E0419",
+                                        "`new` on a captured binding whose class value is not \
+                                         known is not supported; construct the class by name \
+                                         instead",
+                                        id.span,
+                                    );
+                                    senv.error_ty()
+                                } else {
+                                    match self.class_types.get(id.name.as_str()) {
+                                        Some(&class_ty) => class_ty,
+                                        None => senv.error_ty(),
+                                    }
+                                }
+                            }
+                        },
                     }
-                    _ => match self.class_types.get(id.name.as_str()) {
-                        Some(&class_ty) => class_ty,
-                        None => senv.error_ty(),
-                    },
                 }
             }
             Expression::Identifier(id) => match scope.lookup(id.name.as_str()) {
@@ -1773,8 +2506,29 @@ impl SkeletonBuilder {
                 },
                 None => senv.error_ty(),
             },
-            _ => senv.error_ty(),
+            _ => {
+                let callee_ty = callee_expr.ty();
+                let is_member = matches!(
+                    &new_expr.callee,
+                    Expression::StaticMemberExpression(_)
+                        | Expression::ComputedMemberExpression(_)
+                        | Expression::PrivateFieldExpression(_)
+                );
+                if is_member
+                    && callee_expr.has_static_type()
+                    && !matches!(
+                        senv.types.resolve(callee_ty),
+                        None | Some(ts_aot_core::Type::Error)
+                    )
+                    && self.class_types.values().any(|&known| known == callee_ty)
+                {
+                    callee_ty
+                } else {
+                    senv.error_ty()
+                }
+            }
         };
+        self.check_local_class_construction(senv, ty, scope, core_span_from_oxc(new_expr.span));
         self.note_may_throw();
         HirExpr::New {
             callee: Box::new(callee_expr),
@@ -1793,6 +2547,9 @@ impl SkeletonBuilder {
         use oxc_ast::ast::MemberExpression as ME;
         match m {
             ME::StaticMemberExpression(s) => {
+                if matches!(s.object, Expression::Super(_)) {
+                    return self.walk_super_member(senv, s, scope);
+                }
                 if let Expression::Identifier(obj) = &s.object
                     && obj.name.as_str() == "assert"
                     && scope.lookup("assert").is_none()
@@ -1829,6 +2586,44 @@ impl SkeletonBuilder {
                     return HirExpr::Global {
                         name: global,
                         ty,
+                        span: core_span_from_oxc(s.span),
+                    };
+                }
+                if let Expression::Identifier(obj) = &s.object
+                    && !self.in_callee_position
+                    && scope.visible_binding(obj.name.as_str()).is_none()
+                    && !self.module_lets.contains(obj.name.as_str())
+                    && !self.module_vars.contains(obj.name.as_str())
+                    && self.captured_local_id(obj.name.as_str()).is_none()
+                    && !SkeletonBuilder::captured_name_is_visible(senv, obj.name.as_str())
+                    && self
+                        .class_value_globals
+                        .get(obj.name.as_str())
+                        .is_none_or(|classes| classes.len() <= 1)
+                    && let Some(class_ty) = self.class_types.get(obj.name.as_str()).copied()
+                    && let Some((global, _ret, fn_ty)) = self
+                        .static_method_globals
+                        .get(&class_ty)
+                        .and_then(|methods| methods.get(&Atom::from(s.property.name.as_str())))
+                        .cloned()
+                {
+                    if self.static_method_captures.contains_key(&global) {
+                        senv.report_unsupported(
+                            "E0419",
+                            format!(
+                                "the static method `{}` reads a local variable of the function \
+                                 that declares the class, so its value cannot be taken out of that \
+                                 function; call it there instead",
+                                s.property.name.as_str()
+                            )
+                            .as_str(),
+                            s.span,
+                        );
+                        return HirExpr::Unit(core_span_from_oxc(s.span));
+                    }
+                    return HirExpr::Global {
+                        name: global,
+                        ty: fn_ty,
                         span: core_span_from_oxc(s.span),
                     };
                 }
@@ -1993,32 +2788,34 @@ impl SkeletonBuilder {
                     senv.types.resolve(lookup_ty),
                     Some(ts_aot_core::Type::String | ts_aot_core::Type::Array { .. })
                 );
+                let generator_result_inner = match senv.types.resolve(lookup_ty) {
+                    Some(ts_aot_core::Type::GeneratorResult { inner }) => Some(*inner),
+                    _ => None,
+                };
                 let field_ty = if matches!(
                     senv.types.resolve(lookup_ty),
                     Some(ts_aot_core::Type::Struct { .. })
                 ) {
-                    senv.program
-                        .declarations
-                        .iter()
-                        .find_map(|d| match d {
-                            HirDecl::Class(c) if c.ty == lookup_ty => c
-                                .fields
-                                .iter()
-                                .find(|f| f.name.as_str() == prop)
-                                .map(|f| f.ty),
-                            _ => None,
-                        })
-                        .or_else(|| {
-                            senv.program
-                                .class_fields
-                                .get(&lookup_ty)
-                                .and_then(|fields| {
-                                    fields
-                                        .iter()
-                                        .find(|f| f.name.as_str() == prop)
-                                        .map(|f| f.ty)
-                                })
-                        })
+                    class_field_ty_in_program(senv, lookup_ty, prop).or_else(|| {
+                        senv.program
+                            .class_fields
+                            .get(&lookup_ty)
+                            .and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find(|f| f.name.as_str() == prop)
+                                    .map(|f| f.ty)
+                            })
+                    })
+                } else if let Some(inner) = generator_result_inner {
+                    match prop {
+                        "value" => Some(senv.types.intern(&ts_aot_core::Type::Optional {
+                            inner,
+                            nullish: NullishKinds::UNDEFINED_ONLY,
+                        })),
+                        "done" => Some(senv.types.intern(&ts_aot_core::Type::Bool)),
+                        _ => None,
+                    }
                 } else {
                     None
                 };
@@ -2056,6 +2853,19 @@ impl SkeletonBuilder {
                 }
             }
             ME::ComputedMemberExpression(computed) => {
+                if matches!(computed.object, Expression::Super(_)) {
+                    let span = core_span_from_oxc(computed.span);
+                    let Some(prop) = super_computed_property_name(&computed.expression) else {
+                        senv.report_unsupported(
+                            "E0500",
+                            "`super[...]` is only supported with a literal string or numeric \
+                             property name in this AOT target",
+                            computed.span,
+                        );
+                        return HirExpr::Unit(span);
+                    };
+                    return self.walk_super_property(senv, &prop, span, computed.span, scope);
+                }
                 let owner = self.walk_expr(senv, &computed.object, scope);
                 let owner = if computed.optional {
                     Self::wrap_optional_chain(owner, core_span_from_oxc(computed.object.span()))
@@ -2071,10 +2881,239 @@ impl SkeletonBuilder {
                     span: core_span_from_oxc(computed.span),
                 }
             }
-            ME::PrivateFieldExpression(p) => {
-                senv.report_unwalked("private field access is not supported", p.span);
-                HirExpr::Unit(core_span_from_oxc(p.span))
+            ME::PrivateFieldExpression(p) => self.walk_private_field(senv, p, scope),
+        }
+    }
+
+    fn walk_private_field(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        p: &oxc_ast::ast::PrivateFieldExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let span = core_span_from_oxc(p.span);
+        let name = p.field.name.as_str().to_owned();
+        let Some((declaring_ty, class_name, member)) = self.private_member(name.as_str()) else {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name}` is used outside the body of the class that declares it; a private \
+                     member can only be read or written where its name is in scope"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        };
+        if member.is_static {
+            let receiver_ok = match &p.object {
+                Expression::Identifier(obj) => {
+                    scope.lookup(obj.name.as_str()).is_none()
+                        && !SkeletonBuilder::captured_name_is_visible(senv, obj.name.as_str())
+                        && self.class_types.get(obj.name.as_str()).copied() == Some(declaring_ty)
+                }
+                Expression::ThisExpression(_) => self.in_static_method,
+                _ => false,
+            };
+            if !receiver_ok {
+                senv.report_unsupported(
+                    "E0500",
+                    format!(
+                        "the static private member `#{name}` can only be accessed through the \
+                         class that declares it"
+                    )
+                    .as_str(),
+                    p.span,
+                );
+                return HirExpr::Unit(span);
             }
+            if let Some((global, ty)) = self
+                .static_field_globals
+                .get(&declaring_ty)
+                .and_then(|statics| statics.get(&member.lowered))
+                .cloned()
+            {
+                return HirExpr::Global {
+                    name: global,
+                    ty,
+                    span,
+                };
+            }
+            if let Some((global, ret, fn_ty)) = self
+                .static_method_globals
+                .get(&declaring_ty)
+                .and_then(|methods| methods.get(&member.lowered))
+                .cloned()
+            {
+                let ty = if self.in_callee_position { ret } else { fn_ty };
+                return HirExpr::Global {
+                    name: global,
+                    ty,
+                    span,
+                };
+            }
+        }
+        let class_receiver = (member.is_static
+            && matches!(p.object, Expression::ThisExpression(_))
+            && !class_name.as_str().is_empty())
+        .then(|| {
+            self.identifier_expr(
+                senv,
+                class_name.as_str(),
+                scope,
+                core_span_from_oxc(p.object.span()),
+            )
+        });
+        let owner = match class_receiver {
+            Some(owner) => owner,
+            None => self.walk_expr(senv, &p.object, scope),
+        };
+        let owner = if p.optional {
+            Self::wrap_optional_chain(owner, core_span_from_oxc(p.object.span()))
+        } else {
+            owner
+        };
+        let owner_ty = owner.ty();
+        let (lookup_ty, nullish) = match senv.types.resolve(owner_ty) {
+            Some(ts_aot_core::Type::Optional { inner, nullish }) => (*inner, Some(*nullish)),
+            _ => (owner_ty, None),
+        };
+        let declared = class_field_ty_in_program(senv, lookup_ty, member.lowered.as_str())
+            .or_else(|| {
+                senv.program
+                    .class_fields
+                    .get(&lookup_ty)
+                    .and_then(|fields| {
+                        fields
+                            .iter()
+                            .find(|f| f.name == member.lowered)
+                            .map(|f| f.ty)
+                    })
+            })
+            .or_else(|| {
+                self.class_method_rets
+                    .get(&(lookup_ty, member.lowered.clone(), false))
+                    .copied()
+            });
+        let bare_ty = declared.unwrap_or_else(|| senv.error_ty());
+        let ty = match nullish {
+            Some(_) => {
+                let bare = senv.types.resolve(bare_ty).cloned();
+                let (inner, kinds) = match bare {
+                    Some(ts_aot_core::Type::Optional { inner, nullish }) => (
+                        inner,
+                        NullishKinds {
+                            null: nullish.null,
+                            undefined: true,
+                        },
+                    ),
+                    _ => (bare_ty, NullishKinds::UNDEFINED_ONLY),
+                };
+                senv.types.intern(&ts_aot_core::Type::Optional {
+                    inner,
+                    nullish: kinds,
+                })
+            }
+            None => bare_ty,
+        };
+        HirExpr::Field {
+            owner: Box::new(owner),
+            field: FieldId::from_raw(0),
+            field_name: member.lowered,
+            ty,
+            span,
+        }
+    }
+
+    fn walk_private_in(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        p: &oxc_ast::ast::PrivateInExpression<'_>,
+        scope: &mut BodyScope,
+    ) -> HirExpr {
+        let span = core_span_from_oxc(p.span);
+        let bool_ty = senv.types.intern(&ts_aot_core::Type::Bool);
+        let name = p.left.name.as_str().to_owned();
+        let Some((_declaring_ty, _class_name, member)) = self.private_member(name.as_str()) else {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` is used outside the body of the class that declares it; a \
+                     private member can only be tested where its name is in scope"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        };
+        if member.is_static {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` for a static private member has no instance to test; this \
+                     AOT target supports the ergonomic brand check only for instance private \
+                     fields"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let object = self.walk_expr(senv, &p.right, scope);
+        if matches!(
+            senv.types.resolve(object.ty()),
+            Some(ts_aot_core::Type::Optional { .. } | ts_aot_core::Type::Null)
+        ) {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` with an `obj` that may be null or undefined throws a \
+                     TypeError in JavaScript; narrow the operand to a non-nullish class instance \
+                     first"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let owner_ty = object.ty();
+        if !matches!(
+            senv.types.resolve(owner_ty),
+            Some(ts_aot_core::Type::Struct { .. })
+        ) {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` needs the class of `obj` to be known statically; the AOT \
+                     brand check is a plain field lookup on the object's struct"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        if !member.brand_is_field {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` for a private method or accessor is not supported in this \
+                     AOT target; only the brand check for an instance private field is lowered"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        }
+        let present = class_field_ty_in_program(senv, owner_ty, member.lowered.as_str()).is_some()
+            || senv
+                .program
+                .class_fields
+                .get(&owner_ty)
+                .is_some_and(|fields| fields.iter().any(|f| f.name == member.lowered));
+        HirExpr::Sequence {
+            exprs: vec![object, HirExpr::Bool(present, span)],
+            ty: bool_ty,
+            span,
         }
     }
 
@@ -2763,7 +3802,11 @@ impl SkeletonBuilder {
         true
     }
 
-    fn rhs_final_class_value_classes(&mut self, rhs: &mut HirExpr) -> Option<Vec<TypeId>> {
+    fn rhs_final_class_value_classes(
+        &mut self,
+        rhs: &mut HirExpr,
+        span: oxc_span::Span,
+    ) -> Option<Vec<TypeId>> {
         match rhs {
             HirExpr::DefaultConstruct { ty, span, .. } => {
                 let (class_ty, span) = (*ty, *span);
@@ -2773,8 +3816,10 @@ impl SkeletonBuilder {
             }
             HirExpr::Global { name, .. } => {
                 let name = name.as_str().to_owned();
-                if self.captured_local_id(name.as_str()).is_some()
-                    || self.module_lets.contains(name.as_str())
+                if self.captured_local_id(name.as_str()).is_some() {
+                    return self.captured_class_values(name.as_str(), span);
+                }
+                if self.module_lets.contains(name.as_str())
                     || self.module_vars.contains(name.as_str())
                 {
                     return None;
@@ -2812,6 +3857,117 @@ impl SkeletonBuilder {
             }
             _ => None,
         }
+    }
+
+    fn resolve_static_method_callee(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        callee: HirExpr,
+        span: oxc_span::Span,
+        scope: &BodyScope,
+    ) -> HirExpr {
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = &callee
+        else {
+            return callee;
+        };
+        if let HirExpr::Global { name, .. } = owner.as_ref()
+            && self.class_types.contains_key(name.as_str())
+            && !self.class_value_globals.contains_key(name.as_str())
+            && self.captured_local_id(name.as_str()).is_none()
+            && !SkeletonBuilder::captured_name_is_visible(senv, name.as_str())
+        {
+            return callee;
+        }
+        let owner_ty = owner.ty();
+        let base = self.class_value_field_base(owner, scope.body_id());
+        let escaping = base
+            .as_ref()
+            .is_none_or(|base| !self.class_value_field_base_is_fresh(base));
+        let blocked = self
+            .unknown_class_value_fields
+            .get(&owner_ty)
+            .is_some_and(|fields| fields.contains(field_name))
+            || self
+                .class_value_field_poison_bases
+                .get(&owner_ty)
+                .and_then(|fields| fields.get(field_name))
+                .is_some_and(|bases| {
+                    bases.unknown_base
+                        || if escaping {
+                            !bases.bases.is_empty()
+                        } else {
+                            base.as_ref()
+                                .is_some_and(|base| bases.bases.contains_key(base))
+                        }
+                });
+        if blocked {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "`{field_name}` is a class-value field that was assigned a value which is not \
+                     a class value, so a static call through it has no class to select; keep the \
+                     field a class value"
+                )
+                .as_str(),
+                span,
+            );
+            return HirExpr::Unit(core_span_from_oxc(span));
+        }
+        let mut owner_expr = owner.as_ref().clone();
+        let Some(classes) = self.rhs_final_class_value_classes(&mut owner_expr, span) else {
+            return callee;
+        };
+        if classes.is_empty() {
+            return callee;
+        }
+        match self.static_method_access(&classes, field_name.as_str(), span, senv) {
+            Some(replacement) => replacement,
+            None => callee,
+        }
+    }
+
+    fn static_method_access(
+        &self,
+        classes: &[TypeId],
+        method: &str,
+        span: oxc_span::Span,
+        senv: &mut SkeletonEnv,
+    ) -> Option<HirExpr> {
+        let name = Atom::from(method);
+        let mut found: Vec<(Atom, TypeId)> = Vec::new();
+        for class_ty in classes {
+            if let Some((global, ty, _fn_ty)) = self
+                .static_method_globals
+                .get(class_ty)
+                .and_then(|methods| methods.get(&name))
+                .cloned()
+            {
+                found.push((global, ty));
+            }
+        }
+        if found.is_empty() {
+            return None;
+        }
+        if classes.len() != 1 || found.len() != 1 {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "static method `{method}` cannot be called on a binding that may hold more \
+                     than one class value; name the class directly"
+                )
+                .as_str(),
+                span,
+            );
+            return Some(HirExpr::Unit(core_span_from_oxc(span)));
+        }
+        let (global, ty) = found.remove(0);
+        Some(HirExpr::Global {
+            name: global,
+            ty,
+            span: core_span_from_oxc(span),
+        })
     }
 
     fn static_field_access(
@@ -2967,7 +4123,7 @@ impl SkeletonBuilder {
         if let HirExpr::Global { name, .. } = &target {
             let name = name.as_str().to_owned();
             if self.captured_class_value_local(name.as_str()).is_some() {
-                let _ = self.rhs_final_class_value_classes(&mut rhs);
+                let _ = self.rhs_final_class_value_classes(&mut rhs, a.span);
                 senv.report_unsupported(
                     "E0419",
                     format!(
@@ -3306,7 +4462,7 @@ impl SkeletonBuilder {
                     ) {
                     None
                 } else {
-                    self.rhs_final_class_value_classes(&mut rhs)
+                    self.rhs_final_class_value_classes(&mut rhs, a.span)
                 };
                 if proven_class
                     && matches!(
@@ -3537,6 +4693,22 @@ impl SkeletonBuilder {
         use oxc_ast::ast::SimpleAssignmentTarget as SAT;
         match s {
             SAT::AssignmentTargetIdentifier(id) => {
+                let name = id.name.as_str();
+                if scope.lookup(name).is_none()
+                    && !SkeletonBuilder::captured_name_is_visible(senv, name)
+                    && self.visible_generator_alias(name).is_some()
+                {
+                    senv.report_unsupported(
+                        "E0500",
+                        format!(
+                            "reassigning the local generator `{name}` is not supported; a \
+                             generator function declaration is lowered as a direct callable and \
+                             cannot be written to"
+                        )
+                        .as_str(),
+                        core_span_from_oxc(id.span),
+                    );
+                }
                 self.identifier_expr(senv, id.name.as_str(), scope, core_span_from_oxc(id.span))
             }
             m @ match_member_expression!(SimpleAssignmentTarget) => {
@@ -3547,6 +4719,255 @@ impl SkeletonBuilder {
                 None => HirExpr::Unit(Span::default()),
             },
         }
+    }
+}
+
+fn generator_element_ty(
+    builder: &mut SkeletonBuilder,
+    senv: &mut SkeletonEnv<'_>,
+    annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+    resolved: TypeId,
+    is_async: bool,
+    scope: &BodyScope,
+) -> TypeId {
+    use oxc_ast::ast::{TSType, TSTypeName};
+    if let Some(TSType::TSTypeReference(reference)) = annotation.map(|a| &a.type_annotation)
+        && let TSTypeName::IdentifierReference(id) = &reference.type_name
+        && is_generator_wrapper_name(id.name.as_str(), is_async)
+        && let Some(arguments) = &reference.type_arguments
+        && let Some(yield_ty) = arguments.params.first()
+    {
+        return builder.resolve_ts_type_with_params_in_scope(
+            senv,
+            Some(yield_ty),
+            None,
+            Some(scope),
+            true,
+        );
+    }
+    resolved
+}
+
+fn is_generator_wrapper_name(name: &str, is_async: bool) -> bool {
+    match name {
+        "Generator" | "IterableIterator" | "Iterator" => !is_async,
+        "AsyncGenerator" | "AsyncIterableIterator" | "AsyncIterator" => is_async,
+        _ => false,
+    }
+}
+
+fn infer_generator_element_ty(body: &[HirStmt], types: &mut TypeTable) -> Option<TypeId> {
+    struct YieldTyScan<'a> {
+        types: &'a mut TypeTable,
+        found: Vec<TypeId>,
+    }
+    impl Visitor for YieldTyScan<'_> {
+        fn visit_expr(&mut self, expr: &HirExpr) {
+            if let HirExpr::Yield {
+                expr: Some(inner), ..
+            } = expr
+                && let Some(ty) = literal_hir_ty(self.types, inner).or_else(|| {
+                    match self.types.resolve(inner.ty()) {
+                        None | Some(Type::Error) => None,
+                        Some(_) => Some(inner.ty()),
+                    }
+                })
+            {
+                self.found.push(ty);
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let mut scan = YieldTyScan {
+        types,
+        found: Vec::new(),
+    };
+    for stmt in body {
+        scan.visit_stmt(stmt);
+    }
+    let YieldTyScan { types, found } = scan;
+    let first = *found.first()?;
+    let all_numeric = found.iter().all(|ty| {
+        matches!(
+            types.resolve(*ty),
+            Some(
+                Type::F32
+                    | Type::F64
+                    | Type::I8
+                    | Type::I16
+                    | Type::I32
+                    | Type::I64
+                    | Type::U8
+                    | Type::U16
+                    | Type::U32
+                    | Type::U64
+            )
+        )
+    });
+    let any_float = found
+        .iter()
+        .any(|ty| matches!(types.resolve(*ty), Some(Type::F32 | Type::F64)));
+    if all_numeric && any_float {
+        return Some(types.intern(&Type::F64));
+    }
+    Some(first)
+}
+
+fn declares_name(program: &ts_aot_ir_hir::HirProgram, name: &Atom) -> bool {
+    fn scan(decls: &[HirDecl], name: &Atom) -> bool {
+        decls.iter().any(|decl| match decl {
+            HirDecl::Function(f) => f.name == *name,
+            HirDecl::Class(c) => c.name == *name,
+            HirDecl::Global { name: n, .. }
+            | HirDecl::Enum { name: n, .. }
+            | HirDecl::TypeAlias { name: n, .. }
+            | HirDecl::Interface { name: n, .. } => n == name,
+            HirDecl::Namespace { members, .. } => scan(members, name),
+        })
+    }
+    scan(&program.declarations, name)
+}
+
+fn super_class_decl<'a>(senv: &'a SkeletonEnv<'_>, name: &Atom) -> Option<&'a HirClass> {
+    senv.program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Class(class) if class.name == *name => Some(class),
+            _ => None,
+        })
+}
+
+fn super_ancestor_declaring_method(
+    senv: &SkeletonEnv<'_>,
+    direct_parent: &Atom,
+    prop: &Atom,
+) -> Option<(Atom, HirFunction)> {
+    let mut current = direct_parent.clone();
+    let mut visited: Vec<Atom> = Vec::new();
+    loop {
+        if visited.contains(&current) {
+            return None;
+        }
+        visited.push(current.clone());
+        let class = super_class_decl(senv, &current)?;
+        if let Some(method) = class.methods.iter().find(|method| {
+            method.name == *prop
+                && method
+                    .params
+                    .first()
+                    .is_some_and(|param| param.name.as_str() == "this")
+        }) {
+            return Some((class.name.clone(), method.clone()));
+        }
+        current = class.extends.clone()?;
+    }
+}
+
+fn super_method_name(owner: &Atom, prop: &Atom) -> Atom {
+    Atom::from(format!(
+        "__super_{}_{}_{}",
+        owner.as_str().chars().count(),
+        owner.as_str(),
+        prop.as_str()
+    ))
+}
+
+fn super_computed_property_name(expr: &Expression<'_>) -> Option<Atom> {
+    match expr {
+        Expression::StringLiteral(s) => Some(Atom::from(s.value.as_str())),
+        Expression::NumericLiteral(n) => Some(Atom::from(n.value.to_string().as_str())),
+        Expression::ParenthesizedExpression(p) => super_computed_property_name(&p.expression),
+        Expression::TemplateLiteral(t) if t.expressions.is_empty() => t
+            .quasis
+            .first()
+            .and_then(|quasi| quasi.value.cooked.as_ref().map(|s| Atom::from(s.as_str()))),
+        _ => None,
+    }
+}
+
+fn class_field_ty_in_program(
+    senv: &SkeletonEnv<'_>,
+    ty: TypeId,
+    field_name: &str,
+) -> Option<TypeId> {
+    let mut current = ty;
+    let mut visited: Vec<TypeId> = Vec::new();
+    loop {
+        if visited.contains(&current) {
+            return None;
+        }
+        visited.push(current);
+        let class = senv
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                HirDecl::Class(class) if class.ty == current => Some(class),
+                _ => None,
+            })?;
+        if let Some(field) = class
+            .fields
+            .iter()
+            .find(|field| field.name.as_str() == field_name)
+        {
+            return Some(field.ty);
+        }
+        let parent = class.extends.as_ref()?;
+        current = senv
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                HirDecl::Class(class) if class.name == *parent => Some(class.ty),
+                _ => None,
+            })?;
+    }
+}
+
+fn class_method_ret_in_program(
+    senv: &SkeletonEnv<'_>,
+    ty: TypeId,
+    method: &str,
+    static_method: bool,
+) -> Option<TypeId> {
+    let mut current = ty;
+    let mut visited: Vec<TypeId> = Vec::new();
+    loop {
+        if visited.contains(&current) {
+            return None;
+        }
+        visited.push(current);
+        let class = senv
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                HirDecl::Class(class) if class.ty == current => Some(class),
+                _ => None,
+            })?;
+        if let Some(found) = class.methods.iter().find(|method_def| {
+            method_def.name.as_str() == method
+                && method_def
+                    .params
+                    .first()
+                    .is_none_or(|param| param.name.as_str() != "this")
+                    == static_method
+        }) {
+            return match senv.types.resolve(found.ret) {
+                None | Some(ts_aot_core::Type::Error) => None,
+                Some(_) => Some(found.ret),
+            };
+        }
+        let parent = class.extends.as_ref()?;
+        current = senv
+            .program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                HirDecl::Class(class) if class.name == *parent => Some(class.ty),
+                _ => None,
+            })?;
     }
 }
 
@@ -3669,7 +5090,25 @@ impl SkeletonBuilder {
     }
 }
 
-fn capture_type_map(
+pub(crate) fn capture_binding_map(
+    scope: &BodyScope,
+    narrowed: &std::collections::HashMap<LocalId, (LocalId, TypeId)>,
+) -> std::collections::HashMap<String, (LocalId, TypeId)> {
+    let mut map = std::collections::HashMap::new();
+    for name in scope.names() {
+        let Some(id) = scope.visible_binding(&name) else {
+            continue;
+        };
+        let Some(ty) = scope.type_of_visible(&name) else {
+            continue;
+        };
+        let binding = narrowed.get(&id).copied().unwrap_or((id, ty));
+        map.insert(name, binding);
+    }
+    map
+}
+
+pub(crate) fn capture_type_map(
     scope: &BodyScope,
     narrowed: &std::collections::HashMap<LocalId, (LocalId, TypeId)>,
 ) -> std::collections::HashMap<String, TypeId> {

@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bumpalo::collections::String as BumpString;
 use jiff::Timestamp;
 use jiff::civil::{Date, DateTime};
 use jiff::tz::TimeZone;
@@ -261,25 +262,25 @@ pub fn parse_iso8601_to_ms(s: &str) -> Option<i64> {
     timeclip(raw)
 }
 
-fn format_iso(ms: i64) -> String {
+fn write_iso(ms: i64, out: &mut impl std::fmt::Write) -> std::fmt::Result {
     let Some(c) = ms_to_civil_utc(ms) else {
-        return String::new();
+        return Ok(());
     };
-    let time = format!(
-        "{:02}:{:02}:{:02}.{:03}Z",
-        c.hour, c.minute, c.second, c.millisecond
-    );
     let abs_year = c.year.unsigned_abs();
     let month = c.month;
     let day = c.day;
-    let date = if c.year >= 10_000 {
-        format!("+{abs_year:06}-{month:02}-{day:02}")
+    if c.year >= 10_000 {
+        write!(out, "+{abs_year:06}-{month:02}-{day:02}")?;
     } else if c.year < 0 {
-        format!("-{abs_year:06}-{month:02}-{day:02}")
+        write!(out, "-{abs_year:06}-{month:02}-{day:02}")?;
     } else {
-        format!("{:04}-{month:02}-{day:02}", c.year)
-    };
-    format!("{date}T{time}")
+        write!(out, "{:04}-{month:02}-{day:02}", c.year)?;
+    }
+    write!(
+        out,
+        "T{:02}:{:02}:{:02}.{:03}Z",
+        c.hour, c.minute, c.second, c.millisecond
+    )
 }
 
 #[must_use]
@@ -375,7 +376,9 @@ pub fn __ts_aot_date_to_iso_string<'a>(ctx: &Ctx<'a>, ms: i64) -> JsString<'a> {
     if ms == INVALID_DATE_MS {
         return JsString::Valid("");
     }
-    JsString::Valid(ctx.arena.alloc_str(&format_iso(ms)))
+    let mut out = BumpString::with_capacity_in(32, ctx.arena);
+    write_iso(ms, &mut out).expect("writing to an arena String is infallible");
+    JsString::Valid(out.into_bump_str())
 }
 
 #[must_use]

@@ -41,6 +41,24 @@ impl ExprConverter {
         known_type(ty, types)
     }
 
+    fn nullable_mir_type(
+        &self,
+        ty: Option<TypeId>,
+        mir: &MirExpr,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let mir_ty = self.mir_expr_static_ty(mir, types);
+        match (ty, mir_ty) {
+            (Some(current), Some(mir_ty))
+                if !is_nullable_type(types.resolve(current), types)
+                    && is_nullable_type(types.resolve(mir_ty), types) =>
+            {
+                Some(mir_ty)
+            }
+            (current, _) => current,
+        }
+    }
+
     fn hir_static_ty(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         match expr {
             HirExpr::Global { name, .. } => known_type(self.global_decl_type(name), types),
@@ -74,7 +92,7 @@ impl ExprConverter {
     }
 }
 
-fn type_name(types: &TypeTable, ty: TypeId) -> String {
+pub(super) fn type_name(types: &TypeTable, ty: TypeId) -> String {
     fn is_integer(ty: &Type) -> bool {
         matches!(
             ty,
@@ -95,6 +113,17 @@ fn type_name(types: &TypeTable, ty: TypeId) -> String {
         Some(Type::BigInt) => "bigint".to_owned(),
         Some(Type::Null) => "null".to_owned(),
         Some(Type::Void) => "undefined".to_owned(),
+        Some(Type::Struct { .. }) => "object".to_owned(),
+        Some(Type::Array { .. }) => "array".to_owned(),
+        Some(Type::Fn { .. }) => "function".to_owned(),
+        Some(Type::Tuple { .. }) => "tuple".to_owned(),
+        Some(Type::Named { symbol }) => symbol.as_str().to_owned(),
+        Some(Type::Promise { .. }) => "Promise".to_owned(),
+        Some(Type::Result { .. }) => "Result".to_owned(),
+        Some(
+            Type::Generator { .. } | Type::GeneratorResult { .. } | Type::AsyncGenYield { .. },
+        ) => "generator".to_owned(),
+        Some(Type::GenericParam { .. }) => "generic type parameter".to_owned(),
         Some(Type::Optional { inner, nullish }) => {
             let kinds = match (nullish.null, nullish.undefined) {
                 (true, true) => "null | undefined",
@@ -170,6 +199,100 @@ fn types_compatible(a: TypeId, b: TypeId, types: &TypeTable) -> bool {
         (None | Some(Type::Error), _) | (_, None | Some(Type::Error)) => true,
         (Some(x), Some(y)) => x == y || (is_numeric_type(a, types) && is_numeric_type(b, types)),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperandKind {
+    Numeric,
+    Str,
+    Bool,
+    Symbol,
+    Struct,
+    Array,
+    Fn,
+    Other,
+}
+
+fn operand_kind(ty: Option<TypeId>, types: &TypeTable) -> OperandKind {
+    let Some(ty) = ty else {
+        return OperandKind::Other;
+    };
+    match types.resolve(ty) {
+        Some(
+            Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::F32
+            | Type::F64,
+        ) => OperandKind::Numeric,
+        Some(Type::String) => OperandKind::Str,
+        Some(Type::Bool) => OperandKind::Bool,
+        Some(Type::Symbol) => OperandKind::Symbol,
+        Some(Type::Struct { .. }) => OperandKind::Struct,
+        Some(Type::Array { .. }) => OperandKind::Array,
+        Some(Type::Fn { .. }) => OperandKind::Fn,
+        _ => OperandKind::Other,
+    }
+}
+
+fn operand_kind_name(kind: OperandKind) -> &'static str {
+    match kind {
+        OperandKind::Numeric => "number",
+        OperandKind::Str => "string",
+        OperandKind::Bool => "boolean",
+        OperandKind::Symbol => "symbol",
+        OperandKind::Struct => "object",
+        OperandKind::Array => "array",
+        OperandKind::Fn => "function",
+        OperandKind::Other => "value",
+    }
+}
+
+fn is_object_kind(kind: OperandKind) -> bool {
+    matches!(
+        kind,
+        OperandKind::Struct | OperandKind::Array | OperandKind::Fn
+    )
+}
+
+fn equality_kinds_match(left: OperandKind, right: OperandKind) -> bool {
+    matches!(
+        (left, right),
+        (OperandKind::Numeric, OperandKind::Numeric)
+            | (OperandKind::Str, OperandKind::Str)
+            | (OperandKind::Bool, OperandKind::Bool)
+            | (OperandKind::Fn, OperandKind::Fn)
+            | (OperandKind::Symbol, OperandKind::Symbol)
+    )
+}
+
+fn ordering_kinds_match(left: OperandKind, right: OperandKind) -> bool {
+    matches!(
+        (left, right),
+        (OperandKind::Numeric, OperandKind::Numeric) | (OperandKind::Bool, OperandKind::Bool)
+    )
+}
+
+fn arithmetic_kinds_match(left: OperandKind, right: OperandKind) -> bool {
+    matches!((left, right), (OperandKind::Numeric, OperandKind::Numeric))
+}
+
+fn operand_kinds_match(op: HirBinaryOp, left: OperandKind, right: OperandKind) -> bool {
+    if left == OperandKind::Other || right == OperandKind::Other {
+        return true;
+    }
+    if is_equality_op(op) {
+        return equality_kinds_match(left, right);
+    }
+    if is_relational_op(op) {
+        return ordering_kinds_match(left, right);
+    }
+    arithmetic_kinds_match(left, right)
 }
 
 const NO_KINDS: NullishKinds = NullishKinds {
@@ -357,8 +480,138 @@ fn is_arithmetic_op(op: HirBinaryOp) -> bool {
     )
 }
 
+fn is_bitwise_op(op: HirBinaryOp) -> bool {
+    matches!(
+        op,
+        HirBinaryOp::BitAnd
+            | HirBinaryOp::BitOr
+            | HirBinaryOp::BitXor
+            | HirBinaryOp::Shl
+            | HirBinaryOp::Shr
+    )
+}
+
+fn is_shift_op(op: HirBinaryOp) -> bool {
+    matches!(op, HirBinaryOp::Shl | HirBinaryOp::Shr)
+}
+
+pub(super) fn mask_shift_count(mir: MirExpr, op: HirBinaryOp, ty: TypeId) -> MirExpr {
+    if is_shift_op(op) {
+        MirExpr::Binary {
+            op: BinaryOp::BitAnd,
+            left: Box::new(mir),
+            right: Box::new(MirExpr::Int { value: 31, ty }),
+            ty,
+        }
+    } else {
+        mir
+    }
+}
+
 fn is_nullish_hir_literal(expr: &HirExpr) -> bool {
     nullish_literal_kinds(expr).is_some()
+}
+
+fn promise_operand_span(
+    op: HirBinaryOp,
+    lhs: &HirExpr,
+    rhs: &HirExpr,
+    types: &TypeTable,
+) -> Option<Span> {
+    if !matches!(
+        op,
+        HirBinaryOp::Add
+            | HirBinaryOp::Sub
+            | HirBinaryOp::Mul
+            | HirBinaryOp::Div
+            | HirBinaryOp::Mod
+            | HirBinaryOp::BitAnd
+            | HirBinaryOp::BitOr
+            | HirBinaryOp::BitXor
+            | HirBinaryOp::Shl
+            | HirBinaryOp::Shr
+    ) {
+        return None;
+    }
+    [lhs, rhs].into_iter().find_map(|operand| {
+        matches!(types.resolve(operand.ty()), Some(Type::Promise { .. })).then(|| operand.span())
+    })
+}
+
+fn static_nullish(expr: &HirExpr) -> Option<bool> {
+    match expr {
+        HirExpr::Null(_) => Some(true),
+        HirExpr::Undefined(_) | HirExpr::Unit(_) => Some(false),
+        HirExpr::Unary {
+            op: HirUnaryOp::Void,
+            ..
+        } => Some(false),
+        _ => None,
+    }
+}
+
+fn is_float_ty(ty: TypeId, types: &TypeTable) -> bool {
+    matches!(types.resolve(ty), Some(Type::F32 | Type::F64))
+}
+
+fn statically_numeric_hir(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Int(..) | HirExpr::Float(..) => true,
+        HirExpr::Unary {
+            op: HirUnaryOp::Neg,
+            expr,
+            ..
+        } => statically_numeric_hir(expr),
+        _ => false,
+    }
+}
+
+fn literal_float_mir(expr: &HirExpr, f64_ty: TypeId) -> Option<MirExpr> {
+    match expr {
+        HirExpr::Int(value, _) => Some(MirExpr::Int {
+            value: i128::from(*value),
+            ty: f64_ty,
+        }),
+        HirExpr::Float(bits, _) => Some(MirExpr::Float {
+            value: f64::from_bits(*bits),
+            ty: f64_ty,
+        }),
+        HirExpr::Unary {
+            op: HirUnaryOp::Neg,
+            expr,
+            ..
+        } => match literal_float_mir(expr, f64_ty)? {
+            MirExpr::Int { value, .. } => Some(MirExpr::Int {
+                value: -value,
+                ty: f64_ty,
+            }),
+            MirExpr::Float { value, .. } => Some(MirExpr::Float {
+                value: -value,
+                ty: f64_ty,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn nullish_number_mir(is_null: bool, ty: TypeId, types: &TypeTable) -> MirExpr {
+    if is_float_ty(ty, types) {
+        let value = if is_null { 0.0 } else { f64::NAN };
+        MirExpr::Float { value, ty }
+    } else {
+        MirExpr::Int { value: 0, ty }
+    }
+}
+
+fn cast_numeric_operand(mir: MirExpr, from: Option<TypeId>, to: TypeId) -> MirExpr {
+    match from {
+        Some(from) if from != to => MirExpr::Cast {
+            expr: Box::new(mir),
+            ty: to,
+        },
+        _ => mir,
+    }
 }
 
 fn nullish_literal_kinds(expr: &HirExpr) -> Option<NullishKinds> {
@@ -393,7 +646,7 @@ fn op_name_for_bigint(op: HirBinaryOp) -> &'static str {
     }
 }
 
-fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
+pub(super) fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::DefaultConstruct { .. } => false,
         HirExpr::Assignment { .. } | HirExpr::CompoundUpdate { .. } => true,
@@ -453,7 +706,7 @@ fn hir_expr_may_reassign(expr: &HirExpr) -> bool {
     }
 }
 
-fn hir_expr_contains_call(expr: &HirExpr) -> bool {
+pub(super) fn hir_expr_contains_call(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::DefaultConstruct { .. } => true,
         HirExpr::Call { .. }
@@ -595,7 +848,17 @@ impl ExprConverter {
                 );
             }
         }
-        self.check_optional_operands(op, lhs, rhs, types, ctx);
+        let (lhs_static_ty, rhs_static_ty) = self.check_optional_operands(op, lhs, rhs, types, ctx);
+        if let Some(span) = promise_operand_span(op, lhs, rhs, types) {
+            ctx.error(
+                "E0419",
+                "a `Promise` value cannot be used in an arithmetic operation; the AOT target \
+                 lowers `async function` expressions as synchronous closures, so the promise \
+                 value still has to be awaited explicitly before it is used as a number",
+                span,
+            );
+            return MirExpr::Unit;
+        }
         if op == HirBinaryOp::Coalesce {
             return self.convert_coalesce(
                 lhs,
@@ -608,9 +871,28 @@ impl ExprConverter {
                 ctx,
             );
         }
-        if op == HirBinaryOp::Add
-            && (is_string_operand(lhs, types) || is_string_operand(rhs, types))
-        {
+        let lhs_is_string =
+            is_string_operand(lhs, types) || operand_kind(lhs_static_ty, types) == OperandKind::Str;
+        let rhs_is_string =
+            is_string_operand(rhs, types) || operand_kind(rhs_static_ty, types) == OperandKind::Str;
+        if op == HirBinaryOp::Add && (lhs_is_string || rhs_is_string) {
+            for (operand_ty, span) in [(lhs_static_ty, lhs.span()), (rhs_static_ty, rhs.span())] {
+                let kind = operand_kind(operand_ty, types);
+                if !is_object_kind(kind) {
+                    continue;
+                }
+                ctx.error(
+                    NULLISH_NARROWING_DIAG,
+                    format!(
+                        "`+` concatenates a string with an operand of type `{}`, but the AOT \
+                         target has no JavaScript string conversion (ToPrimitive/ToString) for it; \
+                         convert the operand to a string or a number explicitly",
+                        operand_kind_name(kind)
+                    ),
+                    span,
+                );
+                return MirExpr::Unit;
+            }
             let string_ty = types.intern(&Type::String);
             let lhs_mir = match lhs {
                 HirExpr::Null(_) => MirExpr::String {
@@ -629,7 +911,7 @@ impl ExprConverter {
             let lhs_snapshot_ty = if rhs_may_change_lhs {
                 hir_expr_type_id(lhs)
                     .filter(|t| !matches!(types.resolve(*t), None | Some(Type::Error)))
-                    .or_else(|| is_string_operand(lhs, types).then_some(string_ty))
+                    .or_else(|| lhs_is_string.then_some(string_ty))
             } else {
                 None
             };
@@ -790,26 +1072,243 @@ impl ExprConverter {
                 {
                     return logical;
                 }
-                MirExpr::Binary {
-                    op: convert_binop(op, ctx),
-                    left: Box::new(self.convert_expr(
+                if (is_comparison_op(op) || is_arithmetic_op(op))
+                    && let (Some(lhs_ty), Some(rhs_ty)) = (lhs_static_ty, rhs_static_ty)
+                    && !self.report_operand_kinds(op, lhs_ty, rhs_ty, lhs.span(), types, ctx)
+                {
+                    return MirExpr::Unit;
+                }
+                self.convert_numeric_binary(
+                    op,
+                    lhs,
+                    rhs,
+                    ty,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )
+            }
+        }
+    }
+
+    fn convert_numeric_binary(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        ty: TypeId,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> MirExpr {
+        let lhs_nullish = static_nullish(lhs);
+        let rhs_nullish = static_nullish(rhs);
+        if !(is_arithmetic_op(op) || is_relational_op(op))
+            || (lhs_nullish.is_none() && rhs_nullish.is_none())
+        {
+            return MirExpr::Binary {
+                op: convert_binop(op, ctx),
+                left: Box::new(self.convert_expr(
+                    lhs,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )),
+                right: Box::new(self.convert_expr(
+                    rhs,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                )),
+                ty,
+            };
+        }
+        let op_name = comparison_op_name(op);
+        let lhs_ty = self.operand_static_ty(lhs, types);
+        let rhs_ty = self.operand_static_ty(rhs, types);
+        let other_ty = match (lhs_nullish, rhs_nullish) {
+            (Some(_), None) => rhs_ty,
+            (None, Some(_)) => lhs_ty,
+            _ => None,
+        };
+        let other_numeric = other_ty.filter(|t| is_numeric_type(*t, types));
+        let other_name = match (lhs_nullish, rhs_nullish) {
+            (Some(_), None) => operand_type_name(rhs, rhs_ty, types),
+            (None, Some(_)) => operand_type_name(lhs, lhs_ty, types),
+            _ => "nullish".to_owned(),
+        };
+        if other_ty.is_some() && other_numeric.is_none() {
+            ctx.error(
+                NULLISH_NARROWING_DIAG,
+                format!(
+                    "`{op_name}` combines a nullish literal with a `{other_name}` value, and the \
+                     AOT target has no numeric coercion for that type; write the coercion \
+                     explicitly (for example `Number(x)`) or narrow the operand's type"
+                ),
+                lhs.span(),
+            );
+            return MirExpr::Unit;
+        }
+        let other_expr = match (lhs_nullish, rhs_nullish) {
+            (Some(_), None) => rhs,
+            (None, Some(_)) => lhs,
+            _ => lhs,
+        };
+        let wants_nan = matches!(lhs_nullish, Some(false)) || matches!(rhs_nullish, Some(false));
+        if !matches!(op, HirBinaryOp::Div | HirBinaryOp::Mod)
+            && !is_bitwise_op(op)
+            && wants_nan
+            && other_numeric.is_some_and(|t| !is_float_ty(t, types))
+            && !is_literal(other_expr)
+        {
+            ctx.error(
+                NULLISH_NARROWING_DIAG,
+                format!(
+                    "`{op_name}` combines `undefined` with a `{other_name}` value, and `undefined` \
+                     coerces to `NaN`, which the AOT target cannot represent in the integer type \
+                     `{other_name}`; convert the operand to `number` first"
+                ),
+                lhs.span(),
+            );
+            return MirExpr::Unit;
+        }
+        let f64_ty = types.intern(&Type::F64);
+        let i32_ty = types.intern(&Type::I32);
+        let bitwise = is_bitwise_op(op);
+        let target_ty = if matches!(op, HirBinaryOp::Div | HirBinaryOp::Mod) {
+            f64_ty
+        } else if bitwise {
+            i32_ty
+        } else {
+            match other_numeric {
+                Some(t) if !wants_nan || is_float_ty(t, types) => t,
+                _ => f64_ty,
+            }
+        };
+        let left_mir = match lhs_nullish {
+            Some(is_null) => {
+                if matches!(
+                    lhs,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Void,
+                        ..
+                    }
+                ) {
+                    let _ = self.convert_expr(
                         lhs,
                         out,
                         shared_struct_ids,
                         shared_next_struct,
                         types,
                         ctx,
-                    )),
-                    right: Box::new(self.convert_expr(
+                    );
+                }
+                nullish_number_mir(is_null, target_ty, types)
+            }
+            None => {
+                let mir =
+                    self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                if bitwise {
+                    let as_f64 = match literal_float_mir(lhs, f64_ty) {
+                        Some(literal) => literal,
+                        None => MirExpr::Cast {
+                            expr: Box::new(mir),
+                            ty: f64_ty,
+                        },
+                    };
+                    self.lower_int32_mir(as_f64, out, types)
+                } else {
+                    cast_numeric_operand(mir, lhs_ty, target_ty)
+                }
+            }
+        };
+        let operation_ty = if bitwise { i32_ty } else { ty };
+        let stmts_before_rhs = out.len();
+        let right_mir = match rhs_nullish {
+            Some(is_null) => {
+                if matches!(
+                    rhs,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Void,
+                        ..
+                    }
+                ) {
+                    let _ = self.convert_expr(
                         rhs,
                         out,
                         shared_struct_ids,
                         shared_next_struct,
                         types,
                         ctx,
-                    )),
-                    ty,
+                    );
                 }
+                nullish_number_mir(is_null, target_ty, types)
+            }
+            None => {
+                let mir =
+                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                if bitwise {
+                    let as_f64 = match literal_float_mir(rhs, f64_ty) {
+                        Some(literal) => literal,
+                        None => MirExpr::Cast {
+                            expr: Box::new(mir),
+                            ty: f64_ty,
+                        },
+                    };
+                    self.lower_int32_mir(as_f64, out, types)
+                } else {
+                    cast_numeric_operand(mir, rhs_ty, target_ty)
+                }
+            }
+        };
+        let left_mir = if out.len() > stmts_before_rhs
+            && !matches!(
+                &left_mir,
+                MirExpr::Unit
+                    | MirExpr::Bool(_)
+                    | MirExpr::Int { .. }
+                    | MirExpr::Float { .. }
+                    | MirExpr::String { .. }
+                    | MirExpr::Null { .. }
+                    | MirExpr::Local(_)
+                    | MirExpr::Global(_)
+            ) {
+            let left_temp = self.fresh_local();
+            self.push_temp_local(left_temp, operation_ty);
+            out.insert(
+                stmts_before_rhs,
+                MirStmt::Let {
+                    local: left_temp,
+                    ty: operation_ty,
+                    init: Some(left_mir),
+                    mutable: false,
+                },
+            );
+            MirExpr::Local(left_temp)
+        } else {
+            left_mir
+        };
+        let right_mir = mask_shift_count(right_mir, op, i32_ty);
+        let result = MirExpr::Binary {
+            op: convert_binop(op, ctx),
+            left: Box::new(left_mir),
+            right: Box::new(right_mir),
+            ty: operation_ty,
+        };
+        if operation_ty == ty {
+            result
+        } else {
+            MirExpr::Cast {
+                expr: Box::new(result),
+                ty,
             }
         }
     }
@@ -821,12 +1320,12 @@ impl ExprConverter {
         rhs: &HirExpr,
         types: &mut TypeTable,
         ctx: &mut PassContext,
-    ) {
+    ) -> (Option<TypeId>, Option<TypeId>) {
         if (!is_comparison_op(op) && !is_arithmetic_op(op))
             || is_nullish_hir_literal(lhs)
             || is_nullish_hir_literal(rhs)
         {
-            return;
+            return (None, None);
         }
         let lhs_ty = self.operand_static_ty(lhs, types);
         let rhs_ty = self.operand_static_ty(rhs, types);
@@ -849,7 +1348,7 @@ impl ExprConverter {
                     lhs.span(),
                 );
             }
-            return;
+            return (lhs_ty, rhs_ty);
         }
         if is_relational_op(op) {
             if lhs_inner.is_some() || rhs_inner.is_some() {
@@ -865,7 +1364,7 @@ impl ExprConverter {
                     lhs.span(),
                 );
             }
-            return;
+            return (lhs_ty, rhs_ty);
         }
         let incompatible = if let (Some(a), Some(b)) = (lhs_inner, rhs_inner) {
             !types_compatible(a, b, types)
@@ -889,6 +1388,62 @@ impl ExprConverter {
                 lhs.span(),
             );
         }
+        (lhs_ty, rhs_ty)
+    }
+
+    fn report_operand_kinds(
+        &self,
+        op: HirBinaryOp,
+        lhs_ty: TypeId,
+        rhs_ty: TypeId,
+        span: Span,
+        types: &TypeTable,
+        ctx: &mut PassContext,
+    ) -> bool {
+        let left_kind = operand_kind(Some(lhs_ty), types);
+        let right_kind = operand_kind(Some(rhs_ty), types);
+        if operand_kinds_match(op, left_kind, right_kind) {
+            return true;
+        }
+        let op_name = comparison_op_name(op);
+        let left = type_name(types, lhs_ty);
+        let right = type_name(types, rhs_ty);
+        if is_equality_op(op) && is_object_kind(left_kind) && is_object_kind(right_kind) {
+            ctx.error(
+                NULLISH_NARROWING_DIAG,
+                format!(
+                    "`{op_name}` compares two `{left}` operands: JavaScript compares object \
+                     identity, and the AOT target has no reference-equality operator here (a \
+                     structural comparison would answer differently). Compare a field of the \
+                     operands, or compare values of a type the target can compare"
+                ),
+                span,
+            );
+            return false;
+        }
+        if left_kind == right_kind {
+            ctx.error(
+                NULLISH_NARROWING_DIAG,
+                format!(
+                    "`{op_name}` is not available for two `{left}` operands in the AOT target: the \
+                     operator has no Rust representation for that type. Convert the operands to \
+                     `number` explicitly (for example with `Number(x)`)"
+                ),
+                span,
+            );
+            return false;
+        }
+        ctx.error(
+            NULLISH_NARROWING_DIAG,
+            format!(
+                "`{op_name}` cannot combine a `{left}` operand with a `{right}` one: the AOT \
+                 target has no implicit coercion between them, so this operator has no Rust \
+                 representation. Convert one of the operands explicitly (for example with \
+                 `Number(x)` or `String(x)`)"
+            ),
+            span,
+        );
+        false
     }
 
     fn optional_type(&self, inner: TypeId, nullish: NullishKinds, types: &mut TypeTable) -> TypeId {
@@ -1020,7 +1575,6 @@ impl ExprConverter {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_without_expected(
         &mut self,
         expr: &HirExpr,
@@ -1037,7 +1591,6 @@ impl ExprConverter {
         mir
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_coalesce(
         &mut self,
         lhs: &HirExpr,
@@ -1084,6 +1637,7 @@ impl ExprConverter {
         let lhs_ty = lhs_hir_ty
             .or_else(|| self.mir_expr_static_ty(&left_mir, types))
             .or_else(|| self.hir_static_ty(lhs, types));
+        let lhs_ty = self.nullable_mir_type(lhs_ty, &left_mir, types);
         self.convert_coalesce_operand(
             left_mir,
             lhs_ty,
@@ -1099,7 +1653,6 @@ impl ExprConverter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_coalesce_operand(
         &mut self,
         left_mir: MirExpr,
@@ -1164,17 +1717,22 @@ impl ExprConverter {
         );
         let right_mir =
             self.logical_setter_value(right_mir, setter.clone(), &mut else_stmts, types, rhs, ctx);
-        let rhs_ty = known_type(hir_expr_type_id(rhs), types).or_else(|| {
-            if is_literal(rhs) {
-                None
-            } else {
-                self.mir_expr_static_ty(&right_mir, types)
-            }
-        });
-        let rhs_ty = match rhs_ty {
-            Some(ty) => Some(ty),
-            None if is_literal(rhs) => None,
-            None => self.hir_static_ty(rhs, types),
+        let mir_rhs_ty = if is_literal(rhs) {
+            None
+        } else {
+            self.mir_expr_static_ty(&right_mir, types)
+        };
+        let rhs_ty = match mir_rhs_ty {
+            Some(ty) if is_nullable_type(types.resolve(ty), types) => Some(ty),
+            _ => known_type(hir_expr_type_id(rhs), types)
+                .or(mir_rhs_ty)
+                .or_else(|| {
+                    if is_literal(rhs) {
+                        None
+                    } else {
+                        self.hir_static_ty(rhs, types)
+                    }
+                }),
         };
         let rhs_resolved = rhs_ty.and_then(|t| types.resolve(t)).cloned();
         let nullish_fallback =
@@ -1301,7 +1859,6 @@ impl ExprConverter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_operand_logical(
         &mut self,
         op: HirBinaryOp,
@@ -1372,7 +1929,6 @@ impl ExprConverter {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn select_logical_operand_ty(
         &mut self,
         op: HirBinaryOp,
@@ -1428,7 +1984,6 @@ impl ExprConverter {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn convert_operand_logical_lowered(
         &mut self,
         op: HirBinaryOp,
@@ -1629,7 +2184,6 @@ impl ExprConverter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn convert_optional_operand_logical(
         &mut self,
         op: HirBinaryOp,
@@ -1969,7 +2523,6 @@ impl ExprConverter {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn finish_conditional_value(
         &mut self,
         cond: MirExpr,
@@ -2093,6 +2646,146 @@ impl ExprConverter {
                 _ => {}
             }
         }
+        if matches!(op, HirUnaryOp::Neg | HirUnaryOp::BitNot) {
+            let op_name = match op {
+                HirUnaryOp::Neg => "-",
+                _ => "~",
+            };
+            let operand_ty = self.operand_static_ty(expr, types);
+            let resolved = operand_ty.and_then(|t| types.resolve(t)).cloned();
+            if let Some(is_null) = static_nullish(expr) {
+                if matches!(
+                    expr,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Void,
+                        ..
+                    }
+                ) {
+                    let _ = self.convert_expr(
+                        expr,
+                        out,
+                        shared_struct_ids,
+                        shared_next_struct,
+                        types,
+                        ctx,
+                    );
+                }
+                if op == HirUnaryOp::BitNot {
+                    return MirExpr::Int { value: -1, ty };
+                }
+                let f64_ty = types.intern(&Type::F64);
+                let inner = nullish_number_mir(is_null, f64_ty, types);
+                return MirExpr::Unary {
+                    op: convert_unaryop(op, ctx),
+                    expr: Box::new(inner),
+                    ty,
+                };
+            }
+            if let Some(operand_ty) = operand_ty
+                && matches!(
+                    types.resolve(operand_ty),
+                    Some(Type::Null | Type::Void | Type::Optional { .. })
+                )
+            {
+                ctx.error(
+                    NULLISH_NARROWING_DIAG,
+                    format!(
+                        "`{op_name}` cannot be applied to an optional value (`{}`): the AOT \
+                         target represents an optional value as `Option<T>` and has no arithmetic \
+                         operator for it; handle the nullish case first (for example with `x!` \
+                         after a check, or by narrowing the operand's type)",
+                        type_name(types, operand_ty)
+                    ),
+                    expr.span(),
+                );
+                return MirExpr::Unit;
+            }
+            if op == HirUnaryOp::BitNot {
+                let i32_ty = types.intern(&Type::I32);
+                let is_bool = matches!(resolved, Some(Type::Bool));
+                let numeric = operand_ty.is_some_and(|t| is_numeric_type(t, types));
+                if is_bool || numeric || statically_numeric_hir(expr) {
+                    let result_ty = if is_numeric_type(ty, types) {
+                        ty
+                    } else {
+                        i32_ty
+                    };
+                    let int32 = if is_bool {
+                        let value = self.convert_expr(
+                            expr,
+                            out,
+                            shared_struct_ids,
+                            shared_next_struct,
+                            types,
+                            ctx,
+                        );
+                        MirExpr::Cast {
+                            expr: Box::new(value),
+                            ty: i32_ty,
+                        }
+                    } else {
+                        let f64_ty = types.intern(&Type::F64);
+                        let as_f64 = match literal_float_mir(expr, f64_ty) {
+                            Some(literal) => literal,
+                            None => {
+                                let value = self.convert_expr(
+                                    expr,
+                                    out,
+                                    shared_struct_ids,
+                                    shared_next_struct,
+                                    types,
+                                    ctx,
+                                );
+                                MirExpr::Cast {
+                                    expr: Box::new(value),
+                                    ty: f64_ty,
+                                }
+                            }
+                        };
+                        self.lower_int32_mir(as_f64, out, types)
+                    };
+                    let negated = MirExpr::Unary {
+                        op: convert_unaryop(op, ctx),
+                        expr: Box::new(int32),
+                        ty: i32_ty,
+                    };
+                    return if result_ty == i32_ty {
+                        negated
+                    } else {
+                        MirExpr::Cast {
+                            expr: Box::new(negated),
+                            ty: result_ty,
+                        }
+                    };
+                }
+            }
+            if let Some(operand_ty) = operand_ty
+                && matches!(
+                    resolved,
+                    Some(
+                        Type::String
+                            | Type::BigInt
+                            | Type::Bool
+                            | Type::Struct { .. }
+                            | Type::Array { .. }
+                            | Type::Union { .. }
+                            | Type::Optional { .. }
+                    )
+                )
+            {
+                ctx.error(
+                    NULLISH_NARROWING_DIAG,
+                    format!(
+                        "`{op_name}` cannot be applied to a value of type `{}`: the AOT target \
+                         has no numeric coercion for it. Convert it to `number` first (for \
+                         example with `Number(x)`)",
+                        type_name(types, operand_ty)
+                    ),
+                    expr.span(),
+                );
+                return MirExpr::Unit;
+            }
+        }
         match op {
             HirUnaryOp::TypeOf => {
                 let inner =
@@ -2182,6 +2875,51 @@ impl ExprConverter {
                 )),
                 ty,
             },
+        }
+    }
+
+    fn lower_int32_mir(
+        &mut self,
+        value: MirExpr,
+        _out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+    ) -> MirExpr {
+        let f64_ty = types.intern(&Type::F64);
+        let i64_ty = types.intern(&Type::I64);
+        let i32_ty = types.intern(&Type::I32);
+        let modulo = MirExpr::Binary {
+            op: BinaryOp::Mod,
+            left: Box::new(value),
+            right: Box::new(MirExpr::Float {
+                value: 4294967296.0,
+                ty: f64_ty,
+            }),
+            ty: f64_ty,
+        };
+        let shifted = MirExpr::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(MirExpr::Cast {
+                expr: Box::new(modulo),
+                ty: i64_ty,
+            }),
+            right: Box::new(MirExpr::Int {
+                value: 4294967296,
+                ty: i64_ty,
+            }),
+            ty: i64_ty,
+        };
+        let wrapped = MirExpr::Binary {
+            op: BinaryOp::Mod,
+            left: Box::new(shifted),
+            right: Box::new(MirExpr::Int {
+                value: 4294967296,
+                ty: i64_ty,
+            }),
+            ty: i64_ty,
+        };
+        MirExpr::Cast {
+            expr: Box::new(wrapped),
+            ty: i32_ty,
         }
     }
 

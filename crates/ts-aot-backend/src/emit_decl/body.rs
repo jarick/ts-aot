@@ -5,12 +5,12 @@ use std::collections::HashSet;
 use ts_aot_core::{Atom, FieldId, LocalId, NullishKinds, StructId, Type, TypeId, TypeTable};
 
 use ts_aot_ir_mir::{
-    BinaryOp, ConstValue, MirBlock, MirDecl, MirExpr, MirFunctionDecl, MirLocalDecl, MirParam,
-    MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
+    BinaryOp, ConstValue, MirBlock, MirDecl, MirExpr, MirFieldDecl, MirFunctionDecl, MirLocalDecl,
+    MirParam, MirPlace, MirPlaceBase, MirStmt, RuntimeOp, UnaryOp,
 };
 
 use super::ctx::{
-    BodyCtx, EmitCtx, EmitEnv, RuntimeCallSpec, SharedAccess, SharedStorage,
+    BodyCtx, EmitCtx, EmitEnv, EnvInit, RuntimeCallSpec, SharedAccess, SharedStorage,
     place_root_global_name, shared_borrow_tokens, shared_reset_tokens, shared_write_tokens,
 };
 use super::ident::ident_from;
@@ -23,6 +23,661 @@ use crate::error::BackendError;
 fn loop_label(ident: &Ident) -> TokenStream {
     let apostrophe = Punct::new('\'', Spacing::Joint);
     quote!(#apostrophe #ident)
+}
+
+fn stage_argument_binds(
+    rest: &[TokenStream],
+    body_ctx: &BodyCtx,
+) -> (Vec<TokenStream>, Vec<Ident>) {
+    let mut binds = Vec::with_capacity(rest.len());
+    let mut names = Vec::with_capacity(rest.len());
+    for (index, arg) in rest.iter().enumerate() {
+        let name = body_ctx.alloc_hoist_ident(&format!("__ts_arg_{index}"));
+        binds.push(quote!(let #name = #arg;));
+        names.push(name);
+    }
+    (binds, names)
+}
+
+fn receiver_is_materializable_value(expr: &MirExpr) -> bool {
+    !matches!(expr, MirExpr::Local(_) | MirExpr::Global(_))
+        && !matches!(expr, MirExpr::Field { .. } | MirExpr::Index { .. })
+}
+
+fn mir_arg_requires_staging(arg: &MirExpr, body_ctx: &BodyCtx) -> bool {
+    match arg {
+        MirExpr::Local(id) => {
+            Some(*id) == body_ctx.self_param()
+                || body_ctx
+                    .shared_access_for_local(*id)
+                    .is_some_and(|access| access.storage == SharedStorage::RefCell)
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. } => false,
+        _ => true,
+    }
+}
+
+#[derive(Default)]
+struct SelfCaptureTaint {
+    whole: HashSet<LocalId>,
+    members: HashSet<(LocalId, FieldId)>,
+}
+
+impl SelfCaptureTaint {
+    fn len(&self) -> usize {
+        self.whole.len() + self.members.len()
+    }
+
+    fn holds_local(&self, id: LocalId) -> bool {
+        self.whole.contains(&id) || self.members.iter().any(|(local, _)| *local == id)
+    }
+
+    fn taint_whole(&mut self, id: LocalId) -> bool {
+        self.whole.insert(id)
+    }
+
+    fn taint_member(&mut self, id: LocalId, field: FieldId) -> bool {
+        self.members.insert((id, field))
+    }
+
+    fn copy_members(&mut self, from: LocalId, to: LocalId) -> bool {
+        let fields: Vec<FieldId> = self
+            .members
+            .iter()
+            .filter(|(local, _)| *local == from)
+            .map(|(_, field)| *field)
+            .collect();
+        let mut changed = false;
+        for field in fields {
+            changed |= self.members.insert((to, field));
+        }
+        changed
+    }
+}
+
+enum TaintTarget {
+    Whole(LocalId),
+    Member(LocalId, FieldId),
+}
+
+fn expr_taint_target(expr: &MirExpr) -> Option<TaintTarget> {
+    match expr {
+        MirExpr::Local(id) => Some(TaintTarget::Whole(*id)),
+        MirExpr::Field { base, field, .. } => match expr_taint_target(base) {
+            Some(TaintTarget::Whole(local)) => Some(TaintTarget::Member(local, *field)),
+            member @ Some(TaintTarget::Member(..)) => member,
+            None => None,
+        },
+        MirExpr::Index { base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::UnwrapOptional { expr: base, .. } => expr_taint_target(base),
+        _ => None,
+    }
+}
+
+fn place_taint_target(place: &MirPlace) -> Option<TaintTarget> {
+    match place {
+        MirPlace::Local { id } => Some(TaintTarget::Whole(*id)),
+        MirPlace::Global(_) => None,
+        MirPlace::Field { base, field, .. } => match place_base_taint_target(base) {
+            Some(TaintTarget::Whole(local)) => Some(TaintTarget::Member(local, *field)),
+            member @ Some(TaintTarget::Member(..)) => member,
+            None => None,
+        },
+        MirPlace::Index { base, .. } => expr_taint_target(base),
+    }
+}
+
+fn place_base_taint_target(base: &MirPlaceBase) -> Option<TaintTarget> {
+    match base {
+        MirPlaceBase::Local(id) => Some(TaintTarget::Whole(*id)),
+        MirPlaceBase::Global(_) => None,
+        MirPlaceBase::Field { base, field, .. } => match place_base_taint_target(base) {
+            Some(TaintTarget::Whole(local)) => Some(TaintTarget::Member(local, *field)),
+            member @ Some(TaintTarget::Member(..)) => member,
+            None => None,
+        },
+        MirPlaceBase::Index { base, .. } | MirPlaceBase::Chain { base, .. } => {
+            expr_taint_target(base)
+        }
+    }
+}
+
+fn apply_taint_target(taint: &mut SelfCaptureTaint, target: &TaintTarget, self_param: LocalId) {
+    match *target {
+        TaintTarget::Whole(id) if id != self_param => {
+            taint.taint_whole(id);
+        }
+        TaintTarget::Member(id, field) if id != self_param => {
+            taint.taint_member(id, field);
+        }
+        _ => {}
+    }
+}
+
+fn expr_may_hold_self_capture(
+    expr: &MirExpr,
+    self_param: LocalId,
+    taint: &SelfCaptureTaint,
+    emit_env: &EmitEnv,
+) -> bool {
+    match expr {
+        MirExpr::Closure { captures, .. } => {
+            captures.contains(&self_param) || captures.iter().any(|id| taint.holds_local(*id))
+        }
+        MirExpr::Local(id) => taint.holds_local(*id),
+        MirExpr::StructLiteral { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| expr_may_hold_self_capture(value, self_param, taint, emit_env)),
+        MirExpr::Field { base, field, ty } => {
+            if !ty_may_hold_fn(*ty, emit_env) {
+                return false;
+            }
+            match base.as_ref() {
+                MirExpr::Local(local) => {
+                    taint.whole.contains(local) || taint.members.contains(&(*local, *field))
+                }
+                _ => match expr_taint_target(base) {
+                    Some(TaintTarget::Member(local, outer)) => {
+                        taint.whole.contains(&local) || taint.members.contains(&(local, outer))
+                    }
+                    _ => expr_may_hold_self_capture(base, self_param, taint, emit_env),
+                },
+            }
+        }
+        MirExpr::Index { base, ty, .. } => {
+            if !ty_may_hold_fn(*ty, emit_env) {
+                return false;
+            }
+            match expr_taint_target(base) {
+                Some(TaintTarget::Whole(local)) => taint.holds_local(local),
+                Some(TaintTarget::Member(local, member)) => {
+                    taint.whole.contains(&local) || taint.members.contains(&(local, member))
+                }
+                None => expr_may_hold_self_capture(base, self_param, taint, emit_env),
+            }
+        }
+        MirExpr::ResultOk { value: base, .. }
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Propagate { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::UnwrapOptional { expr: base, .. } => {
+            expr_may_hold_self_capture(base, self_param, taint, emit_env)
+        }
+        MirExpr::Yield { expr, .. } => expr
+            .as_ref()
+            .is_some_and(|value| expr_may_hold_self_capture(value, self_param, taint, emit_env)),
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Global(_)
+        | MirExpr::Call { .. }
+        | MirExpr::IndirectCall { .. }
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Import { .. }
+        | MirExpr::Binary { .. }
+        | MirExpr::Unary { .. }
+        | MirExpr::IsSome { .. }
+        | MirExpr::TypeOf { .. } => false,
+    }
+}
+
+fn propagate_taint_to_local(
+    taint: &mut SelfCaptureTaint,
+    dest: LocalId,
+    value: &MirExpr,
+    self_param: LocalId,
+    emit_env: &EmitEnv,
+) {
+    if let MirExpr::Local(src) = value
+        && !taint.whole.contains(src)
+    {
+        taint.copy_members(*src, dest);
+        return;
+    }
+    if expr_may_hold_self_capture(value, self_param, taint, emit_env) {
+        taint.taint_whole(dest);
+    }
+}
+
+fn place_is_escaping_target(place: &MirPlace, self_param: LocalId) -> bool {
+    match place {
+        MirPlace::Local { id } => *id == self_param,
+        MirPlace::Global(_) => true,
+        MirPlace::Field { base, .. } => place_base_is_escaping_target(base, self_param),
+        MirPlace::Index { base, .. } => expr_is_escaping_target(base, self_param),
+    }
+}
+
+fn place_base_is_escaping_target(base: &MirPlaceBase, self_param: LocalId) -> bool {
+    match base {
+        MirPlaceBase::Local(id) => *id == self_param,
+        MirPlaceBase::Global(_) => true,
+        MirPlaceBase::Chain { base, .. } | MirPlaceBase::Index { base, .. } => {
+            expr_is_escaping_target(base, self_param)
+        }
+        MirPlaceBase::Field { base, .. } => place_base_is_escaping_target(base, self_param),
+    }
+}
+
+fn expr_is_escaping_target(expr: &MirExpr, self_param: LocalId) -> bool {
+    match expr {
+        MirExpr::Global(_) => true,
+        MirExpr::Local(id) => *id == self_param,
+        MirExpr::Field { base, .. }
+        | MirExpr::Index { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::IsSome { expr: base, .. }
+        | MirExpr::UnwrapOptional { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. } => expr_is_escaping_target(base, self_param),
+        _ => false,
+    }
+}
+
+fn array_element_of(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
+    match types.resolve(ty) {
+        Some(Type::Array { element }) => Some(*element),
+        _ => None,
+    }
+}
+
+fn expr_array_element_ty(expr: &MirExpr, emit_env: &EmitEnv, body_ctx: &BodyCtx) -> Option<TypeId> {
+    let ty = expr_base_ty(expr, body_ctx)?;
+    if let Some(element) = array_element_of(ty, emit_env.types) {
+        return Some(element);
+    }
+    match emit_env.types.resolve(ty) {
+        Some(Type::Optional { inner, .. }) => array_element_of(*inner, emit_env.types),
+        _ => None,
+    }
+}
+
+fn struct_fields<'a>(emit_env: &EmitEnv<'a>, struct_id: StructId) -> Option<&'a [MirFieldDecl]> {
+    emit_env
+        .program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            MirDecl::Struct(s) if s.id == struct_id => Some(s.fields.as_slice()),
+            _ => None,
+        })
+}
+
+fn struct_fields_contain_type(
+    emit_env: &EmitEnv,
+    struct_id: StructId,
+    target: TypeId,
+    depth: u32,
+) -> bool {
+    match struct_fields(emit_env, struct_id) {
+        Some(fields) => fields
+            .iter()
+            .any(|field| type_contains_type(field.ty, target, emit_env, depth)),
+        None => true,
+    }
+}
+
+fn type_contains_type(container: TypeId, target: TypeId, emit_env: &EmitEnv, depth: u32) -> bool {
+    if container == target {
+        return true;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let depth = depth - 1;
+    match emit_env.types.resolve(container) {
+        Some(
+            Type::Optional { inner, .. }
+            | Type::Generator { inner, .. }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner },
+        ) => type_contains_type(*inner, target, emit_env, depth),
+        Some(Type::Union { variants }) => variants
+            .iter()
+            .any(|variant| type_contains_type(*variant, target, emit_env, depth)),
+        Some(Type::Intersection { parts }) => parts
+            .iter()
+            .any(|part| type_contains_type(*part, target, emit_env, depth)),
+        Some(Type::Array { element }) => type_contains_type(*element, target, emit_env, depth),
+        Some(Type::Tuple { elements }) => elements
+            .iter()
+            .any(|element| type_contains_type(*element, target, emit_env, depth)),
+        Some(Type::Result { ok, err }) => {
+            type_contains_type(*ok, target, emit_env, depth)
+                || type_contains_type(*err, target, emit_env, depth)
+        }
+        Some(Type::Promise { ok, err }) => {
+            type_contains_type(*ok, target, emit_env, depth)
+                || err.is_some_and(|err| type_contains_type(err, target, emit_env, depth))
+        }
+        Some(Type::Struct { id }) => struct_fields_contain_type(emit_env, *id, target, depth),
+        Some(Type::Named { .. } | Type::GenericParam { .. } | Type::Error) | None => true,
+        _ => false,
+    }
+}
+
+fn type_may_hold_fn(ty: TypeId, emit_env: &EmitEnv, seen: &mut Vec<StructId>, depth: u32) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    let depth = depth - 1;
+    match emit_env.types.resolve(ty) {
+        Some(
+            Type::Optional { inner, .. }
+            | Type::Generator { inner, .. }
+            | Type::GeneratorResult { inner }
+            | Type::AsyncGenYield { inner },
+        ) => type_may_hold_fn(*inner, emit_env, seen, depth),
+        Some(Type::Union { variants }) => variants
+            .iter()
+            .any(|variant| type_may_hold_fn(*variant, emit_env, seen, depth)),
+        Some(Type::Intersection { parts }) => parts
+            .iter()
+            .any(|part| type_may_hold_fn(*part, emit_env, seen, depth)),
+        Some(Type::Array { element }) => type_may_hold_fn(*element, emit_env, seen, depth),
+        Some(Type::Tuple { elements }) => elements
+            .iter()
+            .any(|element| type_may_hold_fn(*element, emit_env, seen, depth)),
+        Some(Type::Result { ok, err }) => {
+            type_may_hold_fn(*ok, emit_env, seen, depth)
+                || type_may_hold_fn(*err, emit_env, seen, depth)
+        }
+        Some(Type::Promise { ok, err }) => {
+            type_may_hold_fn(*ok, emit_env, seen, depth)
+                || err.is_some_and(|err| type_may_hold_fn(err, emit_env, seen, depth))
+        }
+        Some(Type::WeakMap { value, .. }) => type_may_hold_fn(*value, emit_env, seen, depth),
+        Some(Type::Struct { id }) => {
+            if seen.contains(id) {
+                return false;
+            }
+            seen.push(*id);
+            let holds = match struct_fields(emit_env, *id) {
+                Some(fields) => fields
+                    .iter()
+                    .any(|field| type_may_hold_fn(field.ty, emit_env, seen, depth)),
+                None => true,
+            };
+            seen.pop();
+            holds
+        }
+        Some(Type::Fn { .. } | Type::Named { .. } | Type::GenericParam { .. } | Type::Error)
+        | None => true,
+        _ => false,
+    }
+}
+
+fn ty_may_hold_fn(ty: TypeId, emit_env: &EmitEnv) -> bool {
+    type_may_hold_fn(ty, emit_env, &mut Vec::new(), 8)
+}
+
+fn array_from_mapped_can_forward_element(
+    result_ty: TypeId,
+    source: &MirExpr,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> bool {
+    let Some(result_element) = array_element_of(result_ty, emit_env.types) else {
+        return false;
+    };
+    let Some(source_element) = expr_array_element_ty(source, emit_env, body_ctx) else {
+        return false;
+    };
+    type_contains_type(result_element, source_element, emit_env, 8)
+}
+
+fn self_capture_escape_propagate(
+    block: &MirBlock,
+    self_param: LocalId,
+    taint: &mut SelfCaptureTaint,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) {
+    for stmt in &block.stmts {
+        match stmt {
+            MirStmt::Let {
+                local,
+                init: Some(value),
+                ..
+            } => {
+                propagate_taint_to_local(taint, *local, value, self_param, emit_env);
+            }
+            MirStmt::Assign { target, value } => match target {
+                MirPlace::Local { id } if *id != self_param => {
+                    propagate_taint_to_local(taint, *id, value, self_param, emit_env);
+                }
+                MirPlace::Local { .. } => {}
+                _ => {
+                    if let Some(target) = place_taint_target(target)
+                        && expr_may_hold_self_capture(value, self_param, taint, emit_env)
+                    {
+                        apply_taint_target(taint, &target, self_param);
+                    }
+                }
+            },
+            MirStmt::Runtime {
+                op, args, dest, ty, ..
+            } => {
+                let carries = args
+                    .iter()
+                    .any(|arg| expr_may_hold_self_capture(arg, self_param, taint, emit_env));
+                if matches!(
+                    op,
+                    RuntimeOp::ArrayCreate
+                        | RuntimeOp::ArraySlice
+                        | RuntimeOp::ArrayConcat
+                        | RuntimeOp::ArrayFrom
+                ) && let Some(dest) = dest
+                    && carries
+                {
+                    taint.taint_whole(*dest);
+                }
+                if matches!(op, RuntimeOp::ArrayFromMapped)
+                    && let Some(dest) = dest
+                    && carries
+                    && args.first().is_some_and(|source| {
+                        array_from_mapped_can_forward_element(*ty, source, emit_env, body_ctx)
+                    })
+                {
+                    taint.taint_whole(*dest);
+                }
+                if matches!(op, RuntimeOp::ArrayGet | RuntimeOp::ArrayGetOrDefault)
+                    && let Some(dest) = dest
+                    && args.first().is_some_and(|container| {
+                        expr_may_hold_self_capture(container, self_param, taint, emit_env)
+                    })
+                {
+                    taint.taint_whole(*dest);
+                }
+                if matches!(
+                    op,
+                    RuntimeOp::ArrayPush
+                        | RuntimeOp::ArraySet
+                        | RuntimeOp::MapSet
+                        | RuntimeOp::WeakMapSet
+                ) && args
+                    .iter()
+                    .skip(1)
+                    .any(|arg| expr_may_hold_self_capture(arg, self_param, taint, emit_env))
+                    && let Some(target) = args.first().and_then(expr_taint_target)
+                {
+                    apply_taint_target(taint, &target, self_param);
+                }
+            }
+            MirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self_capture_escape_propagate(then_block, self_param, taint, emit_env, body_ctx);
+                if let Some(else_block) = else_block {
+                    self_capture_escape_propagate(
+                        else_block, self_param, taint, emit_env, body_ctx,
+                    );
+                }
+            }
+            MirStmt::While { body, .. }
+            | MirStmt::DoWhile { body, .. }
+            | MirStmt::ForOf { body, .. }
+            | MirStmt::ForAwaitOf { body, .. }
+            | MirStmt::ForIn { body, .. } => {
+                self_capture_escape_propagate(body, self_param, taint, emit_env, body_ctx);
+            }
+            MirStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    self_capture_escape_propagate(
+                        &case.body, self_param, taint, emit_env, body_ctx,
+                    );
+                }
+                if let Some(default) = default {
+                    self_capture_escape_propagate(default, self_param, taint, emit_env, body_ctx);
+                }
+            }
+            MirStmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
+                self_capture_escape_propagate(body, self_param, taint, emit_env, body_ctx);
+                if let Some(catch) = catch {
+                    self_capture_escape_propagate(catch, self_param, taint, emit_env, body_ctx);
+                }
+                if let Some(finally) = finally {
+                    self_capture_escape_propagate(finally, self_param, taint, emit_env, body_ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn self_capture_escapes(
+    block: &MirBlock,
+    self_param: LocalId,
+    taint: &SelfCaptureTaint,
+    emit_env: &EmitEnv,
+) -> bool {
+    for stmt in &block.stmts {
+        match stmt {
+            MirStmt::Return(Some(value)) => {
+                if expr_may_hold_self_capture(value, self_param, taint, emit_env) {
+                    return true;
+                }
+            }
+            MirStmt::Assign { target, value } => {
+                if place_is_escaping_target(target, self_param)
+                    && expr_may_hold_self_capture(value, self_param, taint, emit_env)
+                {
+                    return true;
+                }
+            }
+            MirStmt::Runtime { op, args, .. } => {
+                if matches!(
+                    op,
+                    RuntimeOp::ArrayPush
+                        | RuntimeOp::ArraySet
+                        | RuntimeOp::MapSet
+                        | RuntimeOp::WeakMapSet
+                ) && args
+                    .iter()
+                    .skip(1)
+                    .any(|arg| expr_may_hold_self_capture(arg, self_param, taint, emit_env))
+                    && args
+                        .first()
+                        .is_some_and(|container| expr_is_escaping_target(container, self_param))
+                {
+                    return true;
+                }
+            }
+            MirStmt::Throw { error, .. } | MirStmt::ReturnResultErr { error, .. } => {
+                if expr_may_hold_self_capture(error, self_param, taint, emit_env) {
+                    return true;
+                }
+            }
+            MirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                if self_capture_escapes(then_block, self_param, taint, emit_env)
+                    || else_block.as_ref().is_some_and(|else_block| {
+                        self_capture_escapes(else_block, self_param, taint, emit_env)
+                    })
+                {
+                    return true;
+                }
+            }
+            MirStmt::While { body, .. }
+            | MirStmt::DoWhile { body, .. }
+            | MirStmt::ForOf { body, .. }
+            | MirStmt::ForAwaitOf { body, .. }
+            | MirStmt::ForIn { body, .. } => {
+                if self_capture_escapes(body, self_param, taint, emit_env) {
+                    return true;
+                }
+            }
+            MirStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    if self_capture_escapes(&case.body, self_param, taint, emit_env) {
+                        return true;
+                    }
+                }
+                if let Some(default) = default
+                    && self_capture_escapes(default, self_param, taint, emit_env)
+                {
+                    return true;
+                }
+            }
+            MirStmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } if self_capture_escapes(body, self_param, taint, emit_env)
+                || catch.as_ref().is_some_and(|catch| {
+                    self_capture_escapes(catch, self_param, taint, emit_env)
+                })
+                || finally.as_ref().is_some_and(|finally| {
+                    self_capture_escapes(finally, self_param, taint, emit_env)
+                }) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn self_capture_may_escape(
+    block: &MirBlock,
+    self_param: LocalId,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> bool {
+    let mut taint = SelfCaptureTaint::default();
+    loop {
+        let before = taint.len();
+        self_capture_escape_propagate(block, self_param, &mut taint, emit_env, body_ctx);
+        if taint.len() == before {
+            break;
+        }
+    }
+    self_capture_escapes(block, self_param, &taint, emit_env)
 }
 
 fn with_loop_body<F>(
@@ -52,6 +707,18 @@ pub(super) fn emit_body(
             "a function returns a value but its return type could not be determined; \
              add an explicit return type annotation",
         ));
+    }
+    if let Some(self_param) = body_ctx.self_param()
+        && body_ctx.self_env().is_some()
+        && self_capture_may_escape(&f.body.block, self_param, emit_env, body_ctx)
+    {
+        return Err(BackendError::EscapingThisCapture {
+            code: "E0513",
+            message: "an arrow function that captures `this` escapes its method here, so it would \
+                 observe a snapshot copy of the receiver taken when the method was entered \
+                 instead of the caller's live receiver; call the arrow inside the method, or \
+                 pass the values it needs in as parameters/arguments",
+        });
     }
     let mut stmts = emit_block_stmts(&f.body.block, ctx, emit_env, body_ctx)?;
     if block_contains_try(&f.body.block) {
@@ -1079,9 +1746,9 @@ fn emit_place(
             Ok(quote!(#name))
         }
         MirPlace::Field { base, field, .. } => {
-            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
-                "field place: base type unresolved",
-            ))?;
+            let base_ty = place_base_ty(base, ctx, body_ctx).ok_or(
+                BackendError::NotImplemented("field place: base type unresolved"),
+            )?;
             let struct_id = types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented(
@@ -1110,9 +1777,9 @@ fn emit_place_base(
         MirPlaceBase::Local(id) => Ok(body_ctx.local_place_base(*id)),
         MirPlaceBase::Global(name) => Ok(emit_global_place_base(name, ctx, emit_env, body_ctx)),
         MirPlaceBase::Field { base, field, .. } => {
-            let base_ty = place_base_ty(base, body_ctx).ok_or(BackendError::NotImplemented(
-                "nested field place: base type unresolved",
-            ))?;
+            let base_ty = place_base_ty(base, ctx, body_ctx).ok_or(
+                BackendError::NotImplemented("nested field place: base type unresolved"),
+            )?;
             let struct_id = types
                 .struct_id(base_ty)
                 .ok_or(BackendError::NotImplemented(
@@ -1131,10 +1798,14 @@ fn emit_place_base(
     }
 }
 
-fn place_base_ty(base: &MirPlaceBase, body_ctx: &BodyCtx) -> Option<TypeId> {
+fn place_base_ty(base: &MirPlaceBase, ctx: &EmitCtx, body_ctx: &BodyCtx) -> Option<TypeId> {
     match base {
-        MirPlaceBase::Local(id) => body_ctx.local_ty(*id),
-        MirPlaceBase::Global(name) => body_ctx.shared_ty_for_name(name),
+        MirPlaceBase::Local(id) => body_ctx.local_ty(*id).or_else(|| body_ctx.capture_ty(*id)),
+        MirPlaceBase::Global(name) => match body_ctx.shared_ty_for_name(name) {
+            Some(ty) => Some(ty),
+            None if ctx.is_mutable_global(name) => ctx.global_ty(name),
+            None => None,
+        },
         other => other.ty(),
     }
 }
@@ -1511,7 +2182,9 @@ fn emit_owned_exprs_coerced(
                 return Ok(tokens);
             };
             let tokens = optional_coerce(e, tokens, target, ctx, emit_env, body_ctx, false)?;
-            Ok(numeric_coerce(e, tokens, target, ctx, emit_env, body_ctx))
+            Ok(numeric_coerce_exact(
+                e, tokens, target, ctx, emit_env, body_ctx,
+            ))
         })
         .collect()
 }
@@ -1717,6 +2390,18 @@ fn emit_expr(
             if let Some(base_ty) = expr_base_ty(base, body_ctx)
                 && matches!(
                     types.resolve(base_ty),
+                    Some(ts_aot_core::Type::GeneratorResult { .. })
+                )
+            {
+                let base = emit_expr(base, ctx, emit_env, body_ctx)?;
+                if field.raw() == 0 {
+                    return Ok(quote!(#base.value.clone()));
+                }
+                return Ok(quote!(#base.done));
+            }
+            if let Some(base_ty) = expr_base_ty(base, body_ctx)
+                && matches!(
+                    types.resolve(base_ty),
                     Some(ts_aot_core::Type::AsyncGenYield { .. })
                 )
             {
@@ -1893,7 +2578,11 @@ fn emit_expr(
                 let (receiver, rest) = args
                     .split_first()
                     .expect("a method call always carries its receiver");
+                let materialize_receiver = receiver_is_materializable_value(receiver);
                 let (receiver, receiver_unsafe) = match receiver {
+                    MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_some() => {
+                        (body_ctx.local_place_base(*id), false)
+                    }
                     MirExpr::Local(id) if Some(*id) == body_ctx.self_param() => (
                         if body_ctx.self_is_borrowed() {
                             quote!((*self))
@@ -1908,7 +2597,7 @@ fn emit_expr(
                     MirExpr::Global(_) => emit_mut_receiver(receiver, ctx, emit_env, body_ctx)?,
                     other => (emit_expr(other, ctx, emit_env, body_ctx)?, false),
                 };
-                let rest = emit_owned_exprs_coerced(
+                let rest_tokens = emit_owned_exprs_coerced(
                     rest,
                     param_tys.map(|tys| &tys[1..]),
                     ctx,
@@ -1917,21 +2606,37 @@ fn emit_expr(
                 )?;
                 if receiver_unsafe {
                     let receiver_ident = body_ctx.alloc_hoist_ident("__ts_receiver");
-                    let mut binds = Vec::with_capacity(rest.len());
-                    let mut names = Vec::with_capacity(rest.len());
-                    for (index, arg) in rest.iter().enumerate() {
-                        let name = body_ctx.alloc_hoist_ident(&format!("__ts_arg_{index}"));
-                        binds.push(quote!(let #name = #arg;));
-                        names.push(name);
-                    }
+                    let (binds, names) = stage_argument_binds(&rest_tokens, body_ctx);
                     return Ok(quote!({
                         let #receiver_ident = ::core::ptr::addr_of_mut!(#receiver);
                         #(#binds)*
                         unsafe { #callee(&mut (*#receiver_ident), __ctx, #(#names),*) }
                     }));
                 }
-                let call = quote!(#callee(&mut (#receiver), __ctx, #(#rest),*));
-                return Ok(call);
+                let mut binds = Vec::with_capacity(rest_tokens.len());
+                let mut staged_rest = Vec::with_capacity(rest_tokens.len());
+                let stage_all = rest
+                    .iter()
+                    .any(|arg| mir_arg_requires_staging(arg, body_ctx));
+                for (index, (arg, tokens)) in rest.iter().zip(rest_tokens.iter()).enumerate() {
+                    if stage_all || mir_arg_requires_staging(arg, body_ctx) {
+                        let name = body_ctx.alloc_hoist_ident(&format!("__ts_arg_{index}"));
+                        binds.push(quote!(let #name = #tokens;));
+                        staged_rest.push(quote!(#name));
+                    } else {
+                        staged_rest.push(tokens.clone());
+                    }
+                }
+                let mut receiver_place = quote!(&mut (#receiver));
+                if materialize_receiver {
+                    let ident = body_ctx.alloc_hoist_ident("__ts_mut_receiver");
+                    receiver_place = quote!(&mut #ident);
+                    binds.insert(0, quote!(let mut #ident = #receiver;));
+                }
+                return Ok(quote!({
+                    #(#binds)*
+                    #callee(#receiver_place, __ctx, #(#staged_rest),*)
+                }));
             }
             let args = emit_owned_exprs_coerced(args, param_tys, ctx, emit_env, body_ctx)?;
             let call_args = if is_method {
@@ -2421,10 +3126,11 @@ fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Op
         .iter()
         .map(|f| {
             let field = &f.field;
-            let init = if let Some(param) = &f.param_init {
-                quote!(Some(#param))
-            } else {
-                quote!(None)
+            let init = match &f.init {
+                EnvInit::Empty => quote!(None),
+                EnvInit::Param(param) => quote!(Some(#param)),
+                EnvInit::Receiver => quote!(Some(self)),
+                EnvInit::BorrowedReceiver => quote!(Some((*self).clone())),
             };
             match f.storage {
                 SharedStorage::Cell => quote!(#field: std::cell::Cell::new(#init)),
@@ -2440,12 +3146,41 @@ fn emit_env_prelude(body_ctx: &BodyCtx, emit_env: &EmitEnv, ctx: &EmitCtx) -> Op
             _marker: ::core::marker::PhantomData<&'a ()>,
         }
     });
-    Some(quote!(
+    let mut prelude = quote!(
         let #env_ident: std::rc::Rc<#env_type<'a>> = std::rc::Rc::new(#env_type {
             #(#inits,)*
             _marker: ::core::marker::PhantomData,
         });
-    ))
+    );
+    if let Some(self_env) = body_ctx.self_env()
+        && self_env.borrowed
+    {
+        let guard = format_ident!("{}WriteBack", env_type);
+        let guard_binding = format_ident!("_self_write_back_{}", env_ident);
+        let field = &self_env.field;
+        let receiver_ty = emit_type_id_with_ctx(self_env.ty, emit_env, ctx);
+        ctx.push_env_struct(quote! {
+            struct #guard<'t, 'a> {
+                __target: &'t mut #receiver_ty,
+                __env: std::rc::Rc<#env_type<'a>>,
+            }
+
+            impl<'t, 'a> ::core::ops::Drop for #guard<'t, 'a> {
+                fn drop(&mut self) {
+                    if let Some(__value) = self.__env.#field.borrow().clone() {
+                        *self.__target = __value;
+                    }
+                }
+            }
+        });
+        prelude.extend(quote! {
+            let #guard_binding = #guard {
+                __target: self,
+                __env: #env_ident.clone(),
+            };
+        });
+    }
+    Some(prelude)
 }
 
 struct ClosureEmit<'a> {
@@ -2507,6 +3242,10 @@ fn emit_closure_value(
         candidates.insert(l.id);
     }
     let assigned = collect_assigned_locals(&body.stmts, types, &candidates);
+    for (env_ident, _) in &envs {
+        child.reserve_ident(env_ident.clone());
+    }
+    child.reserve_ident(format_ident!("__env_c{closure_id}"));
     for l in locals {
         let name = ident_from(&l.name);
         child.forget_inherited_name(&name);
@@ -2629,6 +3368,19 @@ fn emit_binary_expr(
     }
     check_optional_strict_equality_kinds(op, left, right, ctx, emit_env, body_ctx)?;
     check_optional_strict_equality_inner_types(op, left, right, ctx, emit_env, body_ctx)?;
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::StrictEq | BinaryOp::StrictNe
+    ) && [left, right]
+        .iter()
+        .any(|side| is_function_value(side, ctx, emit_env, body_ctx))
+    {
+        return Err(BackendError::NotImplemented(
+            "function value equality: the AOT target represents a function value as a generated \
+             enum without a stable identity, so `==`/`===` on function values cannot be lowered \
+             without guessing; compare the results of calling them instead",
+        ));
+    }
     let target = if matches!(
         op,
         BinaryOp::Add
@@ -2679,6 +3431,26 @@ fn emit_binary_expr(
         BinaryOp::Shl => quote!(#left_tokens << #right_tokens),
         BinaryOp::Shr => quote!(#left_tokens >> #right_tokens),
     })
+}
+
+fn is_function_value(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> bool {
+    if let MirExpr::Global(name) = expr {
+        if ctx.fn_value_for_name(name).is_some() {
+            return true;
+        }
+        if ctx.global_ty(name).is_none() && ctx.is_function_symbol(name) {
+            return true;
+        }
+    }
+    matches!(
+        value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty)),
+        Some(Type::Fn { .. })
+    )
 }
 
 fn common_numeric_target(
@@ -3002,7 +3774,6 @@ fn numeric_coerce_impl(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn numeric_coerce_from_source_ty(
     value: &MirExpr,
     tokens: TokenStream,
@@ -3552,6 +4323,24 @@ fn emit_typeof(
             __ts_aot_typeof_null()
         ))),
         _ => {
+            if let Some(Type::Fn { .. }) =
+                value_ty(expr, ctx, emit_env, body_ctx).and_then(|ty| emit_env.types.resolve(ty))
+            {
+                if matches!(expr, MirExpr::Global(_)) {
+                    return Ok(quote!(ts_aot_runtime::JsString::from("function")));
+                }
+                let evaluated = emit_expr(expr, ctx, emit_env, body_ctx)?;
+                return Ok(quote!({
+                    let _ = #evaluated;
+                    ts_aot_runtime::JsString::from("function")
+                }));
+            }
+            if let MirExpr::Global(name) = expr
+                && (ctx.fn_value_for_name(name).is_some()
+                    || (ctx.global_ty(name).is_none() && ctx.is_function_symbol(name)))
+            {
+                return Ok(quote!(ts_aot_runtime::JsString::from("function")));
+            }
             if let Some(Type::Optional { inner, nullish }) = value_ty(expr, ctx, emit_env, body_ctx)
                 .and_then(|ty| emit_env.types.resolve(ty))
                 .cloned()
@@ -4241,6 +5030,122 @@ fn emit_runtime_call(
                 Ok(quote!(#name(&#owner, Some(#radix))))
             }
         }
+        RuntimeOp::NumberToString
+        | RuntimeOp::NumberToFixed
+        | RuntimeOp::NumberToExponential
+        | RuntimeOp::NumberToPrecision => {
+            let name = runtime_op_ident(op)?;
+            let value = match &args[0] {
+                MirExpr::Int { value, .. } => emit_float_from_int(*value),
+                other => {
+                    let other = emit_expr(other, ctx, emit_env, body_ctx)?;
+                    quote!((#other) as f64)
+                }
+            };
+            let argument = match args.get(1) {
+                None | Some(MirExpr::Unit) => quote!(None),
+                Some(MirExpr::Int { value, .. }) => {
+                    let digits = i32::try_from(*value).unwrap_or(i32::MAX);
+                    quote!(Some(#digits))
+                }
+                Some(other) => {
+                    let other = emit_expr(other, ctx, emit_env, body_ctx)?;
+                    quote!(Some((#other) as i32))
+                }
+            };
+            Ok(quote!(#name(__ctx, #value, #argument)))
+        }
+        RuntimeOp::ArraySlice => {
+            let element_ty_id = match types.resolve(ty) {
+                Some(Type::Array { element }) => *element,
+                _ => ty,
+            };
+            let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+            let start = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+            let end = emit_expr(&args[2], ctx, emit_env, body_ctx)?;
+            Ok(quote!(__ts_aot_array_slice::<#element_ty>(
+                __ctx, #arr, (#start) as i64, (#end) as i64
+            )))
+        }
+        RuntimeOp::ArrayIndexOf => {
+            let element_ty_id = match array_element_ty(&args[0], ctx, emit_env, body_ctx) {
+                Some(element) => element,
+                None => ty,
+            };
+            let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+            let raw_needle = emit_owned_value(&args[1], ctx, emit_env, body_ctx)?;
+            let needle_is_float = expr_base_ty(&args[1], body_ctx)
+                .and_then(|ty| emit_env.types.resolve(ty))
+                .is_some_and(is_float_type);
+            let element_is_integer = emit_env
+                .types
+                .resolve(element_ty_id)
+                .is_some_and(is_integer_type);
+            let fractions_cannot_match = needle_is_float && element_is_integer;
+            let needle = numeric_coerce(
+                &args[1],
+                raw_needle.clone(),
+                element_ty_id,
+                ctx,
+                emit_env,
+                body_ctx,
+            );
+            let needle = optional_coerce(
+                &args[1],
+                needle,
+                element_ty_id,
+                ctx,
+                emit_env,
+                body_ctx,
+                false,
+            )?;
+            let from = match args.get(2) {
+                None | Some(MirExpr::Unit) => quote!(0_i64),
+                Some(from) => {
+                    let tokens = emit_expr(from, ctx, emit_env, body_ctx)?;
+                    let optional = expr_base_ty(from, body_ctx)
+                        .is_some_and(|ty| matches!(types.resolve(ty), Some(Type::Optional { .. })));
+                    if optional {
+                        quote!((#tokens).map_or(0_i64, |from| from as i64))
+                    } else {
+                        quote!((#tokens) as i64)
+                    }
+                }
+            };
+            if fractions_cannot_match {
+                if let MirExpr::Float { value, .. } = &args[1]
+                    && value.fract() != 0.0
+                {
+                    return Ok(quote!({
+                        let _ = #arr;
+                        let _ = #from;
+                        -1.0_f64
+                    }));
+                }
+                let needle_binding = body_ctx.alloc_hoist_ident("__needle");
+                let arr_binding = body_ctx.alloc_hoist_ident("__arr");
+                let from_binding = body_ctx.alloc_hoist_ident("__from");
+                return Ok(quote!({
+                    let #arr_binding = #arr;
+                    let #needle_binding = #raw_needle;
+                    let #from_binding = #from;
+                    if (#needle_binding).fract() != 0.0 {
+                        -1.0_f64
+                    } else {
+                        __ts_aot_array_index_of::<#element_ty>(
+                            #arr_binding,
+                            &((#needle_binding) as #element_ty),
+                            #from_binding,
+                        )
+                    }
+                }));
+            }
+            Ok(quote!(__ts_aot_array_index_of::<#element_ty>(
+                #arr, &#needle, #from
+            )))
+        }
         RuntimeOp::BigIntNew => {
             let name = runtime_op_ident(op)?;
             let arg = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -4693,7 +5598,7 @@ fn emit_try(
 ) -> Result<TokenStream, BackendError> {
     let try_id = body_ctx.alloc_try_id();
     let label = format_ident!("__try_{}", try_id);
-    let slot_ident = format_ident!("__return_slot_{}", try_id);
+    let slot_ident = body_ctx.alloc_hoist_ident(&format!("__return_slot_{try_id}"));
     let prev_in_try = body_ctx.in_try();
     let prev_try_label = body_ctx.try_label();
     let prev_return_slot = body_ctx.return_slot();

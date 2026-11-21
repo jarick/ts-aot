@@ -1,9 +1,11 @@
 use std::hash::{Hash, Hasher};
 
+use bumpalo::collections::String as BumpString;
+use bumpalo::collections::Vec as BumpVec;
 use serde::{Serialize, Serializer};
 
+use crate::accessor::__ts_aot_throw_range_error;
 use crate::arena::Ctx;
-use crate::host::__ts_aot_throw;
 
 #[derive(Debug, Clone, Copy)]
 pub enum JsString<'a> {
@@ -189,9 +191,18 @@ pub(crate) fn bytes_to_utf16_lossy(bytes: &[u8]) -> Vec<u16> {
 
 #[must_use]
 pub fn __ts_aot_string_concat<'a>(ctx: &Ctx<'a>, a: &JsString, b: &JsString) -> JsString<'a> {
-    let mut units = a.to_units();
-    units.extend(b.to_units());
-    JsString::Raw(ctx.arena.alloc_slice_copy(&units))
+    if let (JsString::Valid(x), JsString::Valid(y)) = (a, b) {
+        let mut out = BumpString::with_capacity_in(x.len() + y.len(), ctx.arena);
+        out.push_str(x);
+        out.push_str(y);
+        JsString::Valid(out.into_bump_str())
+    } else {
+        let total = usize::try_from(a.len_code_units() + b.len_code_units()).unwrap_or(0);
+        let mut units = BumpVec::with_capacity_in(total, ctx.arena);
+        units.extend(a.units_iter());
+        units.extend(b.units_iter());
+        JsString::Raw(units.into_bump_slice())
+    }
 }
 
 #[must_use]
@@ -230,9 +241,8 @@ pub fn __ts_aot_string_char_at<'a>(ctx: &Ctx<'a>, s: &JsString, idx: i64) -> JsS
     let Ok(i) = usize::try_from(idx) else {
         return JsString::Valid("");
     };
-    let units = s.to_units();
-    match units.get(i) {
-        Some(&code) => JsString::Raw(ctx.arena.alloc_slice_copy(&[code])),
+    match s.units_iter().nth(i) {
+        Some(code) => JsString::Raw(ctx.arena.alloc_slice_copy(&[code])),
         None => JsString::Valid(""),
     }
 }
@@ -244,19 +254,21 @@ pub fn __ts_aot_string_substring_utf16<'a>(
     start: i64,
     end: i64,
 ) -> JsString<'a> {
-    let units = s.to_units();
-    let len = units.len();
+    let len = usize::try_from(s.len_code_units()).unwrap_or(0);
     let clamp = |n: i64| -> usize { usize::try_from(n.max(0)).unwrap_or(len).min(len) };
     let lo = clamp(start);
     let hi = clamp(end);
     let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-    JsString::Raw(ctx.arena.alloc_slice_copy(&units[lo..hi]))
+    let mut units = BumpVec::with_capacity_in(hi - lo, ctx.arena);
+    units.extend(s.units_iter().skip(lo).take(hi - lo));
+    JsString::Raw(units.into_bump_slice())
 }
 
 #[must_use]
 pub fn __ts_aot_string_from_char_code<'a>(ctx: &Ctx<'a>, codes: &[i64]) -> JsString<'a> {
-    let units: Vec<u16> = codes.iter().map(|&c| i64_to_char_code_u16(c)).collect();
-    JsString::Raw(ctx.arena.alloc_slice_copy(&units))
+    let mut units = BumpVec::with_capacity_in(codes.len(), ctx.arena);
+    units.extend(codes.iter().map(|&c| i64_to_char_code_u16(c)));
+    JsString::Raw(units.into_bump_slice())
 }
 
 #[must_use]
@@ -264,34 +276,42 @@ pub fn __ts_aot_string_from_code_point<'a>(ctx: &Ctx<'a>, points: &[i64]) -> JsS
     let mut has_surrogate = false;
     for &p in points {
         if !(0..=0x10_FFFF).contains(&p) {
-            __ts_aot_throw(format!("RangeError: Invalid code point {p}"));
+            let message = format!("Invalid code point {p}");
+            __ts_aot_throw_range_error(JsString::from(message.as_str()));
         }
         if (0xD800..=0xDFFF).contains(&p) {
             has_surrogate = true;
         }
     }
     if has_surrogate {
-        let mut units: Vec<u16> = Vec::with_capacity(points.len());
+        let unit_len: usize = points
+            .iter()
+            .map(|&p| {
+                if (0xD800..=0xDFFF).contains(&p) {
+                    1
+                } else {
+                    code_point_char(p).len_utf16()
+                }
+            })
+            .sum();
+        let mut units = BumpVec::with_capacity_in(unit_len, ctx.arena);
         for &p in points {
             if (0xD800..=0xDFFF).contains(&p) {
                 units.push(u16::try_from(p).expect("validated surrogate range above"));
             } else {
-                let as_u32 = u32::try_from(p).expect("validated in-range above");
-                let c = char::from_u32(as_u32).expect("validated non-surrogate above");
                 let mut buf = [0u16; 2];
-                let encoded = c.encode_utf16(&mut buf);
+                let encoded = code_point_char(p).encode_utf16(&mut buf);
                 units.extend_from_slice(encoded);
             }
         }
-        JsString::Raw(ctx.arena.alloc_slice_copy(&units))
+        JsString::Raw(units.into_bump_slice())
     } else {
-        let mut s = String::new();
+        let byte_len: usize = points.iter().map(|&p| code_point_char(p).len_utf8()).sum();
+        let mut s = BumpString::with_capacity_in(byte_len, ctx.arena);
         for &p in points {
-            let as_u32 = u32::try_from(p).expect("validated in-range above");
-            let c = char::from_u32(as_u32).expect("validated non-surrogate above");
-            s.push(c);
+            s.push(code_point_char(p));
         }
-        JsString::Valid(ctx.arena.alloc_str(&s))
+        JsString::Valid(s.into_bump_str())
     }
 }
 
@@ -302,6 +322,11 @@ pub fn __ts_aot_string_len(s: &JsString) -> f64 {
 
 fn i64_to_char_code_u16(c: i64) -> u16 {
     u16::try_from(c & 0xFFFF_i64).expect("0..=0xFFFF fits in u16")
+}
+
+fn code_point_char(p: i64) -> char {
+    let as_u32 = u32::try_from(p).expect("validated in-range above");
+    char::from_u32(as_u32).expect("validated non-surrogate above")
 }
 
 #[cfg(test)]

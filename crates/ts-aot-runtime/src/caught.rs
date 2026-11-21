@@ -1,5 +1,8 @@
 use std::any::Any;
 use std::fmt;
+use std::fmt::Write as _;
+
+use bumpalo::collections::String as BumpString;
 
 use crate::arena::Ctx;
 use crate::promise::__ts_aot_panic_message;
@@ -12,6 +15,8 @@ pub enum CaughtValue {
     Bool(bool),
     Number(f64),
     Str(String),
+    TypeError(String),
+    RangeError(String),
 }
 
 impl CaughtValue {
@@ -19,7 +24,7 @@ impl CaughtValue {
     pub fn typeof_str(&self) -> &'static str {
         match self {
             CaughtValue::Undefined => "undefined",
-            CaughtValue::Null => "object",
+            CaughtValue::Null | CaughtValue::TypeError(_) | CaughtValue::RangeError(_) => "object",
             CaughtValue::Bool(_) => "boolean",
             CaughtValue::Number(_) => "number",
             CaughtValue::Str(_) => "string",
@@ -33,12 +38,15 @@ impl CaughtValue {
             CaughtValue::Bool(b) => *b,
             CaughtValue::Number(n) => *n != 0.0 && !n.is_nan(),
             CaughtValue::Str(s) => !s.is_empty(),
+            CaughtValue::TypeError(_) | CaughtValue::RangeError(_) => true,
         }
     }
 
     #[must_use]
     pub fn to_js_string<'a>(&self, ctx: &Ctx<'a>) -> JsString<'a> {
-        JsString::Valid(ctx.arena.alloc_str(&self.to_string()))
+        let mut out = BumpString::new_in(ctx.arena);
+        write!(out, "{self}").expect("writing to an arena String is infallible");
+        JsString::Valid(out.into_bump_str())
     }
 }
 
@@ -62,6 +70,8 @@ impl fmt::Display for CaughtValue {
                 }
             }
             CaughtValue::Str(s) => f.write_str(s),
+            CaughtValue::TypeError(message) => write!(f, "TypeError: {message}"),
+            CaughtValue::RangeError(message) => write!(f, "RangeError: {message}"),
         }
     }
 }
@@ -160,6 +170,12 @@ pub fn __ts_aot_caught_eq_dyn<T: 'static>(caught: &CaughtValue, other: &T) -> bo
 
 fn caught_from_payload(payload: &(dyn Any + Send)) -> Option<CaughtValue> {
     use num_traits::ToPrimitive;
+    if let Some(e) = payload.downcast_ref::<crate::accessor::TypeErrorPayload>() {
+        return Some(CaughtValue::TypeError(e.message.clone()));
+    }
+    if let Some(e) = payload.downcast_ref::<crate::accessor::RangeErrorPayload>() {
+        return Some(CaughtValue::RangeError(e.message.clone()));
+    }
     if let Some(c) = payload.downcast_ref::<CaughtValue>() {
         return Some(c.clone());
     }
@@ -263,10 +279,16 @@ pub fn __ts_aot_catch_string<'a>(
     match payload.downcast::<CaughtValue>() {
         Ok(caught) => match &*caught {
             CaughtValue::Str(s) => Ok(JsString::Valid(ctx.arena.alloc_str(s))),
+            caught @ (CaughtValue::TypeError(_) | CaughtValue::RangeError(_)) => {
+                Ok(JsString::Valid(ctx.arena.alloc_str(&caught.to_string())))
+            }
             _ => Err(caught),
         },
         Err(payload) => match caught_from_payload(&*payload) {
             Some(CaughtValue::Str(s)) => Ok(JsString::Valid(ctx.arena.alloc_str(&s))),
+            Some(caught @ (CaughtValue::TypeError(_) | CaughtValue::RangeError(_))) => {
+                Ok(JsString::Valid(ctx.arena.alloc_str(&caught.to_string())))
+            }
             _ => Err(payload),
         },
     }
@@ -344,6 +366,21 @@ mod tests {
         assert_eq!(CaughtValue::from(true).typeof_str(), "boolean");
         assert_eq!(CaughtValue::from(1_i64).to_string(), "1");
         assert_eq!(CaughtValue::from("x").to_string(), "x");
+    }
+
+    #[test]
+    fn a_caught_range_error_keeps_its_kind_and_reports_object() {
+        let thrown = std::panic::catch_unwind(|| {
+            crate::accessor::__ts_aot_throw_range_error(crate::string::JsString::from("bad radix"));
+        });
+        let payload = thrown.expect_err("the RangeError helper must panic");
+        let caught = __ts_aot_catch_bind(&*payload);
+        assert_eq!(
+            caught.typeof_str(),
+            "object",
+            "a caught RangeError must report `object` like a real error object, not a string"
+        );
+        assert_eq!(caught.to_string(), "RangeError: bad radix");
     }
 
     #[test]

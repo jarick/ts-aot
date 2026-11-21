@@ -22,6 +22,28 @@ pub fn sanitize_rust_ident(raw: &str) -> String {
 }
 
 #[must_use]
+pub fn escape_rust_ident(raw: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(raw.len());
+    for (i, ch) in raw.chars().enumerate() {
+        if i == 0 && ch.is_ascii_digit() {
+            out.push('_');
+        }
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        } else if ch == '_' {
+            out.push_str("__");
+        } else {
+            let _ = write!(out, "_u{:x}_", u32::from(ch));
+        }
+    }
+    if is_rust_keyword(&out) {
+        out.push('_');
+    }
+    out
+}
+
+#[must_use]
 pub fn is_rust_keyword(s: &str) -> bool {
     matches!(
         s,
@@ -81,7 +103,7 @@ pub fn is_rust_keyword(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_rust_keyword, sanitize_rust_ident};
+    use super::{escape_rust_ident, is_rust_keyword, sanitize_rust_ident};
 
     #[test]
     fn sanitize_rust_ident_replaces_qualified_separator() {
@@ -128,6 +150,21 @@ mod tests {
         assert_eq!(sanitize_rust_ident("type"), "type_");
         assert_eq!(sanitize_rust_ident("fn"), "fn_");
         assert_eq!(sanitize_rust_ident("Self"), "Self_");
+    }
+
+    #[test]
+    fn escape_rust_ident_prefixes_digit_suffixes_keyword_and_keeps_an_empty_segment() {
+        assert_eq!(escape_rust_ident("foo"), "foo");
+        assert_eq!(escape_rust_ident("7greet"), "_7greet");
+        assert_eq!(escape_rust_ident("0"), "_0");
+        assert_eq!(escape_rust_ident(""), "");
+        assert_eq!(escape_rust_ident("fn"), "fn_");
+        assert_eq!(escape_rust_ident("Self"), "Self_");
+        assert_eq!(
+            format!("{}__k_5", escape_rust_ident("")),
+            "__k_5",
+            "an empty class segment must keep the global name shape used by anonymous classes"
+        );
     }
 
     #[test]
