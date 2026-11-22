@@ -7,6 +7,7 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 use ts_aot_core::{
     Atom, Diagnostic, GenericParamId, LocalId, Span as CoreSpan, Type, TypeId, TypeTable,
+    escape_rust_ident,
 };
 use ts_aot_ir_hir::{
     HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam, HirStmt,
@@ -1205,7 +1206,12 @@ fn field_init_hir(
 }
 
 fn static_field_global_name(class: &str, field: &str, ty: TypeId) -> Atom {
-    Atom::from(format!("{class}__{field}_{}", ty.raw()))
+    Atom::from(format!(
+        "{}__{}_{}",
+        escape_rust_ident(class),
+        escape_rust_ident(field),
+        ty.raw()
+    ))
 }
 
 fn literal_value_hir(value: &Expression<'_>, span: CoreSpan) -> Option<HirExpr> {
@@ -1273,4 +1279,22 @@ fn is_const_initializer(expr: &HirExpr) -> bool {
             | HirExpr::Float(_, _)
             | HirExpr::Null(_)
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::static_field_global_name;
+    use ts_aot_core::TypeId;
+
+    #[test]
+    fn static_field_global_name_separates_underscore_segments() {
+        let a_underscore = static_field_global_name("A_", "b", TypeId::from_raw(5));
+        let underscore_b = static_field_global_name("A", "_b", TypeId::from_raw(5));
+        assert_ne!(a_underscore.as_str(), underscore_b.as_str());
+    }
+
+    #[test]
+    fn static_field_global_name_keeps_anonymous_class_shape() {
+        let anonymous = static_field_global_name("", "k", TypeId::from_raw(5));
+        assert_eq!(anonymous.as_str(), "__k_5");
+    }
 }

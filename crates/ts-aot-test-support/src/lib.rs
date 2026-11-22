@@ -77,3 +77,42 @@ pub fn run_generated_crate(package: &str, rust: &str, main: &str) -> String {
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
+
+#[track_caller]
+pub fn assert_exact_f64(actual: f64, expected: f64) {
+    assert!(
+        actual.to_bits() == expected.to_bits(),
+        "expected {expected} ({:#018x}), got {actual} ({:#018x})",
+        expected.to_bits(),
+        actual.to_bits()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assert_exact_f64;
+
+    fn panics(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(f);
+        std::panic::set_hook(previous);
+        result.is_err()
+    }
+
+    #[test]
+    fn assert_exact_f64_compares_bit_patterns() {
+        assert_exact_f64(3.5, 3.5);
+        assert_exact_f64(-0.0, -0.0);
+        assert_exact_f64(f64::NAN, f64::NAN);
+        let nan_payload = f64::from_bits(0x7ff8_0000_0000_0001);
+        assert_exact_f64(nan_payload, nan_payload);
+        assert!(panics(|| assert_exact_f64(-0.0, 0.0)));
+        assert!(panics(|| assert_exact_f64(f64::NAN, 1.0)));
+        assert!(panics(|| assert_exact_f64(1.0, f64::NAN)));
+        assert!(panics(|| assert_exact_f64(
+            f64::from_bits(0x7ff8_0000_0000_0002),
+            nan_payload
+        )));
+    }
+}
