@@ -170,7 +170,7 @@ fn main() {
     let r = optional_chain_field::mkR(&ctx);
     // the cloned field still holds its value
     let q = optional_chain_field::f(&ctx, Some(r)).expect("r?.q on a present receiver");
-    assert_eq!(q.s.to_string_lossy(), "hello");
+    assert_eq!(q.s.borrow().to_string_lossy(), "hello");
     // and `null` still short-circuits to `undefined`
     assert!(optional_chain_field::f(&ctx, None).is_none());
     println!("ok");
@@ -179,7 +179,7 @@ fn main() {
     let rust = rust_of(SOURCE);
     let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        norm.contains(".q.clone()"),
+        norm.contains(".q.borrow().clone()"),
         "`?.field` must clone a non-Copy field; got:\n{rust}"
     );
     check_generated_crate("optional_chain_field", &rust);
@@ -207,14 +207,19 @@ fn main() {
     assert_eq!(e.len(), 3);
     assert!((e[2] - 3.5).abs() < f64::EPSILON);
     assert!(optional_chain_index::g(&ctx, None, 0.0).is_none());
+    let a = optional_chain_index::mkA(&ctx);
+    assert!(
+        optional_chain_index::g(&ctx, Some(a), 9.0).is_none(),
+        "an out-of-range index on a present receiver is `undefined`, not a Rust panic"
+    );
     println!("ok");
 }
 "#;
     let rust = rust_of(SOURCE);
     let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        norm.contains("[iasusize].clone()"),
-        "`?.[i]` must clone a non-Copy element; got:\n{rust}"
+        norm.contains(".get(iasusize).cloned()"),
+        "`?.[i]` must clone a non-Copy element through the checked `get` accessor; got:\n{rust}"
     );
     check_generated_crate("optional_chain_index", &rust);
     let stdout = run_generated_crate("optional_chain_index", &rust, MAIN);

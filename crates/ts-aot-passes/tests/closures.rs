@@ -41,6 +41,7 @@ fn end_to_end_lower_closures_then_convert_program_resolves_indirect_global_calle
                     }],
                     ty: i64_ty,
                 }),
+                narrowed: false,
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {
@@ -228,6 +229,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     }],
                     ty: i64_ty,
                 }),
+                narrowed: false,
             },
             HirStmt::Let {
                 id: sub_local,
@@ -252,6 +254,7 @@ fn end_to_end_two_distinct_closures_both_lifted_and_resolvable() {
                     }],
                     ty: i64_ty,
                 }),
+                narrowed: false,
             },
             HirStmt::Expr {
                 expr: HirExpr::Call {

@@ -75,9 +75,9 @@ fn end_to_end_optional_chain_field_emit_uses_as_ref_map() {
     let s = tokens.to_string();
 
     assert!(
-        s.contains("obj . as_ref () . map (| o | o . x)"),
-        "end-to-end OptionalChain + Field with shared types must emit `obj.as_ref().map(|o| o.x)` \
-         If this fails with `obj . x` (no as_ref), convert and emit are seeing different \
-         TypeTables. Got: {s}"
+        s.contains("obj . as_ref () . map (| o | o . x . borrow () . clone ())"),
+        "end-to-end OptionalChain + Field with shared types must emit \
+         `obj.as_ref().map(|o| o.x.borrow().clone())`. If this fails with `obj . x` (no as_ref), \
+         convert and emit are seeing different TypeTables. Got: {s}"
     );
 }

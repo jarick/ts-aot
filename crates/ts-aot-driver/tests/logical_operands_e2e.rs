@@ -409,7 +409,9 @@ fn main() {
     assert_eq!(existing_logical::bothOpt(&ctx, none, some(3.0)), some(3.0));
     assert_eq!(existing_logical::bothOpt(&ctx, some(0.0), some(3.0)), some(3.0));
     assert_eq!(existing_logical::bothOpt(&ctx, some(2.0), some(3.0)), some(2.0));
-    let c = existing_logical::C { f: 3.0 };
+    let c = existing_logical::C {
+        f: ::std::rc::Rc::new(::core::cell::RefCell::new(3.0)),
+    };
     assert_eq!(existing_logical::field(&ctx, none, c.clone()), 3.0);
     assert_eq!(existing_logical::field(&ctx, some(0.0), c.clone()), 3.0);
     assert_eq!(existing_logical::field(&ctx, some(4.0), c), 4.0);

@@ -132,5 +132,12 @@ pub(super) fn runtime_op_ident(op: RuntimeOp) -> Result<Ident, BackendError> {
         RuntimeOp::BigIntNeq => format_ident!("__ts_aot_bigint_neq"),
         RuntimeOp::BigIntToString => format_ident!("__ts_aot_bigint_to_string"),
         RuntimeOp::BigIntToNumber => format_ident!("__ts_aot_bigint_to_number"),
+        RuntimeOp::NumberToString => format_ident!("__ts_aot_number_to_string"),
+        RuntimeOp::NumberToFixed => format_ident!("__ts_aot_number_to_fixed"),
+        RuntimeOp::NumberToExponential => format_ident!("__ts_aot_number_to_exponential"),
+        RuntimeOp::NumberToPrecision => format_ident!("__ts_aot_number_to_precision"),
+        RuntimeOp::ArraySlice => format_ident!("__ts_aot_array_slice"),
+        RuntimeOp::ArrayIndexOf => format_ident!("__ts_aot_array_index_of"),
+        RuntimeOp::ThrowTypeError => format_ident!("__ts_aot_throw_type_error"),
     })
 }

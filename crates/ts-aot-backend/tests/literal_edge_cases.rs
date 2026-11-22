@@ -46,7 +46,6 @@ fn literal_string_handles_carriage_return() {
 fn literal_string_handles_null_byte() {
     let s = "a\0b";
     let out = render(s);
-    eprintln!("null byte render: {out}");
     assert!(
         out.contains("\\0") || out.contains("\\x00"),
         "null byte must be escaped, got: {out}"
@@ -61,7 +60,6 @@ fn literal_string_handles_control_chars() {
         }
         let s = format!("a{}b", byte as char);
         let out = render(&s);
-        eprintln!("ctrl 0x{byte:02x} render: {out}");
         assert!(
             out.contains("\\x") || out.contains("\\u{"),
             "control char 0x{byte:02x} must be escaped, got: {out}"
@@ -73,7 +71,6 @@ fn literal_string_handles_control_chars() {
 fn literal_string_handles_unicode() {
     assert_eq!(render("héllo"), "\"héllo\"");
     let out = render("🦀");
-    eprintln!("emoji render: {out}");
     assert!(out.contains("🦀"), "emoji must round-trip, got: {out}");
 }
 
@@ -81,7 +78,6 @@ fn literal_string_handles_unicode() {
 fn literal_string_handles_combined_specials() {
     let s = "a\"b\\c\nd\te";
     let out = render(s);
-    eprintln!("combined render: {out}");
     assert!(out.contains("\\\""));
     assert!(out.contains("\\\\"));
     assert!(out.contains("\\n"));

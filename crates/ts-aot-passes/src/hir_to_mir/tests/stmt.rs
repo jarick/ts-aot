@@ -73,6 +73,7 @@ fn convert_block_let_creates_local_and_let_stmt() {
         name: Atom::new_inline("11"),
         ty: unit_ty(),
         init: Some(int_lit(5)),
+        narrowed: false,
     }]);
     let (mir_block, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert_eq!(mir_block.len(), 1);
@@ -89,6 +90,7 @@ fn convert_let_without_reassignment_keeps_immutable() {
         name: Atom::new_inline("1"),
         ty: unit_ty(),
         init: Some(int_lit(1)),
+        narrowed: false,
     }]);
     let (mir_block, locals) = c.convert_block(&block, &mut empty_types(), &mut cx);
     assert!(!cx.has_errors());
@@ -115,6 +117,7 @@ fn convert_let_with_reassignment_marks_mutable() {
             name: Atom::new_inline("1"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Expr {
             expr: HirExpr::Assignment {
@@ -203,6 +206,7 @@ fn convert_let_reassigned_inside_if_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::If {
             cond: HirExpr::Bool(true, Span::default()),
@@ -222,6 +226,7 @@ fn convert_let_reassigned_inside_while_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::While {
             cond: HirExpr::Bool(false, Span::default()),
@@ -240,6 +245,7 @@ fn convert_let_reassigned_inside_dowhile_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::DoWhile {
             body: Box::new(assignment_to(x, 2)),
@@ -261,6 +267,7 @@ fn convert_let_reassigned_inside_forof_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::ForOf {
             binding: LocalId::from_raw(1),
@@ -289,6 +296,7 @@ fn convert_let_reassigned_inside_forin_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::ForIn {
             binding: LocalId::from_raw(1),
@@ -309,6 +317,7 @@ fn convert_let_reassigned_inside_switch_case_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Switch {
             disc: int_lit(1),
@@ -329,6 +338,7 @@ fn convert_let_reassigned_in_any_of_two_switch_cases_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(0)),
+            narrowed: false,
         },
         HirStmt::Switch {
             disc: int_lit(1),
@@ -353,6 +363,7 @@ fn convert_let_reassigned_inside_try_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Try {
             body: Box::new(assignment_to(x, 2)),
@@ -372,6 +383,7 @@ fn convert_let_reassigned_inside_catch_body_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Try {
             body: Box::new(HirStmt::Throw {
@@ -396,6 +408,7 @@ fn convert_let_reassigned_inside_block_scope_marks_mutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Block(vec![assignment_to(x, 2)]),
     ]);
@@ -412,6 +425,7 @@ fn convert_let_unrelated_assignment_in_block_keeps_immutable() {
             name: Atom::new_inline("x"),
             ty: unit_ty(),
             init: Some(int_lit(1)),
+            narrowed: false,
         },
         HirStmt::Block(vec![assignment_to(y, 2)]),
     ]);
@@ -533,6 +547,7 @@ fn convert_let_inside_if_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -552,6 +567,7 @@ fn convert_let_inside_while_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -569,6 +585,7 @@ fn convert_let_inside_dowhile_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -596,6 +613,7 @@ fn convert_let_inside_forof_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -615,6 +633,7 @@ fn convert_let_inside_forin_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -632,6 +651,7 @@ fn convert_let_inside_try_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ])),
@@ -656,6 +676,7 @@ fn convert_let_inside_catch_body_reassigned_marks_mutable() {
                     name: Atom::new_inline("x"),
                     ty: unit_ty(),
                     init: Some(int_lit(1)),
+                    narrowed: false,
                 },
                 assignment_to(x, 2),
             ])),
@@ -677,6 +698,7 @@ fn convert_let_inside_finally_body_reassigned_marks_mutable() {
                 name: Atom::new_inline("x"),
                 ty: unit_ty(),
                 init: Some(int_lit(1)),
+                narrowed: false,
             },
             assignment_to(x, 2),
         ]))),
@@ -2372,6 +2394,7 @@ fn convert_block_starts_struct_id_counter_at_one() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }]);
     let (mir_block, _locals) = c.convert_block(&block, &mut types, &mut cx);
     assert!(

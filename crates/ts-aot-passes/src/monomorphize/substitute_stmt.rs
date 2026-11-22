@@ -14,13 +14,20 @@ pub fn substitute_stmt(
 ) -> HirStmt {
     match stmt {
         HirStmt::Block(stmts) => HirStmt::Block(substitute_body(stmts, mapping, types, result)),
-        HirStmt::Let { id, name, ty, init } => HirStmt::Let {
+        HirStmt::Let {
+            id,
+            name,
+            ty,
+            init,
+            narrowed,
+        } => HirStmt::Let {
             id: *id,
             name: name.clone(),
             ty: substitute_type(*ty, mapping, types, result),
             init: init
                 .as_ref()
                 .map(|e| substitute_expr(e, mapping, types, result)),
+            narrowed: *narrowed,
         },
         HirStmt::Expr { expr } => HirStmt::Expr {
             expr: substitute_expr(expr, mapping, types, result),

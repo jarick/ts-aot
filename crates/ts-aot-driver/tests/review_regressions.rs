@@ -125,7 +125,7 @@ export function deferred(): number { let f = () => boom(); return 4; }
 }
 
 #[test]
-fn generator_method_reborrows_its_owned_receiver() {
+fn generator_method_shares_its_owned_receiver() {
     let out = compile(
         r"
 class Counter {
@@ -143,8 +143,9 @@ class Counter {
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(
-        rust.contains("Counter::Counter__bump(&mut((self)),"),
-        "{rust}"
+        rust.contains("Counter::Counter__bump(&((self)),"),
+        "a generator method owns its receiver, so the mutating call borrows it sharedly: {rust}"
     );
     assert!(!rust.contains("&mut((*self))"), "{rust}");
+    assert!(!rust.contains("&mut(self)"), "{rust}");
 }

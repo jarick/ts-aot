@@ -25,6 +25,7 @@ pub enum HirStmt {
         name: Atom,
         ty: TypeId,
         init: Option<HirExpr>,
+        narrowed: bool,
     },
 
     Expr {
@@ -103,7 +104,24 @@ impl HirStmt {
 
     #[must_use]
     pub fn let_(id: LocalId, name: Atom, ty: TypeId, init: Option<HirExpr>) -> Self {
-        Self::Let { id, name, ty, init }
+        Self::Let {
+            id,
+            name,
+            ty,
+            init,
+            narrowed: false,
+        }
+    }
+
+    #[must_use]
+    pub fn narrowed_let(id: LocalId, name: Atom, ty: TypeId, init: Option<HirExpr>) -> Self {
+        Self::Let {
+            id,
+            name,
+            ty,
+            init,
+            narrowed: true,
+        }
     }
 
     #[must_use]

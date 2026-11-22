@@ -201,6 +201,12 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::WeakMapHas
         | RuntimeOp::WeakMapDelete
         | RuntimeOp::WeakMapClear => &[WeakMap],
+        RuntimeOp::NumberToString
+        | RuntimeOp::NumberToFixed
+        | RuntimeOp::NumberToExponential
+        | RuntimeOp::NumberToPrecision => &[StringFeat],
+        RuntimeOp::ArraySlice | RuntimeOp::ArrayIndexOf => &[Array],
+        RuntimeOp::ThrowTypeError => &[],
         RuntimeOp::ArrayGetOrDefault => &[Array],
         RuntimeOp::ArrayConcat => &[Array],
         RuntimeOp::ArrayHole => &[Array],

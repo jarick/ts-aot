@@ -748,6 +748,7 @@ mod tests {
                 name: ts_aot_core::Atom::from("x"),
                 ty: TypeId::from_raw(0),
                 init: Some(int_lit(15)),
+                narrowed: false,
             },
         ];
         let mut v = LocalTyAssigner { target };

@@ -7,7 +7,7 @@ use oxc_ast::ast::{
     match_declaration, match_expression,
 };
 use oxc_span::GetSpan;
-use ts_aot_core::{Atom, LocalId, Span, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, LocalId, NARROWED_LOCAL_PREFIX, Span, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirCatchBinding, HirCatchClause, HirExpr, HirStmt, HirSwitchCase,
 };
@@ -47,6 +47,7 @@ impl SkeletonEnv<'_> {
             name: temp_name,
             ty: init_ty_id,
             init: Some(init),
+            narrowed: false,
         });
         let temp_ref = HirExpr::Local {
             id: temp_id,
@@ -88,6 +89,7 @@ impl SkeletonEnv<'_> {
                 name: Atom::from(name_str.as_str()),
                 ty: element_ty_id,
                 init: Some(init_call),
+                narrowed: false,
             });
         }
     }
@@ -1002,6 +1004,7 @@ impl SkeletonBuilder {
                 name: Atom::from(name.as_str()),
                 ty,
                 init,
+                narrowed: false,
             });
             if let Some(stmt) = copy_back {
                 out.push(stmt);
@@ -1224,22 +1227,17 @@ impl SkeletonBuilder {
         }
         let visible = scope.names();
         let mut uid = senv.next_destructured_id.get();
-        let mut binding_name = Atom::from(format!("_narrowed_{uid}"));
+        let mut binding_name = Atom::from(format!("{NARROWED_LOCAL_PREFIX}{uid}"));
         while self.declared_name_is_taken(binding_name.as_str())
             || visible
                 .iter()
                 .any(|visible| visible == binding_name.as_str())
         {
             uid += 1;
-            binding_name = Atom::from(format!("_narrowed_{uid}"));
+            binding_name = Atom::from(format!("{NARROWED_LOCAL_PREFIX}{uid}"));
         }
         senv.next_destructured_id.set(uid + 1);
-        Some(HirStmt::Let {
-            id,
-            name: binding_name,
-            ty: inner,
-            init: Some(init),
-        })
+        Some(HirStmt::narrowed_let(id, binding_name, inner, Some(init)))
     }
 
     fn statement_narrowed_update(

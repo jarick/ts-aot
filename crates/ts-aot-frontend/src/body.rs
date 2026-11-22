@@ -67,6 +67,7 @@ impl SkeletonBuilder {
                     name: Atom::from(name),
                     ty: inner_ty,
                     init: Some(init_expr),
+                    narrowed: false,
                 });
             } else if param.name.as_str() == "_" {
                 let mut names: Vec<Atom> = Vec::new();
@@ -85,6 +86,7 @@ impl SkeletonBuilder {
                         name,
                         ty,
                         init: Some(init),
+                        narrowed: false,
                     });
                 }
             }
@@ -96,6 +98,7 @@ impl SkeletonBuilder {
                 name,
                 ty,
                 init: Some(init),
+                narrowed: false,
             });
         }
         prelude

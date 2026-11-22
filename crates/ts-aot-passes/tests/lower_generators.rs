@@ -30,6 +30,7 @@ fn collect_call_callees_in_block(b: &MirBlock, out: &mut Vec<FunctionId>) {
                     collect_in_expr(e, out);
                 }
             }
+            MirStmt::LetInfer { init, .. } => collect_in_expr(init, out),
             MirStmt::Assign { value, .. } => collect_in_expr(value, out),
             MirStmt::Expr(expr) => collect_in_expr(expr, out),
             MirStmt::Return(Some(expr)) => collect_in_expr(expr, out),
@@ -1687,6 +1688,7 @@ fn propagate_generator_types_resolves_namespace_scoped_next() {
                 name: g_name,
                 ty: i64_ty,
                 init: Some(constructor_call),
+                narrowed: false,
             },
             HirStmt::Expr { expr: next_call },
             HirStmt::Return {
@@ -1827,6 +1829,7 @@ fn propagate_generator_types_resolves_bare_name_global_call_in_namespace() {
                 name: Atom::from("g"),
                 ty: i64_ty,
                 init: Some(bare_constructor_call),
+                narrowed: false,
             },
             HirStmt::Expr { expr: next_call },
             HirStmt::Return {
@@ -2018,6 +2021,7 @@ fn propagate_generator_types_does_not_shadow_root_generator_with_namespace_plain
                 name: Atom::from("g"),
                 ty: i64_ty,
                 init: Some(bare_gen_call),
+                narrowed: false,
             },
             HirStmt::Return {
                 value: Some(HirExpr::Local {
@@ -2246,6 +2250,7 @@ fn propagate_generator_types_qualifier_does_not_shadow_root_generator_with_names
                 name: Atom::from("g"),
                 ty: i64_ty,
                 init: Some(qualified_gen_call),
+                narrowed: false,
             },
             HirStmt::Return {
                 value: Some(HirExpr::Local {
@@ -2402,6 +2407,7 @@ fn propagate_generator_types_resolves_root_generator_bare_from_namespace_without
                 name: Atom::from("g"),
                 ty: i64_ty,
                 init: Some(bare_gen_call),
+                narrowed: false,
             },
             HirStmt::Expr { expr: next_call },
             HirStmt::Return {
@@ -2564,6 +2570,7 @@ fn propagate_generator_types_skips_root_generator_shadowed_by_namespaced_global(
                 name: Atom::from("x"),
                 ty: i64_ty,
                 init: Some(bare_gen_call),
+                narrowed: false,
             },
             HirStmt::Return {
                 value: Some(HirExpr::Local {
@@ -2742,6 +2749,7 @@ fn propagate_generator_types_skips_outer_generator_shadowed_by_inner_namespace_n
                 name: Atom::from("g"),
                 ty: i64_ty,
                 init: Some(bare_gen_call),
+                narrowed: false,
             },
             HirStmt::Return {
                 value: Some(HirExpr::Local {
@@ -2928,6 +2936,7 @@ fn propagate_generator_types_does_not_reassign_closure_local_sharing_outer_local
         name: Atom::from("g"),
         ty: i64_ty,
         init: Some(gen_call),
+        narrowed: false,
     };
 
     let closure_body_g_let = HirStmt::Let {
@@ -2935,6 +2944,7 @@ fn propagate_generator_types_does_not_reassign_closure_local_sharing_outer_local
         name: Atom::from("g"),
         ty: i64_ty,
         init: Some(HirExpr::Int(42, Span::default())),
+        narrowed: false,
     };
 
     let closure_body_g_return = HirStmt::Return {

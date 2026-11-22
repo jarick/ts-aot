@@ -27,6 +27,83 @@ fn compile_script(source: &str) -> ts_aot_driver::DriverOutput {
     )
 }
 
+fn first_call_arg<'a>(rust: &'a str, call: &str) -> &'a str {
+    let start = rust
+        .find(call)
+        .unwrap_or_else(|| panic!("no `{call}` in generated code:\n{rust}"))
+        + call.len();
+    let mut depth = 1i32;
+    for (i, ch) in rust[start..].char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rust[start..start + i];
+                }
+            }
+            ',' if depth == 1 => return &rust[start..start + i],
+            _ => {}
+        }
+    }
+    panic!("unbalanced `{call}` call in generated code:\n{rust}");
+}
+
+fn receiver_temporary(norm: &str) -> Option<String> {
+    let prefix = "__ts_receiver";
+    let mut from = 0;
+    while let Some(at) = norm[from..].find("let") {
+        let at = from + at;
+        from = at + "let".len();
+        if at > 0 {
+            let prev = norm.as_bytes()[at - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                continue;
+            }
+        }
+        let rest = norm[at + "let".len()..].trim_start();
+        let rest = rest.strip_prefix("mut").map_or(rest, str::trim_start);
+        if rest.strip_prefix(prefix).is_none() {
+            continue;
+        }
+        let stop = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        return Some(rest[..stop].to_owned());
+    }
+    None
+}
+
+#[test]
+fn the_receiver_temporary_helper_detects_both_binding_spellings() {
+    let plain = common::normalize_rust("let\n    __ts_receiver_1 = __ts_get (g) ;");
+    assert_eq!(
+        receiver_temporary(&plain).as_deref(),
+        Some("__ts_receiver_1"),
+        "a plain `let` binding must be detected even though normalization keeps a space after \
+         `let`; got `{plain}`"
+    );
+    let mutable = common::normalize_rust("let\n    mut __ts_receiver_1 = __ts_get (g) ;");
+    assert_eq!(
+        receiver_temporary(&mutable).as_deref(),
+        Some("__ts_receiver_1"),
+        "a `let mut` binding must be detected; got `{mutable}`"
+    );
+    let later = common::normalize_rust("let __ts_arg_0 = 1 ; let mut __ts_receiver_2 = 2 ;");
+    assert_eq!(
+        receiver_temporary(&later).as_deref(),
+        Some("__ts_receiver_2"),
+        "the scan must skip unrelated bindings instead of stopping at the first `let`; got \
+         `{later}`"
+    );
+    let unrelated = common::normalize_rust("let __ts_arg_0 = 1 ; let counter = 2 ;");
+    assert_eq!(
+        receiver_temporary(&unrelated),
+        None,
+        "an unrelated `let` must not be reported as a receiver temporary; got `{unrelated}`"
+    );
+}
+
 #[test]
 fn mutable_global_read_write_is_wrapped_in_unsafe() {
     let out = compile_rust(
@@ -52,7 +129,7 @@ fn mutable_global_read_write_is_wrapped_in_unsafe() {
 }
 
 #[test]
-fn a_mutating_method_on_a_mutable_global_captures_the_receiver_before_its_arguments() {
+fn a_mutating_method_on_a_mutable_global_borrows_the_receiver_after_its_arguments() {
     let out = compile_rust(
         "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
          let g = new Counter(); \
@@ -67,23 +144,28 @@ fn a_mutating_method_on_a_mutable_global_captures_the_receiver_before_its_argume
     let source = out.rust_source.expect("rust_source");
     let got_at = source.find("pub fn got").expect("got must be emitted");
     let body = &source[got_at..];
-    let capture_at = body
-        .find("addr_of_mut ! (g)")
-        .expect("the receiver must be captured as an address");
     let arg_at = body
         .find("let __ts_arg_0")
         .expect("the argument must be bound to a temporary");
     let call_at = body
-        .find("Counter__add (& mut (* __ts_receiver)")
-        .expect("the callee must run on the captured receiver");
+        .find("Counter__add (")
+        .expect("the callee must be emitted");
     assert!(
-        capture_at < arg_at && arg_at < call_at,
-        "an argument may write the same global, so the receiver has to be captured first and \
-         borrowed only after the arguments ran; got:\n{body}"
+        arg_at < call_at,
+        "the argument runs before the receiver is borrowed; an argument that reassigns the \
+         receiver global is refused with E0419, so the borrow still names the same instance; \
+         got:\n{body}"
+    );
+    let norm: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let receiver = first_call_arg(&norm, "Counter__add(");
+    assert!(
+        receiver.starts_with("&(") && receiver.contains("get_or_insert_with"),
+        "the callee must run on a shared borrow of the lazily initialized global receiver; got \
+         receiver `{receiver}` in:\n{body}"
     );
     assert!(
-        !body.contains("& mut (g)"),
-        "the receiver must not be re-read after the arguments; got:\n{body}"
+        !body.contains("& mut ("),
+        "the receiver must never be borrowed mutably; got:\n{body}"
     );
     check_generated_crate("global_receiver_capture", &source);
 }
@@ -590,8 +672,8 @@ fn main() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let source = out.rust_source.expect("rust_source");
     assert!(
-        common::normalize_rust(&source).contains("__ts_receiver_"),
-        "the hoisted receiver temporary must avoid a parameter with the same name; got:\n{source}"
+        common::normalize_rust(&source).contains("__ts_arg_0_"),
+        "the hoisted argument temporary must avoid a parameter with the same name; got:\n{source}"
     );
     check_generated_crate("hoisted_temporaries", &source);
     let stdout = run_generated_crate("hoisted_temporaries", &source, MAIN);
@@ -628,8 +710,19 @@ fn main() {
     let source = out.rust_source.expect("rust_source");
     let norm = common::normalize_rust(&source);
     assert!(
-        norm.contains("__ts_receiver_") && norm.contains("__ts_arg_0_"),
-        "hoisted temporaries must avoid module globals with the same name; got:\n{source}"
+        norm.contains("__ts_arg_0_"),
+        "a hoisted argument temporary must avoid a module global with the same name; got:\n{source}"
+    );
+    let hoisted = receiver_temporary(&norm);
+    assert!(
+        hoisted.is_none(),
+        "a mutating call no longer hoists the receiver into a local temporary, so no local binding \
+         may reuse or extend the module global's name `__ts_receiver`; got `{}` in:\n{source}",
+        hoisted.unwrap_or_default()
+    );
+    assert!(
+        !norm.contains("(*__ts_receiver)"),
+        "a mutating call no longer hoists the receiver into a temporary; got:\n{source}"
     );
     check_generated_crate("hoisted_vs_globals", &source);
     let stdout = run_generated_crate("hoisted_vs_globals", &source, MAIN);

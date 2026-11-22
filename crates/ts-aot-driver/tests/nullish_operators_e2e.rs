@@ -156,7 +156,9 @@ fn main() {
     let host = NoHost;
     let bump = Bump::new();
     let ctx = Ctx { arena: &bump, host: &host };
-    let boxed = optional_method_call::Box { value: 4.0 };
+    let boxed = optional_method_call::Box {
+        value: ::std::rc::Rc::new(::core::cell::RefCell::new(4.0)),
+    };
     assert_eq!(optional_method_call::read(&ctx, ::core::option::Option::Some(boxed)), 4.0);
     assert_eq!(optional_method_call::read(&ctx, ::core::option::Option::None), -1.0);
     println!("ok");
