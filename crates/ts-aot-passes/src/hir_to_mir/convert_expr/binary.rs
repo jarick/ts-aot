@@ -72,6 +72,24 @@ impl ExprConverter {
             .or_else(|| self.hir_static_ty(expr, types))
             .or_else(|| self.expr_type(expr, types))
     }
+
+    fn nullable_mir_type(
+        &self,
+        ty: Option<TypeId>,
+        mir: &MirExpr,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let mir_ty = self.mir_expr_static_ty(mir, types);
+        match (ty, mir_ty) {
+            (Some(current), Some(mir_ty))
+                if !is_nullable_type(types.resolve(current), types)
+                    && is_nullable_type(types.resolve(mir_ty), types) =>
+            {
+                Some(mir_ty)
+            }
+            (current, _) => current,
+        }
+    }
 }
 
 fn type_name(types: &TypeTable, ty: TypeId) -> String {
@@ -1247,6 +1265,7 @@ impl ExprConverter {
         let lhs_ty = lhs_hir_ty
             .or_else(|| self.mir_expr_static_ty(&left_mir, types))
             .or_else(|| self.hir_static_ty(lhs, types));
+        let lhs_ty = self.nullable_mir_type(lhs_ty, &left_mir, types);
         self.convert_coalesce_operand(
             left_mir,
             lhs_ty,

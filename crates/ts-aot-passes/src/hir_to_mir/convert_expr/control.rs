@@ -902,6 +902,7 @@ enum TypeCategory {
     Numeric,
     String,
     Bool,
+    BigInt,
     Void,
     Null,
     Other,
@@ -923,6 +924,7 @@ fn classify(ty: Option<&Type>) -> TypeCategory {
         ) => TypeCategory::Numeric,
         Some(Type::String) => TypeCategory::String,
         Some(Type::Bool) => TypeCategory::Bool,
+        Some(Type::BigInt) => TypeCategory::BigInt,
         Some(Type::Void) => TypeCategory::Void,
         Some(Type::Null) => TypeCategory::Null,
         _ => TypeCategory::Other,
@@ -1007,6 +1009,44 @@ fn report_compat_warning(ctx: &mut PassContext, code: &str, message: &str, span:
     true
 }
 
+pub(super) fn is_call_argument_compatible(
+    value: &HirExpr,
+    value_ty: TypeId,
+    param_ty: TypeId,
+    types: &TypeTable,
+    span: Span,
+    ctx: &mut PassContext,
+) -> bool {
+    let target_ty = match types.resolve(param_ty) {
+        Some(Type::Optional { inner, .. }) => *inner,
+        _ => param_ty,
+    };
+    let value_cat = classify_hir(value, value_ty, types);
+    let target_cat = classify(types.resolve(target_ty));
+    if matches!(target_cat, TypeCategory::Void | TypeCategory::Other) {
+        return true;
+    }
+    if value_cat == TypeCategory::Void {
+        if is_nullish_branch(value) {
+            return true;
+        }
+        return report_compat_error(
+            ctx,
+            "E0410",
+            "a `void` value cannot be passed to a parameter that is not `void`; this AOT target \
+             has no implicit Unit-to-value coercion",
+            span,
+        );
+    }
+    if !matches!(
+        value_cat,
+        TypeCategory::Numeric | TypeCategory::String | TypeCategory::Bool | TypeCategory::BigInt
+    ) {
+        return true;
+    }
+    is_assignment_compatible(value, value_ty, target_ty, types, span, ctx)
+}
+
 pub(super) fn is_assignment_compatible(
     value: &HirExpr,
     value_ty: TypeId,
@@ -1088,6 +1128,31 @@ pub(super) fn is_assignment_compatible(
              this AOT target has no implicit boolean-to-number coercion",
             span,
         ),
+        (TypeCategory::Numeric, TypeCategory::BigInt)
+        | (TypeCategory::BigInt, TypeCategory::Numeric) => report_compat_error(
+            ctx,
+            "E0408",
+            "bigint and numeric values cannot be assigned to each other; this AOT target has \
+             no implicit bigint-to-number coercion",
+            span,
+        ),
+        (TypeCategory::String, TypeCategory::BigInt)
+        | (TypeCategory::BigInt, TypeCategory::String) => report_compat_error(
+            ctx,
+            "E0408",
+            "string and bigint values cannot be assigned to each other; this AOT target has \
+             no implicit bigint-to-string coercion",
+            span,
+        ),
+        (TypeCategory::Bool, TypeCategory::BigInt) | (TypeCategory::BigInt, TypeCategory::Bool) => {
+            report_compat_error(
+                ctx,
+                "E0410",
+                "boolean value cannot be assigned to a bigint target (and vice versa); \
+             this AOT target has no implicit boolean-to-bigint coercion",
+                span,
+            )
+        }
         (_, TypeCategory::Null) | (TypeCategory::Null, _) => report_compat_warning(
             ctx,
             "E0410",

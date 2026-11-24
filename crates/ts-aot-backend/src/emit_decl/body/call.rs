@@ -170,7 +170,13 @@ pub(super) fn emit_call_expr(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let MirExpr::Call { callee, args, .. } = expr else {
+    let MirExpr::Call {
+        callee,
+        args,
+        ty: call_ty,
+        ..
+    } = expr
+    else {
         unreachable!()
     };
     let callee_id = *callee;
@@ -204,9 +210,17 @@ pub(super) fn emit_call_expr(
         } else {
             call
         };
+        let flattened = ctx.function_ret(callee_id).is_some_and(|ret| {
+            ret == *call_ty && matches!(emit_env.types.resolve(ret), Some(Type::Optional { .. }))
+        });
+        let mapped = if flattened {
+            quote!(#receiver_opt.as_ref().and_then(|#recv| #call))
+        } else {
+            quote!(#receiver_opt.as_ref().map(|#recv| #call))
+        };
         return Ok(quote!({
             let #receiver_opt = (#receiver).clone();
-            #receiver_opt.as_ref().map(|#recv| #call)
+            #mapped
         }));
     }
     let callee = if let Some(owner_ident) = owner_ident {

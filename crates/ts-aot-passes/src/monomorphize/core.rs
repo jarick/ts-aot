@@ -1,22 +1,27 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use ts_aot_core::{Atom, FunctionId, TypeId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{
-    HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField,
+    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField,
+    VisitorMut, walk_expr_mut, walk_stmt_mut,
 };
 
 use crate::PassContext;
-use crate::hir_to_mir::ExprConverter;
+use crate::hir_to_mir::{ExprConverter, optional_chain_result};
 
 use super::MonomorphizeStats;
-use super::infer::{build_mapping, format_type_args, infer_type_args, type_args_resolved};
-use super::substitute::{TypeSubstitutionResult, substitute_func};
+use super::infer::{
+    build_mapping, format_type_args, hir_expr_ty, infer_type_args, type_args_resolved,
+    type_resolved,
+};
+use super::substitute::{TypeParamMap, TypeSubstitutionResult, substitute_func};
+use super::substitute_ty::substitute_type;
 
 type SpecializationKey = (FunctionId, Vec<TypeId>);
 #[derive(Default)]
 struct MethodIndex {
     generic: HashMap<(TypeId, Atom, bool), FunctionId>,
-    class_names: HashSet<Atom>,
+    class_types: HashMap<Atom, TypeId>,
 }
 
 impl MethodIndex {
@@ -29,7 +34,7 @@ impl MethodIndex {
     }
 }
 
-type OnCallee<'a> = &'a mut dyn FnMut(&mut HirCallee, &[HirExpr], &[TypeId]);
+type OnCallee<'a> = &'a mut dyn FnMut(&mut HirCallee, &mut [HirExpr], &[TypeId]);
 
 pub fn monomorphize(
     program: &mut HirProgram,
@@ -43,7 +48,7 @@ pub fn monomorphize(
 
     let mut name_to_generic: HashMap<Atom, FunctionId> = HashMap::new();
     let mut method_to_generic: MethodIndex = MethodIndex::default();
-    let mut method_owner: HashMap<FunctionId, TypeId> = HashMap::new();
+    let mut method_owner: HashMap<FunctionId, (TypeId, bool)> = HashMap::new();
     classify_decls(
         &program.declarations,
         &mut next_fid,
@@ -62,7 +67,7 @@ pub fn monomorphize(
     }
     {
         let mut on_callee =
-            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
+            |callee: &mut HirCallee, args: &mut [HirExpr], explicit_type_args: &[TypeId]| {
                 push_specialization(
                     callee,
                     args,
@@ -113,7 +118,7 @@ pub fn monomorphize(
 
         let mut mono_for_scan = mono_decl.clone();
         let mut on_callee =
-            |callee: &mut HirCallee, args: &[HirExpr], explicit_type_args: &[TypeId]| {
+            |callee: &mut HirCallee, args: &mut [HirExpr], explicit_type_args: &[TypeId]| {
                 push_specialization(
                     callee,
                     args,
@@ -129,7 +134,7 @@ pub fn monomorphize(
             };
         visit_decl_callees(&mut mono_for_scan, &mut on_callee);
 
-        if let Some(owner_ty) = method_owner.get(&generic_fid).copied() {
+        if let Some((owner_ty, _)) = method_owner.get(&generic_fid).copied() {
             method_specializations.push((owner_ty, mono));
         } else {
             new_decls.push(mono_decl);
@@ -161,7 +166,7 @@ pub fn monomorphize(
 
     {
         let mut on_callee = |callee: &mut HirCallee,
-                             args: &[HirExpr],
+                             args: &mut [HirExpr],
                              explicit_type_args: &[TypeId]| {
             let Some(fid) = generic_callee(
                 callee,
@@ -176,6 +181,7 @@ pub fn monomorphize(
             let Some(generic_fn) = fn_index.get(&fid) else {
                 return;
             };
+            narrow_optional_chain_receiver_args(callee, args, types);
             let type_args = infer_for_callee(
                 callee,
                 &method_to_generic,
@@ -211,7 +217,478 @@ pub fn monomorphize(
         }
     }
 
+    let mut mapping_by_fid: HashMap<FunctionId, TypeParamMap> = HashMap::new();
+    let mut mapping_by_name: HashMap<Atom, TypeParamMap> = HashMap::new();
+    let mut mapping_by_owner: HashMap<(TypeId, Atom, bool), TypeParamMap> = HashMap::new();
+    for ((generic_fid, type_args), mono_fid) in &mono_for_specialization {
+        let Some(generic_fn) = fn_index.get(generic_fid) else {
+            continue;
+        };
+        let mapping = build_mapping(generic_fn, type_args);
+        mapping_by_fid.insert(*mono_fid, mapping.clone());
+        if let Some(&(owner_ty, is_static)) = method_owner.get(generic_fid)
+            && let Some(name) = specialization_names.get(mono_fid)
+        {
+            mapping_by_owner.insert((owner_ty, name.clone(), is_static), mapping.clone());
+            mapping_by_name.insert(name.clone(), mapping);
+        }
+    }
+    let mut struct_shapes: StructShapes = HashMap::new();
+    repair_specialized_call_types(
+        &mut program.declarations,
+        types,
+        &mapping_by_fid,
+        &mapping_by_name,
+        &mapping_by_owner,
+        &method_to_generic.class_types,
+        &inference,
+        &mut struct_shapes,
+    );
+    for inits in program.class_field_inits.values_mut() {
+        for (_, init) in inits.iter_mut() {
+            let mut repair = CallTypeRepair {
+                types: &mut *types,
+                by_fid: &mapping_by_fid,
+                by_name: &mapping_by_name,
+                by_owner: &mapping_by_owner,
+                class_types: &method_to_generic.class_types,
+                converter: &inference,
+                struct_shapes: &mut struct_shapes,
+                local_tys: HashMap::new(),
+            };
+            repair.visit_expr_mut(init);
+        }
+    }
+    repair_struct_field_types(&mut program.declarations, &struct_shapes, types);
+
     stats
+}
+
+type StructShapes = HashMap<TypeId, Option<Vec<TypeId>>>;
+
+struct CallTypeRepair<'a> {
+    types: &'a mut TypeTable,
+    by_fid: &'a HashMap<FunctionId, TypeParamMap>,
+    by_name: &'a HashMap<Atom, TypeParamMap>,
+    by_owner: &'a HashMap<(TypeId, Atom, bool), TypeParamMap>,
+    class_types: &'a HashMap<Atom, TypeId>,
+    converter: &'a ExprConverter,
+    struct_shapes: &'a mut StructShapes,
+    local_tys: HashMap<ts_aot_core::LocalId, TypeId>,
+}
+
+impl CallTypeRepair<'_> {
+    fn mapping_of(&mut self, callee: &HirCallee) -> Option<TypeParamMap> {
+        match callee {
+            HirCallee::Function(fid) => self.by_fid.get(fid).cloned(),
+            HirCallee::Indirect(inner) => match inner.as_ref() {
+                HirExpr::Field {
+                    owner, field_name, ..
+                } => {
+                    let (ty, is_static) =
+                        receiver_owner(owner, self.class_types, self.converter, &mut *self.types);
+                    let primary = self
+                        .by_owner
+                        .get(&(ty, field_name.clone(), is_static))
+                        .cloned();
+                    if primary.is_some() {
+                        return primary;
+                    }
+                    self.by_name.get(field_name).cloned()
+                }
+                HirExpr::Global { name, .. } => self.by_name.get(name).cloned(),
+                _ => None,
+            },
+            HirCallee::Closure(_) | HirCallee::Runtime { .. } => None,
+        }
+    }
+
+    fn repair_ty(&mut self, ty: &mut TypeId, mapping: &TypeParamMap) {
+        let mut result = TypeSubstitutionResult::default();
+        let substituted = substitute_type(*ty, mapping, self.types, &mut result);
+        if substituted != *ty {
+            *ty = substituted;
+        }
+    }
+
+    fn optional_chain_call(&self, callee: &HirCallee) -> bool {
+        let HirCallee::Indirect(inner) = callee else {
+            return false;
+        };
+        let HirExpr::Field { owner, .. } = inner.as_ref() else {
+            return false;
+        };
+        matches!(owner.as_ref(), HirExpr::OptionalChain { .. })
+            && matches!(
+                self.types.resolve(owner.ty()),
+                Some(Type::Null | Type::Void | Type::Optional { .. })
+            )
+    }
+
+    fn repair_expr(&mut self, expr: &mut HirExpr) -> Option<TypeId> {
+        match expr {
+            HirExpr::Call {
+                callee, args, ty, ..
+            } => {
+                if let HirCallee::Indirect(inner) = callee {
+                    self.visit_expr_mut(inner);
+                }
+                for arg in args.iter_mut() {
+                    self.visit_expr_mut(arg);
+                }
+                let mapping = self.mapping_of(callee)?;
+                self.repair_ty(ty, &mapping);
+                if self.optional_chain_call(callee) {
+                    *ty = optional_chain_result(*ty, self.types);
+                }
+                Some(*ty)
+            }
+            HirExpr::OptionalChain { base, ty, .. } => {
+                let repaired = self.repair_expr(base);
+                *ty = base.ty();
+                repaired.map(|_| *ty)
+            }
+            HirExpr::Binary {
+                op: HirBinaryOp::Coalesce,
+                lhs,
+                rhs,
+                ty,
+                ..
+            } => {
+                self.repair_expr(lhs);
+                self.repair_expr(rhs);
+                match self.types.resolve(lhs.ty()).cloned() {
+                    Some(Type::Null | Type::Void) => {
+                        if let Some(rhs_ty) = hir_expr_ty(rhs, self.types) {
+                            *ty = rhs_ty;
+                        }
+                    }
+                    Some(Type::Optional { inner, .. }) => {
+                        match self.types.resolve(rhs.ty()).cloned() {
+                            Some(Type::Optional {
+                                inner: rhs_inner,
+                                nullish,
+                            }) if rhs_inner == inner => {
+                                *ty = self.types.intern(&Type::Optional { inner, nullish });
+                            }
+                            Some(Type::Null | Type::Void) => {
+                                *ty = lhs.ty();
+                            }
+                            _ => {
+                                *ty = inner;
+                            }
+                        }
+                    }
+                    _ => {
+                        *ty = lhs.ty();
+                    }
+                }
+                Some(*ty)
+            }
+            HirExpr::Binary {
+                op: HirBinaryOp::And | HirBinaryOp::Or,
+                lhs,
+                rhs,
+                ty,
+                ..
+            } => {
+                let left = self.repair_expr(lhs);
+                let right = self.repair_expr(rhs);
+                match (left, right) {
+                    (Some(left), Some(right)) if left == right => {
+                        if !type_resolved(*ty, self.types) {
+                            *ty = left;
+                        }
+                        Some(*ty)
+                    }
+                    _ => None,
+                }
+            }
+            HirExpr::ArrayLiteral { elements, ty, .. } => {
+                for element in elements.iter_mut() {
+                    self.repair_expr(element);
+                }
+                self.repair_array_element(ty, elements);
+                Some(*ty)
+            }
+            HirExpr::Index {
+                owner, index, ty, ..
+            } => {
+                self.repair_expr(owner);
+                self.repair_expr(index);
+                self.repair_index_element(owner, ty);
+                Some(*ty)
+            }
+            HirExpr::Local { id, ty, .. } => {
+                if !type_resolved(*ty, self.types)
+                    && let Some(&declared) = self.local_tys.get(id)
+                    && type_resolved(declared, self.types)
+                {
+                    *ty = declared;
+                }
+                Some(*ty)
+            }
+            HirExpr::Closure { captures, body, .. } => {
+                for capture in captures.iter_mut() {
+                    self.repair_expr(capture);
+                }
+                let saved = std::mem::take(&mut self.local_tys);
+                for stmt in body.iter_mut() {
+                    self.visit_stmt_mut(stmt);
+                }
+                self.local_tys = saved;
+                None
+            }
+            HirExpr::StructLiteral { fields, ty, .. } => {
+                for (_, value) in fields.iter_mut() {
+                    self.repair_expr(value);
+                }
+                self.record_struct_shape(*ty, fields);
+                Some(*ty)
+            }
+            HirExpr::TypeAssertion { expr, target, .. } => {
+                let repaired = self.repair_expr(expr);
+                if !type_resolved(*target, self.types)
+                    && let Some(mut value_ty) = repaired
+                {
+                    while let Some(Type::Optional { inner, .. }) =
+                        self.types.resolve(value_ty).cloned()
+                    {
+                        value_ty = inner;
+                    }
+                    *target = value_ty;
+                }
+                repaired
+            }
+            other => {
+                walk_expr_mut(self, other);
+                None
+            }
+        }
+    }
+
+    fn repair_array_element(&mut self, ty: &mut TypeId, elements: &[HirExpr]) {
+        let Some(Type::Array { element }) = self.types.resolve(*ty).cloned() else {
+            return;
+        };
+        if type_resolved(element, self.types) {
+            return;
+        }
+        let mut inferred: Option<TypeId> = None;
+        for element_expr in elements {
+            let Some(element_ty) = hir_expr_ty(element_expr, self.types) else {
+                return;
+            };
+            if !type_resolved(element_ty, self.types)
+                || matches!(self.types.resolve(element_ty), Some(Type::Error) | None)
+            {
+                return;
+            }
+            match inferred {
+                None => inferred = Some(element_ty),
+                Some(previous) if previous == element_ty => {}
+                Some(_) => return,
+            }
+        }
+        if let Some(element_ty) = inferred
+            && element_ty != element
+        {
+            *ty = self.types.intern(&Type::Array {
+                element: element_ty,
+            });
+        }
+    }
+
+    fn repair_index_element(&mut self, owner: &HirExpr, ty: &mut TypeId) {
+        if type_resolved(*ty, self.types) {
+            return;
+        }
+        let owner_ty = match owner {
+            HirExpr::Local { id, ty: stale, .. } if !type_resolved(*stale, self.types) => {
+                self.local_tys.get(id).copied().unwrap_or(*stale)
+            }
+            other => other.ty(),
+        };
+        if let Some(Type::Array { element }) = self.types.resolve(owner_ty).cloned() {
+            *ty = element;
+        }
+    }
+
+    fn record_struct_shape(&mut self, ty: TypeId, fields: &[(ts_aot_core::FieldId, HirExpr)]) {
+        if !matches!(self.types.resolve(ty), Some(Type::Struct { .. })) {
+            return;
+        }
+        let mut shape = Vec::with_capacity(fields.len());
+        for (_, value) in fields {
+            let Some(field_ty) = hir_expr_ty(value, self.types) else {
+                return;
+            };
+            shape.push(field_ty);
+        }
+        match self.struct_shapes.get(&ty).cloned() {
+            None => {
+                self.struct_shapes.insert(ty, Some(shape));
+            }
+            Some(Some(previous)) if previous != shape => {
+                self.struct_shapes.insert(ty, None);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl VisitorMut for CallTypeRepair<'_> {
+    fn visit_stmt_mut(&mut self, stmt: &mut HirStmt) {
+        match stmt {
+            HirStmt::Let { id, ty, init, .. } => {
+                if let Some(init) = init.as_mut()
+                    && let Some(repaired) = self.repair_expr(init)
+                    && !type_resolved(*ty, self.types)
+                {
+                    *ty = repaired;
+                }
+                self.local_tys.insert(*id, *ty);
+            }
+            other => walk_stmt_mut(self, other),
+        }
+    }
+
+    fn visit_expr_mut(&mut self, expr: &mut HirExpr) {
+        self.repair_expr(expr);
+    }
+}
+
+fn unify_field_ty(
+    pattern: TypeId,
+    actual: TypeId,
+    mapping: &mut TypeParamMap,
+    types: &TypeTable,
+) -> bool {
+    match types.resolve(pattern) {
+        Some(Type::GenericParam { id }) => match mapping.get(id) {
+            Some(existing) => *existing == actual,
+            None => {
+                mapping.insert(*id, actual);
+                true
+            }
+        },
+        Some(Type::Optional { inner, .. }) => match types.resolve(actual) {
+            Some(Type::Optional {
+                inner: actual_inner,
+                ..
+            }) => unify_field_ty(*inner, *actual_inner, mapping, types),
+            _ => false,
+        },
+        Some(Type::Array { element }) => match types.resolve(actual) {
+            Some(Type::Array {
+                element: actual_element,
+            }) => unify_field_ty(*element, *actual_element, mapping, types),
+            _ => false,
+        },
+        _ => pattern == actual,
+    }
+}
+
+fn repair_struct_field_types(decls: &mut [HirDecl], shapes: &StructShapes, types: &mut TypeTable) {
+    for decl in decls {
+        match decl {
+            HirDecl::Namespace { members, .. } => {
+                repair_struct_field_types(members, shapes, types);
+            }
+            HirDecl::Class(class) => {
+                let Some(Some(shape)) = shapes.get(&class.ty) else {
+                    continue;
+                };
+                if class.fields.len() != shape.len() {
+                    continue;
+                }
+                let mut mapping = TypeParamMap::new();
+                let mut unified = true;
+                for (field, actual) in class.fields.iter().zip(shape.iter()) {
+                    if !unify_field_ty(field.ty, *actual, &mut mapping, types) {
+                        unified = false;
+                        break;
+                    }
+                }
+                if !unified || mapping.is_empty() {
+                    continue;
+                }
+                for field in class.fields.iter_mut() {
+                    let mut result = TypeSubstitutionResult::default();
+                    let substituted = substitute_type(field.ty, &mapping, types, &mut result);
+                    if substituted != field.ty {
+                        field.ty = substituted;
+                    }
+                }
+            }
+            HirDecl::Function(_)
+            | HirDecl::TypeAlias { .. }
+            | HirDecl::Enum { .. }
+            | HirDecl::Global { .. }
+            | HirDecl::Interface { .. } => {}
+        }
+    }
+}
+
+fn repair_specialized_call_types(
+    decls: &mut [HirDecl],
+    types: &mut TypeTable,
+    by_fid: &HashMap<FunctionId, TypeParamMap>,
+    by_name: &HashMap<Atom, TypeParamMap>,
+    by_owner: &HashMap<(TypeId, Atom, bool), TypeParamMap>,
+    class_types: &HashMap<Atom, TypeId>,
+    converter: &ExprConverter,
+    struct_shapes: &mut StructShapes,
+) {
+    for decl in decls {
+        if let HirDecl::Namespace { members, .. } = decl {
+            repair_specialized_call_types(
+                members,
+                types,
+                by_fid,
+                by_name,
+                by_owner,
+                class_types,
+                converter,
+                struct_shapes,
+            );
+            continue;
+        }
+        let mut repair = CallTypeRepair {
+            types: &mut *types,
+            by_fid,
+            by_name,
+            by_owner,
+            class_types,
+            converter,
+            struct_shapes,
+            local_tys: HashMap::new(),
+        };
+        match decl {
+            HirDecl::Function(f) => {
+                repair.local_tys.clear();
+                for stmt in f.body.iter_mut() {
+                    repair.visit_stmt_mut(stmt);
+                }
+            }
+            HirDecl::Class(c) => {
+                for m in c.methods.iter_mut() {
+                    repair.local_tys.clear();
+                    for stmt in m.body.iter_mut() {
+                        repair.visit_stmt_mut(stmt);
+                    }
+                }
+            }
+            HirDecl::Global {
+                init: Some(expr), ..
+            } => repair.visit_expr_mut(expr),
+            HirDecl::TypeAlias { .. }
+            | HirDecl::Enum { .. }
+            | HirDecl::Interface { .. }
+            | HirDecl::Namespace { .. }
+            | HirDecl::Global { init: None, .. } => {}
+        }
+    }
 }
 
 fn receiver_class_ty(owner: &HirExpr, converter: &ExprConverter, types: &mut TypeTable) -> TypeId {
@@ -227,10 +704,18 @@ fn receiver_class_ty(owner: &HirExpr, converter: &ExprConverter, types: &mut Typ
     }
 }
 
-fn receiver_is_static(owner: &HirExpr, class_names: &HashSet<Atom>) -> bool {
+fn receiver_owner(
+    owner: &HirExpr,
+    class_types: &HashMap<Atom, TypeId>,
+    converter: &ExprConverter,
+    types: &mut TypeTable,
+) -> (TypeId, bool) {
     match owner {
-        HirExpr::Global { name, .. } => class_names.contains(name),
-        _ => false,
+        HirExpr::Global { name, .. } => match class_types.get(name) {
+            Some(&class_ty) => (class_ty, true),
+            None => (receiver_class_ty(owner, converter, types), false),
+        },
+        _ => (receiver_class_ty(owner, converter, types), false),
     }
 }
 
@@ -241,9 +726,8 @@ fn method_generic(
     converter: &ExprConverter,
     types: &mut TypeTable,
 ) -> Option<FunctionId> {
-    let ty = receiver_class_ty(owner, converter, types);
-    let preferred = receiver_is_static(owner, &index.class_names);
-    index.get(&(ty, field_name.clone(), preferred)).copied()
+    let (ty, is_static) = receiver_owner(owner, &index.class_types, converter, types);
+    index.get(&(ty, field_name.clone(), is_static)).copied()
 }
 
 fn generic_callee(
@@ -298,9 +782,49 @@ fn infer_for_callee(
     infer_type_args(generic_fn, args, explicit_type_args, types, converter)
 }
 
+fn narrow_optional_chain_receiver_args(
+    callee: &HirCallee,
+    args: &mut [HirExpr],
+    types: &TypeTable,
+) {
+    let HirCallee::Indirect(inner) = callee else {
+        return;
+    };
+    let HirExpr::Field { owner, .. } = inner.as_ref() else {
+        return;
+    };
+    let HirExpr::OptionalChain { base, ty, .. } = owner.as_ref() else {
+        return;
+    };
+    let Some(Type::Optional {
+        inner: narrowed, ..
+    }) = types.resolve(*ty).cloned()
+    else {
+        return;
+    };
+    for arg in args.iter_mut() {
+        if arg.ty() != *ty {
+            continue;
+        }
+        let same_receiver = match (&*arg, base.as_ref()) {
+            (HirExpr::Local { id, .. }, HirExpr::Local { id: base_id, .. }) => id == base_id,
+            _ => false,
+        };
+        if same_receiver {
+            let span = arg.span();
+            let value = std::mem::replace(arg, HirExpr::Unit(span));
+            *arg = HirExpr::TypeAssertion {
+                expr: Box::new(value),
+                target: narrowed,
+                span,
+            };
+        }
+    }
+}
+
 fn push_specialization(
     callee: &HirCallee,
-    args: &[HirExpr],
+    args: &mut [HirExpr],
     explicit_type_args: &[TypeId],
     generic_fn_ids: &HashSet<FunctionId>,
     name_to_generic: &HashMap<Atom, FunctionId>,
@@ -323,6 +847,7 @@ fn push_specialization(
     let Some(generic_fn) = fn_index.get(&fid) else {
         return;
     };
+    narrow_optional_chain_receiver_args(callee, args, types);
     let type_args = infer_for_callee(
         callee,
         method_to_generic,
@@ -344,7 +869,7 @@ fn classify_decls(
     fn_index: &mut HashMap<FunctionId, HirFunction>,
     top_level_names: &mut HashMap<Atom, FunctionId>,
     method_to_generic: &mut MethodIndex,
-    method_owner: &mut HashMap<FunctionId, TypeId>,
+    method_owner: &mut HashMap<FunctionId, (TypeId, bool)>,
     stats: &mut MonomorphizeStats,
 ) {
     for decl in decls {
@@ -360,7 +885,7 @@ fn classify_decls(
                 fn_index.insert(fid, f.clone());
             }
             HirDecl::Class(c) => {
-                method_to_generic.class_names.insert(c.name.clone());
+                method_to_generic.class_types.insert(c.name.clone(), c.ty);
                 for m in &c.methods {
                     if m.params.is_empty() {
                         continue;
@@ -372,7 +897,7 @@ fn classify_decls(
                     if !m.type_params.is_empty() && !shadowed_by_field {
                         generic_fn_ids.insert(fid);
                         method_to_generic.insert((c.ty, m.name.clone(), is_static), fid);
-                        method_owner.insert(fid, c.ty);
+                        method_owner.insert(fid, (c.ty, is_static));
                         stats.generic_functions += 1;
                     }
                     fn_index.insert(fid, m.clone());

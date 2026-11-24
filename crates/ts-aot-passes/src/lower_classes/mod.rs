@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use ts_aot_core::{Atom, Span, TypeTable};
-use ts_aot_ir_hir::{HirClass, HirDecl, HirField, HirFunction, HirProgram};
+use ts_aot_core::{Atom, Span, TypeId, TypeTable};
+use ts_aot_ir_hir::{
+    HirClass, HirDecl, HirExpr, HirField, HirFunction, HirProgram, Visitor, VisitorMut, walk_expr,
+    walk_expr_mut,
+};
 
 use crate::PassContext;
 
@@ -135,8 +138,16 @@ fn flatten_class(
         }
     }
     kept_parent_methods.reverse();
+    for method in &mut kept_parent_methods {
+        retype_this(method, c.ty);
+    }
 
     let inherited_method_count = kept_parent_methods.len();
+
+    let mut super_ref_sources = kept_parent_methods.clone();
+    super_ref_sources.extend(c.methods.iter().cloned());
+    let super_clones = build_super_method_clones(&super_ref_sources, c.ty, index);
+    c.methods.extend(super_clones);
 
     let mut merged_fields = parent_fields;
     merged_fields.extend(c.fields.iter().cloned());
@@ -152,6 +163,122 @@ fn flatten_class(
     stats.inherited_fields += inherited_field_count;
     stats.inherited_methods += inherited_method_count;
     stats.overridden_methods += override_count;
+}
+
+fn build_super_method_clones(
+    methods: &[HirFunction],
+    class_ty: TypeId,
+    index: &HashMap<Atom, Rc<HirClass>>,
+) -> Vec<HirFunction> {
+    let mut pending: Vec<Atom> = collect_super_method_refs(methods);
+    let mut cloned: HashSet<Atom> = HashSet::new();
+    let mut out: Vec<HirFunction> = Vec::new();
+    while let Some(name) = pending.pop() {
+        if !cloned.insert(name.clone()) {
+            continue;
+        }
+        let Some((owner, method)) = parse_super_method_name(name.as_str()) else {
+            continue;
+        };
+        let Some(owner_class) = index.get(&owner) else {
+            continue;
+        };
+        let Some(original) = owner_class
+            .methods
+            .iter()
+            .find(|m| m.name == method && !method_is_static(m))
+            .or_else(|| owner_class.methods.iter().find(|m| m.name == method))
+        else {
+            continue;
+        };
+        let mut clone = original.clone();
+        retype_this(&mut clone, class_ty);
+        clone.name = name;
+        pending.extend(collect_super_method_refs(std::slice::from_ref(&clone)));
+        out.push(clone);
+    }
+    out
+}
+
+fn collect_super_method_refs(methods: &[HirFunction]) -> Vec<Atom> {
+    struct SuperRefScan {
+        found: Vec<Atom>,
+    }
+    impl Visitor for SuperRefScan {
+        fn visit_expr(&mut self, expr: &HirExpr) {
+            if let HirExpr::Field { field_name, .. } = expr
+                && field_name.as_str().starts_with("__super_")
+            {
+                self.found.push(field_name.clone());
+            }
+            walk_expr(self, expr);
+        }
+    }
+    let mut scan = SuperRefScan { found: Vec::new() };
+    for method in methods {
+        for stmt in &method.body {
+            scan.visit_stmt(stmt);
+        }
+    }
+    scan.found
+}
+
+fn parse_super_method_name(name: &str) -> Option<(Atom, Atom)> {
+    let rest = name.strip_prefix("__super_")?;
+    let (len_text, after_len) = rest.split_once('_')?;
+    let owner_len: usize = len_text.parse().ok()?;
+    if owner_len == 0 {
+        return None;
+    }
+    let owner_end = after_len
+        .char_indices()
+        .nth(owner_len)
+        .map_or(after_len.len(), |(index, _)| index);
+    let owner = after_len.get(..owner_end)?;
+    let method = after_len.get(owner_end..)?.strip_prefix('_')?;
+    if method.is_empty() {
+        return None;
+    }
+    Some((Atom::from(owner), Atom::from(method)))
+}
+
+fn method_is_static(method: &HirFunction) -> bool {
+    method
+        .params
+        .first()
+        .is_none_or(|param| param.name.as_str() != "this")
+}
+
+fn retype_this(method: &mut HirFunction, class_ty: TypeId) {
+    let is_instance = method
+        .params
+        .first()
+        .is_some_and(|param| param.name.as_str() == "this");
+    if !is_instance {
+        return;
+    }
+    if let Some(param) = method.params.first_mut() {
+        param.ty = class_ty;
+    }
+    let mut retyper = ThisRetyper { class_ty };
+    for stmt in &mut method.body {
+        retyper.visit_stmt_mut(stmt);
+    }
+}
+
+struct ThisRetyper {
+    class_ty: TypeId,
+}
+
+impl VisitorMut for ThisRetyper {
+    fn visit_expr_mut(&mut self, expr: &mut HirExpr) {
+        match expr {
+            HirExpr::Local { id, ty, .. } if id.raw() == 0 => *ty = self.class_ty,
+            HirExpr::Global { name, ty, .. } if name.as_str() == "this" => *ty = self.class_ty,
+            _ => {}
+        }
+        walk_expr_mut(self, expr);
+    }
 }
 
 fn collect_parents(

@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, Expression, ForInStatement, ForOfStatement, ForStatement,
-    ForStatementInit, ForStatementLeft, SimpleAssignmentTarget, Statement, SwitchStatement,
-    TryStatement, VariableDeclaration, VariableDeclarationKind, match_assignment_target,
-    match_declaration, match_expression,
+    Argument, BindingPattern, Declaration, Expression, ForInStatement, ForOfStatement,
+    ForStatement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget, Statement,
+    SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind,
+    match_assignment_target, match_declaration, match_expression,
 };
 use oxc_span::GetSpan;
 use ts_aot_core::{Atom, LocalId, NARROWED_LOCAL_PREFIX, Span, Type, TypeId, TypeTable};
@@ -16,9 +16,10 @@ use crate::body::LoopEffects;
 use crate::ops::{label_atom, left_span};
 use crate::scope::BodyScope;
 use crate::skeleton::{
-    ClassValueFieldBase, SkeletonBuilder, SkeletonEnv, SwitchCaseEvent, SwitchCaseEventKind,
+    ClassValueFieldBase, ESCAPING_THIS_CAPTURE_CODE, ESCAPING_THIS_CAPTURE_MESSAGE,
+    LocalGeneratorAlias, SkeletonBuilder, SkeletonEnv, SwitchCaseEvent, SwitchCaseEventKind,
 };
-use crate::util::{binding_pattern_name, core_span_from_oxc};
+use crate::util::{binding_pattern_name, collect_binding_names, core_span_from_oxc};
 
 impl SkeletonEnv<'_> {
     pub(crate) fn expand_array_destructuring(
@@ -96,6 +97,75 @@ impl SkeletonEnv<'_> {
 }
 
 impl SkeletonBuilder {
+    fn enclosing_this_local(&self) -> Option<LocalId> {
+        self.this_local_stack.iter().rev().flatten().copied().next()
+    }
+
+    fn closure_captures_this(&self, value: &HirExpr) -> bool {
+        let Some(this_id) = self.enclosing_this_local() else {
+            return false;
+        };
+        let HirExpr::Closure { captures, .. } = value else {
+            return false;
+        };
+        captures
+            .iter()
+            .any(|capture| matches!(capture, HirExpr::Local { id, .. } if *id == this_id))
+    }
+
+    fn refuse_escaping_this_capture(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        value: Option<&HirExpr>,
+        span: oxc_span::Span,
+    ) {
+        let Some(value) = value else {
+            return;
+        };
+        let escapes = match value {
+            HirExpr::Closure { .. } => self.closure_captures_this(value),
+            HirExpr::Local { id, .. } => self
+                .this_capture_locals
+                .last()
+                .is_some_and(|locals| locals.contains(id)),
+            _ => false,
+        };
+        if escapes {
+            senv.report_unsupported(
+                ESCAPING_THIS_CAPTURE_CODE,
+                ESCAPING_THIS_CAPTURE_MESSAGE,
+                span,
+            );
+        }
+    }
+
+    fn refuse_stored_this_capture(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        expr: &HirExpr,
+        span: oxc_span::Span,
+    ) {
+        let Some(this_id) = self.enclosing_this_local() else {
+            return;
+        };
+        let HirExpr::Assignment { target, value, .. } = expr else {
+            return;
+        };
+        let stores_on_this = match target.as_ref() {
+            HirExpr::Field { owner, .. } | HirExpr::Index { owner, .. } => {
+                matches!(owner.as_ref(), HirExpr::Local { id, .. } if *id == this_id)
+            }
+            _ => false,
+        };
+        if stores_on_this && self.closure_captures_this(value) {
+            senv.report_unsupported(
+                ESCAPING_THIS_CAPTURE_CODE,
+                ESCAPING_THIS_CAPTURE_MESSAGE,
+                span,
+            );
+        }
+    }
+
     pub(crate) fn walk_stmts(
         &mut self,
         senv: &mut SkeletonEnv,
@@ -103,10 +173,67 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> Vec<HirStmt> {
         let mut out = Vec::new();
+        self.collect_array_literal_hints(senv, stmts, scope);
+        self.hoisted_fn_decls.push(Vec::new());
         for s in stmts {
             self.walk_stmt(senv, s, &mut out, scope);
         }
+        let mut hoisted = self.hoisted_fn_decls.pop().unwrap_or_default();
+        if !hoisted.is_empty() {
+            hoisted.append(&mut out);
+            out = hoisted;
+        }
         out
+    }
+
+    fn collect_array_literal_hints(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        stmts: &[Statement<'_>],
+        scope: &BodyScope,
+    ) {
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Statement::VariableDeclaration(decl) = stmt else {
+                continue;
+            };
+            for declarator in &decl.declarations {
+                if declarator.type_annotation.is_some() {
+                    continue;
+                }
+                let Some(name) = binding_pattern_name(&declarator.id) else {
+                    continue;
+                };
+                let Some(Expression::ArrayExpression(array)) = declarator.init.as_ref() else {
+                    continue;
+                };
+                if !array.elements.is_empty() {
+                    continue;
+                }
+                let mut values: Vec<&Expression<'_>> = Vec::new();
+                collect_array_uses_stmts(
+                    &stmts[index + 1..],
+                    name.as_str(),
+                    false,
+                    &HashSet::new(),
+                    &mut values,
+                );
+                let mut element: Option<TypeId> = None;
+                let mut conflicting = false;
+                for value in values {
+                    let Some(ty) = array_element_value_ty(senv, self, scope, value) else {
+                        continue;
+                    };
+                    match element {
+                        None => element = Some(ty),
+                        Some(previous) if previous == ty => {}
+                        Some(_) => conflicting = true,
+                    }
+                }
+                if !conflicting && let Some(element) = element {
+                    self.array_literal_hints.insert(array.span.start, element);
+                }
+            }
+        }
     }
 
     fn walk_child(
@@ -251,6 +378,12 @@ impl SkeletonBuilder {
                     Declaration::VariableDeclaration(v) => {
                         self.walk_var_decl(senv, v, out, scope);
                     }
+                    Declaration::ClassDeclaration(c) => {
+                        self.walk_local_class_decl(senv, c, out, scope);
+                    }
+                    Declaration::FunctionDeclaration(f) => {
+                        self.walk_local_function_decl(senv, f, out, scope);
+                    }
                     other => {
                         senv.report_unwalked(
                             "statement form is not supported by the body walker",
@@ -264,6 +397,7 @@ impl SkeletonBuilder {
                 self.own_statement_expr = true;
                 let mut expr = self.walk_expr(senv, &e.expression, scope);
                 self.own_statement_expr = previous_statement_expr;
+                self.refuse_stored_this_capture(senv, &expr, e.span);
                 let narrowing = self.narrow_after_assignment(senv, &e.expression, &mut expr, scope);
                 let copy_back = self.finish_statement_expression(&expr, senv);
                 out.push(HirStmt::Expr { expr });
@@ -276,6 +410,7 @@ impl SkeletonBuilder {
             }
             Statement::ReturnStatement(r) => {
                 let value = r.argument.as_ref().map(|e| self.walk_expr(senv, e, scope));
+                self.refuse_escaping_this_capture(senv, value.as_ref(), r.span);
                 self.note_may_exit(false);
                 out.push(HirStmt::Return { value });
             }
@@ -493,6 +628,140 @@ impl SkeletonBuilder {
                     other.span(),
                 );
             }
+        }
+    }
+
+    fn walk_local_function_decl(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        func: &oxc_ast::ast::Function<'_>,
+        out: &mut Vec<HirStmt>,
+        scope: &mut BodyScope,
+    ) {
+        let Some(id) = func.id.as_ref() else {
+            senv.report_unsupported(
+                "E0500",
+                "a function declaration inside a function body must be named",
+                func.span,
+            );
+            return;
+        };
+        if func.generator {
+            self.lift_local_generator_decl(senv, func, id.name.as_str(), scope);
+            return;
+        }
+        let name = Atom::from(id.name.as_str());
+        let referenced_earlier = scope.predeclared_is_allocated(name.as_str());
+        let closure = self.walk_function_expression(senv, func, scope, true);
+        let ty = closure.ty();
+        let local = scope.declare(name.as_str(), ty);
+        if let Some(bodies) = crate::skeleton::closure_bodies_of(&closure) {
+            for body in bodies {
+                scope.set_closure_body(local, body);
+            }
+        }
+        let stmt = HirStmt::Let {
+            id: local,
+            name: name.clone(),
+            ty,
+            init: Some(closure),
+            narrowed: false,
+        };
+        let forwardable = matches!(&stmt, HirStmt::Let { init: Some(closure), .. }
+            if matches!(closure, HirExpr::Closure { captures, .. } if captures.is_empty()));
+        if !forwardable && referenced_earlier {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "`{}` is referenced before its declaration, but the local function captures \
+                     a variable of the enclosing function and cannot be hoisted above the \
+                     reference; move the declaration above the reference",
+                    name.as_str()
+                )
+                .as_str(),
+                func.span,
+            );
+        }
+        if forwardable && let Some(frame) = self.hoisted_fn_decls.last_mut() {
+            frame.push(stmt);
+            self.note_switch_case_hoisted_decl(local, &name, scope.depth());
+            return;
+        }
+        out.push(stmt);
+    }
+
+    fn lift_local_generator_decl(
+        &mut self,
+        senv: &mut SkeletonEnv,
+        func: &oxc_ast::ast::Function<'_>,
+        name: &str,
+        scope: &mut BodyScope,
+    ) {
+        if scope.depth() > 1 {
+            senv.report_unsupported(
+                "E0500",
+                "a generator function declaration inside a nested block is not supported by the \
+                 body walker; declare it directly in the function body",
+                func.span,
+            );
+            return;
+        }
+        if self.generator_alias_declared_here(name) {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "two generator declarations named `{name}` in one function body are not \
+                     supported by the body walker"
+                )
+                .as_str(),
+                func.span,
+            );
+            return;
+        }
+        if self.generator_alias_shadows_outer(name) {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "a generator declaration named `{name}` that shadows a generator of an \
+                     enclosing function is not supported by the body walker; rename one of them"
+                )
+                .as_str(),
+                func.span,
+            );
+            return;
+        }
+        if self.generator_alias_stack.is_empty() {
+            senv.report_unsupported(
+                "E0500",
+                "a generator function declaration outside a function body is not supported by \
+                 the body walker",
+                func.span,
+            );
+            return;
+        }
+        let previous_callee_position = self.in_callee_position;
+        self.in_callee_position = false;
+        let lifted = self.walk_generator_function_expression(senv, func, scope);
+        self.in_callee_position = previous_callee_position;
+        let HirExpr::Global {
+            name: lifted, ty, ..
+        } = lifted
+        else {
+            return;
+        };
+        let call_ty = match senv.types.resolve(ty) {
+            Some(Type::Fn { ret, .. }) => *ret,
+            _ => ty,
+        };
+        if let Some(frame) = self.generator_alias_stack.last_mut() {
+            frame.insert(
+                name.to_owned(),
+                LocalGeneratorAlias {
+                    lifted,
+                    call_ty,
+                    fn_ty: ty,
+                },
+            );
         }
     }
 
@@ -748,11 +1017,16 @@ impl SkeletonBuilder {
                     return None;
                 };
                 let ty = if p.type_annotation.is_some() {
-                    self.resolve_ts_type_from_annotation(senv, p.type_annotation.as_deref())
+                    self.resolve_ts_type_from_annotation_in_scope(
+                        senv,
+                        p.type_annotation.as_deref(),
+                        Some(scope),
+                    )
                 } else {
                     senv.error_ty()
                 };
                 let id = scope.declare(name.as_str(), ty);
+                self.mutable_locals.insert((scope.body_id(), id));
                 Some(HirCatchBinding::new(id, Atom::from(name.as_str()), ty))
             });
             let cbody =
@@ -841,7 +1115,11 @@ impl SkeletonBuilder {
                 continue;
             };
             let mut ty = if d.type_annotation.is_some() {
-                self.resolve_ts_type_from_annotation(senv, d.type_annotation.as_deref())
+                self.resolve_ts_type_from_annotation_in_declaration_scope(
+                    senv,
+                    d.type_annotation.as_deref(),
+                    Some(scope),
+                )
             } else {
                 senv.error_ty()
             };
@@ -855,6 +1133,16 @@ impl SkeletonBuilder {
                 && let Some(HirExpr::New { ty: new_ty, .. }) = &init
             {
                 ty = *new_ty;
+            }
+            if d.type_annotation.is_none()
+                && matches!(senv.types.resolve(ty), None | Some(Type::Error))
+                && let Some(result_ty) = init.as_ref().map(HirExpr::ty)
+                && matches!(
+                    senv.types.resolve(result_ty),
+                    Some(Type::GeneratorResult { .. } | Type::AsyncGenYield { .. })
+                )
+            {
+                ty = result_ty;
             }
             if d.type_annotation.is_none()
                 && matches!(senv.types.resolve(ty), None | Some(Type::Error))
@@ -905,6 +1193,12 @@ impl SkeletonBuilder {
                 ty = senv.types.intern(&ts_aot_core::Type::I64);
             }
             let id = scope.declare(name.as_str(), ty);
+            if matches!(
+                v.kind,
+                VariableDeclarationKind::Let | VariableDeclarationKind::Var
+            ) {
+                self.mutable_locals.insert((scope.body_id(), id));
+            }
             let switch_kind = if matches!(v.kind, VariableDeclarationKind::Var) {
                 SwitchCaseEventKind::VarDecl
             } else {
@@ -916,6 +1210,13 @@ impl SkeletonBuilder {
                 scope.depth(),
                 switch_kind,
             );
+            if let Some(HirExpr::Closure { .. }) = &init
+                && let Some(init_expr) = init.as_ref()
+                && self.closure_captures_this(init_expr)
+                && let Some(top) = self.this_capture_locals.last_mut()
+            {
+                top.insert(id);
+            }
             if let Some(bodies) = init.as_ref().and_then(crate::skeleton::closure_bodies_of) {
                 for body in bodies {
                     scope.set_closure_body(id, body);
@@ -1065,18 +1366,32 @@ impl SkeletonBuilder {
             && let Some(name) = binding_pattern_name(&d.id)
         {
             let ty = if d.type_annotation.is_some() {
-                self.resolve_ts_type_from_annotation(senv, d.type_annotation.as_deref())
+                self.resolve_ts_type_from_annotation_in_scope(
+                    senv,
+                    d.type_annotation.as_deref(),
+                    Some(scope),
+                )
             } else {
                 senv.error_ty()
             };
-            return scope.declare(name.as_str(), ty);
+            let mutable = matches!(
+                v.kind,
+                VariableDeclarationKind::Let | VariableDeclarationKind::Var
+            );
+            let id = scope.declare(name.as_str(), ty);
+            if mutable {
+                self.mutable_locals.insert((scope.body_id(), id));
+            }
+            return id;
         }
         if let t @ match_assignment_target!(ForStatementLeft) = left
             && let t = t.to_assignment_target()
             && let Some(name) = extract_simple_target_name(t)
         {
             let ty = senv.error_ty();
-            return scope.declare(&name, ty);
+            let id = scope.declare(&name, ty);
+            self.mutable_locals.insert((scope.body_id(), id));
+            return id;
         }
         senv.report_unwalked(
             "loop binding must be a simple `let`/`const` identifier",
@@ -1708,4 +2023,310 @@ fn case_covers_its_end(stmts: &[Statement<'_>]) -> bool {
         return true;
     };
     cut == 0 || !statement_leaves_case(&stmts[0])
+}
+
+fn collect_array_uses_stmts<'b, 'a>(
+    stmts: &'b [Statement<'a>],
+    name: &str,
+    shadowed: bool,
+    nested: &HashSet<String>,
+    out: &mut Vec<&'b Expression<'a>>,
+) {
+    let shadowed = shadowed || stmts.iter().any(|stmt| statement_declares_name(stmt, name));
+    let mut next = nested.clone();
+    for stmt in stmts {
+        collect_stmt_declared_names(stmt, &mut next);
+    }
+    for stmt in stmts {
+        collect_array_uses_stmt(stmt, name, shadowed, &next, out);
+    }
+}
+
+fn collect_stmt_declared_names(stmt: &Statement<'_>, out: &mut HashSet<String>) {
+    match stmt {
+        Statement::VariableDeclaration(decl) => {
+            for declarator in &decl.declarations {
+                let mut names: Vec<Atom> = Vec::new();
+                collect_binding_names(&declarator.id, &mut names);
+                for declared in names {
+                    out.insert(declared.as_str().to_owned());
+                }
+            }
+        }
+        Statement::FunctionDeclaration(func) => {
+            if let Some(id) = &func.id {
+                out.insert(id.name.as_str().to_owned());
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                out.insert(id.name.as_str().to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn declarations_declare_name(decl: &VariableDeclaration<'_>, name: &str) -> bool {
+    decl.declarations
+        .iter()
+        .any(|declarator| binding_pattern_declares(&declarator.id, name))
+}
+
+fn binding_pattern_declares(pattern: &BindingPattern<'_>, name: &str) -> bool {
+    let mut names: Vec<Atom> = Vec::new();
+    collect_binding_names(pattern, &mut names);
+    names.iter().any(|declared| declared.as_str() == name)
+}
+
+fn for_init_declares_name(init: &ForStatementInit<'_>, name: &str) -> bool {
+    match init {
+        ForStatementInit::VariableDeclaration(decl) => declarations_declare_name(decl, name),
+        _ => false,
+    }
+}
+
+fn for_left_declares_name(left: &ForStatementLeft<'_>, name: &str) -> bool {
+    match left {
+        ForStatementLeft::VariableDeclaration(decl) => declarations_declare_name(decl, name),
+        _ => false,
+    }
+}
+
+fn statement_declares_name(stmt: &Statement<'_>, name: &str) -> bool {
+    match stmt {
+        Statement::VariableDeclaration(decl) => declarations_declare_name(decl, name),
+        Statement::FunctionDeclaration(func) => {
+            func.id.as_ref().is_some_and(|id| id.name.as_str() == name)
+        }
+        Statement::ClassDeclaration(class) => {
+            class.id.as_ref().is_some_and(|id| id.name.as_str() == name)
+        }
+        _ => false,
+    }
+}
+
+fn collect_array_uses_stmt<'b, 'a>(
+    stmt: &'b Statement<'a>,
+    name: &str,
+    shadowed: bool,
+    nested: &HashSet<String>,
+    out: &mut Vec<&'b Expression<'a>>,
+) {
+    match stmt {
+        Statement::ExpressionStatement(e) => {
+            collect_array_uses_expr(&e.expression, name, shadowed, nested, out);
+        }
+        Statement::ReturnStatement(r) => {
+            if let Some(argument) = &r.argument {
+                collect_array_uses_expr(argument, name, shadowed, nested, out);
+            }
+        }
+        Statement::ThrowStatement(t) => {
+            collect_array_uses_expr(&t.argument, name, shadowed, nested, out);
+        }
+        Statement::VariableDeclaration(d) => {
+            for declarator in &d.declarations {
+                if let Some(init) = &declarator.init {
+                    collect_array_uses_expr(init, name, shadowed, nested, out);
+                }
+            }
+        }
+        Statement::BlockStatement(b) => {
+            collect_array_uses_stmts(&b.body, name, shadowed, nested, out);
+        }
+        Statement::IfStatement(i) => {
+            collect_array_uses_expr(&i.test, name, shadowed, nested, out);
+            collect_array_uses_stmt(&i.consequent, name, shadowed, nested, out);
+            if let Some(alternate) = &i.alternate {
+                collect_array_uses_stmt(alternate, name, shadowed, nested, out);
+            }
+        }
+        Statement::WhileStatement(w) => {
+            collect_array_uses_expr(&w.test, name, shadowed, nested, out);
+            collect_array_uses_stmt(&w.body, name, shadowed, nested, out);
+        }
+        Statement::DoWhileStatement(d) => {
+            collect_array_uses_expr(&d.test, name, shadowed, nested, out);
+            collect_array_uses_stmt(&d.body, name, shadowed, nested, out);
+        }
+        Statement::ForStatement(f) => {
+            let loop_shadowed = shadowed
+                || f.init
+                    .as_ref()
+                    .is_some_and(|init| for_init_declares_name(init, name));
+            if let Some(init) = &f.init
+                && let init @ match_expression!(ForStatementInit) = init
+            {
+                collect_array_uses_expr(init.to_expression(), name, shadowed, nested, out);
+            }
+            if let Some(update) = &f.update {
+                collect_array_uses_expr(update, name, loop_shadowed, nested, out);
+            }
+            collect_array_uses_stmt(&f.body, name, loop_shadowed, nested, out);
+        }
+        Statement::ForInStatement(f) => {
+            collect_array_uses_expr(&f.right, name, shadowed, nested, out);
+            let body_shadowed = shadowed || for_left_declares_name(&f.left, name);
+            collect_array_uses_stmt(&f.body, name, body_shadowed, nested, out);
+        }
+        Statement::ForOfStatement(f) => {
+            collect_array_uses_expr(&f.right, name, shadowed, nested, out);
+            let body_shadowed = shadowed || for_left_declares_name(&f.left, name);
+            collect_array_uses_stmt(&f.body, name, body_shadowed, nested, out);
+        }
+        Statement::SwitchStatement(s) => {
+            collect_array_uses_expr(&s.discriminant, name, shadowed, nested, out);
+            let cases_shadowed = shadowed
+                || s.cases.iter().any(|case| {
+                    case.consequent
+                        .iter()
+                        .any(|stmt| statement_declares_name(stmt, name))
+                });
+            let mut cases_nested = nested.clone();
+            for case in &s.cases {
+                for stmt in &case.consequent {
+                    collect_stmt_declared_names(stmt, &mut cases_nested);
+                }
+            }
+            for case in &s.cases {
+                collect_array_uses_stmts(
+                    &case.consequent,
+                    name,
+                    cases_shadowed,
+                    &cases_nested,
+                    out,
+                );
+            }
+        }
+        Statement::TryStatement(t) => {
+            collect_array_uses_stmts(&t.block.body, name, shadowed, nested, out);
+            if let Some(handler) = &t.handler {
+                let handler_shadowed = shadowed
+                    || handler
+                        .param
+                        .as_ref()
+                        .is_some_and(|param| binding_pattern_declares(&param.pattern, name));
+                let mut handler_nested = nested.clone();
+                if let Some(param) = &handler.param {
+                    let mut names: Vec<Atom> = Vec::new();
+                    collect_binding_names(&param.pattern, &mut names);
+                    for declared in names {
+                        handler_nested.insert(declared.as_str().to_owned());
+                    }
+                }
+                collect_array_uses_stmts(
+                    &handler.body.body,
+                    name,
+                    handler_shadowed,
+                    &handler_nested,
+                    out,
+                );
+            }
+            if let Some(finalizer) = &t.finalizer {
+                collect_array_uses_stmts(&finalizer.body, name, shadowed, nested, out);
+            }
+        }
+        Statement::LabeledStatement(l) => {
+            collect_array_uses_stmt(&l.body, name, shadowed, nested, out);
+        }
+        _ => {}
+    }
+}
+
+fn is_shadowed_identifier(expr: &Expression<'_>, nested: &HashSet<String>) -> bool {
+    matches!(expr, Expression::Identifier(id) if nested.contains(id.name.as_str()))
+}
+
+fn strip_parens<'b, 'a>(expr: &'b Expression<'a>) -> &'b Expression<'a> {
+    let mut current = expr;
+    while let Expression::ParenthesizedExpression(p) = current {
+        current = &p.expression;
+    }
+    current
+}
+
+fn collect_array_uses_expr<'b, 'a>(
+    expr: &'b Expression<'a>,
+    name: &str,
+    shadowed: bool,
+    nested: &HashSet<String>,
+    out: &mut Vec<&'b Expression<'a>>,
+) {
+    if shadowed {
+        return;
+    }
+    match strip_parens(expr) {
+        Expression::CallExpression(call) => {
+            let Expression::StaticMemberExpression(member) = strip_parens(&call.callee) else {
+                return;
+            };
+            if !matches!(
+                strip_parens(&member.object),
+                Expression::Identifier(id) if id.name.as_str() == name
+            ) || !matches!(member.property.name.as_str(), "push" | "unshift")
+            {
+                return;
+            }
+            for argument in &call.arguments {
+                let argument @ match_expression!(Argument) = argument else {
+                    continue;
+                };
+                let argument = strip_parens(argument.to_expression());
+                if !is_shadowed_identifier(argument, nested) {
+                    out.push(argument);
+                }
+            }
+        }
+        Expression::AssignmentExpression(a) => {
+            let Some(oxc_ast::ast::MemberExpression::ComputedMemberExpression(computed)) =
+                a.left.as_member_expression()
+            else {
+                return;
+            };
+            if matches!(
+                strip_parens(&computed.object),
+                Expression::Identifier(id) if id.name.as_str() == name
+            ) && !is_shadowed_identifier(strip_parens(&a.right), nested)
+            {
+                out.push(strip_parens(&a.right));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn concrete_hint_ty(senv: &SkeletonEnv, ty: TypeId) -> Option<TypeId> {
+    match senv.types.resolve(ty) {
+        Some(Type::Error | Type::Void | Type::Null | Type::Optional { .. }) | None => None,
+        Some(_) => Some(ty),
+    }
+}
+
+fn array_element_value_ty(
+    senv: &mut SkeletonEnv,
+    builder: &SkeletonBuilder,
+    scope: &BodyScope,
+    expr: &Expression<'_>,
+) -> Option<TypeId> {
+    match expr {
+        Expression::NumericLiteral(_) => Some(senv.types.intern(&Type::F64)),
+        Expression::StringLiteral(_) => Some(senv.types.intern(&Type::String)),
+        Expression::BooleanLiteral(_) => Some(senv.types.intern(&Type::Bool)),
+        Expression::BigIntLiteral(_) => Some(senv.types.intern(&Type::BigInt)),
+        Expression::Identifier(id) => {
+            let ty = scope.type_of_visible(id.name.as_str())?;
+            concrete_hint_ty(senv, ty)
+        }
+        Expression::NewExpression(new_expr) => {
+            let Expression::Identifier(id) = &new_expr.callee else {
+                return None;
+            };
+            scope
+                .visible_class(id.name.as_str())
+                .map(|binding| binding.ty)
+                .or_else(|| builder.class_types.get(id.name.as_str()).copied())
+        }
+        _ => None,
+    }
 }

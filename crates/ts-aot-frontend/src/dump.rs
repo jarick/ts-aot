@@ -135,7 +135,20 @@ mod tests {
         let text = out.dump_text();
         assert!(text.contains("diagnostics:"));
         assert!(text.contains("error [E0200]") || text.contains("error [E0100]"));
-        assert!(text.contains("(0.."));
+        assert!(
+            text.contains("(18..19)"),
+            "the parse error must point at the semicolon at 18..19 rather than at the whole file, \
+             got: {text}"
+        );
+        let spans: Vec<(u32, u32)> = out
+            .diagnostics
+            .iter()
+            .map(|d| (d.span.start, d.span.end))
+            .collect();
+        assert!(
+            spans.contains(&(18, 19)),
+            "a parse diagnostic must span the semicolon at 18..19; got {spans:?}"
+        );
     }
 
     #[test]

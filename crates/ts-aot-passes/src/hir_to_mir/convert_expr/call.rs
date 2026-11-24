@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, FunctionId, MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirFunction};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirFunction, HirUnaryOp};
 use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp};
 
 use crate::PassContext;
@@ -688,6 +688,14 @@ impl ExprConverter {
                         &format!("parameter {} of this call", i + 1),
                         false,
                     );
+                    super::control::is_call_argument_compatible(
+                        arg,
+                        self.call_argument_effective_ty(arg, types),
+                        param.ty,
+                        types,
+                        arg.span(),
+                        ctx,
+                    );
                 }
             }
         }
@@ -1371,6 +1379,62 @@ impl ExprConverter {
         known_static_ty(expr.ty(), types)
     }
 
+    fn math_numeric_call(callee: &HirCallee) -> bool {
+        let HirCallee::Indirect(inner) = callee else {
+            return false;
+        };
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        else {
+            return false;
+        };
+        super::globals::is_global_math_reference(owner)
+            && super::fallback_dispatch::math_runtime_op(field_name.as_str()).is_some()
+    }
+
+    fn unary_result_ty(
+        &self,
+        op: HirUnaryOp,
+        operand: &HirExpr,
+        types: &mut TypeTable,
+    ) -> Option<TypeId> {
+        match op {
+            HirUnaryOp::Neg | HirUnaryOp::BitNot => {
+                let operand_ty = self.call_argument_effective_ty(operand, types);
+                match types.resolve(operand_ty) {
+                    Some(Type::BigInt) => Some(operand_ty),
+                    _ => Some(types.intern(&Type::F64)),
+                }
+            }
+            HirUnaryOp::Not | HirUnaryOp::Delete => Some(types.intern(&Type::Bool)),
+            HirUnaryOp::TypeOf => Some(types.intern(&Type::String)),
+            HirUnaryOp::Void => Some(types.intern(&Type::Void)),
+        }
+    }
+
+    pub(super) fn call_argument_effective_ty(
+        &self,
+        arg: &HirExpr,
+        types: &mut TypeTable,
+    ) -> TypeId {
+        let declared = arg.ty();
+        if !matches!(types.resolve(declared), None | Some(Type::Error)) {
+            return declared;
+        }
+        let recovered = match arg {
+            HirExpr::Unary { op, expr, .. } => self.unary_result_ty(*op, expr, types),
+            HirExpr::Call { callee, .. } if Self::math_numeric_call(callee) => {
+                Some(types.intern(&Type::F64))
+            }
+            _ => self.expr_type(arg, types),
+        };
+        match recovered {
+            Some(ty) if !matches!(types.resolve(ty), None | Some(Type::Error)) => ty,
+            _ => declared,
+        }
+    }
+
     pub(super) fn join_expr_types(
         &self,
         a: TypeId,
@@ -1674,10 +1738,7 @@ impl ExprConverter {
         }
         let declared_ret = self.method_ret.get(&key).copied().unwrap_or(ty);
         let call_ty = if chain_receiver {
-            types.intern(&Type::Optional {
-                inner: declared_ret,
-                nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
-            })
+            crate::hir_to_mir::nullish::optional_chain_result(declared_ret, types)
         } else {
             declared_ret
         };
@@ -1718,6 +1779,14 @@ impl ExprConverter {
                         ctx,
                         &format!("parameter {} of this call", i + 1),
                         false,
+                    );
+                    super::control::is_call_argument_compatible(
+                        arg,
+                        self.call_argument_effective_ty(arg, types),
+                        *param_ty,
+                        types,
+                        arg.span(),
+                        ctx,
                     );
                 }
             }

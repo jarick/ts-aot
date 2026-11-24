@@ -5,6 +5,7 @@ mod expr;
 mod frontend;
 mod module;
 mod ops;
+mod param_infer;
 mod scope;
 mod semantic_analyze;
 mod skeleton;

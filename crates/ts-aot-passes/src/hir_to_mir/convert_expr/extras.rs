@@ -305,6 +305,14 @@ impl ExprConverter {
                         "this constructor parameter",
                         false,
                     );
+                    super::control::is_call_argument_compatible(
+                        a,
+                        self.call_argument_effective_ty(a, types),
+                        param_ty,
+                        types,
+                        a.span(),
+                        ctx,
+                    );
                 }
                 let value = self.convert_call_arg(
                     a,
@@ -628,10 +636,18 @@ impl ExprConverter {
             Some(Type::Optional { .. } | Type::Error) | None
         );
         if value_is_optional && !target_is_optional {
-            return MirExpr::UnwrapOptional {
-                expr: Box::new(value),
-                ty: target,
-            };
+            let mut value = value;
+            let mut current = value_ty;
+            while let Some(Type::Optional { inner, .. }) =
+                current.and_then(|ty| types.resolve(ty)).cloned()
+            {
+                value = MirExpr::UnwrapOptional {
+                    expr: Box::new(value),
+                    ty: inner,
+                };
+                current = Some(inner);
+            }
+            return value;
         }
         value
     }

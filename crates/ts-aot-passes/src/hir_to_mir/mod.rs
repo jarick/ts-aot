@@ -29,6 +29,7 @@ pub use program::convert_program;
 #[cfg(test)]
 pub(crate) use converter::{ClassPath, build_class_index, class_at_path, index_decl};
 
+pub(crate) use nullish::optional_chain_result;
 pub(crate) use program::qualified_name;
 
 #[cfg(test)]

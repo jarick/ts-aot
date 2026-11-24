@@ -12,6 +12,15 @@ use crate::util::source_type_for;
 const PARSE_PANIC_CODE: &str = "E0100";
 const PARSE_ERROR_CODE: &str = "E0200";
 
+fn labeled_span_or(err: &oxc_diagnostics::OxcDiagnostic, fallback: CoreSpan) -> CoreSpan {
+    let span = crate::semantic_analyze::error_span(err);
+    if span.start == 0 && span.end == 0 {
+        fallback
+    } else {
+        span
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FrontendPass;
 
@@ -49,11 +58,21 @@ impl FrontendPass {
         let fallback_span = CoreSpan::new(0, end);
 
         if ret.panicked {
-            diagnostics.push(Diagnostic::error(
-                PARSE_PANIC_CODE,
-                "internal parser panic",
-                fallback_span,
-            ));
+            if ret.diagnostics.is_empty() {
+                diagnostics.push(Diagnostic::error(
+                    PARSE_PANIC_CODE,
+                    "internal parser panic",
+                    fallback_span,
+                ));
+            } else {
+                for oxc_err in &ret.diagnostics {
+                    diagnostics.push(Diagnostic::error(
+                        PARSE_PANIC_CODE,
+                        format!("internal parser panic: {oxc_err}"),
+                        labeled_span_or(oxc_err, fallback_span),
+                    ));
+                }
+            }
             program.diagnostics.extend(diagnostics.iter().cloned());
             return FrontendOutput {
                 program,
@@ -65,7 +84,7 @@ impl FrontendPass {
             diagnostics.push(Diagnostic::error(
                 PARSE_ERROR_CODE,
                 format!("parse error: {oxc_err}"),
-                fallback_span,
+                labeled_span_or(oxc_err, fallback_span),
             ));
         }
 

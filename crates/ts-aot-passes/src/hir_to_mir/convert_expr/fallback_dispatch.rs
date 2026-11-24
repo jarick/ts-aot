@@ -15,6 +15,32 @@ use super::globals::{
     is_global_string_reference, is_string_typed_source, type_label,
 };
 
+pub(super) fn math_runtime_op(field: &str) -> Option<RuntimeOp> {
+    match field {
+        "abs" => Some(RuntimeOp::MathAbs),
+        "floor" => Some(RuntimeOp::MathFloor),
+        "ceil" => Some(RuntimeOp::MathCeil),
+        "round" => Some(RuntimeOp::MathRound),
+        "trunc" => Some(RuntimeOp::MathTrunc),
+        "sign" => Some(RuntimeOp::MathSign),
+        "sqrt" => Some(RuntimeOp::MathSqrt),
+        "pow" => Some(RuntimeOp::MathPow),
+        "log" => Some(RuntimeOp::MathLog),
+        "exp" => Some(RuntimeOp::MathExp),
+        "sin" => Some(RuntimeOp::MathSin),
+        "cos" => Some(RuntimeOp::MathCos),
+        "tan" => Some(RuntimeOp::MathTan),
+        "asin" => Some(RuntimeOp::MathAsin),
+        "acos" => Some(RuntimeOp::MathAcos),
+        "atan" => Some(RuntimeOp::MathAtan),
+        "atan2" => Some(RuntimeOp::MathAtan2),
+        "max" => Some(RuntimeOp::MathMax),
+        "min" => Some(RuntimeOp::MathMin),
+        "random" => Some(RuntimeOp::MathRandom),
+        _ => None,
+    }
+}
+
 impl ExprConverter {
     pub(in crate::hir_to_mir::convert_expr) fn try_known_indirect_dispatch(
         &mut self,
@@ -409,29 +435,7 @@ impl ExprConverter {
         } = inner.as_ref()
             && is_global_math_reference(math_owner)
         {
-            let op = match math_field.as_str() {
-                "abs" => Some(RuntimeOp::MathAbs),
-                "floor" => Some(RuntimeOp::MathFloor),
-                "ceil" => Some(RuntimeOp::MathCeil),
-                "round" => Some(RuntimeOp::MathRound),
-                "trunc" => Some(RuntimeOp::MathTrunc),
-                "sign" => Some(RuntimeOp::MathSign),
-                "sqrt" => Some(RuntimeOp::MathSqrt),
-                "pow" => Some(RuntimeOp::MathPow),
-                "log" => Some(RuntimeOp::MathLog),
-                "exp" => Some(RuntimeOp::MathExp),
-                "sin" => Some(RuntimeOp::MathSin),
-                "cos" => Some(RuntimeOp::MathCos),
-                "tan" => Some(RuntimeOp::MathTan),
-                "asin" => Some(RuntimeOp::MathAsin),
-                "acos" => Some(RuntimeOp::MathAcos),
-                "atan" => Some(RuntimeOp::MathAtan),
-                "atan2" => Some(RuntimeOp::MathAtan2),
-                "max" => Some(RuntimeOp::MathMax),
-                "min" => Some(RuntimeOp::MathMin),
-                "random" => Some(RuntimeOp::MathRandom),
-                _ => None,
-            };
+            let op = math_runtime_op(math_field.as_str());
             if let Some(op) = op {
                 let expected_arity = match op {
                     RuntimeOp::MathRandom => Some(0),

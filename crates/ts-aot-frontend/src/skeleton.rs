@@ -27,6 +27,11 @@ pub(crate) struct NarrowedUpdate {
 const RESERVED_NAME_MAIN_CODE: &str = "E0510";
 const RESERVED_NAME_TLA_MAIN_CODE: &str = "E0511";
 const RESERVED_NAME_TLA_GENERATED_CODE: &str = "E0512";
+pub(crate) const ESCAPING_THIS_CAPTURE_CODE: &str = "E0513";
+pub(crate) const ESCAPING_THIS_CAPTURE_MESSAGE: &str = "an arrow function that captures `this` escapes its method here, so it would \
+     observe a snapshot copy of the receiver taken when the method was entered instead of the \
+     caller's live receiver; call the arrow inside the method, or pass the values it needs in as \
+     parameters/arguments";
 
 fn reserved_name_reason(name: &str) -> Option<(&'static str, &'static str)> {
     if name == "main" {
@@ -98,6 +103,8 @@ pub(crate) type PendingClassValueFieldRead = (
     oxc_span::Span,
     Option<ClassValueFieldBase>,
 );
+
+pub(crate) type ClassCaptureFields = HashMap<TypeId, Vec<(Atom, Atom, LocalId, TypeId, CoreSpan)>>;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ClassValuePoisonFacts {
@@ -285,6 +292,102 @@ pub(crate) struct ClassValuePoisonWrite {
     pub(crate) branch: Option<u32>,
 }
 
+#[derive(Clone)]
+pub(crate) struct StaticMethodCapture {
+    pub(crate) source: Atom,
+    pub(crate) local: LocalId,
+    pub(crate) body_id: u32,
+    pub(crate) ty: TypeId,
+}
+
+#[derive(Clone)]
+pub(crate) struct PrivateMember {
+    pub(crate) lowered: Atom,
+    pub(crate) is_static: bool,
+    pub(crate) brand_is_field: bool,
+}
+
+pub(crate) struct PrivateClassFrame {
+    pub(crate) ty: TypeId,
+    pub(crate) class_name: Atom,
+    pub(crate) members: HashMap<Atom, PrivateMember>,
+}
+
+pub(crate) fn rust_ident_escape(raw: &str) -> String {
+    ts_aot_core::escape_rust_ident(raw)
+}
+
+pub(crate) fn private_member_hir_name(class_ty: TypeId, name: &str) -> Atom {
+    Atom::from(format!(
+        "__ps_{}_{}",
+        class_ty.raw(),
+        rust_ident_escape(name)
+    ))
+}
+
+#[derive(Clone)]
+pub(crate) struct LocalGeneratorAlias {
+    pub(crate) lifted: Atom,
+    pub(crate) call_ty: TypeId,
+    pub(crate) fn_ty: TypeId,
+}
+
+#[derive(Clone)]
+pub(crate) struct CaptureRecord {
+    pub(crate) binding: LocalId,
+    pub(crate) source: Atom,
+    pub(crate) span: CoreSpan,
+    pub(crate) construction_only: bool,
+    pub(crate) mutable_reference: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct CaptureCheckFrame {
+    pub(crate) captures: Vec<CaptureRecord>,
+    pub(crate) inherited: Vec<(Atom, CoreSpan)>,
+}
+
+pub(crate) struct PendingClosureCaptures {
+    pub(crate) enclosing_body_id: u32,
+    pub(crate) closure_depth: u32,
+    pub(crate) enclosing_bindings: HashMap<String, (LocalId, TypeId)>,
+    pub(crate) required: Vec<(LocalId, TypeId, CoreSpan)>,
+}
+
+impl PendingClosureCaptures {
+    pub(crate) fn require(&mut self, local: LocalId, ty: TypeId, span: CoreSpan) {
+        if self.required.iter().any(|(id, _, _)| *id == local) {
+            return;
+        }
+        self.required.push((local, ty, span));
+    }
+}
+
+impl CaptureCheckFrame {
+    pub(crate) fn record(&mut self, record: CaptureRecord) {
+        if let Some(entry) = self
+            .captures
+            .iter_mut()
+            .find(|entry| entry.binding.raw() == record.binding.raw())
+        {
+            entry.construction_only = entry.construction_only && record.construction_only;
+            return;
+        }
+        self.captures.push(record);
+    }
+
+    pub(crate) fn inherit(&mut self, source: Atom, span: CoreSpan) {
+        if self
+            .inherited
+            .iter()
+            .any(|(name, _)| name.as_str() == source.as_str())
+        {
+            return;
+        }
+        self.inherited.push((source, span));
+    }
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SkeletonBuilder {
     pub(crate) source_len: u32,
@@ -297,6 +400,7 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) class_value_globals: HashMap<String, Vec<TypeId>>,
     pub(crate) module_lets: HashSet<String>,
     pub(crate) module_vars: HashSet<String>,
+    pub(super) mutable_locals: HashSet<(u32, LocalId)>,
     pub(super) pending_class_value_global_reads: Vec<PendingGlobalRead>,
     pub(super) pending_global_receiver_calls: Vec<PendingGlobalReceiverCall>,
     pub(super) unknown_class_value_globals: HashSet<String>,
@@ -330,8 +434,18 @@ pub(crate) struct SkeletonBuilder {
     pub(crate) is_generator_stack: Vec<bool>,
     pub(crate) type_param_stack: Vec<TypeParamMap>,
     pub(crate) in_static_method: bool,
+    pub(crate) current_super_class: Option<Atom>,
     pub(crate) module: bool,
     pub(crate) static_field_globals: HashMap<TypeId, HashMap<Atom, (Atom, TypeId)>>,
+    pub(crate) static_method_globals: HashMap<TypeId, HashMap<Atom, (Atom, TypeId, TypeId)>>,
+    pub(crate) static_method_captures: HashMap<Atom, Vec<StaticMethodCapture>>,
+    pub(crate) pending_static_captures: HashMap<(TypeId, Atom), Vec<(Atom, StaticMethodCapture)>>,
+    pub(crate) capture_check_frames: Vec<CaptureCheckFrame>,
+    pub(crate) class_capture_fields: ClassCaptureFields,
+    pub(crate) class_decl_body: HashMap<TypeId, u32>,
+    pub(crate) pending_closure_captures: Vec<PendingClosureCaptures>,
+    pub(crate) body_depth: u32,
+    pub(super) in_callee_position: bool,
     pub(crate) strict: bool,
     pub(crate) tla_main_body: Vec<TlaMainItem>,
     pub(crate) tla_main_name: Atom,
@@ -340,11 +454,20 @@ pub(crate) struct SkeletonBuilder {
     pub(super) narrowed_stack: Vec<HashMap<LocalId, (LocalId, TypeId)>>,
     pub(super) captured_stack: Vec<HashSet<LocalId>>,
     pub(super) declared_names_stack: Vec<HashSet<String>>,
+    pub(super) generator_alias_stack: Vec<HashMap<String, LocalGeneratorAlias>>,
     pub(super) suppress_narrowing: u32,
     pub(super) conditional_depth: u32,
     pub(super) try_body_skips: Option<bool>,
     pub(super) own_statement_expr: bool,
     pub(super) pending_narrowed_updates: Vec<NarrowedUpdate>,
+    pub(crate) array_literal_hints: HashMap<u32, TypeId>,
+    pub(crate) class_method_rets: HashMap<(TypeId, Atom, bool), TypeId>,
+    pub(crate) private_class_stack: Vec<PrivateClassFrame>,
+    pub(super) hoisted_fn_decls: Vec<Vec<HirStmt>>,
+    pub(super) current_class_ty: Option<TypeId>,
+    pub(super) current_class_own_methods: Vec<Atom>,
+    pub(super) this_local_stack: Vec<Option<LocalId>>,
+    pub(super) this_capture_locals: Vec<HashSet<LocalId>>,
 }
 
 pub(crate) struct SkeletonEnv<'b> {
@@ -403,10 +526,21 @@ pub(super) struct PendingGlobalRead {
     pub(super) span: oxc_span::Span,
 }
 
+pub(super) const INDEX_PATH_COMPONENT: &str = "[]";
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) enum ReceiverRef {
     Global(String),
-    StaticField { class: String, field: String },
+    StaticField {
+        class: String,
+        field: String,
+    },
+    Path {
+        root: String,
+        root_id: LocalId,
+        body_id: u32,
+        fields: Vec<String>,
+    },
 }
 
 impl ReceiverRef {
@@ -414,6 +548,22 @@ impl ReceiverRef {
         match self {
             ReceiverRef::Global(name) => name.clone(),
             ReceiverRef::StaticField { class, field } => format!("{class}.{field}"),
+            ReceiverRef::Path { root, fields, .. } if fields.is_empty() => root.clone(),
+            ReceiverRef::Path { root, fields, .. } => format!("{root}.{}", fields.join(".")),
+        }
+    }
+
+    fn root_local(&self) -> Option<LocalId> {
+        match self {
+            ReceiverRef::Path { root_id, .. } => Some(*root_id),
+            ReceiverRef::Global(_) | ReceiverRef::StaticField { .. } => None,
+        }
+    }
+
+    fn path_fields(&self) -> Option<&[String]> {
+        match self {
+            ReceiverRef::Path { fields, .. } => Some(fields.as_slice()),
+            ReceiverRef::Global(_) | ReceiverRef::StaticField { .. } => None,
         }
     }
 }
@@ -447,6 +597,7 @@ pub(super) enum ArgumentBody {
 pub(super) struct ReceiverCallSite {
     pub(super) target: ReceiverCallTarget,
     pub(super) args: Vec<ArgumentBody>,
+    pub(super) owner_path: Option<Vec<String>>,
 }
 
 pub(crate) fn may_hold_a_callable(init: &HirExpr) -> bool {
@@ -506,6 +657,9 @@ pub(super) struct ReceiverWriteScan<'c> {
     expanded_locals: HashSet<(LocalId, Vec<ArgumentBody>)>,
     class_types: &'c HashMap<String, TypeId>,
     shadowed_locals: HashMap<String, Option<TypeId>>,
+    this_local: Option<LocalId>,
+    this_place: Option<Vec<String>>,
+    root_in_scope: bool,
 }
 
 impl<'c> ReceiverWriteScan<'c> {
@@ -526,7 +680,29 @@ impl<'c> ReceiverWriteScan<'c> {
             expanded_locals: HashSet::new(),
             class_types,
             shadowed_locals,
+            this_local: None,
+            this_place: None,
+            root_in_scope: false,
         }
+    }
+
+    pub(super) fn enter_receiver_scope(
+        &mut self,
+        this_local: Option<LocalId>,
+        this_place: Option<Vec<String>>,
+        root_in_scope: bool,
+    ) {
+        self.this_local = this_local;
+        self.this_place = this_place;
+        self.root_in_scope = root_in_scope;
+    }
+
+    pub(super) fn enter_method(&mut self, params: &[HirParam], place: Option<Vec<String>>) {
+        let this_local = params
+            .iter()
+            .find(|param| param.name.as_str() == "this")
+            .map(|param| param.id);
+        self.enter_receiver_scope(this_local, place, false);
     }
 
     fn forget_expansions(&mut self, id: LocalId) {
@@ -682,12 +858,42 @@ impl<'c> ReceiverWriteScan<'c> {
         args.iter().map(|arg| self.argument_body(arg)).collect()
     }
 
-    fn push_call_site(&mut self, target: ReceiverCallTarget, args: &[HirExpr]) {
+    fn push_call_site(
+        &mut self,
+        target: ReceiverCallTarget,
+        args: &[HirExpr],
+        owner_path: Option<Vec<String>>,
+    ) {
         let bindings = self.argument_bodies(args);
         self.call_sites.push(ReceiverCallSite {
             target,
             args: bindings,
+            owner_path,
         });
+    }
+
+    fn place_fields(&self, place: &HirExpr) -> Option<Vec<String>> {
+        match place {
+            HirExpr::Local { id, .. }
+                if self.root_in_scope && Some(*id) == self.receiver.root_local() =>
+            {
+                Some(Vec::new())
+            }
+            HirExpr::Local { id, .. } if Some(*id) == self.this_local => self.this_place.clone(),
+            HirExpr::Field {
+                owner, field_name, ..
+            } => {
+                let mut fields = self.place_fields(owner)?;
+                fields.push(field_name.as_str().to_owned());
+                Some(fields)
+            }
+            HirExpr::Index { owner, .. } => {
+                let mut fields = self.place_fields(owner)?;
+                fields.push(INDEX_PATH_COMPONENT.to_owned());
+                Some(fields)
+            }
+            _ => None,
+        }
     }
 
     fn writes_receiver(&self, target: &HirExpr) -> bool {
@@ -703,6 +909,12 @@ impl<'c> ReceiverWriteScan<'c> {
             ) => {
                 field_name.as_str() == field
                     && matches!(owner.as_ref(), HirExpr::Global { name, .. } if name.as_str() == class)
+            }
+            (ReceiverRef::Path { fields, .. }, _) => {
+                let Some(written) = self.place_fields(target) else {
+                    return false;
+                };
+                fields.starts_with(&written)
             }
             _ => false,
         }
@@ -766,14 +978,19 @@ impl Visitor for ReceiverWriteScan<'_> {
                     HirExpr::Global { name, .. } => self.push_call_site(
                         ReceiverCallTarget::Function(name.as_str().to_owned()),
                         args,
+                        None,
                     ),
                     HirExpr::Field {
                         owner, field_name, ..
                     } => match self.owner_type(owner) {
-                        Some(ty) => self.push_call_site(
-                            ReceiverCallTarget::Method(ty, field_name.as_str().to_owned()),
-                            args,
-                        ),
+                        Some(ty) => {
+                            let owner_path = self.place_fields(owner);
+                            self.push_call_site(
+                                ReceiverCallTarget::Method(ty, field_name.as_str().to_owned()),
+                                args,
+                                owner_path,
+                            );
+                        }
                         None => self.opaque = true,
                     },
                     HirExpr::Closure { params, body, .. } => {
@@ -787,7 +1004,7 @@ impl Visitor for ReceiverWriteScan<'_> {
                         let targets = self.local_aliases.get(id).cloned();
                         let aliased = targets.as_ref().is_some_and(|targets| !targets.is_empty());
                         for target in targets.unwrap_or_default() {
-                            self.push_call_site(target, args);
+                            self.push_call_site(target, args, None);
                         }
                         let bindings = self.argument_bodies(args);
                         if self.expanded_locals.insert((*id, bindings.clone())) {
@@ -1078,6 +1295,7 @@ impl SkeletonBuilder {
             module_init_depth: 0,
             module_lets: HashSet::new(),
             module_vars: HashSet::new(),
+            mutable_locals: HashSet::new(),
             pending_class_value_global_reads: Vec::new(),
             pending_global_receiver_calls: Vec::new(),
             unknown_class_value_globals: HashSet::new(),
@@ -1109,8 +1327,18 @@ impl SkeletonBuilder {
             is_generator_stack: Vec::new(),
             type_param_stack: Vec::new(),
             in_static_method: false,
+            current_super_class: None,
             module,
             static_field_globals: HashMap::new(),
+            static_method_globals: HashMap::new(),
+            static_method_captures: HashMap::new(),
+            pending_static_captures: HashMap::new(),
+            capture_check_frames: Vec::new(),
+            class_capture_fields: HashMap::new(),
+            class_decl_body: HashMap::new(),
+            pending_closure_captures: Vec::new(),
+            body_depth: 0,
+            in_callee_position: false,
             strict: module,
             tla_main_body: Vec::new(),
             tla_main_name,
@@ -1119,11 +1347,20 @@ impl SkeletonBuilder {
             narrowed_stack: Vec::new(),
             captured_stack: Vec::new(),
             declared_names_stack: Vec::new(),
+            generator_alias_stack: Vec::new(),
             suppress_narrowing: 0,
             conditional_depth: 0,
             try_body_skips: None,
             own_statement_expr: false,
             pending_narrowed_updates: Vec::new(),
+            array_literal_hints: HashMap::new(),
+            class_method_rets: HashMap::new(),
+            private_class_stack: Vec::new(),
+            hoisted_fn_decls: Vec::new(),
+            current_class_ty: None,
+            current_class_own_methods: Vec::new(),
+            this_local_stack: Vec::new(),
+            this_capture_locals: Vec::new(),
         }
     }
 
@@ -1177,7 +1414,7 @@ impl SkeletonBuilder {
         if pending.is_empty() {
             return;
         }
-        let refused: Vec<(String, oxc_span::Span)> = {
+        let refused: Vec<(ReceiverRef, oxc_span::Span)> = {
             let index = ReceiverBodyIndex::new(senv.program, &self.tla_main_body);
             pending
                 .into_iter()
@@ -1185,21 +1422,54 @@ impl SkeletonBuilder {
                     self.receiver_is_mutable_place(call)
                         && Self::argument_may_reassign(&index, call)
                 })
-                .map(|call| (call.receiver.describe(), call.span))
+                .map(|call| (call.receiver, call.span))
                 .collect()
         };
         for (receiver, span) in refused {
-            senv.report_unsupported(
-                "E0419",
-                format!(
-                    "`{receiver}` is a mutable module binding, so a receiver read from it is \
+            let described = receiver.describe();
+            let message = match &receiver {
+                ReceiverRef::Path { fields, .. } if fields.is_empty() => format!(
+                    "`{described}` is a mutable place, so a receiver read from it is resolved \
+                     before the arguments of the call run, but the call may reassign `{described}`; \
+                     assign the receiver outside the call or declare it `const`"
+                ),
+                ReceiverRef::Path { .. } => format!(
+                    "`{described}` is a mutable place, so a receiver read from it is resolved \
+                     before the arguments of the call run, but the call may reassign `{described}`; \
+                     read the receiver into a local before the call"
+                ),
+                ReceiverRef::Global(_) | ReceiverRef::StaticField { .. } => format!(
+                    "`{described}` is a mutable module binding, so a receiver read from it is \
                      resolved before the arguments of the call run, but the call may reassign \
-                     `{receiver}`; assign `{receiver}` outside the call or declare it `const`"
-                )
-                .as_str(),
-                span,
-            );
+                     `{described}`; assign `{described}` outside the call or declare it `const`"
+                ),
+            };
+            senv.report_unsupported("E0419", message.as_str(), span);
         }
+    }
+
+    pub(crate) fn private_member(&self, name: &str) -> Option<(TypeId, Atom, PrivateMember)> {
+        let key = Atom::from(name);
+        self.private_class_stack.iter().rev().find_map(|frame| {
+            frame
+                .members
+                .get(&key)
+                .map(|member| (frame.ty, frame.class_name.clone(), member.clone()))
+        })
+    }
+
+    pub(crate) fn lowered_class_key_hir_name(
+        &self,
+        class_ty: TypeId,
+        key: &oxc_ast::ast::PropertyKey<'_>,
+    ) -> Option<Atom> {
+        if let Some(private) = key.private_name() {
+            return Some(self.private_member(private.as_str()).map_or_else(
+                || private_member_hir_name(class_ty, private.as_str()),
+                |(_, _, member)| member.lowered.clone(),
+            ));
+        }
+        key.static_name().map(|name| Atom::from(name.as_ref()))
     }
 
     fn is_static_field_global(&self, name: &str) -> bool {
@@ -1220,6 +1490,17 @@ impl SkeletonBuilder {
                 .get(class)
                 .and_then(|ty| self.static_field_globals.get(ty))
                 .is_some_and(|fields| fields.keys().any(|name| name.as_str() == field)),
+            ReceiverRef::Path {
+                root,
+                root_id,
+                body_id,
+                fields,
+            } => {
+                if !fields.is_empty() {
+                    return true;
+                }
+                root.as_str() != "this" && self.mutable_locals.contains(&(*body_id, *root_id))
+            }
         }
     }
 
@@ -1227,7 +1508,8 @@ impl SkeletonBuilder {
         index: &ReceiverBodyIndex<'_>,
         call: &PendingGlobalReceiverCall,
     ) -> bool {
-        if call.direct_write || call.opaque {
+        let local_place = call.receiver.path_fields().is_some();
+        if call.direct_write || (call.opaque && !local_place) {
             return true;
         }
         let mut seen: HashSet<ReceiverCallSite> = HashSet::new();
@@ -1239,11 +1521,12 @@ impl SkeletonBuilder {
                 &index.classes_by_name,
                 HashMap::new(),
             );
+            scan.enter_method(params, call.receiver.path_fields().map(<[String]>::to_vec));
             scan.bind_params(params, &call.arg_bindings);
             for stmt in body {
                 scan.visit_stmt(stmt);
             }
-            if scan.direct_write || scan.opaque {
+            if scan.direct_write || (scan.opaque && !local_place) {
                 return true;
             }
             queue.extend(scan.call_sites);
@@ -1256,12 +1539,18 @@ impl SkeletonBuilder {
                 ReceiverCallTarget::Function(name) => index.function(name.as_str()),
                 ReceiverCallTarget::Method(ty, name) => {
                     if !index.has_class(*ty) {
+                        if local_place {
+                            continue;
+                        }
                         return true;
                     }
                     index.method(*ty, name.as_str())
                 }
             };
             let Some((params, body)) = body else {
+                if local_place {
+                    continue;
+                }
                 return true;
             };
             let mut scan = ReceiverWriteScan::new(
@@ -1270,11 +1559,12 @@ impl SkeletonBuilder {
                 &index.classes_by_name,
                 HashMap::new(),
             );
+            scan.enter_method(params, site.owner_path.clone());
             scan.bind_params(params, &site.args);
             for stmt in body {
                 scan.visit_stmt(stmt);
             }
-            if scan.direct_write || scan.opaque {
+            if scan.direct_write || (scan.opaque && !local_place) {
                 return true;
             }
             queue.extend(scan.call_sites);
@@ -1710,6 +2000,32 @@ impl SkeletonBuilder {
                     shadowed: None,
                 });
             }
+        }
+    }
+
+    pub(super) fn note_switch_case_hoisted_decl(
+        &mut self,
+        id: LocalId,
+        name: &Atom,
+        scope_depth: usize,
+    ) {
+        let Some(frame) = self.switch_case_frames.last_mut() else {
+            return;
+        };
+        if frame.scope_depth != scope_depth {
+            return;
+        }
+        let shadowed = frame.outer.get(name).copied().filter(|outer| *outer != id);
+        if let Some(events) = frame.events.get_mut(frame.current) {
+            events.insert(
+                0,
+                SwitchCaseEvent {
+                    local: id,
+                    kind: SwitchCaseEventKind::Decl,
+                    name: Some(name.clone()),
+                    shadowed,
+                },
+            );
         }
     }
 
@@ -2151,9 +2467,58 @@ impl SkeletonBuilder {
             .is_some_and(|names| names.contains(name))
     }
 
+    pub(super) fn visible_generator_alias(&self, name: &str) -> Option<LocalGeneratorAlias> {
+        self.generator_alias_stack
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name))
+            .cloned()
+    }
+
+    pub(super) fn generator_alias_declared_here(&self, name: &str) -> bool {
+        self.generator_alias_stack
+            .last()
+            .is_some_and(|frame| frame.contains_key(name))
+    }
+
+    pub(super) fn generator_alias_shadows_outer(&self, name: &str) -> bool {
+        self.generator_alias_stack
+            .iter()
+            .rev()
+            .skip(1)
+            .any(|frame| frame.contains_key(name))
+    }
+
     pub(super) fn captured_name_is_visible(senv: &SkeletonEnv<'_>, name: &str) -> bool {
         senv.capture_types
             .last()
             .is_some_and(|types| types.contains_key(name))
+    }
+
+    pub(crate) fn push_pending_closure_captures(
+        &mut self,
+        scope: &BodyScope,
+        narrowed: &HashMap<LocalId, (LocalId, TypeId)>,
+    ) {
+        self.pending_closure_captures.push(PendingClosureCaptures {
+            enclosing_body_id: scope.body_id(),
+            closure_depth: self.body_depth.saturating_add(1),
+            enclosing_bindings: crate::expr::capture_binding_map(scope, narrowed),
+            required: Vec::new(),
+        });
+    }
+
+    pub(crate) fn finish_pending_closure_captures(&mut self, captures: &mut Vec<HirExpr>) {
+        let Some(pending) = self.pending_closure_captures.pop() else {
+            return;
+        };
+        for (id, ty, span) in pending.required {
+            let present = captures.iter().any(
+                |capture| matches!(capture, HirExpr::Local { id: existing, .. } if existing.raw() == id.raw()),
+            );
+            if !present {
+                captures.push(HirExpr::Local { id, ty, span });
+            }
+        }
     }
 }
