@@ -424,7 +424,7 @@ fn emit_function_with_ctx(
     } else {
         ident_from(&f.name)
     };
-    let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods);
+    let mut body_ctx = BodyCtx::new(f, types, &ctx.mutating_methods, ctx.module_idents());
     body_ctx.set_module_idents(Rc::clone(ctx.module_idents()));
     if is_tla_main {
         body_ctx.set_in_tla_main(true);
@@ -756,7 +756,7 @@ fn emit_field(field: &MirFieldDecl, ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenS
     let ty = emit_type_id_with_ctx(field.ty, emit_env, ctx);
     let vis = visibility_token(field.visibility);
     quote! {
-        #vis #name: #ty
+        #vis #name: ::std::rc::Rc<::core::cell::RefCell<#ty>>
     }
 }
 
@@ -800,7 +800,7 @@ fn emit_struct_const_default(
     for (fid, fty) in fields {
         let fname = ctx.struct_field_ident(id, fid);
         let fdef = emit_const_default(fty, ctx, emit_env, depth, budget, mode)?;
-        inits.push(quote!(#fname: #fdef));
+        inits.push(quote!(#fname: ::std::rc::Rc::new(::core::cell::RefCell::new(#fdef))));
     }
     if ctx.struct_needs_lifetime(id) {
         Ok(quote!(#name {
@@ -925,13 +925,25 @@ fn emit_global_with_ctx(
             .clone()
             .unwrap_or_else(|| emit_static_type_id(g.ty, emit_env, ctx)),
     };
-    let vis = visibility_token(g.visibility);
-    let mutability = if g.mutable || owned.is_some() {
-        quote!(mut)
+    let stores_lazy_struct = emit_env.types.struct_id(g.ty).is_some();
+    if stores_lazy_struct {
+        body::struct_global_default_tokens(&g.name, g.ty, g.init.as_ref(), ctx, emit_env)?;
+    }
+    let ty = if stores_lazy_struct {
+        quote!(::core::option::Option<#ty>)
     } else {
-        quote!()
+        ty
     };
-    let init = if owned.is_some() {
+    let vis = visibility_token(g.visibility);
+    let mutability =
+        if g.mutable || ctx.is_mutable_global(&g.name) || owned.is_some() || stores_lazy_struct {
+            quote!(mut)
+        } else {
+            quote!()
+        };
+    let init = if stores_lazy_struct {
+        quote!(::core::option::Option::None)
+    } else if owned.is_some() {
         quote!(::std::vec::Vec::new())
     } else {
         match (&g.init, durable) {
@@ -982,9 +994,9 @@ fn emit_params(
 
 fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
     match *kind {
-        FunctionKind::Method { self_param, .. } => {
-            if body_ctx.local_mut(self_param) {
-                quote!(&mut self,)
+        FunctionKind::Method { .. } => {
+            if body_ctx.self_is_borrowed() {
+                quote!(&self,)
             } else {
                 quote!(self,)
             }
@@ -996,7 +1008,7 @@ fn self_param_token(kind: &FunctionKind, body_ctx: &BodyCtx) -> TokenStream {
                 quote!(self,)
             }
         }
-        FunctionKind::Constructor { .. } => quote!(&mut self,),
+        FunctionKind::Constructor { .. } => quote!(&self,),
         _ => TokenStream::new(),
     }
 }

@@ -241,6 +241,7 @@ mod tests {
                 ty: ts_aot_core::TypeId::from_raw(7),
                 span: Span::new(span_offset, span_offset + 1),
             }),
+            narrowed: false,
         }
     }
 

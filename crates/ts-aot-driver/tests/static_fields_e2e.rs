@@ -12,6 +12,17 @@ fn compile_module(source: &str) -> ts_aot_driver::DriverOutput {
     )
 }
 
+fn compile_script(source: &str) -> ts_aot_driver::DriverOutput {
+    Driver::new().compile_source(
+        "test.ts",
+        source,
+        &CompileOptions {
+            emit: EmitStage::Rust,
+            module: false,
+        },
+    )
+}
+
 fn rust_of(source: &str) -> String {
     let out = compile_module(source);
     assert!(
@@ -43,6 +54,63 @@ fn crate_rust_of(source: &str) -> String {
 
 fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn push_struct_field(segment: &str, names: &mut Vec<String>) {
+    let segment = segment.trim();
+    let segment = match segment.strip_prefix("pub") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+        _ => segment,
+    };
+    if segment.is_empty() {
+        return;
+    }
+    if let Some((name, _)) = segment.split_once(':') {
+        names.push(name.trim().to_owned());
+    }
+}
+
+fn struct_field_names(rust: &str, name: &str) -> Vec<String> {
+    let marker = format!("struct {name} {{");
+    let start = rust
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no `{marker}` in generated code:\n{rust}"))
+        + marker.len();
+    let mut depth = 1i32;
+    let mut end = rust.len();
+    for (i, ch) in rust[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &rust[start..end];
+    let mut names = Vec::new();
+    let mut segment = 0usize;
+    let mut angle = 0i32;
+    let mut paren = 0i32;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '<' => angle += 1,
+            '>' => angle -= 1,
+            '(' => paren += 1,
+            ')' => paren -= 1,
+            ',' if angle == 0 && paren == 0 => {
+                push_struct_field(&body[segment..i], &mut names);
+                segment = i + 1;
+            }
+            _ => {}
+        }
+    }
+    push_struct_field(&body[segment..], &mut names);
+    names
 }
 
 #[test]
@@ -227,9 +295,15 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let flat = normalized(&rust);
+    let field_names = struct_field_names(&rust, "Box");
+    assert_eq!(
+        field_names,
+        vec!["size".to_owned()],
+        "the instance struct must hold exactly its own fields (`size`); got {field_names:?} in:\n{flat}"
+    );
     assert!(
-        flat.contains("structBox{pubsize:f64,}"),
-        "the instance struct keeps only its own fields; got:\n{flat}"
+        !field_names.iter().any(|name| name == "made"),
+        "the static field must not be stored on the instance struct; got {field_names:?} in:\n{flat}"
     );
 
     check_generated_crate("static_fields_instance", &rust);
@@ -1884,5 +1958,175 @@ fn main() {
     let rust = crate_rust_of(SOURCE);
     check_generated_crate("not_class_values", &rust);
     let stdout = run_generated_crate("not_class_values", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_lazy_struct_global_reads_its_default_before_module_init() {
+    const SOURCE: &str = "class C { x: number = 3; } let g: C = new C(); \
+         export function got(): number { return g.x; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(lazy_before_init::got(&ctx), 0.0);
+    lazy_before_init::__ts_aot_init();
+    assert_eq!(lazy_before_init::got(&ctx), 3.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains(
+            "get_or_insert_with(||C{x:::std::rc::Rc::new(::core::cell::RefCell::new(0.0))})"
+        ),
+        "a struct-typed global without a static initializer must lazily build the default instance \
+         through `get_or_insert_with`; got:\n{flat}"
+    );
+    check_generated_crate("lazy_before_init", &rust);
+    let stdout = run_generated_crate("lazy_before_init", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_struct_global_initialized_from_another_struct_global_runs_in_the_module_init() {
+    const SOURCE: &str = "class C { x: number = 0; } \
+         let a: C = new C(); a.x = 5; let b: C = a; \
+         export function got(): number { return b.x; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(struct_global_copy::got(&ctx), 0.0);
+    struct_global_copy::__ts_aot_init();
+    assert_eq!(struct_global_copy::got(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    check_generated_crate("struct_global_copy", &rust);
+    let stdout = run_generated_crate("struct_global_copy", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+fn assert_struct_global_init_is_rejected(out: &ts_aot_driver::DriverOutput, expected: &str) {
+    assert!(
+        out.has_errors(),
+        "a struct global whose initializer cannot be its lazy default must be reported; got {:?}",
+        out.diagnostics
+    );
+    let codes: Vec<&str> = out.diagnostics.iter().map(|d| d.code.as_str()).collect();
+    assert_eq!(
+        codes,
+        vec!["E0300"],
+        "the unrepresentable struct-global default must be the only diagnostic; got {codes:?}"
+    );
+    let message = out
+        .diagnostics
+        .iter()
+        .find(|d| d.code.as_str() == "E0300")
+        .map(|d| d.message.clone())
+        .expect("expected an E0300 diagnostic");
+    assert!(
+        message.contains("struct-typed global") && message.contains(expected),
+        "the diagnostic must name the initializer shape, got: {message}"
+    );
+    assert!(
+        message.contains("| null") && message.contains("__tla_main"),
+        "the diagnostic must tell the user to declare the global as `<struct> | null` or to \
+         initialize it in the module body; got: {message}"
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a rejected struct-global default must not emit Rust source"
+    );
+}
+
+#[test]
+fn a_null_initialized_struct_global_is_rejected() {
+    const SOURCE: &str = "class C { x: number = 0; } let g: C = null; \
+         export function got(): number { return g.x; }";
+    let out = compile_module(SOURCE);
+    assert_struct_global_init_is_rejected(&out, "`null`");
+}
+
+#[test]
+fn an_initialized_struct_global_with_a_number_const_init_is_rejected() {
+    const SOURCE: &str = "class C { x: number = 0; } let g: C = 7; \
+         export function got(): number { return g.x; }";
+    let out = compile_module(SOURCE);
+    assert_struct_global_init_is_rejected(&out, "a number");
+}
+
+#[test]
+fn an_initialized_struct_global_with_a_boolean_const_init_is_rejected() {
+    const SOURCE: &str = "class C { x: number = 0; } let g: C = true; \
+         export function got(): number { return g.x; }";
+    let out = compile_module(SOURCE);
+    assert_struct_global_init_is_rejected(&out, "a boolean");
+}
+
+#[test]
+fn a_script_mode_static_field_with_a_number_const_init_is_rejected() {
+    const SOURCE: &str = "class C { x: number = 0; static c: C = 7; } \
+         function got(): number { return C.c.x; }";
+    let out = compile_script(SOURCE);
+    assert_struct_global_init_is_rejected(&out, "a number");
+}
+
+#[test]
+fn an_optional_struct_global_keeps_its_own_option_representation() {
+    const SOURCE: &str = "class C { x: number = 5; } let g: C | null = null; \
+         export function set(): void { g = new C(); } \
+         export function isNull(): boolean { return g === null; } \
+         export function readOr(v: number): number { return g?.x ?? v; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(optional_struct_global::isNull(&ctx), true);
+    assert_eq!(optional_struct_global::readOr(&ctx, 9.0), 9.0);
+    optional_struct_global::set(&ctx);
+    assert_eq!(optional_struct_global::isNull(&ctx), false);
+    assert_eq!(optional_struct_global::readOr(&ctx, 9.0), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("staticmutg:Option<C>=::core::option::Option::None"),
+        "a `C | null` global keeps its own `Option` storage; got:\n{flat}"
+    );
+    assert!(
+        flat.contains("unsafe{g.clone()}")
+            && flat.contains("unsafe{g=::core::option::Option::Some("),
+        "a `C | null` global keeps its direct `Option` reads and writes; got:\n{flat}"
+    );
+    assert!(
+        !flat.contains("get_or_insert_with"),
+        "a `C | null` global must not go through the lazy struct accessor; got:\n{flat}"
+    );
+    check_generated_crate("optional_struct_global", &rust);
+    let stdout = run_generated_crate("optional_struct_global", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

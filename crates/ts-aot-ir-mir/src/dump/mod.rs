@@ -239,6 +239,7 @@ mod tests {
                 name: Atom::new_inline("2"),
                 ty: TypeId::from_raw(1),
                 mutable: false,
+                narrowed: false,
             }],
             block: MirBlock {
                 stmts: vec![MirStmt::Let {

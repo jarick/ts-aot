@@ -162,7 +162,12 @@ fn main() {
     assert_eq!(backend_compare_neg_string::add(&ctx, 2, 3), 5.0);
     assert_eq!(backend_compare_neg_string::negLocal(&ctx, 5), -5.0);
     assert_eq!(
-        backend_compare_neg_string::negField(&ctx, backend_compare_neg_string::Box { v: 7 }),
+        backend_compare_neg_string::negField(
+            &ctx,
+            backend_compare_neg_string::Box {
+                v: ::std::rc::Rc::new(::core::cell::RefCell::new(7)),
+            },
+        ),
         -7.0
     );
     assert_eq!(backend_compare_neg_string::negCall(&ctx, 4), -4.0);
@@ -186,7 +191,7 @@ fn main() {
         "`-y` on an `i64` local must still be cast; got:\n{rust}"
     );
     assert!(
-        flat.contains("((-(o.v))asf64)"),
+        flat.contains("((-(o.v.borrow().clone()))asf64)"),
         "`-o.v` on an `i64` field must still be cast; got:\n{rust}"
     );
     assert!(

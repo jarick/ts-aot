@@ -90,6 +90,7 @@ pub fn count_runtime_ops(mir: &MirProgram, op: RuntimeOp) -> usize {
                     }
                 }
                 MirStmt::Let { .. }
+                | MirStmt::LetInfer { .. }
                 | MirStmt::Assign { .. }
                 | MirStmt::Expr(_)
                 | MirStmt::Return(_)

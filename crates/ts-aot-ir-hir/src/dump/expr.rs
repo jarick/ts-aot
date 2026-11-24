@@ -20,12 +20,19 @@ pub(crate) fn dump_stmt(stmt: &HirStmt, d: &mut Dumper) {
             d.pop();
             d.line("}");
         }
-        HirStmt::Let { id, name, ty, init } => {
+        HirStmt::Let {
+            id,
+            name,
+            ty,
+            init,
+            narrowed,
+        } => {
             d.write(&format!(
-                "let {} (id={}): {}",
+                "let {} (id={}): {} narrowed={}",
                 name.as_str(),
                 id.raw(),
-                ty.raw()
+                ty.raw(),
+                narrowed
             ));
             if let Some(init) = init {
                 d.write(" = ");
@@ -600,7 +607,19 @@ mod tests {
             None,
         );
         let text = dump(vec![s]);
-        assert_eq!(text, "let x (id=0): 3\n");
+        assert_eq!(text, "let x (id=0): 3 narrowed=false\n");
+    }
+
+    #[test]
+    fn dump_narrowed_let_stmt_marks_the_binding() {
+        let s = HirStmt::narrowed_let(
+            LocalId::from_raw(1),
+            Atom::new_inline("x"),
+            TypeId::from_raw(3),
+            None,
+        );
+        let text = dump(vec![s]);
+        assert_eq!(text, "let x (id=1): 3 narrowed=true\n");
     }
 
     #[test]
@@ -612,7 +631,7 @@ mod tests {
             Some(HirExpr::Int(42, Span::default())),
         );
         let text = dump(vec![s]);
-        assert!(text.contains("let y (id=2): 3 = 42"));
+        assert!(text.contains("let y (id=2): 3 narrowed=false = 42"));
     }
 
     #[test]

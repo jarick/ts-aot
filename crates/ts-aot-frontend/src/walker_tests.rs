@@ -2948,6 +2948,7 @@ fn body_walker_lets_binding_gets_local_id_and_init() {
             name,
             ty,
             init: Some(HirExpr::Int(v, _)),
+            ..
         } => {
             assert_eq!(*id, LocalId::from_raw(0));
             assert_eq!(*name, Atom::from("x"));

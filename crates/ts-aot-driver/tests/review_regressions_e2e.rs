@@ -1,5 +1,5 @@
 use ts_aot_driver::{CompileOptions, Driver, EmitStage};
-use ts_aot_test_support::run_generated_crate;
+use ts_aot_test_support::{check_generated_crate, run_generated_crate};
 
 fn compile(source: &str) -> ts_aot_driver::DriverOutput {
     Driver::new().compile_source(
@@ -29,6 +29,45 @@ fn main() {{
 "
     );
     let _ = run_generated_crate("regression", &output.rust_source.unwrap(), &main);
+}
+
+#[test]
+fn a_discarded_async_mutating_method_call_still_runs() {
+    let source = "class Counter { n: number = 0; \
+             async add(x: number): Promise<void> { this.n = this.n + x; } } \
+         export async function got(): Promise<number> { \
+             const c = new Counter(); \
+             c.add(5); \
+             return c.n; \
+         }";
+    let output = compile(source);
+    assert!(!output.has_errors(), "{:?}", output.diagnostics);
+    let rust = output
+        .rust_source
+        .expect("emit-rust must populate rust_source");
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("__ts_aot_run_or_poll"),
+        "a discarded async mutating method call must be driven through the promise helper, or the \
+         generated `Future` is dropped and the method body never runs; got:\n{rust}"
+    );
+    let main = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    let promise = ts_aot_runtime::__ts_aot_run_or_poll(regression_async::got(&ctx));
+    assert_eq!(ts_aot_runtime::__ts_aot_await_value::<f64>(&promise), 5.0);
+    println!("ok");
+}
+"#;
+    let stdout = run_generated_crate("regression_async", &rust, main);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 
 #[test]
@@ -213,5 +252,61 @@ fn constructor_arguments_make_receiver_reassignment_analysis_opaque() {
             .any(|d| d.code.as_str() == "E0419"),
         "{:?}",
         output.diagnostics
+    );
+}
+
+#[test]
+fn array_push_stages_an_item_that_reads_the_receiver_cell() {
+    run(
+        "class Bag { a: number[]; constructor(a: number[]) { this.a = a; } add(): void { this.a.push(this.a[0]); } } \
+         export function got(): number { let xs: number[] = []; xs.push(1); xs.push(2); let b = new Bag(xs); b.add(); return b.a.length; }",
+        3.0,
+    );
+}
+
+#[test]
+fn a_nullable_struct_global_is_a_mutable_placeholder() {
+    let source = "class C { x: number = 0; } let g: C | null = null; \
+         export function got(): number { if (g === null) { return 0; } return 1; } \
+         export function read_x(): number { return g?.x ?? -1; } \
+         export function set_x(v: number): number { const c = new C(); c.x = v; g = c; return read_x(); }";
+    let output = compile(source);
+    assert!(!output.has_errors(), "{:?}", output.diagnostics);
+    let rust = output.rust_source.unwrap();
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("staticmutg:Option<C>=::core::option::Option::None;"),
+        "a global whose type holds a class instance must be a `static mut` placeholder, because an \
+         `Rc<RefCell<..>>` field is not `Sync` and a plain `static` would be rejected; got:\n{rust}"
+    );
+    check_generated_crate("nullable_struct_global", &rust);
+    let main = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(nullable_struct_global::got(&ctx), 0.0);
+    assert_eq!(nullable_struct_global::read_x(&ctx), -1.0);
+    assert_eq!(nullable_struct_global::set_x(&ctx, 42.0), 42.0);
+    assert_eq!(nullable_struct_global::read_x(&ctx), 42.0);
+    assert_eq!(nullable_struct_global::got(&ctx), 1.0);
+    println!("ok");
+}
+"#;
+    let stdout = run_generated_crate("nullable_struct_global", &rust, main);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn an_instance_argument_is_mutated_through_the_callee() {
+    run(
+        "class C { x: number = 0; } function bump(c: C): void { c.x = c.x + 3; } \
+         export function got(): number { const c = new C(); bump(c); return c.x; }",
+        3.0,
     );
 }

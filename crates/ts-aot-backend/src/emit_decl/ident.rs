@@ -1,11 +1,45 @@
 use proc_macro2::{Ident, Span};
 
-use ts_aot_core::Atom;
+use std::collections::HashSet;
+
+use ts_aot_core::{Atom, LocalId};
 
 pub(super) fn ident_from(atom: &Atom) -> Ident {
     let raw = atom.as_str();
     let sanitized = sanitize_ident(raw);
     Ident::new(&sanitized, Span::call_site())
+}
+
+pub(super) fn unique_local_ident(
+    atom: &Atom,
+    forbidden: &HashSet<Ident>,
+    taken: &mut HashSet<Ident>,
+) -> Ident {
+    let mut candidate = ident_from(atom);
+    if candidate == "_" {
+        return candidate;
+    }
+    while forbidden.contains(&candidate) || !taken.insert(candidate.clone()) {
+        candidate = Ident::new(&format!("{candidate}_"), Span::call_site());
+    }
+    candidate
+}
+
+pub(super) fn bound_local_ident(
+    atom: &Atom,
+    id: LocalId,
+    forbidden: &HashSet<Ident>,
+    taken: &mut HashSet<Ident>,
+) -> Ident {
+    let candidate = unique_local_ident(atom, forbidden, taken);
+    if candidate != "_" {
+        return candidate;
+    }
+    let mut candidate = Ident::new(&format!("__tmp{}", id.raw()), Span::call_site());
+    while forbidden.contains(&candidate) || !taken.insert(candidate.clone()) {
+        candidate = Ident::new(&format!("{candidate}_"), Span::call_site());
+    }
+    candidate
 }
 
 pub(super) fn sanitize_ident(raw: &str) -> String {

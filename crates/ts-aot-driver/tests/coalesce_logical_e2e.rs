@@ -45,6 +45,28 @@ fn normalized(rust: &str) -> String {
     rust.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+fn first_call_arg<'a>(rust: &'a str, call: &str) -> &'a str {
+    let start = rust
+        .find(call)
+        .unwrap_or_else(|| panic!("no `{call}` in generated code:\n{rust}"))
+        + call.len();
+    let mut depth = 1i32;
+    for (i, ch) in rust[start..].char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rust[start..start + i];
+                }
+            }
+            ',' if depth == 1 => return &rust[start..start + i],
+            _ => {}
+        }
+    }
+    panic!("unbalanced `{call}` call in generated code:\n{rust}");
+}
+
 #[test]
 fn negating_an_absent_optional_is_true() {
     const SOURCE: &str = "
@@ -846,12 +868,16 @@ fn main() {
     let rust = rust_of(SOURCE);
     let flat = normalized(&rust);
     assert!(
-        flat.contains("fnC__set_<'a>(&mutself,"),
-        "a mutating method borrows its receiver; got:\n{flat}"
+        flat.contains("fnC__set_<'a>(&self,"),
+        "a mutating method takes a shared receiver; got:\n{flat}"
     );
     assert!(
-        flat.contains("C::C__set_(&mut(c),"),
-        "the call site borrows the caller's instance; got:\n{flat}"
+        flat.contains("C::C__set_(&(c),"),
+        "the call site passes a shared borrow of the caller's instance; got:\n{flat}"
+    );
+    assert!(
+        !flat.contains("__ts_receiver") && !flat.contains("WriteBack"),
+        "no mutable receiver capture or write-back guard may be emitted; got:\n{flat}"
     );
 
     check_generated_crate("mutating_method", &rust);
@@ -904,19 +930,19 @@ fn main() {
 "#;
     let rust = rust_of(GLOBAL_RECEIVER);
     let flat = normalized(&rust);
-    let capture_at = flat
-        .find("addr_of_mut!(held)")
-        .expect("the global receiver must be captured as an address before its arguments run");
-    let borrow_at = flat
-        .find("Holder__set_(&mut(*__ts_receiver)")
-        .expect("the setter must run on the captured receiver");
+    let receiver = first_call_arg(&flat, "Holder__set_(");
     assert!(
-        capture_at < borrow_at,
-        "the receiver must be captured before it is borrowed; got:\n{flat}"
+        receiver.starts_with("&(") && receiver.contains("get_or_insert_with"),
+        "the setter must run on a shared borrow of the lazily initialized global receiver; got \
+         receiver `{receiver}` in:\n{flat}"
     );
     assert!(
-        !flat.contains("Holder__set_(&mut(held)"),
-        "the receiver must not be re-read after the arguments; got:\n{flat}"
+        !flat.contains("Holder__set_(&mut("),
+        "the receiver must never be borrowed mutably; got:\n{flat}"
+    );
+    assert!(
+        !flat.contains("__ts_receiver"),
+        "a mutable receiver is no longer captured through a raw address; got:\n{flat}"
     );
     check_generated_crate("global_receiver", &rust);
     let stdout = run_generated_crate("global_receiver", &rust, GLOBAL_MAIN);
@@ -955,8 +981,12 @@ fn main() {
     let rust = crate_rust_of(SOURCE);
     let flat = normalized(&rust);
     assert!(
-        flat.contains("unsafe{held.as_mut().map("),
-        "the chain borrows the receiver instead of cloning it; got:\n{flat}"
+        flat.contains(
+            "{let__ts_recv_opt=(unsafe{held.clone()}).clone();__ts_recv_opt.as_ref().map("
+        ),
+        "the chain must clone the optional receiver into a local and map a shared borrow over that \
+         local instead of taking an exclusive borrow or holding a `Ref` across the callee; \
+         got:\n{flat}"
     );
     check_generated_crate("optional_chain_mutation", &rust);
     let stdout = run_generated_crate("optional_chain_mutation", &rust, MAIN);

@@ -418,6 +418,7 @@ fn function_call_method_in_let_init_emits_call_exactly_once() {
             ty: unit_ty(),
             span: Span::default(),
         }),
+        narrowed: false,
     }]);
     let (mir_block, _) = c.convert_block(&block, &mut empty_types(), &mut cx);
 

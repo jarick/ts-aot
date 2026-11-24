@@ -416,6 +416,7 @@ fn local_decl_carries_id_name_ty_mutable() {
         name: Atom::new_inline("2"),
         ty: TypeId::from_raw(3),
         mutable: true,
+        narrowed: false,
     };
     assert_eq!(d.id, LocalId::from_raw(1));
     assert_eq!(d.name, Atom::new_inline("2"));

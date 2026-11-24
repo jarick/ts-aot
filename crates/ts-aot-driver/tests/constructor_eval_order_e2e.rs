@@ -38,6 +38,46 @@ fn function_body(rust: &str, name: &str) -> String {
     tail[..end].to_owned()
 }
 
+fn struct_literal<'a>(body: &'a str, marker: &str) -> &'a str {
+    let start = body
+        .find(marker)
+        .unwrap_or_else(|| panic!("no `{marker}` in generated body:\n{body}"));
+    let mut depth = 0i32;
+    for (i, ch) in body[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &body[start..=start + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced `{marker}` literal in generated body:\n{body}");
+}
+
+fn assert_initialized(literal: &str, fields: &[&str], body: &str) {
+    assert!(
+        !literal.contains(".."),
+        "the allocated struct must not fill its fields through struct-update syntax; got \
+         `{literal}` in:\n{body}"
+    );
+    assert!(
+        !literal.contains("Default::default"),
+        "the allocated struct must initialize its fields explicitly instead of falling back to \
+         `Default::default`; got `{literal}` in:\n{body}"
+    );
+    for field in fields {
+        assert!(
+            literal.contains(&format!("{field}:")),
+            "the allocated struct must be initialized with its `{field}` field; got `{literal}` \
+             in:\n{body}"
+        );
+    }
+}
+
 #[test]
 fn an_argument_is_materialized_before_the_instance_allocation() {
     const SOURCE: &str = "let order: number = 0; \
@@ -61,11 +101,12 @@ fn an_argument_is_materialized_before_the_instance_allocation() {
         .find("arg(__ctx)")
         .unwrap_or_else(|| panic!("the argument call must survive; got:\n{body}"));
     let alloc_at = body
-        .find("C{n:0.0}")
+        .find("C{")
         .unwrap_or_else(|| panic!("the allocation must stay; got:\n{body}"));
     let ctor_at = body
         .find("C::C__constructor(")
         .unwrap_or_else(|| panic!("the constructor call must stay; got:\n{body}"));
+    assert_initialized(struct_literal(&body, "C{"), &["n"], &body);
     assert!(
         arg_at < alloc_at,
         "the argument must be evaluated before the instance (and so before the field \
@@ -158,8 +199,9 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let body = function_body(&rust, "run3");
-    let alloc_at = body.find("E{v:3.0}").expect("allocation with initializer");
+    let alloc_at = body.find("E{").expect("allocation with initializer");
     let ctor_at = body.find("E::E__constructor(").expect("constructor call");
+    assert_initialized(struct_literal(&body, "E{"), &["v"], &body);
     assert!(
         alloc_at < ctor_at,
         "without arguments the allocation still precedes the call; got:\n{body}"
@@ -193,7 +235,8 @@ fn main() {
     let rust = rust_of(SOURCE);
     let body = function_body(&rust, "run4");
     let arg_at = body.find("bump(__ctx)").expect("argument call");
-    let alloc_at = body.find("F{v:0.0}").expect("allocation");
+    let alloc_at = body.find("F{").expect("allocation");
+    assert_initialized(struct_literal(&body, "F{"), &["v"], &body);
     assert!(
         arg_at < alloc_at,
         "the argument must be evaluated before the instance; got:\n{body}"
@@ -232,7 +275,8 @@ fn main() {
     let body = function_body(&rust, "run6");
     let one_at = body.find("one(__ctx)").expect("first argument");
     let two_at = body.find("two(__ctx)").expect("second argument");
-    let alloc_at = body.find("K{a:0.0,b:0.0}").expect("allocation");
+    let alloc_at = body.find("K{").expect("allocation");
+    assert_initialized(struct_literal(&body, "K{"), &["a", "b"], &body);
     assert!(
         one_at < two_at && two_at < alloc_at,
         "arguments must be evaluated left to right, before the instance; got:\n{body}"

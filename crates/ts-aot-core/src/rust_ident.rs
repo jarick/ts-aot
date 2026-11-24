@@ -41,6 +41,8 @@ pub fn escape_rust_ident(raw: &str) -> String {
     out
 }
 
+pub const NARROWED_LOCAL_PREFIX: &str = "_narrowed_";
+
 #[must_use]
 pub fn is_rust_keyword(s: &str) -> bool {
     matches!(

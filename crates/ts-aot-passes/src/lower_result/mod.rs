@@ -110,6 +110,7 @@ fn rewrite_stmt(stmt: &mut MirStmt, result_ty: TypeId, err_ty: TypeId) {
             }
         }
         MirStmt::Let { .. }
+        | MirStmt::LetInfer { .. }
         | MirStmt::Assign { .. }
         | MirStmt::Expr(_)
         | MirStmt::ReturnResultErr { .. }

@@ -10,6 +10,62 @@ fn compile(source: &str) -> DriverOutput {
     Driver::new().compile_source("test.ts", source, &CompileOptions::default())
 }
 
+fn first_call_arg<'a>(rust: &'a str, call: &str) -> &'a str {
+    let start = rust
+        .find(call)
+        .unwrap_or_else(|| panic!("no `{call}` in generated code:\n{rust}"))
+        + call.len();
+    let mut depth = 1i32;
+    for (i, ch) in rust[start..].char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rust[start..start + i];
+                }
+            }
+            ',' if depth == 1 => return &rust[start..start + i],
+            _ => {}
+        }
+    }
+    panic!("unbalanced `{call}` call in generated code:\n{rust}");
+}
+
+fn second_call_arg<'a>(rust: &'a str, call: &str) -> &'a str {
+    let start = rust
+        .find(call)
+        .unwrap_or_else(|| panic!("no `{call}` in generated code:\n{rust}"))
+        + call.len();
+    let mut depth = 1i32;
+    let mut args_seen = 0usize;
+    let mut arg_start = start;
+    for (i, ch) in rust[start..].char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if args_seen == 1 {
+                        return &rust[arg_start..start + i];
+                    }
+                    break;
+                }
+            }
+            ',' if depth == 1 => {
+                args_seen += 1;
+                if args_seen == 1 {
+                    arg_start = start + i + 1;
+                } else {
+                    return &rust[arg_start..start + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("no second argument in `{call}` call in generated code:\n{rust}");
+}
+
 #[test]
 fn empty_source_compiles_without_errors() {
     let out = compile("");
@@ -1084,7 +1140,10 @@ fn e2e_object_literal_lowers_to_anonymous_struct() {
         "an object literal must lower to an anonymous struct, got:\n{rust}"
     );
     assert!(
-        rust.contains("ObjectLit0 { a : 1 , b : true"),
+        rust.contains(
+            "ObjectLit0 { a : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             b : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (true))"
+        ),
         "the anonymous struct must be built with the literal's fields, got:\n{rust}"
     );
 }
@@ -1105,7 +1164,7 @@ fn e2e_object_literal_field_access_is_not_p0013() {
     );
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("return o . a ;"),
+        rust.contains("return o . a . borrow () . clone () ;"),
         "field access must resolve to the struct field, got:\n{rust}"
     );
 }
@@ -1118,7 +1177,10 @@ fn e2e_object_literal_type_assertion_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2"),
+        rust.contains(
+            "Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "a type-asserted object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1135,7 +1197,10 @@ fn e2e_object_literal_typed_let_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2"),
+        rust.contains(
+            "Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "a typed `let` object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1152,7 +1217,10 @@ fn e2e_object_literal_assignment_uses_target_struct() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2"),
+        rust.contains(
+            "Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "an assigned object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
@@ -1168,7 +1236,10 @@ fn e2e_object_literal_return_uses_function_return_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2"),
+        rust.contains(
+            "Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "a returned object literal must lower to the function's return struct, got:\n{rust}"
     );
     assert!(
@@ -1187,7 +1258,10 @@ fn e2e_object_literal_call_argument_uses_param_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("g (__ctx , Point { x : 1 , y : 2"),
+        rust.contains(
+            "g (__ctx , Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+                       y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "an object-literal argument must lower to the parameter's struct, got:\n{rust}"
     );
     assert!(
@@ -1202,7 +1276,7 @@ fn e2e_nested_object_literal_field_type_is_inferred() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("pub a : ObjectLit"),
+        rust.contains("pub a : :: std :: rc :: Rc < :: core :: cell :: RefCell < ObjectLit"),
         "the outer struct field must reference the inferred nested struct type, got:\n{rust}"
     );
 }
@@ -1216,7 +1290,9 @@ fn e2e_typed_nested_object_literal_uses_field_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Inner { a : 1"),
+        rust.contains(
+            "Inner { a : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1))"
+        ),
         "the nested literal must lower to the declared field struct `Inner`, got:\n{rust}"
     );
     assert!(
@@ -1297,11 +1373,14 @@ fn e2e_object_literal_type_assertion_let_sets_local_type() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("Point { x : 1 , y : 2"),
+        rust.contains(
+            "Point { x : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (1)) , \
+             y : :: std :: rc :: Rc :: new (:: core :: cell :: RefCell :: new (2))"
+        ),
         "the asserted object literal must lower to the target struct, got:\n{rust}"
     );
     assert!(
-        rust.contains("return p . x ;"),
+        rust.contains("return p . x . borrow () . clone () ;"),
         "field access must resolve after a type-asserted let, got:\n{rust}"
     );
 }
@@ -1440,15 +1519,36 @@ fn e2e_method_on_class_typed_global_resolves_via_declared_type() {
     );
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        rust.contains("C__foo (obj . clone () , __ctx)"),
-        "a method call on a class-typed global must resolve via the declared global type and \
-         clone the non-Copy static receiver (moving out of a static is E0507), got:\n{rust}"
+        norm.contains("pubstaticmutobj:::core::option::Option<C>=::core::option::Option::None"),
+        "a class-typed global must be a lazily initialized `Option` placeholder because the \
+         instance holds `Rc<RefCell<_>>` fields with no const initializer; got:\n{rust}"
     );
+    let foo_receiver = first_call_arg(&norm, "C::C__foo(");
     assert!(
-        rust.contains("C__get_y (obj . clone () , __ctx)"),
+        foo_receiver.contains("get_or_insert_with") && foo_receiver.ends_with(".clone()"),
+        "a method call on a class-typed global must resolve via the declared global type and read \
+         the lazily initialized static by clone (moving out of a static is E0507); got receiver \
+         `{foo_receiver}` in:\n{rust}"
+    );
+    assert_eq!(
+        second_call_arg(&norm, "C::C__foo("),
+        "__ctx",
+        "the method call must pass the runtime context as the argument right after the receiver; \
+         got:\n{rust}"
+    );
+    let getter_receiver = first_call_arg(&norm, "C::C__get_y(");
+    assert!(
+        getter_receiver.contains("get_or_insert_with") && getter_receiver.ends_with(".clone()"),
         "an accessor read on a class-typed global must resolve via the declared global type and \
-         clone the non-Copy static receiver, got:\n{rust}"
+         read the lazily initialized static by clone; got receiver `{getter_receiver}` in:\n{rust}"
+    );
+    assert_eq!(
+        second_call_arg(&norm, "C::C__get_y("),
+        "__ctx",
+        "the accessor call must pass the runtime context as the argument right after the receiver; \
+         got:\n{rust}"
     );
 }
 
@@ -1502,8 +1602,8 @@ fn e2e_setter_assignment_evaluates_to_assigned_value() {
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
     assert!(
-        rust.contains("C__set_y (& mut (c)"),
-        "the setter must be invoked on the caller's instance (borrowed), got:\n{rust}"
+        rust.contains("C__set_y (& (c)"),
+        "the setter must be invoked on the caller's instance through a shared borrow, got:\n{rust}"
     );
     assert!(
         !rust.contains("z = C__set_y"),
@@ -1524,13 +1624,14 @@ fn e2e_accessor_compound_update_routes_through_getter_and_setter() {
         "a compound accessor update must read through the getter, got:\n{rust}"
     );
     assert!(
-        rust.contains("C__set_y (& mut (c)"),
-        "a compound accessor update must write through the setter on the caller's instance, got:\n{rust}"
+        rust.contains("C__set_y (& (c)"),
+        "a compound accessor update must write through the setter on the caller's instance through \
+         a shared borrow, got:\n{rust}"
     );
 }
 
 #[test]
-fn e2e_accessor_compound_update_captures_the_global_receiver_address() {
+fn e2e_accessor_compound_update_borrows_the_lazily_initialized_global_receiver() {
     let out = compile(
         "class C { x: i64 = 0; get y(): i64 { return this.x; } set y(v: i64) { this.x = v; } } \
          let g: C; \
@@ -1538,24 +1639,35 @@ fn e2e_accessor_compound_update_captures_the_global_receiver_address() {
     );
     assert!(!out.has_errors(), "got {:?}", out.diagnostics);
     let rust = out.rust_source.expect("rust_source");
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        rust.contains("C__get_y (unsafe { g . clone () } , __ctx)"),
-        "a global receiver is read through a direct clone (moving out of a static is E0507), \
+        norm.contains("pubstaticmutg:::core::option::Option<C>=::core::option::Option::None"),
+        "a struct global is stored as a lazily initialized `Option` because its `Rc<RefCell<_>>` \
+         fields have no const initializer and the `Rc` makes the struct non-`Sync`; got:\n{rust}"
+    );
+    let getter_receiver = first_call_arg(&norm, "C::C__get_y(");
+    assert!(
+        getter_receiver.contains("get_or_insert_with") && getter_receiver.ends_with(".clone()"),
+        "a global receiver is read through a clone of the lazily initialized instance; got \
+         receiver `{getter_receiver}` in:\n{rust}"
+    );
+    assert_eq!(
+        second_call_arg(&norm, "C::C__get_y("),
+        "__ctx",
+        "the getter must pass the runtime context as the argument right after the receiver; \
          got:\n{rust}"
     );
-    let capture_at = rust
-        .find("addr_of_mut ! (g)")
-        .expect("a global receiver is captured as an address before the arguments run");
-    let call_at = rust
-        .find("C__set_y (& mut (* __ts_receiver) , __ctx")
-        .expect("a global receiver is forwarded to the setter through the captured address");
+    let setter_receiver = first_call_arg(&norm, "C::C__set_y(");
     assert!(
-        capture_at < call_at,
-        "the captured address must be taken before the setter runs, got:\n{rust}"
+        setter_receiver.starts_with("&(") && setter_receiver.contains("get_or_insert_with"),
+        "a global receiver is forwarded to the setter through a shared borrow of the lazily \
+         initialized instance; got receiver `{setter_receiver}` in:\n{rust}"
     );
-    assert!(
-        !rust.contains("C__set_y (& mut (g) , __ctx"),
-        "the receiver must not be re-read after the arguments, got:\n{rust}"
+    assert_eq!(
+        second_call_arg(&norm, "C::C__set_y("),
+        "__ctx",
+        "the setter must pass the runtime context as the argument right after the receiver; \
+         got:\n{rust}"
     );
 }
 

@@ -218,7 +218,13 @@ impl ExprConverter {
                     );
                 }
             }
-            HirStmt::Let { id, name, ty, init } => {
+            HirStmt::Let {
+                id,
+                name,
+                ty,
+                init,
+                narrowed,
+            } => {
                 let new_id = self.map_local_id(*id);
                 let name = name.clone();
                 self.register_local_name(new_id, name.clone());
@@ -271,6 +277,7 @@ impl ExprConverter {
                     name,
                     ty: effective_ty,
                     mutable,
+                    narrowed: *narrowed,
                 });
                 out.push(MirStmt::Let {
                     local: new_id,
@@ -351,6 +358,7 @@ impl ExprConverter {
                     name: Atom::from(""),
                     ty: bool_ty,
                     mutable: true,
+                    narrowed: false,
                 });
                 let continue_flag = self.fresh_local();
                 final_locals.push(MirLocalDecl {
@@ -358,6 +366,7 @@ impl ExprConverter {
                     name: Atom::from(""),
                     ty: bool_ty,
                     mutable: true,
+                    narrowed: false,
                 });
 
                 let mut inner_stmts = vec![MirStmt::Let {
@@ -431,6 +440,7 @@ impl ExprConverter {
                     name: Atom::from(""),
                     ty: bool_ty,
                     mutable: true,
+                    narrowed: false,
                 });
                 let continue_flag = self.fresh_local();
                 final_locals.push(MirLocalDecl {
@@ -438,6 +448,7 @@ impl ExprConverter {
                     name: Atom::from(""),
                     ty: bool_ty,
                     mutable: true,
+                    narrowed: false,
                 });
 
                 let mut inner_stmts = vec![MirStmt::Let {
@@ -555,6 +566,7 @@ impl ExprConverter {
                     name: binding_name,
                     ty: item_ty,
                     mutable: false,
+                    narrowed: false,
                 });
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
@@ -615,6 +627,7 @@ impl ExprConverter {
                     name: binding_name,
                     ty: item_ty,
                     mutable: true,
+                    narrowed: false,
                 });
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
@@ -647,6 +660,7 @@ impl ExprConverter {
                     name: binding_name,
                     ty: string_ty,
                     mutable: false,
+                    narrowed: false,
                 });
                 let (body_mir, body_locals) = self.convert_stmt_block(
                     body,
@@ -825,6 +839,7 @@ impl ExprConverter {
                             name: binding.name.clone(),
                             ty: binding.ty,
                             mutable: false,
+                            narrowed: false,
                         });
                         new_id
                     });

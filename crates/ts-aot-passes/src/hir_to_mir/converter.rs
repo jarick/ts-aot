@@ -523,6 +523,7 @@ impl ExprConverter {
             name: Atom::from(""),
             ty,
             mutable,
+            narrowed: false,
         });
     }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirCallee, HirExpr};
 use ts_aot_ir_mir::{MirExpr, MirStmt, RuntimeOp};
 
@@ -172,7 +172,7 @@ impl ExprConverter {
             );
             return Some(MirExpr::Unit);
         }
-        if hir_root_local_id_of(&args[0]).is_none() {
+        if !hir_key_root_supported(&args[0]) {
             ctx.warning(
                 "E0406",
                 "WeakMap keys must be local variables; field access (a.b) and index access (a[i]) expressions are not supported as WeakMap keys because the runtime tracks key identity via a per-key Weak<()> binding allocated at the call site, which requires a local root. Struct literals, object literals, calls, and other non-local expressions are also not supported as WeakMap keys.".to_string(),
@@ -252,11 +252,8 @@ fn is_global_weakmap_reference(expr: &HirExpr) -> bool {
     matches!(expr, HirExpr::Global { name, .. } if name.as_str() == "WeakMap")
 }
 
-fn hir_root_local_id_of(expr: &HirExpr) -> Option<LocalId> {
-    match expr {
-        HirExpr::Local { id, .. } => Some(*id),
-        _ => None,
-    }
+fn hir_key_root_supported(expr: &HirExpr) -> bool {
+    matches!(expr, HirExpr::Local { .. } | HirExpr::Global { .. })
 }
 
 fn weakmap_key_value_types(

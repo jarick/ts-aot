@@ -225,6 +225,7 @@ mod tests {
                     name: Atom::new_inline("1"),
                     ty: TypeId::from_raw(2),
                     mutable: false,
+                    narrowed: false,
                 }],
                 block: crate::body::MirBlock::with(crate::body::MirStmt::Return(None)),
             },

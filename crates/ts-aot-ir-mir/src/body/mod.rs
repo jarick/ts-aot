@@ -44,6 +44,7 @@ pub struct MirLocalDecl {
     pub name: Atom,
     pub ty: TypeId,
     pub mutable: bool,
+    pub narrowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +54,10 @@ pub enum MirStmt {
         ty: TypeId,
         init: Option<MirExpr>,
         mutable: bool,
+    },
+    LetInfer {
+        local: LocalId,
+        init: MirExpr,
     },
     Assign {
         target: MirPlace,
@@ -503,6 +508,13 @@ pub enum RuntimeOp {
     BigIntNeq,
     BigIntToString,
     BigIntToNumber,
+    NumberToString,
+    NumberToFixed,
+    NumberToExponential,
+    NumberToPrecision,
+    ArraySlice,
+    ArrayIndexOf,
+    ThrowTypeError,
 }
 
 impl RuntimeOp {

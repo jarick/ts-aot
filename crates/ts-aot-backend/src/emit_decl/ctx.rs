@@ -11,7 +11,7 @@ use ts_aot_ir_mir::{
     MirPlaceBase, MirProgram, MirStmt, RuntimeOp,
 };
 
-use super::ident::{ident_from, sanitize_ident};
+use super::ident::{bound_local_ident, ident_from, sanitize_ident};
 use super::types::emit_type_id_with_ctx;
 
 pub(super) struct RuntimeCallSpec<'a> {
@@ -35,7 +35,10 @@ pub(super) struct EmitCtx {
     struct_field_names: HashMap<StructId, Vec<Atom>>,
     module_idents: Rc<HashSet<Ident>>,
     mutable_globals: HashSet<Atom>,
+    struct_globals: HashSet<Atom>,
+    direct_struct_globals: HashSet<Atom>,
     function_arity: HashMap<Atom, usize>,
+    function_symbols: HashSet<Atom>,
     global_tys: HashMap<Atom, TypeId>,
     struct_lifetimes: HashMap<StructId, bool>,
     fn_value_index: HashMap<TypeId, usize>,
@@ -117,6 +120,17 @@ fn type_needs_lifetime(ty: TypeId, types: &TypeTable, needs: &HashMap<StructId, 
     }
 }
 
+fn global_type_holds_struct(ty: TypeId, types: &TypeTable, depth: u32) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    match types.resolve(ty) {
+        Some(Type::Struct { .. }) => true,
+        Some(Type::Optional { inner, .. }) => global_type_holds_struct(*inner, types, depth - 1),
+        _ => false,
+    }
+}
+
 impl EmitCtx {
     pub(super) fn build(program: &MirProgram, types: &TypeTable) -> Self {
         let mut struct_names = HashMap::new();
@@ -158,12 +172,24 @@ impl EmitCtx {
         let mut function_arity = HashMap::new();
         let mut function_params: HashMap<FunctionId, Vec<TypeId>> = HashMap::new();
         let mut module_idents: HashSet<Ident> = HashSet::new();
+        let mut function_symbols: HashSet<Atom> = HashSet::new();
         for decl in &program.declarations {
             module_idents.insert(match decl {
                 MirDecl::Function(f) => ident_from(&f.name),
                 MirDecl::Struct(s) => ident_from(&s.name),
                 MirDecl::Global(g) => ident_from(&g.name),
             });
+            match decl {
+                MirDecl::Function(f) => {
+                    function_symbols.insert(f.name.clone());
+                }
+                MirDecl::Struct(s) => {
+                    for method in &s.methods {
+                        function_symbols.insert(method.name.clone());
+                    }
+                }
+                MirDecl::Global(_) => {}
+            }
         }
         for decl in &program.declarations {
             match decl {
@@ -220,6 +246,16 @@ impl EmitCtx {
         let (fn_value_index, fn_value_sigs, fn_value_variants, fn_value_of_fn, fn_value_adapters) =
             collect_fn_values(program, types);
         let struct_lifetimes = collect_struct_lifetimes(program, types);
+        let struct_globals: HashSet<Atom> = global_tys
+            .iter()
+            .filter(|(_, ty)| global_type_holds_struct(**ty, types, 16))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let direct_struct_globals: HashSet<Atom> = global_tys
+            .iter()
+            .filter(|(_, ty)| types.struct_id(**ty).is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
         let ctx = Self {
             struct_names,
             function_names,
@@ -233,8 +269,11 @@ impl EmitCtx {
             struct_field_names,
             module_idents: Rc::new(module_idents),
             mutable_globals,
+            struct_globals,
+            direct_struct_globals,
             global_tys,
             function_arity,
+            function_symbols,
             struct_lifetimes,
             fn_value_index,
             fn_value_sigs,
@@ -371,7 +410,11 @@ impl EmitCtx {
     }
 
     pub(super) fn is_mutable_global(&self, name: &Atom) -> bool {
-        self.mutable_globals.contains(name)
+        self.mutable_globals.contains(name) || self.struct_globals.contains(name)
+    }
+
+    pub(super) fn is_struct_global(&self, name: &Atom) -> bool {
+        self.direct_struct_globals.contains(name)
     }
 
     pub(super) fn global_ty(&self, name: &Atom) -> Option<TypeId> {
@@ -384,6 +427,10 @@ impl EmitCtx {
 
     pub(super) fn function_arity(&self, name: &Atom) -> Option<usize> {
         self.function_arity.get(name).copied()
+    }
+
+    pub(super) fn is_function_symbol(&self, name: &Atom) -> bool {
+        self.function_symbols.contains(name)
     }
 
     pub(super) fn struct_ident(&self, id: StructId) -> Ident {
@@ -432,7 +479,6 @@ impl EmitCtx {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub(super) struct BodyCtx {
     locals: HashMap<LocalId, Ident>,
     locals_ty: HashMap<LocalId, TypeId>,
@@ -441,8 +487,7 @@ pub(super) struct BodyCtx {
     module_idents: Rc<HashSet<Ident>>,
     self_param: Option<LocalId>,
     self_is_borrowed: bool,
-    is_generator: bool,
-    is_async_generator: bool,
+    kind: BodyKind,
     gen_co: Option<Ident>,
     ret_inner: TypeId,
     async_plain_ok: Option<TypeId>,
@@ -466,6 +511,25 @@ pub(super) struct BodyCtx {
     dynamic_locals: RefCell<HashSet<LocalId>>,
     dynamic_names: RefCell<HashSet<Atom>>,
     move_safe_locals: RefCell<HashSet<LocalId>>,
+    narrowed_origins: HashMap<LocalId, LocalId>,
+    copy_origins: RefCell<HashSet<(LocalId, LocalId)>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum BodyKind {
+    Plain,
+    Generator,
+    AsyncGenerator,
+}
+
+impl BodyKind {
+    fn is_generator(self) -> bool {
+        !matches!(self, BodyKind::Plain)
+    }
+
+    fn is_async_generator(self) -> bool {
+        matches!(self, BodyKind::AsyncGenerator)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -481,6 +545,15 @@ pub(super) struct SharedAccess {
     pub(super) field: Ident,
     pub(super) storage: SharedStorage,
     pub(super) ty: TypeId,
+    pub(super) source_name: Ident,
+    pub(super) liveness: Option<Ident>,
+}
+
+#[derive(Clone)]
+pub(super) enum EnvInit {
+    Empty,
+    Param(Ident),
+    Receiver,
 }
 
 #[derive(Clone)]
@@ -488,7 +561,7 @@ pub(super) struct EnvField {
     pub(super) field: Ident,
     pub(super) ty: TypeId,
     pub(super) storage: SharedStorage,
-    pub(super) param_init: Option<Ident>,
+    pub(super) init: EnvInit,
     pub(super) dynamic: bool,
 }
 
@@ -496,6 +569,13 @@ pub(super) struct OwnEnv {
     pub(super) env_ident: Ident,
     pub(super) env_type: Ident,
     pub(super) fields: Vec<EnvField>,
+    pub(super) liveness_fields: Vec<Ident>,
+}
+
+#[derive(Clone)]
+pub(super) enum WeakMapLiveness {
+    Local(Ident),
+    Shared { env: Ident, field: Ident },
 }
 
 fn shared_read_tokens(acc: &SharedAccess) -> TokenStream {
@@ -530,14 +610,14 @@ pub(super) fn shared_write_tokens(acc: &SharedAccess, value: &TokenStream) -> To
     let field = &acc.field;
     let tmp = format_ident!("__ts_shared_write_{}", field);
     match acc.storage {
-        SharedStorage::Cell => quote! {
+        SharedStorage::Cell => quote! {{
             let #tmp = #value;
             #env.#field.set(Some(#tmp));
-        },
-        SharedStorage::RefCell => quote! {
+        }},
+        SharedStorage::RefCell => quote! {{
             let #tmp = #value;
             *#env.#field.borrow_mut() = Some(#tmp);
-        },
+        }},
     }
 }
 
@@ -591,6 +671,7 @@ impl BodyCtx {
         f: &MirFunctionDecl,
         types: &TypeTable,
         mutating_methods: &HashSet<FunctionId>,
+        module_idents: &Rc<HashSet<Ident>>,
     ) -> Self {
         let self_param = match f.kind {
             FunctionKind::Method { self_param, .. }
@@ -598,13 +679,16 @@ impl BodyCtx {
             FunctionKind::Constructor { .. } => Some(LocalId::from_raw(0)),
             _ => None,
         };
-        let self_is_borrowed = matches!(f.kind, FunctionKind::Constructor { .. })
-            || (matches!(f.kind, FunctionKind::Method { .. }) && mutating_methods.contains(&f.id));
         let is_generator = matches!(
             f.kind,
             FunctionKind::Generator | FunctionKind::GeneratorMethod { .. }
         );
         let is_async_generator = is_generator && f.effects.is_async;
+        let kind = match (is_generator, is_async_generator) {
+            (false, _) => BodyKind::Plain,
+            (true, false) => BodyKind::Generator,
+            (true, true) => BodyKind::AsyncGenerator,
+        };
         let ret_inner = if is_generator {
             match types.resolve(f.ret) {
                 Some(Type::Generator { inner, .. }) => *inner,
@@ -630,19 +714,39 @@ impl BodyCtx {
         let mut locals = HashMap::new();
         let mut locals_ty = HashMap::new();
         let mut locals_mut = HashMap::new();
+        let mut forbidden: HashSet<Ident> = module_idents.as_ref().clone();
+        forbidden.insert(format_ident!("__ctx"));
+        forbidden.insert(format_ident!("__e"));
+        forbidden.insert(format_ident!("_args"));
+        forbidden.insert(format_ident!("__pending_throw"));
+        forbidden.insert(format_ident!("__loop_jump"));
+        for idx in 0..f.params.len() {
+            forbidden.insert(format_ident!("__slot_{idx}"));
+        }
+        forbidden.insert(format_ident!("__env_{}", f.id.raw()));
+        forbidden.insert(format_ident!("__ScopeEnv{}", f.id.raw()));
+        forbidden.insert(format_ident!("__gen_co_{}", f.id.raw()));
+        let mut taken_idents: HashSet<Ident> = HashSet::new();
         for param in &f.params {
             if Some(param.id) != self_param {
-                locals.insert(param.id, ident_from(&param.name));
+                locals.insert(
+                    param.id,
+                    bound_local_ident(&param.name, param.id, &forbidden, &mut taken_idents),
+                );
             }
             locals_ty.insert(param.id, param.ty);
             locals_mut.insert(param.id, written.contains(&param.id));
         }
         for local in &f.body.locals {
-            locals.insert(local.id, ident_from(&local.name));
+            locals.insert(
+                local.id,
+                bound_local_ident(&local.name, local.id, &forbidden, &mut taken_idents),
+            );
             locals_ty.insert(local.id, local.ty);
             locals_mut.insert(local.id, local.mutable || written.contains(&local.id));
         }
-        let reserved_idents = locals.values().cloned().collect::<HashSet<_>>();
+        let mut reserved_idents = locals.values().cloned().collect::<HashSet<_>>();
+        reserved_idents.extend(forbidden);
         let param_ids: HashSet<LocalId> = f
             .params
             .iter()
@@ -662,12 +766,31 @@ impl BodyCtx {
             }
         }
         let move_safe_locals = collect_move_safe_locals(&f.body.block, &f.body.locals);
+        let self_is_borrowed = matches!(f.kind, FunctionKind::Constructor { .. })
+            || (matches!(f.kind, FunctionKind::Method { .. })
+                && (mutating_methods.contains(&f.id)
+                    || self_param.is_some_and(|id| locals_mut.get(&id).copied().unwrap_or(false))));
+        let receiver_name = self_param
+            .and_then(|id| f.params.iter().find(|p| p.id == id))
+            .map(|p| ident_from(&p.name));
+        let captured = collect_captured_locals(&f.body.block);
+        let narrowed_origins = collect_narrowed_origins(&f.body.block, &f.body.locals);
+        let copy_origins = collect_copy_origins(&f.body.block);
         let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
-        for id in collect_captured_locals(&f.body.block) {
-            if Some(id) == self_param {
-                continue;
-            }
-            let (Some(name), Some(&ty)) = (locals.get(&id), locals_ty.get(&id)) else {
+        for id in captured {
+            let is_receiver = Some(id) == self_param;
+            let name = if is_receiver {
+                let Some(name) = receiver_name.clone() else {
+                    continue;
+                };
+                name
+            } else {
+                let Some(name) = locals.get(&id) else {
+                    continue;
+                };
+                name.clone()
+            };
+            let Some(&ty) = locals_ty.get(&id) else {
                 continue;
             };
             if fields.iter().any(|(fid, _, _)| *fid == id) {
@@ -675,7 +798,13 @@ impl BodyCtx {
             }
             let storage = shared_storage_for(types.resolve(ty));
             let field = format_ident!("{}_{}", name, id.raw());
-            let param_init = param_ids.contains(&id).then(|| name.clone());
+            let init = if is_receiver {
+                EnvInit::Receiver
+            } else if param_ids.contains(&id) {
+                EnvInit::Param(name.clone())
+            } else {
+                EnvInit::Empty
+            };
             fields.push((
                 id,
                 name.clone(),
@@ -683,32 +812,48 @@ impl BodyCtx {
                     field,
                     ty,
                     storage,
-                    param_init,
+                    init,
                     dynamic: dynamic_ids.contains(&id),
                 },
             ));
         }
+        let field_ids: HashSet<LocalId> = fields.iter().map(|(id, _, _)| *id).collect();
+        let shared_liveness = shared_liveness_fields(&f.body.block, &field_ids, &narrowed_origins);
         let mut shared_by_id: HashMap<LocalId, SharedAccess> = HashMap::new();
-        let mut shared_by_name: HashMap<Ident, SharedAccess> = HashMap::new();
         let mut own_env = None;
         if !fields.is_empty() {
             let env_ident = format_ident!("__env_{}", f.id.raw());
             let env_type = format_ident!("__ScopeEnv{}", f.id.raw());
             for (id, name, ef) in &fields {
+                let source_name = f
+                    .params
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .map(|p| ident_from(&p.name))
+                    .or_else(|| {
+                        f.body
+                            .locals
+                            .iter()
+                            .find(|l| l.id == *id)
+                            .map(|l| ident_from(&l.name))
+                    })
+                    .unwrap_or_else(|| name.clone());
                 let acc = SharedAccess {
                     env_ident: env_ident.clone(),
                     env_type: env_type.clone(),
                     field: ef.field.clone(),
                     storage: ef.storage,
                     ty: ef.ty,
+                    source_name,
+                    liveness: shared_liveness.get(id).cloned(),
                 };
-                shared_by_id.insert(*id, acc.clone());
-                shared_by_name.insert(name.clone(), acc);
+                shared_by_id.insert(*id, acc);
             }
             own_env = Some(OwnEnv {
                 env_ident,
                 env_type,
                 fields: fields.iter().map(|(_, _, ef)| ef.clone()).collect(),
+                liveness_fields: ordered_liveness_fields(&shared_liveness),
             });
         }
         Self {
@@ -716,11 +861,10 @@ impl BodyCtx {
             locals_ty,
             locals_mut,
             reserved_idents,
-            module_idents: Rc::new(HashSet::new()),
+            module_idents: Rc::clone(module_idents),
             self_param,
             self_is_borrowed,
-            is_generator,
-            is_async_generator,
+            kind,
             gen_co,
             ret_inner,
             async_plain_ok,
@@ -738,12 +882,14 @@ impl BodyCtx {
             next_try_id: Cell::new(0),
             next_block_id: Cell::new(0),
             shared_by_id,
-            shared_by_name,
+            shared_by_name: HashMap::new(),
             capture_tys: HashMap::new(),
             own_env,
             dynamic_locals: RefCell::new(dynamic_ids),
             dynamic_names: RefCell::new(dynamic_names),
             move_safe_locals: RefCell::new(move_safe_locals),
+            narrowed_origins,
+            copy_origins: RefCell::new(copy_origins),
         }
     }
 
@@ -768,12 +914,19 @@ impl BodyCtx {
             locals: HashMap::new(),
             locals_ty: HashMap::new(),
             locals_mut: HashMap::new(),
-            reserved_idents: HashSet::new(),
+            reserved_idents: [
+                format_ident!("__ctx"),
+                format_ident!("__e"),
+                format_ident!("_args"),
+                format_ident!("__pending_throw"),
+                format_ident!("__loop_jump"),
+            ]
+            .into_iter()
+            .collect(),
             module_idents: Rc::new(HashSet::new()),
             self_param: None,
             self_is_borrowed: false,
-            is_generator: false,
-            is_async_generator: false,
+            kind: BodyKind::Plain,
             gen_co: None,
             ret_inner: ret,
             async_plain_ok: None,
@@ -797,11 +950,22 @@ impl BodyCtx {
             dynamic_locals: RefCell::new(HashSet::new()),
             dynamic_names: RefCell::new(HashSet::new()),
             move_safe_locals: RefCell::new(HashSet::new()),
+            narrowed_origins: HashMap::new(),
+            copy_origins: RefCell::new(HashSet::new()),
         }
     }
 
     pub(super) fn shared_name_map(&self) -> HashMap<Ident, SharedAccess> {
         self.shared_by_name.clone()
+    }
+
+    pub(super) fn inherit_captures(&mut self, captures: &[LocalId], parent: &BodyCtx) {
+        for id in captures {
+            if let Some(acc) = parent.shared_by_id.get(id) {
+                self.shared_by_name
+                    .insert(acc.source_name.clone(), acc.clone());
+            }
+        }
     }
 
     pub(super) fn shared_id_map(&self) -> HashMap<LocalId, SharedAccess> {
@@ -816,6 +980,14 @@ impl BodyCtx {
         self.own_env.as_ref()
     }
 
+    pub(super) fn captures_receiver(&self) -> bool {
+        self.own_env.as_ref().is_some_and(|env| {
+            env.fields
+                .iter()
+                .any(|field| matches!(field.init, EnvInit::Receiver))
+        })
+    }
+
     pub(super) fn detect_own_env(
         &mut self,
         key: &str,
@@ -824,6 +996,8 @@ impl BodyCtx {
         locals: &[MirLocalDecl],
         types: &TypeTable,
     ) {
+        self.narrowed_origins = collect_narrowed_origins(block, locals);
+        let captured = collect_captured_locals(block);
         let mut by_id: HashMap<LocalId, (Ident, TypeId)> = HashMap::new();
         for p in params {
             by_id.insert(p.id, (ident_from(&p.name), p.ty));
@@ -833,7 +1007,7 @@ impl BodyCtx {
         }
         let param_ids: HashSet<LocalId> = params.iter().map(|p| p.id).collect();
         let mut fields: Vec<(LocalId, Ident, EnvField)> = Vec::new();
-        for id in collect_captured_locals(block) {
+        for id in captured {
             let Some((name, ty)) = by_id.get(&id).cloned() else {
                 continue;
             };
@@ -842,7 +1016,11 @@ impl BodyCtx {
             }
             let storage = shared_storage_for(types.resolve(ty));
             let field = format_ident!("{}_{}", name, id.raw());
-            let param_init = param_ids.contains(&id).then(|| name.clone());
+            let init = if param_ids.contains(&id) {
+                EnvInit::Param(self.local_ident(id))
+            } else {
+                EnvInit::Empty
+            };
             let dynamic = self.is_dynamic(id);
             fields.push((
                 id,
@@ -851,7 +1029,7 @@ impl BodyCtx {
                     field,
                     ty,
                     storage,
-                    param_init,
+                    init,
                     dynamic,
                 },
             ));
@@ -859,6 +1037,8 @@ impl BodyCtx {
         if fields.is_empty() {
             return;
         }
+        let field_ids: HashSet<LocalId> = fields.iter().map(|(id, _, _)| *id).collect();
+        let shared_liveness = shared_liveness_fields(block, &field_ids, &self.narrowed_origins);
         for p in params {
             if self.is_dynamic(p.id) {
                 self.dynamic_names.borrow_mut().insert(p.name.clone());
@@ -878,15 +1058,21 @@ impl BodyCtx {
                 field: ef.field.clone(),
                 storage: ef.storage,
                 ty: ef.ty,
+                source_name: name.clone(),
+                liveness: shared_liveness.get(id).cloned(),
             };
-            self.shared_by_id.insert(*id, acc.clone());
-            self.shared_by_name.insert(name.clone(), acc);
+            self.shared_by_id.insert(*id, acc);
         }
         self.own_env = Some(OwnEnv {
             env_ident,
             env_type,
             fields: fields.iter().map(|(_, _, ef)| ef.clone()).collect(),
+            liveness_fields: ordered_liveness_fields(&shared_liveness),
         });
+    }
+
+    pub(super) fn set_narrowed_origins(&mut self, block: &MirBlock, locals: &[MirLocalDecl]) {
+        self.narrowed_origins = collect_narrowed_origins(block, locals);
     }
 
     pub(super) fn shared_access_for_local(&self, id: LocalId) -> Option<SharedAccess> {
@@ -902,15 +1088,15 @@ impl BodyCtx {
     }
 
     pub(super) fn local_read(&self, id: LocalId) -> TokenStream {
+        if let Some(acc) = self.shared_access_for_local(id) {
+            return shared_read_tokens(&acc);
+        }
         if Some(id) == self.self_param {
             return if self.self_is_borrowed {
                 quote!(self.clone())
             } else {
                 quote!(self)
             };
-        }
-        if let Some(acc) = self.shared_access_for_local(id) {
-            return shared_read_tokens(&acc);
         }
         let ident = self.local_ident(id);
         quote!(#ident)
@@ -922,18 +1108,17 @@ impl BodyCtx {
     }
 
     pub(super) fn local_place_base(&self, id: LocalId) -> TokenStream {
-        if Some(id) == self.self_param {
-            return quote!(self);
-        }
         if let Some(acc) = self.shared_access_for_local(id) {
-            let base = shared_place_base_tokens(&acc);
-            debug_assert!(
-                base.is_some(),
-                "Cell-backed shared local cannot be used as a place base"
-            );
-            if let Some(tokens) = base {
+            if let Some(tokens) = shared_place_base_tokens(&acc) {
                 return tokens;
             }
+            debug_assert!(
+                Some(id) == self.self_param,
+                "Cell-backed shared local cannot be used as a place base"
+            );
+        }
+        if Some(id) == self.self_param {
+            return quote!(self);
         }
         let ident = self.local_ident(id);
         quote!(#ident)
@@ -944,14 +1129,48 @@ impl BodyCtx {
             .and_then(|acc| shared_place_base_tokens(&acc))
     }
 
+    pub(super) fn reserve_ident(&mut self, ident: Ident) {
+        self.reserved_idents.insert(ident);
+    }
     pub(super) fn register_local(&mut self, id: LocalId, name: Ident, ty: TypeId, mutable: bool) {
+        let name = if name == "_" || self.locals.get(&id) == Some(&name) {
+            name
+        } else {
+            let mut candidate = name;
+            while self.is_reserved(&candidate) {
+                candidate = format_ident!("{candidate}_");
+            }
+            candidate
+        };
         self.locals.insert(id, name.clone());
         self.locals_ty.insert(id, ty);
         self.locals_mut.insert(id, mutable);
         self.reserved_idents.insert(name);
     }
 
-    pub(super) fn weakmap_liveness_for_key(&self, key_local: LocalId) -> Ident {
+    pub(super) fn weakmap_liveness_for_key(&self, key_local: LocalId) -> WeakMapLiveness {
+        let key_local = self.resolve_narrowed(key_local);
+        if let Some(acc) = self.shared_by_id.get(&key_local)
+            && let Some(field) = &acc.liveness
+        {
+            return WeakMapLiveness::Shared {
+                env: acc.env_ident.clone(),
+                field: field.clone(),
+            };
+        }
+        WeakMapLiveness::Local(self.weakmap_liveness_local_for_key(key_local))
+    }
+
+    pub(super) fn weakmap_liveness_for_name(&self, name: &Atom) -> Option<WeakMapLiveness> {
+        let acc = self.shared_by_name.get(&ident_from(name))?;
+        let field = acc.liveness.clone()?;
+        Some(WeakMapLiveness::Shared {
+            env: acc.env_ident.clone(),
+            field,
+        })
+    }
+
+    fn weakmap_liveness_local_for_key(&self, key_local: LocalId) -> Ident {
         {
             let cache = self.weakmap_liveness_per_key.borrow();
             if let Some(ident) = cache.get(&key_local) {
@@ -963,6 +1182,17 @@ impl BodyCtx {
             .borrow_mut()
             .insert(key_local, ident.clone());
         ident
+    }
+
+    fn resolve_narrowed(&self, id: LocalId) -> LocalId {
+        let mut current = id;
+        for _ in 0..16 {
+            match self.narrowed_origins.get(&current) {
+                Some(&next) if next != current => current = next,
+                _ => break,
+            }
+        }
+        current
     }
 
     pub(super) fn alloc_weakmap_liveness_tmp(&self) -> Ident {
@@ -1003,17 +1233,25 @@ impl BodyCtx {
     }
 
     pub(super) fn has_weakmap_liveness_for_key(&self, key_local: LocalId) -> bool {
+        let key_local = self.resolve_narrowed(key_local);
+        if self
+            .shared_by_id
+            .get(&key_local)
+            .is_some_and(|acc| acc.liveness.is_some())
+        {
+            return true;
+        }
         self.weakmap_liveness_per_key
             .borrow()
             .contains_key(&key_local)
     }
 
     pub(super) fn is_generator(&self) -> bool {
-        self.is_generator
+        self.kind.is_generator()
     }
 
     pub(super) fn is_async_generator(&self) -> bool {
-        self.is_async_generator
+        self.kind.is_async_generator()
     }
 
     pub(super) fn gen_co(&self) -> Option<Ident> {
@@ -1047,6 +1285,11 @@ impl BodyCtx {
     }
 
     pub(super) fn local_ref(&self, id: LocalId) -> TokenStream {
+        if let Some(acc) = self.shared_access_for_local(id)
+            && let Some(tokens) = shared_place_base_tokens(&acc)
+        {
+            return tokens;
+        }
         if Some(id) == self.self_param {
             quote!(self)
         } else {
@@ -1250,11 +1493,17 @@ impl BodyCtx {
 
     pub(super) fn seed_move_safe(&self, block: &MirBlock, locals: &[MirLocalDecl]) {
         let ids = collect_move_safe_locals(block, locals);
+        let copies = collect_copy_origins(block);
         self.move_safe_locals.borrow_mut().extend(ids);
+        self.copy_origins.borrow_mut().extend(copies);
     }
 
     pub(super) fn is_move_safe(&self, id: LocalId) -> bool {
         self.move_safe_locals.borrow().contains(&id)
+    }
+
+    pub(super) fn is_identity_assignment(&self, target: LocalId, value_root: LocalId) -> bool {
+        self.copy_origins.borrow().contains(&(target, value_root))
     }
 }
 
@@ -1290,7 +1539,10 @@ pub(super) fn count_uses_block(
 
 fn count_uses_stmt(stmt: &MirStmt, in_loop: bool, uses: &mut HashMap<LocalId, (u32, bool)>) {
     match stmt {
-        MirStmt::Let { init: Some(e), .. } | MirStmt::Expr(e) | MirStmt::Return(Some(e)) => {
+        MirStmt::Let { init: Some(e), .. }
+        | MirStmt::LetInfer { init: e, .. }
+        | MirStmt::Expr(e)
+        | MirStmt::Return(Some(e)) => {
             count_uses_expr(e, in_loop, uses);
         }
         MirStmt::Let { init: None, .. }
@@ -1578,7 +1830,8 @@ fn collect_dynamic_locals(
                 local,
                 init: Some(init),
                 ..
-            } => {
+            }
+            | MirStmt::LetInfer { local, init } => {
                 if let MirExpr::Local(id) = init
                     && out.contains(id)
                     && locals_ty
@@ -1742,7 +1995,8 @@ fn collect_from_stmt(
         }
         MirStmt::Let {
             init: Some(init), ..
-        } => collect_from_expr(init, types, written, mutating),
+        }
+        | MirStmt::LetInfer { init, .. } => collect_from_expr(init, types, written, mutating),
         MirStmt::Let { init: None, .. }
         | MirStmt::Return(None)
         | MirStmt::Break
@@ -2188,6 +2442,7 @@ fn collect_stmt_tys(
                 collect_expr_tys(init, types, seen, out);
             }
         }
+        MirStmt::LetInfer { init, .. } => collect_expr_tys(init, types, seen, out),
         MirStmt::Assign { target, value } => {
             if let Some(ty) = target.ty() {
                 collect_type_ids(ty, types, seen, out);
@@ -2405,6 +2660,563 @@ fn collect_expr_tys(
     }
 }
 
+fn ordered_liveness_fields(shared: &HashMap<LocalId, Ident>) -> Vec<Ident> {
+    let mut pairs: Vec<(LocalId, Ident)> = shared
+        .iter()
+        .map(|(id, ident)| (*id, ident.clone()))
+        .collect();
+    pairs.sort_by_key(|(id, _)| id.raw());
+    pairs.into_iter().map(|(_, ident)| ident).collect()
+}
+
+fn resolve_narrowed_origin(narrowed: &HashMap<LocalId, LocalId>, id: LocalId) -> LocalId {
+    let mut current = id;
+    for _ in 0..16 {
+        match narrowed.get(&current) {
+            Some(&next) if next != current => current = next,
+            _ => break,
+        }
+    }
+    current
+}
+
+fn shared_liveness_fields(
+    block: &MirBlock,
+    field_ids: &HashSet<LocalId>,
+    narrowed: &HashMap<LocalId, LocalId>,
+) -> HashMap<LocalId, Ident> {
+    let mut keys = HashSet::new();
+    collect_weakmap_key_roots(block, &mut keys);
+    let resolved_keys: HashSet<LocalId> = keys
+        .iter()
+        .map(|key| resolve_narrowed_origin(narrowed, *key))
+        .collect();
+    let mut out = HashMap::new();
+    for id in &resolved_keys {
+        if field_ids.contains(id) {
+            out.insert(*id, format_ident!("__wm_liveness_key_{}", id.raw()));
+        }
+    }
+    out
+}
+
+fn narrowing_wrapper_root(expr: &MirExpr) -> Option<LocalId> {
+    match expr {
+        MirExpr::Local(id) => Some(*id),
+        MirExpr::Cast { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            narrowing_wrapper_root(expr)
+        }
+        _ => None,
+    }
+}
+
+fn collect_narrowed_origins(
+    block: &MirBlock,
+    locals: &[MirLocalDecl],
+) -> HashMap<LocalId, LocalId> {
+    let narrowed_names: HashSet<LocalId> = locals
+        .iter()
+        .filter(|local| local.narrowed)
+        .map(|local| local.id)
+        .collect();
+    let mut scan = NarrowedScan::default();
+    scan.block(block, &narrowed_names);
+    let mut out = scan.origins;
+    let keys: Vec<LocalId> = out.keys().copied().collect();
+    for key in keys {
+        let resolved = resolve_narrowed_origin(&out, key);
+        out.insert(key, resolved);
+    }
+    out
+}
+
+#[derive(Default)]
+struct NarrowedScan {
+    assigned: HashSet<LocalId>,
+    origins: HashMap<LocalId, LocalId>,
+}
+
+impl NarrowedScan {
+    fn block(&mut self, block: &MirBlock, narrowed_names: &HashSet<LocalId>) {
+        for stmt in &block.stmts {
+            self.stmt(stmt, narrowed_names);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &MirStmt, narrowed_names: &HashSet<LocalId>) {
+        match stmt {
+            MirStmt::Let {
+                local,
+                init: Some(init),
+                ..
+            } => {
+                if narrowed_names.contains(local)
+                    && let Some(origin) = narrowing_wrapper_root(init)
+                    && origin != *local
+                    && self.assigned.contains(&origin)
+                {
+                    self.origins.insert(*local, origin);
+                }
+            }
+            MirStmt::Assign { target, .. } => {
+                if let MirPlace::Local { id } = target {
+                    self.assigned.insert(*id);
+                }
+            }
+            MirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.block(then_block, narrowed_names);
+                if let Some(block) = else_block {
+                    self.block(block, narrowed_names);
+                }
+            }
+            MirStmt::While { body, .. }
+            | MirStmt::DoWhile { body, .. }
+            | MirStmt::ForOf { body, .. }
+            | MirStmt::ForAwaitOf { body, .. }
+            | MirStmt::ForIn { body, .. } => self.block(body, narrowed_names),
+            MirStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    self.block(&case.body, narrowed_names);
+                }
+                if let Some(block) = default {
+                    self.block(block, narrowed_names);
+                }
+            }
+            MirStmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
+                self.block(body, narrowed_names);
+                if let Some(block) = catch {
+                    self.block(block, narrowed_names);
+                }
+                if let Some(block) = finally {
+                    self.block(block, narrowed_names);
+                }
+            }
+            MirStmt::Let { .. }
+            | MirStmt::LetInfer { .. }
+            | MirStmt::Expr(_)
+            | MirStmt::Return(_)
+            | MirStmt::ReturnResultErr { .. }
+            | MirStmt::Throw { .. }
+            | MirStmt::Break
+            | MirStmt::Continue
+            | MirStmt::Runtime { .. } => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct CopyOriginScan {
+    identity: HashSet<(LocalId, LocalId)>,
+    not_identity: HashSet<(LocalId, LocalId)>,
+}
+
+fn collect_copy_origins(block: &MirBlock) -> HashSet<(LocalId, LocalId)> {
+    let mut scan = CopyOriginScan::default();
+    scan.block(block, &HashMap::new());
+    scan.identity
+        .difference(&scan.not_identity)
+        .copied()
+        .collect()
+}
+
+fn resolve_copy_state(state: &HashMap<LocalId, LocalId>, id: LocalId) -> LocalId {
+    let mut current = id;
+    for _ in 0..16 {
+        match state.get(&current).copied() {
+            Some(next) if next != current => current = next,
+            _ => break,
+        }
+    }
+    current
+}
+
+fn invalidate_copy_state(state: &mut HashMap<LocalId, LocalId>, id: LocalId) {
+    state.remove(&id);
+    state.retain(|_, root| *root != id);
+}
+
+impl CopyOriginScan {
+    fn block(&mut self, block: &MirBlock, state: &HashMap<LocalId, LocalId>) {
+        let mut state = state.clone();
+        for stmt in &block.stmts {
+            self.stmt(stmt, &mut state);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &MirStmt, state: &mut HashMap<LocalId, LocalId>) {
+        match stmt {
+            MirStmt::Let { local, init, .. } => {
+                let canonical = init
+                    .as_ref()
+                    .and_then(narrowing_wrapper_root)
+                    .map(|root| resolve_copy_state(state, root));
+                invalidate_copy_state(state, *local);
+                if let Some(canonical) = canonical {
+                    let canonical = resolve_copy_state(state, canonical);
+                    if canonical != *local {
+                        state.insert(*local, canonical);
+                    }
+                }
+            }
+            MirStmt::LetInfer { local, init } => {
+                let canonical =
+                    narrowing_wrapper_root(init).map(|root| resolve_copy_state(state, root));
+                invalidate_copy_state(state, *local);
+                if let Some(canonical) = canonical {
+                    let canonical = resolve_copy_state(state, canonical);
+                    if canonical != *local {
+                        state.insert(*local, canonical);
+                    }
+                }
+            }
+            MirStmt::Assign { target, value } => {
+                let MirPlace::Local { id } = target else {
+                    return;
+                };
+                let Some(root) = narrowing_wrapper_root(value) else {
+                    invalidate_copy_state(state, *id);
+                    return;
+                };
+                let canonical = resolve_copy_state(state, root);
+                let target_canonical = resolve_copy_state(state, *id);
+                if (root == *id || state.contains_key(&root)) && canonical == target_canonical {
+                    self.identity.insert((*id, root));
+                } else {
+                    self.not_identity.insert((*id, root));
+                }
+                invalidate_copy_state(state, *id);
+                let canonical = resolve_copy_state(state, canonical);
+                if canonical != *id {
+                    state.insert(*id, canonical);
+                }
+            }
+            MirStmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.block(then_block, state);
+                if let Some(block) = else_block {
+                    self.block(block, state);
+                }
+                invalidate_written_locals(stmt, state);
+            }
+            MirStmt::While { body, .. }
+            | MirStmt::DoWhile { body, .. }
+            | MirStmt::ForOf { body, .. }
+            | MirStmt::ForAwaitOf { body, .. }
+            | MirStmt::ForIn { body, .. } => {
+                let mut loop_state = state.clone();
+                for id in region_written_locals(stmt) {
+                    invalidate_copy_state(&mut loop_state, id);
+                }
+                self.block(body, &loop_state);
+                invalidate_written_locals(stmt, state);
+            }
+            MirStmt::Switch { cases, default, .. } => {
+                for case in cases {
+                    self.block(&case.body, state);
+                }
+                if let Some(block) = default {
+                    self.block(block, state);
+                }
+                invalidate_written_locals(stmt, state);
+            }
+            MirStmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
+                self.block(body, state);
+                if let Some(block) = catch {
+                    self.block(block, state);
+                }
+                if let Some(block) = finally {
+                    self.block(block, state);
+                }
+                invalidate_written_locals(stmt, state);
+            }
+            MirStmt::Expr(_)
+            | MirStmt::Return(_)
+            | MirStmt::ReturnResultErr { .. }
+            | MirStmt::Throw { .. }
+            | MirStmt::Break
+            | MirStmt::Continue
+            | MirStmt::Runtime { .. } => {}
+        }
+    }
+}
+
+fn invalidate_written_locals(stmt: &MirStmt, state: &mut HashMap<LocalId, LocalId>) {
+    for id in region_written_locals(stmt) {
+        invalidate_copy_state(state, id);
+    }
+}
+
+fn region_written_locals(stmt: &MirStmt) -> HashSet<LocalId> {
+    let mut out = HashSet::new();
+    collect_region_written_locals(stmt, &mut out);
+    out
+}
+
+fn collect_region_written_locals(stmt: &MirStmt, out: &mut HashSet<LocalId>) {
+    match stmt {
+        MirStmt::Let { local, .. } | MirStmt::LetInfer { local, .. } => {
+            out.insert(*local);
+        }
+        MirStmt::Assign { target, .. } => {
+            if let MirPlace::Local { id } = target {
+                out.insert(*id);
+            }
+        }
+        MirStmt::Runtime { dest, .. } => {
+            if let Some(dest) = dest {
+                out.insert(*dest);
+            }
+        }
+        MirStmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_region_written_locals_block(then_block, out);
+            if let Some(block) = else_block {
+                collect_region_written_locals_block(block, out);
+            }
+        }
+        MirStmt::While { body, .. } | MirStmt::DoWhile { body, .. } => {
+            collect_region_written_locals_block(body, out);
+        }
+        MirStmt::ForOf { item, body, .. } | MirStmt::ForAwaitOf { item, body, .. } => {
+            out.insert(*item);
+            collect_region_written_locals_block(body, out);
+        }
+        MirStmt::ForIn { key, body, .. } => {
+            out.insert(*key);
+            collect_region_written_locals_block(body, out);
+        }
+        MirStmt::Switch { cases, default, .. } => {
+            for case in cases {
+                collect_region_written_locals_block(&case.body, out);
+            }
+            if let Some(block) = default {
+                collect_region_written_locals_block(block, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch_param,
+            catch,
+            finally,
+        } => {
+            if let Some(param) = catch_param {
+                out.insert(*param);
+            }
+            collect_region_written_locals_block(body, out);
+            if let Some(block) = catch {
+                collect_region_written_locals_block(block, out);
+            }
+            if let Some(block) = finally {
+                collect_region_written_locals_block(block, out);
+            }
+        }
+        MirStmt::Expr(_)
+        | MirStmt::Return(_)
+        | MirStmt::ReturnResultErr { .. }
+        | MirStmt::Throw { .. }
+        | MirStmt::Break
+        | MirStmt::Continue => {}
+    }
+}
+
+fn collect_region_written_locals_block(block: &MirBlock, out: &mut HashSet<LocalId>) {
+    for stmt in &block.stmts {
+        collect_region_written_locals(stmt, out);
+    }
+}
+
+fn collect_weakmap_key_roots(block: &MirBlock, out: &mut HashSet<LocalId>) {
+    for stmt in &block.stmts {
+        collect_weakmap_key_roots_stmt(stmt, out);
+    }
+}
+
+fn collect_weakmap_key_roots_stmt(stmt: &MirStmt, out: &mut HashSet<LocalId>) {
+    match stmt {
+        MirStmt::Runtime { op, args, .. } => {
+            if matches!(
+                op,
+                RuntimeOp::WeakMapSet
+                    | RuntimeOp::WeakMapGet
+                    | RuntimeOp::WeakMapHas
+                    | RuntimeOp::WeakMapDelete
+            ) && let Some(key) = args.get(1).and_then(expr_root_local_id)
+            {
+                out.insert(key);
+            }
+            for arg in args {
+                collect_weakmap_key_roots_expr(arg, out);
+            }
+        }
+        MirStmt::Let { init, .. } => {
+            if let Some(init) = init {
+                collect_weakmap_key_roots_expr(init, out);
+            }
+        }
+        MirStmt::LetInfer { init, .. } => collect_weakmap_key_roots_expr(init, out),
+        MirStmt::Assign { target, value } => {
+            collect_weakmap_key_roots_place(target, out);
+            collect_weakmap_key_roots_expr(value, out);
+        }
+        MirStmt::Expr(expr) | MirStmt::Return(Some(expr)) => {
+            collect_weakmap_key_roots_expr(expr, out);
+        }
+        MirStmt::ReturnResultErr { error, .. } | MirStmt::Throw { error, .. } => {
+            collect_weakmap_key_roots_expr(error, out);
+        }
+        MirStmt::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            collect_weakmap_key_roots_expr(cond, out);
+            collect_weakmap_key_roots(then_block, out);
+            if let Some(block) = else_block {
+                collect_weakmap_key_roots(block, out);
+            }
+        }
+        MirStmt::While { cond, body } | MirStmt::DoWhile { body, cond } => {
+            collect_weakmap_key_roots_expr(cond, out);
+            collect_weakmap_key_roots(body, out);
+        }
+        MirStmt::ForOf { iterable, body, .. } | MirStmt::ForAwaitOf { iterable, body, .. } => {
+            collect_weakmap_key_roots_expr(iterable, out);
+            collect_weakmap_key_roots(body, out);
+        }
+        MirStmt::ForIn { object, body, .. } => {
+            collect_weakmap_key_roots_expr(object, out);
+            collect_weakmap_key_roots(body, out);
+        }
+        MirStmt::Switch {
+            disc,
+            cases,
+            default,
+        } => {
+            collect_weakmap_key_roots_expr(disc, out);
+            for case in cases {
+                collect_weakmap_key_roots(&case.body, out);
+            }
+            if let Some(block) = default {
+                collect_weakmap_key_roots(block, out);
+            }
+        }
+        MirStmt::Try {
+            body,
+            catch,
+            finally,
+            ..
+        } => {
+            collect_weakmap_key_roots(body, out);
+            if let Some(block) = catch {
+                collect_weakmap_key_roots(block, out);
+            }
+            if let Some(block) = finally {
+                collect_weakmap_key_roots(block, out);
+            }
+        }
+        MirStmt::Return(None) | MirStmt::Break | MirStmt::Continue => {}
+    }
+}
+
+fn collect_weakmap_key_roots_place(place: &MirPlace, out: &mut HashSet<LocalId>) {
+    match place {
+        MirPlace::Local { .. } | MirPlace::Global(_) => {}
+        MirPlace::Field { base, .. } => collect_weakmap_key_roots_place_base(base, out),
+        MirPlace::Index { base, index, .. } => {
+            collect_weakmap_key_roots_expr(base, out);
+            collect_weakmap_key_roots_expr(index, out);
+        }
+    }
+}
+
+fn collect_weakmap_key_roots_place_base(base: &MirPlaceBase, out: &mut HashSet<LocalId>) {
+    match base {
+        MirPlaceBase::Local(_) | MirPlaceBase::Global(_) => {}
+        MirPlaceBase::Field { base, .. } => collect_weakmap_key_roots_place_base(base, out),
+        MirPlaceBase::Index { base, index, .. } => {
+            collect_weakmap_key_roots_expr(base, out);
+            collect_weakmap_key_roots_expr(index, out);
+        }
+        MirPlaceBase::Chain { base, .. } => collect_weakmap_key_roots_expr(base, out),
+    }
+}
+
+fn collect_weakmap_key_roots_expr(expr: &MirExpr, out: &mut HashSet<LocalId>) {
+    match expr {
+        MirExpr::Closure { body, .. } => collect_weakmap_key_roots(body, out),
+        MirExpr::Field { base, .. }
+        | MirExpr::OptionalChain { base, .. }
+        | MirExpr::ResultOk { value: base, .. }
+        | MirExpr::Unary { expr: base, .. }
+        | MirExpr::Await { expr: base, .. }
+        | MirExpr::TypeOf { expr: base, .. }
+        | MirExpr::Cast { expr: base, .. }
+        | MirExpr::Import { source: base, .. }
+        | MirExpr::ResultErr { error: base, .. }
+        | MirExpr::Propagate { expr: base, .. } => collect_weakmap_key_roots_expr(base, out),
+        MirExpr::Index { base, index, .. } => {
+            collect_weakmap_key_roots_expr(base, out);
+            collect_weakmap_key_roots_expr(index, out);
+        }
+        MirExpr::IsSome { expr, .. } | MirExpr::UnwrapOptional { expr, .. } => {
+            collect_weakmap_key_roots_expr(expr, out);
+        }
+        MirExpr::Binary { left, right, .. } => {
+            collect_weakmap_key_roots_expr(left, out);
+            collect_weakmap_key_roots_expr(right, out);
+        }
+        MirExpr::Yield { expr: Some(e), .. } => collect_weakmap_key_roots_expr(e, out),
+        MirExpr::Call { args, .. } => {
+            for arg in args {
+                collect_weakmap_key_roots_expr(arg, out);
+            }
+        }
+        MirExpr::IndirectCall { callee, args, .. } => {
+            collect_weakmap_key_roots_expr(callee, out);
+            for arg in args {
+                collect_weakmap_key_roots_expr(arg, out);
+            }
+        }
+        MirExpr::StructLiteral { fields, .. } => {
+            for (_, value) in fields {
+                collect_weakmap_key_roots_expr(value, out);
+            }
+        }
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_)
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. }
+        | MirExpr::Yield { expr: None, .. } => {}
+    }
+}
+
 fn collect_captured_locals(block: &MirBlock) -> Vec<LocalId> {
     let mut out = HashSet::new();
     collect_captures_block(block, &mut out);
@@ -2426,6 +3238,7 @@ fn collect_captures_stmt(stmt: &MirStmt, out: &mut HashSet<LocalId>) {
                 collect_captures_expr(init, out);
             }
         }
+        MirStmt::LetInfer { init, .. } => collect_captures_expr(init, out),
         MirStmt::Assign { target, value } => {
             collect_captures_place(target, out);
             collect_captures_expr(value, out);

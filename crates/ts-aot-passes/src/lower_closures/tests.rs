@@ -54,6 +54,7 @@ fn non_capturing_closure_is_emitted_as_top_level_fn() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
@@ -115,6 +116,7 @@ fn call_to_closure_is_rewritten_to_indirect_global() {
 
                 span: Span::default(),
             }),
+            narrowed: false,
         },
         HirStmt::Expr {
             expr: HirExpr::Call {
@@ -196,6 +198,7 @@ fn capturing_closure_emits_warning_and_is_unchanged() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
@@ -250,6 +253,7 @@ fn two_functions_with_closure_at_local_zero_get_distinct_names() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
 
     let mut fb = empty_function("b");
@@ -273,6 +277,7 @@ fn two_functions_with_closure_at_local_zero_get_distinct_names() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
 
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -326,6 +331,7 @@ fn closure_inside_namespace_is_walked_and_emitted() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
 
     let mut program = HirProgram::new(ModuleId::from_raw(0));
@@ -420,11 +426,12 @@ fn nested_non_capturing_closure_is_walked_and_rewritten() {
 
                     span: Span::default(),
                 }),
+                narrowed: false,
             }],
             ty: int_ty(),
-
             span: Span::default(),
         }),
+        narrowed: false,
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
@@ -522,6 +529,7 @@ fn generated_name_skips_names_already_taken_by_user_decls() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
     let mut program = HirProgram::new(ModuleId::from_raw(0));
     program.declarations.push(HirDecl::Function(f));
@@ -640,6 +648,7 @@ fn generated_name_skips_names_taken_by_class_methods() {
 
             span: Span::default(),
         }),
+        narrowed: false,
     }];
 
     let mut program = HirProgram::new(ModuleId::from_raw(0));

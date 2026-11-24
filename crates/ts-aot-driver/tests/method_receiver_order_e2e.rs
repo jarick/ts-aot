@@ -98,6 +98,90 @@ fn main() {
 }
 
 #[test]
+fn a_captured_local_receiver_is_selected_before_an_argument_that_reassigns_it() {
+    const SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
+         export function got(): number { \
+             const orig = new Counter(); \
+             let c: Counter = orig; \
+             const replace = (): number => { c = new Counter(); return 5; }; \
+             c.add(replace()); \
+             return orig.n; \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(receiver_local::got(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let body = function_body(&rust, "got");
+    let capture_at = body.find("let__ts_recv=").unwrap_or_else(|| {
+        panic!(
+            "`c.add(replace())` must clone the receiver into a hoisted handle, because the \
+             argument may reassign `c`; got:\n{body}"
+        )
+    });
+    let argument_at = body
+        .find("let__ts_arg_0=")
+        .unwrap_or_else(|| panic!("the argument must be staged; got:\n{body}"));
+    assert!(
+        capture_at < argument_at,
+        "the receiver must be selected before the staged argument statements run; got:\n{body}"
+    );
+    assert!(
+        body.contains("Counter::Counter__add(&(__ts_recv),__ctx,__ts_arg_0)"),
+        "the call must use the captured handle instead of re-reading the receiver after the \
+         argument ran; got:\n{body}"
+    );
+    let stdout = run_generated_crate("receiver_local", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_captured_receiver_binding_is_released_before_the_call() {
+    const SOURCE: &str = "class Counter { n: number = 0; \
+             add(f: () => number): void { this.n = 10; this.n = this.n + f(); } } \
+         export function got(): number { \
+             const orig = new Counter(); \
+             let c: Counter = orig; \
+             const read = (): number => c.n; \
+             c.add(read); \
+             return orig.n; \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(receiver_binding::got(&ctx), 20.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let body = function_body(&rust, "got");
+    assert!(
+        body.contains(".borrow_mut()).as_mut().unwrap()).clone();"),
+        "the shared receiver handle must be cloned in a statement of its own, so the `RefCell` \
+         borrow of the environment slot ends before the method call; got:\n{body}"
+    );
+    let stdout = run_generated_crate("receiver_binding", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
 fn a_place_receiver_keeps_the_method_mutations() {
     const SOURCE: &str = "class Counter { n: number = 0; add(x: number): void { this.n = this.n + x; } } \
          let hits: number = 0; \
@@ -191,8 +275,8 @@ fn main() {
          got:\n{body}"
     );
     assert!(
-        body.contains("&mut(arr["),
-        "the receiver must stay a mutable place of the original element; got:\n{body}"
+        body.contains("&(arr[") && !body.contains("&mut(arr["),
+        "the receiver must stay a shared place of the original element; got:\n{body}"
     );
     let stdout = run_generated_crate("index_order", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
@@ -259,4 +343,80 @@ fn a_reassigned_alias_target_is_not_resolved_to_one_function() {
          got {:?}",
         out.diagnostics
     );
+}
+
+#[test]
+fn a_field_receiver_is_materialized_before_the_argument_statements() {
+    const SOURCE: &str = "class E { v: number = 0; m(x: number): void { this.v = x; } } \
+         class C { e: E; constructor(e: E) { this.e = e; } swap(): number { this.e = new E(); return 5; } } \
+         export function got(): number { let e = new E(); let c = new C(e); c.e.m(c.swap()); return e.v; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(field_receiver::got(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let body = function_body(&rust, "got");
+    let receiver_at = body.find("__ts_recv").unwrap_or_else(|| {
+        panic!("the field receiver must be captured into a local; got:\n{body}")
+    });
+    let argument_at = body
+        .find("__ts_arg_0")
+        .unwrap_or_else(|| panic!("the argument must be staged; got:\n{body}"));
+    assert!(
+        receiver_at < argument_at,
+        "`c.e.m(c.swap())` evaluates the receiver reference `c.e` before the arguments, so the \
+         captured receiver must be bound ahead of the staged argument binds; got:\n{body}"
+    );
+    let stdout = run_generated_crate("field_receiver", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn an_element_receiver_releases_the_container_borrow_before_the_call() {
+    const SOURCE: &str = "class C { arr: E[] = []; } \
+         class E { c: C; constructor(c: C) { this.c = c; } m(): void { this.c.arr.push(new E(this.c)); } } \
+         export function got(): number { let c = new C(); c.arr.push(new E(c)); c.arr[0].m(); return c.arr.length; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(element_receiver::got(&ctx), 2.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let body = function_body(&rust, "got");
+    let receiver_at = body.find("__ts_recv").unwrap_or_else(|| {
+        panic!(
+            "an indexed receiver must be captured into a local, which releases the \
+                 `RefCell` borrow of the array before the call; got:\n{body}"
+        )
+    });
+    assert!(
+        !body.contains("E__m(&((*c.arr.borrow())"),
+        "the call must not hold a `Ref` of the receiver's container while the method runs, because \
+         the method reaches the same `RefCell` and would panic; got:\n{body}"
+    );
+    assert!(
+        receiver_at < body.find("E__m").unwrap_or(usize::MAX),
+        "the captured receiver must be bound before the call; got:\n{body}"
+    );
+    let stdout = run_generated_crate("element_receiver", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

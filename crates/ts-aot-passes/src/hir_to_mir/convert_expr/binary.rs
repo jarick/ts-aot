@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, NullishKinds, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
+use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{BinaryOp, MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp};
 
 use crate::PassContext;
 use crate::hir_to_mir::convert_expr::call::is_numeric_type;
 use crate::hir_to_mir::convert_expr::util::{
-    has_potential_side_effects, hir_expr_type_id, mir_expr_ty,
+    has_potential_side_effects, hir_expr_type_id, is_place, mir_expr_ty,
 };
-use crate::hir_to_mir::converter::ExprConverter;
+use crate::hir_to_mir::converter::{ExprConverter, build_class_index, class_at_path};
 use crate::hir_to_mir::nullish::{LOGICAL_DIAG, NULLISH_NARROWING_DIAG, kinds_of_hir, kinds_of_ty};
 use crate::hir_to_mir::ops::{convert_binop, convert_unaryop};
 
@@ -515,14 +515,48 @@ fn hir_expr_contains_call(expr: &HirExpr) -> bool {
     }
 }
 
-fn hir_is_place(expr: &HirExpr) -> bool {
-    matches!(
-        expr,
-        HirExpr::Local { .. }
-            | HirExpr::Global { .. }
-            | HirExpr::Field { .. }
-            | HirExpr::Index { .. }
-    )
+fn rhs_may_invalidate_lhs(rhs: &HirExpr) -> bool {
+    hir_expr_may_reassign(rhs) || hir_expr_contains_call(rhs)
+}
+
+fn mir_contains_borrow_read(value: &MirExpr) -> bool {
+    match value {
+        MirExpr::Field { .. } | MirExpr::Index { .. } => true,
+        MirExpr::Cast { expr, .. }
+        | MirExpr::Unary { expr, .. }
+        | MirExpr::Await { expr, .. }
+        | MirExpr::OptionalChain { base: expr, .. }
+        | MirExpr::IsSome { expr, .. }
+        | MirExpr::UnwrapOptional { expr, .. }
+        | MirExpr::TypeOf { expr, .. }
+        | MirExpr::Propagate { expr, .. }
+        | MirExpr::ResultOk { value: expr, .. }
+        | MirExpr::ResultErr { error: expr, .. }
+        | MirExpr::Import { source: expr, .. } => mir_contains_borrow_read(expr),
+        MirExpr::Binary { left, right, .. } => {
+            mir_contains_borrow_read(left) || mir_contains_borrow_read(right)
+        }
+        MirExpr::Call { args, .. } => args.iter().any(mir_contains_borrow_read),
+        MirExpr::IndirectCall { callee, args, .. } => {
+            mir_contains_borrow_read(callee) || args.iter().any(mir_contains_borrow_read)
+        }
+        MirExpr::StructLiteral { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| mir_contains_borrow_read(field)),
+        MirExpr::Yield { expr, .. } => expr.as_deref().is_some_and(mir_contains_borrow_read),
+        MirExpr::Unit
+        | MirExpr::Bool(_)
+        | MirExpr::Int { .. }
+        | MirExpr::Float { .. }
+        | MirExpr::String { .. }
+        | MirExpr::Null { .. }
+        | MirExpr::Local(_)
+        | MirExpr::Global(_)
+        | MirExpr::Closure { .. }
+        | MirExpr::TemplateStringsArray { .. }
+        | MirExpr::RegExp { .. }
+        | MirExpr::BigInt { .. } => false,
+    }
 }
 
 fn is_string_operand(expr: &HirExpr, types: &TypeTable) -> bool {
@@ -623,9 +657,7 @@ impl ExprConverter {
                 },
                 _ => self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx),
             };
-            let lhs_is_inline = hir_is_place(lhs) || hir_expr_contains_call(lhs);
-            let rhs_may_change_lhs =
-                hir_expr_may_reassign(rhs) || (lhs_is_inline && hir_expr_contains_call(rhs));
+            let rhs_may_change_lhs = rhs_may_invalidate_lhs(rhs);
             let lhs_snapshot_ty = if rhs_may_change_lhs {
                 hir_expr_type_id(lhs)
                     .filter(|t| !matches!(types.resolve(*t), None | Some(Type::Error)))
@@ -646,6 +678,7 @@ impl ExprConverter {
             } else {
                 lhs_mir
             };
+            let rhs_start = out.len();
             let rhs_mir = match rhs {
                 HirExpr::Null(_) => MirExpr::String {
                     id: Atom::from("null"),
@@ -657,6 +690,15 @@ impl ExprConverter {
                 },
                 _ => self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx),
             };
+            let place_may_change = rhs_may_change_lhs && lhs_snapshot_ty.is_none();
+            let lhs_operand = self.materialize_operand_before(
+                lhs_operand,
+                lhs,
+                rhs_start,
+                out,
+                types,
+                place_may_change,
+            );
             let dest = self.fresh_local();
             self.push_temp_local(dest, string_ty);
             out.push(MirStmt::Runtime {
@@ -718,10 +760,15 @@ impl ExprConverter {
         }
         match op {
             HirBinaryOp::In => {
-                let lhs_mir =
-                    self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
-                let rhs_mir =
-                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let (lhs_mir, rhs_mir) = self.convert_binary_operands(
+                    lhs,
+                    rhs,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let bool_ty = types.intern(&Type::Bool);
                 let dest = self.fresh_local();
                 self.push_temp_local(dest, bool_ty);
@@ -735,10 +782,15 @@ impl ExprConverter {
                 MirExpr::Local(dest)
             }
             HirBinaryOp::InstanceOf => {
-                let value_mir =
-                    self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
-                let target_mir =
-                    self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+                let (value_mir, target_mir) = self.convert_binary_operands(
+                    lhs,
+                    rhs,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 let target_type_id: u32 = match rhs {
                     HirExpr::Global { ty, .. } => {
                         shared_struct_ids.get(ty).map(|sid| sid.raw()).unwrap_or(0)
@@ -790,28 +842,139 @@ impl ExprConverter {
                 {
                     return logical;
                 }
+                let (left, right) = self.convert_binary_operands(
+                    lhs,
+                    rhs,
+                    out,
+                    shared_struct_ids,
+                    shared_next_struct,
+                    types,
+                    ctx,
+                );
                 MirExpr::Binary {
                     op: convert_binop(op, ctx),
-                    left: Box::new(self.convert_expr(
-                        lhs,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    )),
-                    right: Box::new(self.convert_expr(
-                        rhs,
-                        out,
-                        shared_struct_ids,
-                        shared_next_struct,
-                        types,
-                        ctx,
-                    )),
+                    left: Box::new(left),
+                    right: Box::new(right),
                     ty,
                 }
             }
         }
+    }
+
+    fn convert_binary_operands(
+        &mut self,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        out: &mut Vec<MirStmt>,
+        shared_struct_ids: &mut HashMap<TypeId, StructId>,
+        shared_next_struct: &mut u32,
+        types: &mut TypeTable,
+        ctx: &mut PassContext,
+    ) -> (MirExpr, MirExpr) {
+        let lhs_mir =
+            self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+        let rhs_start = out.len();
+        let rhs_mir =
+            self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+        let lhs_may_change = rhs_may_invalidate_lhs(rhs);
+        (
+            self.materialize_operand_before(lhs_mir, lhs, rhs_start, out, types, lhs_may_change),
+            rhs_mir,
+        )
+    }
+
+    fn indirect_call_return_ty(&self, expr: &HirExpr, types: &TypeTable) -> Option<TypeId> {
+        let HirExpr::Call {
+            callee: HirCallee::Indirect(inner),
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let callee_ty = hir_expr_type_id(inner)?;
+        match types.resolve(callee_ty) {
+            Some(Type::Fn { ret, .. }) => known_type(Some(*ret), types),
+            _ => None,
+        }
+    }
+
+    fn declared_field_ty(&self, hir: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = hir
+        else {
+            return None;
+        };
+        let owner_ty = self
+            .operand_static_ty(owner, types)
+            .or_else(|| self.declared_field_ty(owner, types))?;
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(&self.program.declarations));
+        let class = class_at_path(
+            &self.program.declarations,
+            class_index.get(&owner_ty)?.clone(),
+        )?;
+        let field = class.fields.iter().find(|f| f.name == *field_name)?;
+        known_type(Some(field.ty), types)
+    }
+
+    fn known_operand_ty(
+        &self,
+        value: &MirExpr,
+        hir: &HirExpr,
+        types: &mut TypeTable,
+    ) -> Option<TypeId> {
+        fn known(ty: Option<TypeId>, types: &TypeTable) -> Option<TypeId> {
+            ty.filter(|t| !matches!(types.resolve(*t), None | Some(Type::Error | Type::Void)))
+        }
+        known(self.mir_expr_static_ty(value, types), types)
+            .or_else(|| self.indirect_call_return_ty(hir, types))
+            .or_else(|| {
+                let ty = self.operand_static_ty(hir, types);
+                known(ty, types)
+            })
+            .or_else(|| self.declared_field_ty(hir, types))
+    }
+
+    fn materialize_operand_before(
+        &mut self,
+        value: MirExpr,
+        hir: &HirExpr,
+        index: usize,
+        out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+        rhs_may_change_lhs: bool,
+    ) -> MirExpr {
+        let value_may_change = has_potential_side_effects(&value);
+        let borrow_read = mir_contains_borrow_read(&value);
+        let place_may_change = rhs_may_change_lhs && (is_place(&value) || borrow_read);
+        let borrow_may_escape = place_may_change && borrow_read;
+        if !(value_may_change || place_may_change) || (out.len() == index && !borrow_may_escape) {
+            return value;
+        }
+        let temp = self.fresh_local();
+        let stmt = match self.known_operand_ty(&value, hir, types) {
+            Some(ty) => {
+                self.push_temp_local(temp, ty);
+                MirStmt::Let {
+                    local: temp,
+                    ty,
+                    init: Some(value),
+                    mutable: false,
+                }
+            }
+            None => {
+                let unknown = types.intern(&Type::Error);
+                self.push_temp_local(temp, unknown);
+                MirStmt::LetInfer {
+                    local: temp,
+                    init: value,
+                }
+            }
+        };
+        out.insert(index, stmt);
+        MirExpr::Local(temp)
     }
 
     fn check_optional_operands(
@@ -2032,10 +2195,15 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
-        let lhs_mir =
-            self.convert_expr(lhs, out, shared_struct_ids, shared_next_struct, types, ctx);
-        let rhs_mir =
-            self.convert_expr(rhs, out, shared_struct_ids, shared_next_struct, types, ctx);
+        let (lhs_mir, rhs_mir) = self.convert_binary_operands(
+            lhs,
+            rhs,
+            out,
+            shared_struct_ids,
+            shared_next_struct,
+            types,
+            ctx,
+        );
         let result_ty = if is_comparison_op(op) {
             types.intern(&Type::Bool)
         } else {
