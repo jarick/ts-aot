@@ -5,12 +5,13 @@ use oxc_ast::ast::{
     TSType, TSTypeName, match_member_expression,
 };
 use oxc_span::GetSpan;
+use oxc_syntax::operator::UnaryOperator;
 use ts_aot_core::{
     Atom, Diagnostic, FieldId, GenericParamId, LocalId, Span as CoreSpan, Type, TypeId, TypeTable,
 };
 use ts_aot_ir_hir::{
-    HirCallee, HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction, HirParam,
-    HirStmt, HirUnaryOp, Visitor, VisitorMut, walk_expr, walk_expr_mut, walk_stmt,
+    HirBinaryOp, HirCallee, HirClass, HirDecl, HirEnumVariant, HirExpr, HirField, HirFunction,
+    HirParam, HirStmt, HirUnaryOp, Visitor, VisitorMut, walk_expr, walk_expr_mut, walk_stmt,
 };
 
 use crate::body::FunctionBodyInput;
@@ -74,6 +75,28 @@ fn mutation_root_entry(root: &HirExpr) -> Option<(Option<LocalId>, Option<String
         HirExpr::Local { id, .. } => Some((Some(*id), None)),
         HirExpr::Global { name, .. } => Some((None, Some(name.as_str().to_owned()))),
         _ => None,
+    }
+}
+
+fn mutation_matches_entry(
+    id: Option<LocalId>,
+    name: Option<&str>,
+    span: CoreSpan,
+    binding: Option<LocalId>,
+    source: &Atom,
+    exempt: &[(String, CoreSpan)],
+) -> bool {
+    (binding.is_some_and(|binding| id == Some(binding)) || name == Some(source.as_str()))
+        && !exempt.iter().any(|(exempt_name, exempt_span)| {
+            exempt_name.as_str() == source.as_str() && *exempt_span == span
+        })
+}
+
+fn iter_definitely_non_empty(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::ArrayLiteral { elements, .. } => !elements.is_empty(),
+        HirExpr::String(value, _) => !value.as_str().is_empty(),
+        _ => false,
     }
 }
 
@@ -454,7 +477,7 @@ impl SkeletonBuilder {
         class: &Class<'_>,
         reuse: bool,
         top_level: bool,
-        scope: Option<&BodyScope>,
+        mut scope: Option<&mut BodyScope>,
     ) -> HirClass {
         let name = class
             .id
@@ -475,7 +498,7 @@ impl SkeletonBuilder {
             class_name: name.clone(),
             members: collect_private_members(class, ty),
         });
-        self.register_static_fields(senv, class, ty, scope);
+        self.register_static_fields(senv, class, ty, scope.as_deref());
 
         let (class_type_param_ids, class_type_param_map) = build_type_param_context(
             senv.types,
@@ -488,8 +511,13 @@ impl SkeletonBuilder {
             if let Some(cached) = senv.program.class_fields.get(&ty).cloned() {
                 cached
             } else {
-                let computed =
-                    self.collect_class_fields(senv, class, ty, Some(&class_type_param_map), scope);
+                let computed = self.collect_class_fields(
+                    senv,
+                    class,
+                    ty,
+                    Some(&class_type_param_map),
+                    scope.as_deref(),
+                );
                 senv.program.class_fields.insert(ty, computed.clone());
                 computed
             };
@@ -631,8 +659,12 @@ impl SkeletonBuilder {
                                 Some(class_ty)
                             } else {
                                 let mut scratch = crate::scope::BodyScope::new(0);
+                                let walk_scope = match scope.as_deref_mut() {
+                                    Some(scope) => scope,
+                                    None => &mut scratch,
+                                };
                                 let built =
-                                    self.walk_class_expression(senv, class_expr, &mut scratch);
+                                    self.walk_class_expression(senv, class_expr, walk_scope);
                                 match built {
                                     HirExpr::DefaultConstruct { ty: class_ty, .. } => {
                                         self.class_value_fields
@@ -685,7 +717,7 @@ impl SkeletonBuilder {
         let extends = class
             .super_class
             .as_ref()
-            .and_then(|expr| Self::resolve_class_parent_name(senv, expr, scope));
+            .and_then(|expr| Self::resolve_class_parent_name(senv, expr, scope.as_deref()));
 
         let own_method_names = collect_own_method_names(class, ty);
         let saved_own_method_names =
@@ -693,8 +725,9 @@ impl SkeletonBuilder {
         let mut methods = Vec::new();
         let mut accessor_names = HashSet::new();
         let mut ordinary_names = HashSet::new();
-        let capture_frame =
-            scope.map(|scope| crate::expr::capture_type_map(scope, &HashMap::new()));
+        let capture_frame = scope
+            .as_deref()
+            .map(|scope| crate::expr::capture_type_map(scope, &HashMap::new()));
         if let Some(frame) = capture_frame.clone() {
             senv.capture_types.push(frame);
         }
@@ -707,7 +740,7 @@ impl SkeletonBuilder {
                 MethodDefinitionKind::Get | MethodDefinitionKind::Set
             );
             let saved_super = std::mem::replace(&mut self.current_super_class, extends.clone());
-            let func = self.build_method(senv, md, ty, &class_type_param_map, scope);
+            let func = self.build_method(senv, md, ty, &class_type_param_map, scope.as_deref());
             self.current_super_class = saved_super;
             if is_accessor {
                 accessor_names.insert(func.name.clone());
@@ -720,7 +753,7 @@ impl SkeletonBuilder {
             senv.capture_types.pop();
         }
         self.current_class_own_methods = saved_own_method_names;
-        if let Some(scope) = scope {
+        if let Some(scope) = scope.as_deref() {
             self.rewrite_local_class_method_captures(
                 senv,
                 ty,
@@ -787,7 +820,40 @@ impl SkeletonBuilder {
             return;
         };
         let name = Atom::from(id.name.as_str());
-        let mut hir_class = self.build_class(senv, class, false, false, Some(scope));
+        for element in &class.body.body {
+            let oxc_ast::ast::ClassElement::PropertyDefinition(p) = element else {
+                continue;
+            };
+            if !p.r#static {
+                continue;
+            }
+            let Some(value) = &p.value else {
+                continue;
+            };
+            if crate::expr::static_field_initializer_is_supported(
+                value,
+                p.type_annotation.as_deref(),
+            ) {
+                continue;
+            }
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "the static field `{}.{}` of a class declared inside a function cannot be \
+                     initialized here: a local class is lowered to one module-level global that is \
+                     seeded before the function runs, so a non-literal initializer would silently \
+                     become the field's zero value; move the class to the top level, make the \
+                     initializer a literal, or drop the static field",
+                    name.as_str(),
+                    p.key
+                        .static_name()
+                        .map_or_else(|| "<computed>".to_owned(), std::borrow::Cow::into_owned)
+                )
+                .as_str(),
+                value.span(),
+            );
+        }
+        let mut hir_class = self.build_class(senv, class, false, false, Some(&mut *scope));
         let class_ty = hir_class.ty;
         self.walk_local_class_field_inits(senv, class, class_ty, scope);
         let unique = self.fresh_anon_class_name(senv);
@@ -1429,7 +1495,6 @@ impl SkeletonBuilder {
         }
         struct WriteScan {
             writes: Vec<WriteEntry>,
-            mutations: Vec<WriteEntry>,
             closure_depth: u32,
             loops: Vec<u32>,
             next_loop_id: u32,
@@ -1472,35 +1537,8 @@ impl SkeletonBuilder {
                                 &loops,
                             ));
                         }
-                        other => {
-                            if let Some((id, name)) = mutation_root_entry(member_chain_root(other))
-                            {
-                                self.mutations
-                                    .push(WriteEntry::new(id, name, *span, in_closure, &loops));
-                            }
-                        }
+                        _ => {}
                     }
-                }
-                let mutation = match expr {
-                    HirExpr::Unary {
-                        op: HirUnaryOp::Delete,
-                        expr: deleted,
-                        ..
-                    } => mutation_root_entry(member_chain_root(deleted)),
-                    HirExpr::Call {
-                        callee: HirCallee::Indirect(callee),
-                        ..
-                    } => match callee.as_ref() {
-                        HirExpr::Field { owner, .. } => {
-                            mutation_root_entry(member_chain_root(owner))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some((id, name)) = mutation {
-                    self.mutations
-                        .push(WriteEntry::new(id, name, expr.span(), in_closure, &loops));
                 }
                 if matches!(expr, HirExpr::Closure { .. }) {
                     self.closure_depth = self.closure_depth.saturating_add(1);
@@ -1566,20 +1604,1068 @@ impl SkeletonBuilder {
                 walk_expr(self, expr);
             }
         }
-        struct AliasScan<'a> {
-            edges: &'a mut HashMap<LocalId, LocalId>,
+        #[derive(Clone, Default, PartialEq, Eq)]
+        struct AliasState {
+            edges: HashMap<LocalId, Vec<LocalId>>,
         }
-        impl Visitor for AliasScan<'_> {
+        impl AliasState {
+            fn roots(&self, id: LocalId) -> Vec<LocalId> {
+                let mut reachable: Vec<LocalId> = Vec::new();
+                let mut seen: HashSet<LocalId> = HashSet::new();
+                let mut stack: Vec<LocalId> = vec![id];
+                while let Some(current) = stack.pop() {
+                    if !seen.insert(current) {
+                        continue;
+                    }
+                    reachable.push(current);
+                    if let Some(next) = self.edges.get(&current) {
+                        stack.extend(next.iter().copied());
+                    }
+                }
+                reachable.sort_by_key(|id| id.raw());
+                reachable.dedup();
+                reachable
+            }
+
+            fn bind(&mut self, id: LocalId, source: LocalId) {
+                let roots = self.roots(source);
+                self.edges.insert(id, roots);
+            }
+
+            fn forget(&mut self, id: LocalId) {
+                self.edges.remove(&id);
+            }
+
+            fn shares(&self, left: LocalId, right: LocalId) -> bool {
+                let left = self.roots(left);
+                let right = self.roots(right);
+                left.iter().any(|id| right.contains(id))
+            }
+
+            fn join(&mut self, other: &Self) {
+                for (id, roots) in &other.edges {
+                    let entry = self.edges.entry(*id).or_default();
+                    for root in roots {
+                        if !entry.contains(root) {
+                            entry.push(*root);
+                        }
+                    }
+                }
+            }
+
+            fn same_facts(&self, other: &Self) -> bool {
+                self.edges.len() == other.edges.len()
+                    && self.edges.iter().all(|(id, roots)| {
+                        other.edges.get(id).is_some_and(|other_roots| {
+                            roots.len() == other_roots.len()
+                                && roots.iter().all(|root| other_roots.contains(root))
+                        })
+                    })
+            }
+        }
+        #[derive(Clone, Default, PartialEq, Eq)]
+        struct ClosureEffect {
+            aliases: Vec<(LocalId, Vec<LocalId>)>,
+            ints: Vec<(LocalId, Option<i64>)>,
+        }
+        fn alias_effect(entry: &AliasState, exit: &AliasState) -> Vec<(LocalId, Vec<LocalId>)> {
+            let mut effect: Vec<(LocalId, Vec<LocalId>)> = Vec::new();
+            for (id, roots) in &exit.edges {
+                if entry.edges.get(id) != Some(roots) {
+                    effect.push((*id, roots.clone()));
+                }
+            }
+            for id in entry.edges.keys() {
+                if !exit.edges.contains_key(id) {
+                    effect.push((*id, Vec::new()));
+                }
+            }
+            effect
+        }
+        fn int_effect(
+            entry: &HashMap<LocalId, i64>,
+            exit: &HashMap<LocalId, i64>,
+        ) -> Vec<(LocalId, Option<i64>)> {
+            let mut effect: Vec<(LocalId, Option<i64>)> = Vec::new();
+            for (id, value) in exit {
+                if entry.get(id) != Some(value) {
+                    effect.push((*id, Some(*value)));
+                }
+            }
+            for id in entry.keys() {
+                if !exit.contains_key(id) {
+                    effect.push((*id, None));
+                }
+            }
+            effect
+        }
+        fn closure_effect_int(effect: Option<&ClosureEffect>, id: LocalId) -> Option<i64> {
+            effect?
+                .ints
+                .iter()
+                .find(|(existing, _)| *existing == id)
+                .and_then(|(_, value)| *value)
+        }
+        fn closure_effect_roots(
+            effect: Option<&ClosureEffect>,
+            id: LocalId,
+        ) -> Option<&Vec<LocalId>> {
+            effect?
+                .aliases
+                .iter()
+                .find(|(existing, _)| *existing == id)
+                .map(|(_, roots)| roots)
+        }
+        fn merge_closure_effects(
+            left: &HashMap<LocalId, ClosureEffect>,
+            right: &HashMap<LocalId, ClosureEffect>,
+            entry_aliases: &AliasState,
+        ) -> HashMap<LocalId, ClosureEffect> {
+            let mut merged: HashMap<LocalId, ClosureEffect> = HashMap::new();
+            for id in left.keys().chain(right.keys()) {
+                if merged.contains_key(id) {
+                    continue;
+                }
+                let mut target = ClosureEffect::default();
+                let mut alias_ids: Vec<LocalId> = Vec::new();
+                for effect in [left.get(id), right.get(id)].into_iter().flatten() {
+                    for (alias_id, _) in &effect.aliases {
+                        if !alias_ids.contains(alias_id) {
+                            alias_ids.push(*alias_id);
+                        }
+                    }
+                }
+                for alias_id in alias_ids {
+                    let left_roots = closure_effect_roots(left.get(id), alias_id);
+                    let right_roots = closure_effect_roots(right.get(id), alias_id);
+                    let mut roots: Vec<LocalId> = Vec::new();
+                    if (left_roots.is_none() || right_roots.is_none())
+                        && let Some(entry) = entry_aliases.edges.get(&alias_id)
+                    {
+                        roots.extend(entry.iter().copied());
+                    }
+                    for source in [left_roots, right_roots].into_iter().flatten() {
+                        for root in source {
+                            if !roots.contains(root) {
+                                roots.push(*root);
+                            }
+                        }
+                    }
+                    target.aliases.push((alias_id, roots));
+                }
+                let mut int_ids: Vec<LocalId> = Vec::new();
+                for effect in [left.get(id), right.get(id)].into_iter().flatten() {
+                    for (int_id, _) in &effect.ints {
+                        if !int_ids.contains(int_id) {
+                            int_ids.push(*int_id);
+                        }
+                    }
+                }
+                for int_id in int_ids {
+                    let value = match (
+                        closure_effect_int(left.get(id), int_id),
+                        closure_effect_int(right.get(id), int_id),
+                    ) {
+                        (Some(left_value), Some(right_value)) if left_value == right_value => {
+                            Some(left_value)
+                        }
+                        _ => None,
+                    };
+                    target.ints.push((int_id, value));
+                }
+                merged.insert(*id, target);
+            }
+            merged
+        }
+        struct MutationEntry {
+            id: Option<LocalId>,
+            name: Option<String>,
+            span: CoreSpan,
+            in_closure: bool,
+            loops: Vec<u32>,
+            aliases: AliasState,
+        }
+        #[derive(Default)]
+        struct ThrowScan {
+            may_throw: bool,
+        }
+        impl Visitor for ThrowScan {
             fn visit_stmt(&mut self, stmt: &HirStmt) {
-                if let HirStmt::Let {
-                    id,
-                    init: Some(HirExpr::Local { id: source, .. }),
-                    ..
-                } = stmt
-                {
-                    self.edges.insert(*id, *source);
+                if matches!(stmt, HirStmt::Throw { .. }) {
+                    self.may_throw = true;
                 }
                 walk_stmt(self, stmt);
+            }
+
+            fn visit_expr(&mut self, expr: &HirExpr) {
+                if matches!(
+                    expr,
+                    HirExpr::Call { .. }
+                        | HirExpr::New { .. }
+                        | HirExpr::Await { .. }
+                        | HirExpr::Yield { .. }
+                ) {
+                    self.may_throw = true;
+                }
+                if matches!(expr, HirExpr::Closure { .. }) {
+                    return;
+                }
+                walk_expr(self, expr);
+            }
+        }
+        fn stmt_may_throw(stmt: &HirStmt) -> bool {
+            let mut scan = ThrowScan::default();
+            scan.visit_stmt(stmt);
+            scan.may_throw
+        }
+        fn stmt_may_return(stmt: &HirStmt) -> bool {
+            match stmt {
+                HirStmt::Return { .. } => true,
+                HirStmt::Block(stmts) => stmts.iter().any(stmt_may_return),
+                HirStmt::If {
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    if is_literal_true(cond) {
+                        stmt_may_return(then)
+                    } else if is_literal_false(cond) {
+                        otherwise.as_deref().is_some_and(stmt_may_return)
+                    } else {
+                        stmt_may_return(then) || otherwise.as_deref().is_some_and(stmt_may_return)
+                    }
+                }
+                HirStmt::While { body, .. }
+                | HirStmt::DoWhile { body, .. }
+                | HirStmt::ForOf { body, .. }
+                | HirStmt::ForAwaitOf { body, .. }
+                | HirStmt::ForIn { body, .. } => stmt_may_return(body),
+                HirStmt::Switch { cases, .. } => cases
+                    .iter()
+                    .any(|case| case.body.iter().any(stmt_may_return)),
+                HirStmt::Try {
+                    body,
+                    catch,
+                    finally,
+                } => {
+                    stmt_may_return(body)
+                        || catch
+                            .as_ref()
+                            .is_some_and(|catch| stmt_may_return(&catch.body))
+                        || finally.as_deref().is_some_and(stmt_may_return)
+                }
+                HirStmt::Let { .. }
+                | HirStmt::Expr { .. }
+                | HirStmt::Break { .. }
+                | HirStmt::Continue { .. }
+                | HirStmt::Throw { .. }
+                | HirStmt::Decl(_) => false,
+            }
+        }
+        fn always_completes_abruptly(stmt: &HirStmt) -> bool {
+            match stmt {
+                HirStmt::Return { .. }
+                | HirStmt::Throw { .. }
+                | HirStmt::Break { .. }
+                | HirStmt::Continue { .. } => true,
+                HirStmt::Block(stmts) => stmts.iter().any(always_completes_abruptly),
+                HirStmt::If {
+                    then, otherwise, ..
+                } => otherwise.as_deref().is_some_and(|otherwise| {
+                    always_completes_abruptly(then) && always_completes_abruptly(otherwise)
+                }),
+                HirStmt::While { cond, body } | HirStmt::DoWhile { body, cond } => {
+                    is_literal_true(cond) && !contains_break(body)
+                }
+                _ => false,
+            }
+        }
+        fn is_literal_true(expr: &HirExpr) -> bool {
+            match expr {
+                HirExpr::Bool(value, _) => *value,
+                HirExpr::Int(value, _) => *value != 0,
+                HirExpr::Float(bits, _) => {
+                    let value = f64::from_bits(*bits);
+                    value != 0.0 && !value.is_nan()
+                }
+                _ => false,
+            }
+        }
+        fn is_literal_false(expr: &HirExpr) -> bool {
+            match expr {
+                HirExpr::Bool(value, _) => !*value,
+                HirExpr::Int(value, _) => *value == 0,
+                HirExpr::Float(bits, _) => {
+                    let value = f64::from_bits(*bits);
+                    value == 0.0 || value.is_nan()
+                }
+                _ => false,
+            }
+        }
+        fn completes_by_transfer(stmt: &HirStmt) -> bool {
+            match stmt {
+                HirStmt::Break { .. } | HirStmt::Continue { .. } => true,
+                HirStmt::Block(stmts) => stmts.iter().any(completes_by_transfer),
+                HirStmt::If {
+                    then, otherwise, ..
+                } => {
+                    completes_by_transfer(then)
+                        || otherwise.as_deref().is_some_and(completes_by_transfer)
+                }
+                _ => false,
+            }
+        }
+        fn contains_break(stmt: &HirStmt) -> bool {
+            match stmt {
+                HirStmt::Break { .. } => true,
+                HirStmt::Block(stmts) => stmts.iter().any(contains_break),
+                HirStmt::If {
+                    then, otherwise, ..
+                } => contains_break(then) || otherwise.as_deref().is_some_and(contains_break),
+                HirStmt::While { .. }
+                | HirStmt::DoWhile { .. }
+                | HirStmt::ForOf { .. }
+                | HirStmt::ForAwaitOf { .. }
+                | HirStmt::ForIn { .. } => false,
+                HirStmt::Switch { .. } => false,
+                HirStmt::Try {
+                    body,
+                    catch,
+                    finally,
+                } => {
+                    contains_break(body)
+                        || catch
+                            .as_ref()
+                            .is_some_and(|catch| contains_break(&catch.body))
+                        || finally.as_deref().is_some_and(contains_break)
+                }
+                HirStmt::Return { .. }
+                | HirStmt::Continue { .. }
+                | HirStmt::Throw { .. }
+                | HirStmt::Let { .. }
+                | HirStmt::Expr { .. }
+                | HirStmt::Decl(_) => false,
+            }
+        }
+        struct MutationScan {
+            mutations: Vec<MutationEntry>,
+            aliases: AliasState,
+            ints: HashMap<LocalId, i64>,
+            closure_effects: HashMap<LocalId, ClosureEffect>,
+            closure_depth: u32,
+            loops: Vec<u32>,
+            next_loop_id: u32,
+            collect_throws: bool,
+            throw_states: Vec<(AliasState, HashMap<LocalId, i64>)>,
+        }
+        impl MutationScan {
+            fn record(&mut self, id: Option<LocalId>, name: Option<String>, span: CoreSpan) {
+                self.mutations.push(MutationEntry {
+                    id,
+                    name,
+                    span,
+                    in_closure: self.closure_depth > 0,
+                    loops: self.loops.clone(),
+                    aliases: self.aliases.clone(),
+                });
+            }
+
+            fn note_throw(&mut self) {
+                if self.collect_throws && self.closure_depth == 0 {
+                    let aliases = self.aliases.clone();
+                    let ints = self.ints.clone();
+                    self.throw_states.push((aliases, ints));
+                }
+            }
+
+            fn visit_stmts(&mut self, stmts: &[HirStmt]) {
+                for stmt in stmts {
+                    let abrupt = self.stmt_completes_abruptly(stmt);
+                    self.visit_stmt(stmt);
+                    if abrupt {
+                        break;
+                    }
+                }
+            }
+
+            fn stmt_completes_abruptly(&self, stmt: &HirStmt) -> bool {
+                match stmt {
+                    HirStmt::If {
+                        cond,
+                        then,
+                        otherwise,
+                    } => match self.eval_cond(cond) {
+                        Some(true) => always_completes_abruptly(then),
+                        Some(false) => otherwise.as_deref().is_some_and(always_completes_abruptly),
+                        None => otherwise.as_deref().is_some_and(|otherwise| {
+                            always_completes_abruptly(then) && always_completes_abruptly(otherwise)
+                        }),
+                    },
+                    HirStmt::While { cond, body } => is_literal_true(cond) && !contains_break(body),
+                    _ => always_completes_abruptly(stmt),
+                }
+            }
+
+            fn set_let(&mut self, id: LocalId, narrowed: bool, init: Option<&HirExpr>) {
+                match init {
+                    Some(HirExpr::Local { id: source, .. }) => self.aliases.bind(id, *source),
+                    Some(HirExpr::TypeAssertion { expr, .. }) if narrowed => match expr.as_ref() {
+                        HirExpr::Local { id: source, .. } => self.aliases.bind(id, *source),
+                        _ => self.aliases.forget(id),
+                    },
+                    _ => self.aliases.forget(id),
+                }
+                self.ints.remove(&id);
+                if let Some(HirExpr::Int(value, _)) = init {
+                    self.ints.insert(id, *value);
+                }
+                if let Some(init) = init {
+                    self.inherit_closure_effect(id, init);
+                }
+            }
+
+            fn set_int(&mut self, id: LocalId, value: Option<i64>) {
+                match value {
+                    Some(value) => {
+                        self.ints.insert(id, value);
+                    }
+                    None => {
+                        self.ints.remove(&id);
+                    }
+                }
+            }
+
+            fn eval_int(&self, expr: &HirExpr) -> Option<i64> {
+                match expr {
+                    HirExpr::Int(value, _) => Some(*value),
+                    HirExpr::Local { id, .. } => self.ints.get(id).copied(),
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Neg,
+                        expr,
+                        ..
+                    } => self.eval_int(expr)?.checked_neg(),
+                    HirExpr::Binary { op, lhs, rhs, .. } => {
+                        let lhs = self.eval_int(lhs)?;
+                        let rhs = self.eval_int(rhs)?;
+                        match op {
+                            HirBinaryOp::Add => lhs.checked_add(rhs),
+                            HirBinaryOp::Sub => lhs.checked_sub(rhs),
+                            HirBinaryOp::Mul => lhs.checked_mul(rhs),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+
+            fn eval_cond(&self, expr: &HirExpr) -> Option<bool> {
+                match expr {
+                    HirExpr::Bool(value, _) => Some(*value),
+                    HirExpr::Int(value, _) => Some(*value != 0),
+                    HirExpr::Float(value, _) => {
+                        Some(f64::from_bits(*value) != 0.0 && !f64::from_bits(*value).is_nan())
+                    }
+                    HirExpr::Local { id, .. } => self.ints.get(id).map(|value| *value != 0),
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Not,
+                        expr,
+                        ..
+                    } => Some(!self.eval_cond(expr)?),
+                    HirExpr::Binary { op, lhs, rhs, .. } => match op {
+                        HirBinaryOp::And => Some(self.eval_cond(lhs)? && self.eval_cond(rhs)?),
+                        HirBinaryOp::Or => Some(self.eval_cond(lhs)? || self.eval_cond(rhs)?),
+                        HirBinaryOp::Lt
+                        | HirBinaryOp::Le
+                        | HirBinaryOp::Gt
+                        | HirBinaryOp::Ge
+                        | HirBinaryOp::Eq
+                        | HirBinaryOp::Ne
+                        | HirBinaryOp::StrictEq
+                        | HirBinaryOp::StrictNe => {
+                            let lhs = self.eval_int(lhs)?;
+                            let rhs = self.eval_int(rhs)?;
+                            Some(match op {
+                                HirBinaryOp::Lt => lhs < rhs,
+                                HirBinaryOp::Le => lhs <= rhs,
+                                HirBinaryOp::Gt => lhs > rhs,
+                                HirBinaryOp::Ge => lhs >= rhs,
+                                HirBinaryOp::Eq | HirBinaryOp::StrictEq => lhs == rhs,
+                                _ => lhs != rhs,
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+
+            fn join_ints(&mut self, other: &HashMap<LocalId, i64>) {
+                self.ints.retain(|id, value| other.get(id) == Some(value));
+            }
+
+            fn scan_closure(&mut self, expr: &HirExpr) -> ClosureEffect {
+                let HirExpr::Closure { captures, body, .. } = expr else {
+                    return ClosureEffect::default();
+                };
+                for capture in captures {
+                    self.visit_expr(capture);
+                }
+                let entry_aliases = self.aliases.clone();
+                let entry_ints = self.ints.clone();
+                self.closure_depth = self.closure_depth.saturating_add(1);
+                self.visit_stmts(body);
+                self.closure_depth = self.closure_depth.saturating_sub(1);
+                let effect = ClosureEffect {
+                    aliases: alias_effect(&entry_aliases, &self.aliases),
+                    ints: int_effect(&entry_ints, &self.ints),
+                };
+                self.aliases = entry_aliases;
+                self.ints = entry_ints;
+                effect
+            }
+
+            fn apply_effect(&mut self, effect: &ClosureEffect) {
+                for (id, roots) in &effect.aliases {
+                    if roots.is_empty() {
+                        self.aliases.forget(*id);
+                    } else {
+                        self.aliases.edges.insert(*id, roots.clone());
+                    }
+                }
+                for (id, value) in &effect.ints {
+                    self.set_int(*id, *value);
+                }
+            }
+
+            fn bind_closure(&mut self, id: LocalId, expr: &HirExpr) {
+                let effect = self.scan_closure(expr);
+                self.aliases.forget(id);
+                self.ints.remove(&id);
+                self.closure_effects.insert(id, effect);
+            }
+
+            fn inherit_closure_effect(&mut self, id: LocalId, value: &HirExpr) {
+                let inherited = match value {
+                    HirExpr::Local { id: source, .. } => self.closure_effects.get(source).cloned(),
+                    _ => None,
+                };
+                if let Some(effect) = inherited {
+                    self.closure_effects.insert(id, effect);
+                }
+            }
+
+            fn drop_closure_effect(&mut self, effect: &ClosureEffect) {
+                for (id, _) in &effect.ints {
+                    self.ints.remove(id);
+                }
+            }
+
+            fn apply_closure(&mut self, id: LocalId) {
+                if let Some(effect) = self.closure_effects.get(&id).cloned() {
+                    self.apply_effect(&effect);
+                }
+            }
+
+            fn begin_loop(&mut self) {
+                let id = self.next_loop_id;
+                self.next_loop_id = self.next_loop_id.saturating_add(1);
+                self.loops.push(id);
+            }
+
+            fn end_loop(&mut self) {
+                self.loops.pop();
+            }
+
+            fn run_loop_body(
+                &mut self,
+                binding: Option<LocalId>,
+                iter: Option<&HirExpr>,
+                cond_before: Option<&HirExpr>,
+                body: &HirStmt,
+                cond_after: Option<&HirExpr>,
+            ) {
+                if let Some(iter) = iter {
+                    self.visit_expr(iter);
+                }
+                if let Some(binding) = binding {
+                    self.aliases.forget(binding);
+                    self.ints.remove(&binding);
+                }
+                if let Some(cond) = cond_before {
+                    self.visit_expr(cond);
+                }
+                self.visit_stmt(body);
+                if let Some(cond) = cond_after {
+                    self.visit_expr(cond);
+                }
+            }
+
+            fn merge_replayed_mutations(&mut self, base: usize, count: usize) -> bool {
+                let start = base + count;
+                if self.mutations.len() != start + count {
+                    return false;
+                }
+                let aligned = (0..count).all(|offset| {
+                    let base_entry = &self.mutations[base + offset];
+                    let replay_entry = &self.mutations[start + offset];
+                    base_entry.span == replay_entry.span
+                        && base_entry.id == replay_entry.id
+                        && base_entry.name == replay_entry.name
+                });
+                if !aligned {
+                    return false;
+                }
+                for offset in 0..count {
+                    let aliases = self.mutations[start + offset].aliases.clone();
+                    self.mutations[base + offset].aliases.join(&aliases);
+                }
+                self.mutations.truncate(start);
+                true
+            }
+
+            fn run_loop(
+                &mut self,
+                binding: Option<LocalId>,
+                iter: Option<&HirExpr>,
+                cond_before: Option<&HirExpr>,
+                body: &HirStmt,
+                cond_after: Option<&HirExpr>,
+            ) {
+                if let Some(cond) = cond_before
+                    && self.eval_cond(cond) == Some(false)
+                {
+                    self.visit_expr(cond);
+                    return;
+                }
+                let body_next = self.next_loop_id;
+                let may_skip = match iter {
+                    Some(iter) => !iter_definitely_non_empty(iter),
+                    None => match cond_before {
+                        Some(cond) => self.eval_cond(cond) != Some(true),
+                        None => false,
+                    },
+                };
+                let entry_aliases = self.aliases.clone();
+                let entry_ints = self.ints.clone();
+                let mutation_base = self.mutations.len();
+                self.next_loop_id = body_next;
+                self.aliases = entry_aliases.clone();
+                self.ints = entry_ints.clone();
+                self.run_loop_body(binding, iter, cond_before, body, cond_after);
+                let mut exit_aliases = self.aliases.clone();
+                let mut exit_ints = self.ints.clone();
+                if !exit_aliases.same_facts(&entry_aliases) || exit_ints != entry_ints {
+                    let observed = self.mutations.len() - mutation_base;
+                    let mut merge_site = Some((mutation_base, observed));
+                    loop {
+                        self.next_loop_id = body_next;
+                        self.aliases = exit_aliases.clone();
+                        self.ints = exit_ints.clone();
+                        self.run_loop_body(binding, iter, cond_before, body, cond_after);
+                        if let Some((base, count)) = merge_site
+                            && !self.merge_replayed_mutations(base, count)
+                        {
+                            merge_site = None;
+                        }
+                        let mut merged_aliases = exit_aliases.clone();
+                        merged_aliases.join(&self.aliases);
+                        let mut merged_ints = exit_ints.clone();
+                        merged_ints.retain(|id, value| self.ints.get(id) == Some(value));
+                        let stable =
+                            merged_aliases.same_facts(&exit_aliases) && merged_ints == exit_ints;
+                        exit_aliases = merged_aliases;
+                        exit_ints = merged_ints;
+                        if stable {
+                            break;
+                        }
+                    }
+                }
+                if may_skip {
+                    let mut merged_aliases = entry_aliases;
+                    merged_aliases.join(&exit_aliases);
+                    self.aliases = merged_aliases;
+                    let mut merged_ints = entry_ints;
+                    merged_ints.retain(|id, value| exit_ints.get(id) == Some(value));
+                    self.ints = merged_ints;
+                } else {
+                    self.aliases = exit_aliases;
+                    self.ints = exit_ints;
+                }
+            }
+        }
+        impl Visitor for MutationScan {
+            fn visit_stmt(&mut self, stmt: &HirStmt) {
+                match stmt {
+                    HirStmt::Block(stmts) => self.visit_stmts(stmts),
+                    HirStmt::Let {
+                        id, narrowed, init, ..
+                    } => {
+                        if let Some(init @ HirExpr::Closure { .. }) = init {
+                            self.bind_closure(*id, init);
+                        } else if let Some(init) = init {
+                            self.visit_expr(init);
+                            self.closure_effects.remove(id);
+                            self.set_let(*id, *narrowed, Some(init));
+                        } else {
+                            self.set_let(*id, *narrowed, None);
+                            self.closure_effects.remove(id);
+                        }
+                    }
+                    HirStmt::Expr { expr } => self.visit_expr(expr),
+                    HirStmt::If {
+                        cond,
+                        then,
+                        otherwise,
+                    } => {
+                        self.visit_expr(cond);
+                        let before_aliases = self.aliases.clone();
+                        let before_ints = self.ints.clone();
+                        let entry_aliases = self.aliases.clone();
+                        match self.eval_cond(cond) {
+                            Some(true) => self.visit_stmt(then),
+                            Some(false) => {
+                                if let Some(otherwise) = otherwise {
+                                    self.visit_stmt(otherwise);
+                                }
+                            }
+                            None => {
+                                let before_effects = self.closure_effects.clone();
+                                self.visit_stmt(then);
+                                let then_aliases =
+                                    std::mem::replace(&mut self.aliases, before_aliases);
+                                let then_ints = std::mem::replace(&mut self.ints, before_ints);
+                                let then_effects =
+                                    std::mem::replace(&mut self.closure_effects, before_effects);
+                                if let Some(otherwise) = otherwise {
+                                    self.visit_stmt(otherwise);
+                                }
+                                let else_aliases = self.aliases.clone();
+                                let else_ints = self.ints.clone();
+                                let else_effects = std::mem::take(&mut self.closure_effects);
+                                self.aliases = then_aliases;
+                                self.aliases.join(&else_aliases);
+                                self.ints = then_ints;
+                                self.join_ints(&else_ints);
+                                self.closure_effects = merge_closure_effects(
+                                    &then_effects,
+                                    &else_effects,
+                                    &entry_aliases,
+                                );
+                            }
+                        }
+                    }
+                    HirStmt::While { cond, body } => {
+                        self.begin_loop();
+                        self.run_loop(None, None, Some(cond), body, None);
+                        self.end_loop();
+                    }
+                    HirStmt::DoWhile { body, cond } => {
+                        self.begin_loop();
+                        self.run_loop(None, None, None, body, Some(cond));
+                        self.end_loop();
+                    }
+                    HirStmt::ForOf {
+                        binding,
+                        iter,
+                        body,
+                    }
+                    | HirStmt::ForAwaitOf {
+                        binding,
+                        iter,
+                        body,
+                    }
+                    | HirStmt::ForIn {
+                        binding,
+                        iter,
+                        body,
+                    } => {
+                        self.begin_loop();
+                        self.run_loop(Some(*binding), Some(iter), None, body, None);
+                        self.end_loop();
+                    }
+                    HirStmt::Switch { disc, cases } => {
+                        self.visit_expr(disc);
+                        let entry = self.aliases.clone();
+                        let entry_ints = self.ints.clone();
+                        let has_default = cases.iter().any(|case| case.test.is_none());
+                        let mut reaching: Option<AliasState> = None;
+                        let mut reaching_ints: Option<HashMap<LocalId, i64>> = None;
+                        let mut exits: Vec<(AliasState, HashMap<LocalId, i64>)> = Vec::new();
+                        for case in cases {
+                            self.aliases = reaching.clone().unwrap_or_default();
+                            self.aliases.join(&entry);
+                            self.ints = match &reaching_ints {
+                                Some(reaching_ints) => {
+                                    let mut merged = reaching_ints.clone();
+                                    merged.retain(|id, value| entry_ints.get(id) == Some(value));
+                                    merged
+                                }
+                                None => entry_ints.clone(),
+                            };
+                            if let Some(test) = &case.test {
+                                self.visit_expr(test);
+                            }
+                            self.visit_stmts(&case.body);
+                            exits.push((self.aliases.clone(), self.ints.clone()));
+                            let mut next = reaching.clone().unwrap_or_default();
+                            next.join(&self.aliases);
+                            reaching = Some(next);
+                            reaching_ints = Some(match &reaching_ints {
+                                Some(reaching_ints) => {
+                                    let mut merged = reaching_ints.clone();
+                                    merged.retain(|id, value| self.ints.get(id) == Some(value));
+                                    merged
+                                }
+                                None => self.ints.clone(),
+                            });
+                        }
+                        let mut result = if has_default {
+                            AliasState::default()
+                        } else {
+                            entry
+                        };
+                        let mut result_ints = entry_ints;
+                        for (state, ints) in &exits {
+                            result.join(state);
+                            result_ints.retain(|id, value| ints.get(id) == Some(value));
+                        }
+                        if let Some(reaching) = &reaching {
+                            result.join(reaching);
+                        }
+                        if let Some(reaching_ints) = &reaching_ints {
+                            result_ints.retain(|id, value| reaching_ints.get(id) == Some(value));
+                        }
+                        self.aliases = result;
+                        self.ints = result_ints;
+                    }
+                    HirStmt::Return { value } => {
+                        if let Some(value) = value {
+                            self.visit_expr(value);
+                        }
+                    }
+                    HirStmt::Throw { expr } => {
+                        self.visit_expr(expr);
+                        self.note_throw();
+                    }
+                    HirStmt::Try {
+                        body,
+                        catch,
+                        finally,
+                    } => {
+                        let entry = self.aliases.clone();
+                        let entry_ints = self.ints.clone();
+                        let outer_collect = self.collect_throws;
+                        let mut outer_throw_states = std::mem::take(&mut self.throw_states);
+                        self.collect_throws = true;
+                        self.visit_stmt(body);
+                        let body_throw_states = std::mem::take(&mut self.throw_states);
+                        self.collect_throws = outer_collect;
+                        let abrupt = always_completes_abruptly(body);
+                        let transfers = completes_by_transfer(body);
+                        let mut after = self.aliases.clone();
+                        let mut after_ints = self.ints.clone();
+                        let mut escaping: Vec<(AliasState, HashMap<LocalId, i64>)> = Vec::new();
+                        let mut handled = false;
+                        let mut caught: Option<(AliasState, HashMap<LocalId, i64>)> = None;
+                        if let Some(catch) = catch
+                            && stmt_may_throw(body)
+                        {
+                            handled = true;
+                            if let Some(((first_aliases, first_ints), rest)) =
+                                body_throw_states.split_first()
+                            {
+                                self.aliases = first_aliases.clone();
+                                self.ints.clone_from(first_ints);
+                                for (aliases, ints) in rest {
+                                    self.aliases.join(aliases);
+                                    self.join_ints(ints);
+                                }
+                            } else {
+                                self.aliases = entry;
+                                self.ints = entry_ints;
+                            }
+                            if let Some(binding) = &catch.binding {
+                                self.aliases.forget(binding.id);
+                                self.ints.remove(&binding.id);
+                            }
+                            self.collect_throws = true;
+                            self.visit_stmt(&catch.body);
+                            escaping.extend(std::mem::take(&mut self.throw_states));
+                            self.collect_throws = outer_collect;
+                            let catch_aliases = self.aliases.clone();
+                            let catch_ints = self.ints.clone();
+                            after.join(&catch_aliases);
+                            after_ints.retain(|id, value| catch_ints.get(id) == Some(value));
+                            caught = Some((catch_aliases, catch_ints));
+                        }
+                        if !handled {
+                            escaping.extend(body_throw_states);
+                        }
+                        if let Some(finally) = finally {
+                            self.aliases = after.clone();
+                            self.ints.clone_from(&after_ints);
+                            if handled && abrupt && !transfers && !stmt_may_return(body) {
+                                if let Some((catch_aliases, catch_ints)) = &caught {
+                                    self.aliases = catch_aliases.clone();
+                                    self.ints.clone_from(catch_ints);
+                                }
+                                for (aliases, ints) in &escaping {
+                                    self.aliases.join(aliases);
+                                    self.join_ints(ints);
+                                }
+                            }
+                            self.collect_throws = true;
+                            self.visit_stmt(finally);
+                            let finally_throw_states = std::mem::take(&mut self.throw_states);
+                            self.collect_throws = outer_collect;
+                            if always_completes_abruptly(finally) {
+                                escaping.clear();
+                            } else {
+                                for (aliases, ints) in &mut escaping {
+                                    aliases.clone_from(&self.aliases);
+                                    ints.clone_from(&self.ints);
+                                }
+                            }
+                            escaping.extend(finally_throw_states);
+                            after = self.aliases.clone();
+                            after_ints.clone_from(&self.ints);
+                        } else if abrupt && !transfers {
+                            if let Some((aliases, ints)) = caught {
+                                after = aliases;
+                                after_ints = ints;
+                            } else {
+                                after = AliasState::default();
+                                after_ints = HashMap::new();
+                            }
+                        }
+                        if outer_collect {
+                            outer_throw_states.extend(escaping);
+                        }
+                        self.throw_states = outer_throw_states;
+                        self.aliases = after;
+                        self.ints = after_ints;
+                    }
+                    HirStmt::Break { .. } | HirStmt::Continue { .. } | HirStmt::Decl(_) => {}
+                }
+            }
+
+            fn visit_expr(&mut self, expr: &HirExpr) {
+                if matches!(
+                    expr,
+                    HirExpr::Call { .. }
+                        | HirExpr::New { .. }
+                        | HirExpr::Await { .. }
+                        | HirExpr::Yield { .. }
+                ) {
+                    self.note_throw();
+                }
+                match expr {
+                    HirExpr::Closure { .. } => {
+                        let effect = self.scan_closure(expr);
+                        self.drop_closure_effect(&effect);
+                    }
+                    HirExpr::Assignment { target, value, .. } => match target.as_ref() {
+                        HirExpr::Local { id, .. } => {
+                            if let HirExpr::Closure { .. } = value.as_ref() {
+                                self.bind_closure(*id, value);
+                            } else {
+                                self.visit_expr(value);
+                                self.closure_effects.remove(id);
+                                match value.as_ref() {
+                                    HirExpr::Local { id: source, .. } => {
+                                        self.aliases.bind(*id, *source);
+                                        self.inherit_closure_effect(*id, value);
+                                    }
+                                    _ => self.aliases.forget(*id),
+                                }
+                                self.set_int(*id, None);
+                                if let HirExpr::Int(value, _) = value.as_ref() {
+                                    self.ints.insert(*id, *value);
+                                }
+                            }
+                        }
+                        HirExpr::Global { .. } => {
+                            self.visit_expr(target);
+                            self.visit_expr(value);
+                        }
+                        other => {
+                            if let Some((id, name)) = mutation_root_entry(member_chain_root(other))
+                            {
+                                self.record(id, name, expr.span());
+                            }
+                            self.visit_expr(target);
+                            self.visit_expr(value);
+                        }
+                    },
+                    HirExpr::CompoundUpdate {
+                        target, op, rhs, ..
+                    } => {
+                        if !matches!(
+                            target.as_ref(),
+                            HirExpr::Local { .. } | HirExpr::Global { .. }
+                        ) && let Some((id, name)) =
+                            mutation_root_entry(member_chain_root(target))
+                        {
+                            self.record(id, name, expr.span());
+                        }
+                        let updated = match target.as_ref() {
+                            HirExpr::Local { id, .. } => {
+                                let current = self.ints.get(id).copied();
+                                let rhs = self.eval_int(rhs);
+                                match (current, rhs) {
+                                    (Some(current), Some(rhs)) => match op {
+                                        HirBinaryOp::Add => current.checked_add(rhs),
+                                        HirBinaryOp::Sub => current.checked_sub(rhs),
+                                        HirBinaryOp::Mul => current.checked_mul(rhs),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        self.visit_expr(target);
+                        self.visit_expr(rhs);
+                        if let HirExpr::Local { id, .. } = target.as_ref() {
+                            self.set_int(*id, updated);
+                        }
+                    }
+                    HirExpr::Unary {
+                        op: HirUnaryOp::Delete,
+                        expr: deleted,
+                        ..
+                    } => {
+                        if let Some((id, name)) = mutation_root_entry(member_chain_root(deleted)) {
+                            self.record(id, name, expr.span());
+                        }
+                        self.visit_expr(deleted);
+                    }
+                    HirExpr::Call { callee, args, .. } => {
+                        if let HirCallee::Indirect(callee) = callee
+                            && let HirExpr::Field { owner, .. } = callee.as_ref()
+                            && let Some((id, name)) = mutation_root_entry(member_chain_root(owner))
+                        {
+                            self.record(id, name, expr.span());
+                        }
+                        for arg in args {
+                            self.visit_expr(arg);
+                        }
+                        if let HirCallee::Indirect(callee) = callee {
+                            match callee.as_ref() {
+                                HirExpr::Closure { .. } => {
+                                    let effect = self.scan_closure(callee);
+                                    self.apply_effect(&effect);
+                                }
+                                HirExpr::Local { id, .. } => {
+                                    self.visit_expr(callee);
+                                    self.apply_closure(*id);
+                                }
+                                _ => self.visit_expr(callee),
+                            }
+                        }
+                    }
+                    _ => walk_expr(self, expr),
+                }
             }
         }
         let Some(frame) = self.capture_check_frames.pop() else {
@@ -1592,7 +2678,6 @@ impl SkeletonBuilder {
         collect_for_header_writes(ast, &mut exempt);
         let mut scan = WriteScan {
             writes: Vec::new(),
-            mutations: Vec::new(),
             closure_depth: 0,
             loops: Vec::new(),
             next_loop_id: 0,
@@ -1600,24 +2685,19 @@ impl SkeletonBuilder {
         for stmt in body {
             scan.visit_stmt(stmt);
         }
-        let mut alias_edges: HashMap<LocalId, LocalId> = HashMap::new();
-        for stmt in body {
-            AliasScan {
-                edges: &mut alias_edges,
-            }
-            .visit_stmt(stmt);
-        }
-        let resolve_alias = |mut id: LocalId| -> LocalId {
-            let mut seen: Vec<u32> = Vec::new();
-            while let Some(next) = alias_edges.get(&id) {
-                if seen.contains(&id.raw()) {
-                    break;
-                }
-                seen.push(id.raw());
-                id = *next;
-            }
-            id
+        let mut mutation_scan = MutationScan {
+            mutations: Vec::new(),
+            aliases: AliasState::default(),
+            ints: HashMap::new(),
+            closure_effects: HashMap::new(),
+            closure_depth: 0,
+            loops: Vec::new(),
+            next_loop_id: 0,
+            collect_throws: false,
+            throw_states: Vec::new(),
         };
+        mutation_scan.visit_stmts(body);
+        let mutations = mutation_scan.mutations;
         let bases = collect_class_parents(&senv.program.declarations);
         let mut constructions = ConstructionScan {
             capture_fields: &self.class_capture_fields,
@@ -1642,27 +2722,32 @@ impl SkeletonBuilder {
                             })
                     })
             };
-        let matches_entry = |entry: &WriteEntry, binding: Option<LocalId>, source: &Atom| {
-            (binding.is_some_and(|binding| entry.id == Some(binding))
-                || entry.name.as_deref() == Some(source.as_str()))
-                && !exempt.iter().any(|(exempt_name, exempt_span)| {
-                    exempt_name.as_str() == source.as_str() && *exempt_span == entry.span
-                })
-        };
         let written = |binding: Option<LocalId>, source: &Atom| {
             scan.writes.iter().any(|entry| {
-                matches_entry(entry, binding, source)
-                    && !before_construction(binding, entry.span, entry.in_closure, &entry.loops)
+                mutation_matches_entry(
+                    entry.id,
+                    entry.name.as_deref(),
+                    entry.span,
+                    binding,
+                    source,
+                    &exempt,
+                ) && !before_construction(binding, entry.span, entry.in_closure, &entry.loops)
             })
         };
         let mutated = |binding: Option<LocalId>, source: &Atom| {
-            scan.mutations.iter().any(|entry| {
+            mutations.iter().any(|entry| {
                 let through_alias = binding.is_some_and(|binding| {
-                    entry
-                        .id
-                        .is_some_and(|id| resolve_alias(id).raw() == binding.raw())
+                    entry.id.is_some_and(|id| entry.aliases.shares(id, binding))
                 });
-                (through_alias || matches_entry(entry, binding, source))
+                (through_alias
+                    || mutation_matches_entry(
+                        entry.id,
+                        entry.name.as_deref(),
+                        entry.span,
+                        binding,
+                        source,
+                        &exempt,
+                    ))
                     && !before_construction(binding, entry.span, entry.in_closure, &entry.loops)
             })
         };
@@ -1954,6 +3039,22 @@ impl SkeletonBuilder {
                 && let Some(inferred) = crate::expr::literal_hir_ty(senv.types, &init)
             {
                 ty = inferred;
+            } else if let Some(numeric) = folded_numeric_literal(value) {
+                let span = core_span_from_oxc(value.span());
+                ty = senv
+                    .types
+                    .intern(&match number_hir_keeping_signed_zero(numeric, span) {
+                        HirExpr::Float(..) => Type::F64,
+                        _ => Type::I64,
+                    });
+            } else if let Expression::Identifier(id) = value
+                && let Some(scope) = scope
+                && let Some(binding_ty) = scope
+                    .type_of_visible(id.name.as_str())
+                    .or_else(|| global_decl_ty(senv, id.name.as_str()))
+                && !matches!(senv.types.resolve(binding_ty), None | Some(Type::Error))
+            {
+                ty = binding_ty;
             }
         }
         ty
@@ -2642,6 +3743,18 @@ impl SkeletonBuilder {
         }
     }
 }
+fn global_decl_ty(senv: &SkeletonEnv<'_>, name: &str) -> Option<TypeId> {
+    senv.program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Global {
+                name: declared, ty, ..
+            } if declared.as_str() == name => Some(*ty),
+            _ => None,
+        })
+}
+
 fn field_init_hir(
     value: &Expression<'_>,
     field_ty: Option<TypeId>,
@@ -2649,16 +3762,73 @@ fn field_init_hir(
     span: CoreSpan,
 ) -> Option<HirExpr> {
     match value {
-        Expression::NumericLiteral(n) => {
-            if field_ty.is_some_and(|t| matches!(types.resolve(t), Some(Type::F64 | Type::F32))) {
-                Some(HirExpr::Float(n.value.to_bits(), span))
-            } else {
-                Some(crate::ops::number_to_hir(n.value, span))
-            }
+        Expression::ParenthesizedExpression(inner) => {
+            field_init_hir(&inner.expression, field_ty, types, span)
         }
+        Expression::NumericLiteral(n) => Some(field_init_number(n.value, field_ty, types, span)),
+        Expression::UnaryExpression(u) => match u.operator {
+            UnaryOperator::UnaryNegation => {
+                let Expression::NumericLiteral(n) = &u.argument else {
+                    return None;
+                };
+                Some(field_init_number(-n.value, field_ty, types, span))
+            }
+            UnaryOperator::UnaryPlus => {
+                let Expression::NumericLiteral(n) = &u.argument else {
+                    return None;
+                };
+                Some(field_init_number(n.value, field_ty, types, span))
+            }
+            UnaryOperator::BitwiseNot => {
+                let Expression::NumericLiteral(n) = &u.argument else {
+                    return None;
+                };
+                Some(field_init_number(
+                    bitwise_not_literal(n.value),
+                    field_ty,
+                    types,
+                    span,
+                ))
+            }
+            _ => None,
+        },
         Expression::BooleanLiteral(b) => Some(HirExpr::Bool(b.value, span)),
         Expression::StringLiteral(s) => Some(HirExpr::String(Atom::from(s.value.as_str()), span)),
         _ => None,
+    }
+}
+
+fn bitwise_not_literal(value: f64) -> f64 {
+    if !value.is_finite() {
+        return -1.0;
+    }
+    let wrapped = value.trunc().rem_euclid(4_294_967_296.0);
+    let signed = if wrapped >= 2_147_483_648.0 {
+        wrapped - 4_294_967_296.0
+    } else {
+        wrapped
+    };
+    -(signed + 1.0)
+}
+
+fn number_hir_keeping_signed_zero(value: f64, span: CoreSpan) -> HirExpr {
+    if value == 0.0 && value.is_sign_negative() {
+        HirExpr::Float(value.to_bits(), span)
+    } else {
+        crate::ops::number_to_hir(value, span)
+    }
+}
+
+fn field_init_number(
+    value: f64,
+    field_ty: Option<TypeId>,
+    types: &TypeTable,
+    span: CoreSpan,
+) -> HirExpr {
+    if field_ty.is_some_and(|t| matches!(types.resolve(t), Some(Type::F64 | Type::F32))) {
+        HirExpr::Float(value.to_bits(), span)
+    } else {
+        number_hir_keeping_signed_zero(value, span)
     }
 }
 
@@ -2792,6 +3962,28 @@ fn collect_own_method_names(class: &Class<'_>, class_ty: TypeId) -> Vec<Atom> {
     names
 }
 
+fn reserve_private_lowered_name(
+    public_names: &mut HashSet<Atom>,
+    class_ty: TypeId,
+    private_name: &str,
+) -> Atom {
+    let mut lowered = private_member_hir_name(class_ty, private_name);
+    loop {
+        let getter = Atom::from(format!("__get_{}", lowered.as_str()));
+        let setter = Atom::from(format!("__set_{}", lowered.as_str()));
+        if !public_names.contains(&lowered)
+            && !public_names.contains(&getter)
+            && !public_names.contains(&setter)
+        {
+            public_names.insert(lowered.clone());
+            public_names.insert(getter);
+            public_names.insert(setter);
+            return lowered;
+        }
+        lowered = Atom::from(format!("{}__dup", lowered.as_str()));
+    }
+}
+
 fn collect_private_members(class: &Class<'_>, class_ty: TypeId) -> HashMap<Atom, PrivateMember> {
     let mut public_names: HashSet<Atom> = HashSet::new();
     for element in &class.body.body {
@@ -2834,11 +4026,7 @@ fn collect_private_members(class: &Class<'_>, class_ty: TypeId) -> HashMap<Atom,
         let private_name = private.as_str();
         let name = Atom::from(private_name);
         if let std::collections::hash_map::Entry::Vacant(slot) = members.entry(name) {
-            let mut lowered = private_member_hir_name(class_ty, private_name);
-            while public_names.contains(&lowered) {
-                lowered = Atom::from(format!("{}__dup", lowered.as_str()));
-            }
-            public_names.insert(lowered.clone());
+            let lowered = reserve_private_lowered_name(&mut public_names, class_ty, private_name);
             slot.insert(PrivateMember {
                 lowered,
                 is_static,
@@ -2856,6 +4044,25 @@ fn literal_value_hir(value: &Expression<'_>, span: CoreSpan) -> Option<HirExpr> 
         Expression::StringLiteral(s) => HirExpr::String(Atom::from(s.value.as_str()), span),
         _ => return None,
     })
+}
+
+fn folded_numeric_literal(value: &Expression<'_>) -> Option<f64> {
+    match value {
+        Expression::ParenthesizedExpression(inner) => folded_numeric_literal(&inner.expression),
+        Expression::NumericLiteral(n) => Some(n.value),
+        Expression::UnaryExpression(u) => {
+            let Expression::NumericLiteral(n) = &u.argument else {
+                return None;
+            };
+            match u.operator {
+                UnaryOperator::UnaryNegation => Some(-n.value),
+                UnaryOperator::UnaryPlus => Some(n.value),
+                UnaryOperator::BitwiseNot => Some(bitwise_not_literal(n.value)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn build_type_param_context(
@@ -2917,8 +4124,10 @@ fn is_const_initializer(expr: &HirExpr) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::static_field_global_name;
-    use ts_aot_core::TypeId;
+    use std::collections::HashSet;
+
+    use super::{private_member_hir_name, reserve_private_lowered_name, static_field_global_name};
+    use ts_aot_core::{Atom, TypeId};
 
     #[test]
     fn static_field_global_name_separates_underscore_segments() {
@@ -2931,5 +4140,35 @@ mod tests {
     fn static_field_global_name_keeps_anonymous_class_shape() {
         let anonymous = static_field_global_name("", "k", TypeId::from_raw(5));
         assert_eq!(anonymous.as_str(), "__k_5");
+    }
+
+    #[test]
+    fn a_private_lowered_name_reserves_its_accessor_names() {
+        let class_ty = TypeId::from_raw(7);
+        let mut public_names: HashSet<Atom> = HashSet::new();
+        let base = private_member_hir_name(class_ty, "v");
+        let getter = Atom::from(format!("__get_{}", base.as_str()));
+        public_names.insert(getter.clone());
+        let lowered = reserve_private_lowered_name(&mut public_names, class_ty, "v");
+        assert_ne!(
+            lowered, base,
+            "a public method named `{getter}` must push the private lowering off that name"
+        );
+        let emitted_getter = Atom::from(format!("__get_{}", lowered.as_str()));
+        assert_ne!(emitted_getter, getter);
+        assert!(
+            public_names.contains(&emitted_getter),
+            "the chosen lowering must reserve its emitted accessor names"
+        );
+    }
+
+    #[test]
+    fn a_private_lowered_name_reserves_an_ordinary_method_name() {
+        let class_ty = TypeId::from_raw(7);
+        let mut public_names: HashSet<Atom> = HashSet::new();
+        let base = private_member_hir_name(class_ty, "v");
+        public_names.insert(base.clone());
+        let lowered = reserve_private_lowered_name(&mut public_names, class_ty, "v");
+        assert_ne!(lowered, base);
     }
 }

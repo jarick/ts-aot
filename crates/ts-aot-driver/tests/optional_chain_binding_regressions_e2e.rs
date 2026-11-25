@@ -240,6 +240,75 @@ fn main() {
 }
 
 #[test]
+fn a_side_effecting_argument_of_an_optional_chain_call_follows_the_receiver() {
+    const SOURCE: &str = "class K { m(x: number | undefined): number { bodies = bodies + 1; seen = calls + 100; return x ?? 7; } } \
+         var calls: number = 0; \
+         var bodies: number = 0; \
+         var seen: number = 0; \
+         function bump(): number { calls = calls + 1; return calls; } \
+         export function run(k: K | undefined): number { return k?.m(void bump()) ?? -1; } \
+         export function effects(): number { return calls; } \
+         export function bodiesRun(): number { return bodies; } \
+         export function seenAtCall(): number { return seen; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    use ::core::option::Option::{None, Some};
+    assert_eq!(chain_arg_effect::run(&ctx, None), -1.0);
+    assert_eq!(
+        chain_arg_effect::effects(&ctx),
+        0.0,
+        "an absent receiver must skip the argument side effect"
+    );
+    assert_eq!(
+        chain_arg_effect::bodiesRun(&ctx),
+        0.0,
+        "an absent receiver must skip the call itself"
+    );
+    assert_eq!(chain_arg_effect::seenAtCall(&ctx), 0.0);
+    assert_eq!(
+        chain_arg_effect::run(&ctx, Some(chain_arg_effect::K {})),
+        7.0
+    );
+    assert_eq!(
+        chain_arg_effect::effects(&ctx),
+        1.0,
+        "a present receiver must run the argument side effect exactly once"
+    );
+    assert_eq!(chain_arg_effect::bodiesRun(&ctx), 1.0);
+    assert_eq!(
+        chain_arg_effect::seenAtCall(&ctx),
+        101.0,
+        "the argument side effect must run exactly once before the method body"
+    );
+    assert_eq!(
+        chain_arg_effect::run(&ctx, Some(chain_arg_effect::K {})),
+        7.0
+    );
+    assert_eq!(chain_arg_effect::effects(&ctx), 2.0);
+    assert_eq!(chain_arg_effect::bodiesRun(&ctx), 2.0);
+    assert_eq!(
+        chain_arg_effect::seenAtCall(&ctx),
+        102.0,
+        "every call must observe the counter incremented exactly once by its own argument"
+    );
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    check_generated_crate("chain_arg_effect", &rust);
+    let stdout = run_generated_crate("chain_arg_effect", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
 fn a_super_method_call_reaches_the_parent_method() {
     const SOURCE: &str = "class A { m(): number { return 1; } } \
          class B extends A { m(): number { return super.m(); } } \
@@ -278,9 +347,145 @@ fn main() {
 }
 
 #[test]
+fn a_guarded_optional_chain_call_snapshots_every_receiver_shape_by_clone() {
+    const SOURCE: &str = "class K { m(a: number, b: number): number { return b; } } \
+         class H { k: K | undefined = undefined; } \
+         var g: K | undefined = undefined; \
+         var seq: number = 0; \
+         function bump(): number { seq = seq + 1; return seq; } \
+         export function runLocal(): number { \
+             seq = 0; const k: K | undefined = new K(); \
+             const r = k?.m(bump(), k === undefined ? 1 : 2); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; } \
+         export function runParam(k: K | undefined): number { \
+             seq = 0; const r = k?.m(bump(), k === undefined ? 1 : 2); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; } \
+         export function runArray(xs: (K | undefined)[]): number { \
+             seq = 0; const r = xs[0]?.m(bump(), xs[0] === undefined ? 1 : 2); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; } \
+         export function runField(h: H): number { \
+             seq = 0; h.k = new K(); \
+             const r = h.k?.m(bump(), h.k === undefined ? 1 : 2); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; } \
+         export function runGlobal(): number { \
+             seq = 0; g = new K(); \
+             const r = g?.m(bump(), g === undefined ? 1 : 2); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; } \
+         export function runDouble(k: K | undefined): number { \
+             seq = 0; const r = k?.m(bump(), bump()); \
+             return (r === 2 ? 1 : 0) * 1000 + seq * 10; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    use ::core::option::Option::{None, Some};
+    assert_eq!(chain_receiver_guard::runLocal(&ctx), 1010.0);
+    assert_eq!(chain_receiver_guard::runParam(&ctx, None), 0.0);
+    assert_eq!(chain_receiver_guard::runParam(&ctx, Some(chain_receiver_guard::K {})), 1010.0);
+    let absent = ts_aot_runtime::bumpalo::vec![in ctx.arena; None];
+    assert_eq!(chain_receiver_guard::runArray(&ctx, absent), 0.0);
+    let empty = ts_aot_runtime::bumpalo::collections::Vec::new_in(ctx.arena);
+    assert_eq!(
+        chain_receiver_guard::runArray(&ctx, empty),
+        0.0,
+        "an empty array must yield `undefined` through the optional chain instead of panicking \
+         with an out-of-bounds index"
+    );
+    let present = ts_aot_runtime::bumpalo::vec![in ctx.arena; Some(chain_receiver_guard::K {})];
+    assert_eq!(chain_receiver_guard::runArray(&ctx, present), 1010.0);
+    let h = chain_receiver_guard::H {
+        k: ::std::rc::Rc::new(::core::cell::RefCell::new(None)),
+    };
+    assert_eq!(chain_receiver_guard::runField(&ctx, h), 1010.0);
+    assert_eq!(chain_receiver_guard::runGlobal(&ctx), 1010.0);
+    assert_eq!(chain_receiver_guard::runDouble(&ctx, None), 0.0);
+    assert_eq!(chain_receiver_guard::runDouble(&ctx, Some(chain_receiver_guard::K {})), 1020.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let norm = compact(&rust);
+    assert!(
+        norm.contains(":Option<K>=k.clone();"),
+        "a local receiver must be snapshotted by clone so the branch can still read it; got:\n{rust}"
+    );
+    assert!(
+        norm.contains("__ts_aot_array_get_or_default::<Option<K>>("),
+        "an array-element receiver must be read through the checked accessor, so an out-of-range \
+         index yields `None`/`undefined` instead of panicking and the element is cloned out of \
+         the array; got:\n{rust}"
+    );
+    assert!(
+        !norm.contains(":Option<K>=k;") && !norm.contains(":Option<K>=xs[0asusize];"),
+        "the receiver snapshot must never move a local or an array element; got:\n{rust}"
+    );
+    check_generated_crate("chain_receiver_guard", &rust);
+    let stdout = run_generated_crate("chain_receiver_guard", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_guarded_optional_chain_call_transposes_a_throwing_callee_inside_the_guard() {
+    const SOURCE: &str = "class K { m(a: number, b: number): number { throw 1; } } \
+         var seq: number = 0; \
+         function bump(): number { seq = seq + 1; return seq; } \
+         export function run(k: K | undefined): number { \
+             seq = 0; return k?.m(bump(), k === undefined ? 1 : 2) ?? -1; } \
+         export function effects(): number { return seq; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    use ::core::option::Option::{None, Some};
+    assert_eq!(chain_throw_guard::run(&ctx, None), Ok(-1.0));
+    assert_eq!(
+        chain_throw_guard::effects(&ctx),
+        0.0,
+        "an absent receiver must skip the argument side effects"
+    );
+    assert_eq!(
+        chain_throw_guard::run(&ctx, Some(chain_throw_guard::K {})),
+        Err(1.0)
+    );
+    assert_eq!(
+        chain_throw_guard::effects(&ctx),
+        1.0,
+        "a present receiver must run the argument side effect exactly once before the throw"
+    );
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let norm = compact(&rust);
+    assert!(
+        norm.contains(":Option<K>=k.clone();"),
+        "the throwing-callee guard must also clone its receiver snapshot; got:\n{rust}"
+    );
+    assert!(
+        norm.contains(").clone().unwrap()?)"),
+        "the throwing call must still be transposed inside the receiver-present branch; got:\n{rust}"
+    );
+    check_generated_crate("chain_throw_guard", &rust);
+    let stdout = run_generated_crate("chain_throw_guard", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
 fn a_super_method_call_runs_the_parent_body_on_the_subclass_receiver() {
-    const SOURCE: &str = "class A { m(x: number): number { return x + 1; } } \
-         class B extends A { m(): number { return super.m(4) + 10; } } \
+    const SOURCE: &str = "class A { v: number = 1; m(x: number): number { return x + this.v; } } \
+         class B extends A { m(): number { this.v = 100; return super.m(4) + 10; } } \
          export function got(): number { return new B().m(); }";
     const MAIN: &str = r#"
 use ts_aot_runtime::{Bump, Ctx, Host};
@@ -292,11 +497,23 @@ fn main() {
     let host = NoHost;
     let bump = Bump::new();
     let ctx = Ctx { arena: &bump, host: &host };
-    assert_eq!(super_method_args::got(&ctx), 15.0);
+    assert_eq!(
+        super_method_args::got(&ctx),
+        114.0,
+        "`super.m(4)` must run the parent body on the subclass instance, so `this.v` reads the \
+         value `B.m` stored just before the call (100) and the result is 4 + 100 + 10; a stale \
+         receiver, or a super receiver that kept the parent's field, would yield 4 + 1 + 10 = 15"
+    );
     println!("ok");
 }
 "#;
     let rust = rust_of(SOURCE);
+    let norm = compact(&rust);
+    assert!(
+        norm.contains("self.v.borrow().clone()"),
+        "the parent body reached through `super.m` must read the inherited field off the receiver \
+         it was given; got:\n{rust}"
+    );
     check_generated_crate("super_method_args", &rust);
     let stdout = run_generated_crate("super_method_args", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");

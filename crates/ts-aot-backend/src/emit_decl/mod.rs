@@ -194,7 +194,11 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
                 ) -> #ret {
                     match __f {
                         #enum_name::#placeholder => unreachable!(),
-                        #enum_name::__Unset => unreachable!(),
+                        #enum_name::__Unset => {
+                            ts_aot_runtime::__ts_aot_throw(
+                                "TypeError: value is not a function".to_owned(),
+                            )
+                        }
                         #enum_name::__Phantom(_) => unreachable!(),
                     }
                 }
@@ -224,7 +228,11 @@ fn emit_fn_values(ctx: &EmitCtx, emit_env: &EmitEnv) -> TokenStream {
             ) -> #ret {
                 match __f {
                     #(#arms)*
-                    #enum_name::__Unset => unreachable!(),
+                    #enum_name::__Unset => {
+                        ts_aot_runtime::__ts_aot_throw(
+                            "TypeError: value is not a function".to_owned(),
+                        )
+                    }
                     #enum_name::__Phantom(_) => unreachable!(),
                 }
             }

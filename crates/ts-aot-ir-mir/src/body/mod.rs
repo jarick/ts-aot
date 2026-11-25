@@ -484,6 +484,7 @@ pub enum RuntimeOp {
     WeakMapDelete,
     WeakMapClear,
     ArrayGetOrDefault,
+    ArrayGetOptional,
     ArrayConcat,
     ArrayHole,
     GeneratorNext,

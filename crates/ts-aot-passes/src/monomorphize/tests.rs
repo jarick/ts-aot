@@ -402,8 +402,9 @@ fn generic_class_method_with_call_is_monomorphized() {
 }
 
 #[test]
-fn empty_param_generic_class_method_is_not_monomorphized() {
+fn empty_param_generic_class_method_is_indexed_and_monomorphized() {
     let (mut program, mut types, mut ctx) = setup();
+    let f64_ty = types.intern(&Type::F64);
     let method = generic_fn(
         "wrap",
         vec![GenericParamId::from_raw(0)],
@@ -425,7 +426,7 @@ fn empty_param_generic_class_method_is_not_monomorphized() {
             callee: HirCallee::Function(FunctionId::from_raw(0)),
             args: vec![HirExpr::Int(7, Span::default())],
             ty: TypeId::from_raw(0),
-            type_args: vec![],
+            type_args: vec![f64_ty],
         },
     }];
     program.push_decl(HirDecl::Function(simple_fn("caller", caller_body)));
@@ -433,14 +434,15 @@ fn empty_param_generic_class_method_is_not_monomorphized() {
     let stats = monomorphize(&mut program, &mut types, &mut ctx);
 
     assert_eq!(
-        stats.generic_functions, 0,
-        "empty-param class methods are invisible to monomorphize (convert_program skips them too)"
+        stats.generic_functions, 1,
+        "a parameterless class method with type parameters must be indexed, so a call with \
+         explicit type arguments reaches the specialization path"
     );
-    assert_eq!(stats.monomorphized, 0);
-    assert_eq!(stats.calls_rewritten, 0);
+    assert_eq!(stats.monomorphized, 1);
+    assert_eq!(stats.calls_rewritten, 1);
     assert!(
-        find_mono_for(&program, "wrap").is_none(),
-        "no mono copy for skipped empty-param method"
+        find_mono_for(&program, "wrap").is_some(),
+        "a parameterless generic method must get a specialized copy"
     );
 }
 

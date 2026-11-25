@@ -207,7 +207,7 @@ fn features_for(op: RuntimeOp) -> &'static [RuntimeFeature] {
         | RuntimeOp::NumberToPrecision => &[StringFeat],
         RuntimeOp::ArraySlice | RuntimeOp::ArrayIndexOf => &[Array],
         RuntimeOp::ThrowTypeError => &[],
-        RuntimeOp::ArrayGetOrDefault => &[Array],
+        RuntimeOp::ArrayGetOrDefault | RuntimeOp::ArrayGetOptional => &[Array],
         RuntimeOp::ArrayConcat => &[Array],
         RuntimeOp::ArrayHole => &[Array],
         RuntimeOp::GeneratorNext => &[Generator],

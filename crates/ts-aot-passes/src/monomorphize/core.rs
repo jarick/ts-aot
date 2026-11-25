@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use ts_aot_core::{Atom, FunctionId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, NullishKinds, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{
     HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirStmt, ObjectLiteralField,
-    VisitorMut, walk_expr_mut, walk_stmt_mut,
+    Visitor, VisitorMut, walk_expr, walk_expr_mut, walk_stmt_mut,
 };
 
 use crate::PassContext;
@@ -181,7 +181,19 @@ pub fn monomorphize(
             let Some(generic_fn) = fn_index.get(&fid) else {
                 return;
             };
-            narrow_optional_chain_receiver_args(callee, args, types);
+            if let Some(span) = narrow_optional_chain_receiver_args(callee, generic_fn, args, types)
+            {
+                ctx.error(
+                    "E0300",
+                    "another argument of this optional-chain call reassigns the receiver, so the \
+                     argument that reads the receiver cannot be narrowed to the non-nullish type \
+                     the guard checked; the AOT target would not pass the receiver's pre-call \
+                     value. Move the reading argument out of the call, or pass a value that is not \
+                     the receiver local",
+                    span,
+                );
+                return;
+            }
             let type_args = infer_for_callee(
                 callee,
                 &method_to_generic,
@@ -255,6 +267,7 @@ pub fn monomorphize(
                 converter: &inference,
                 struct_shapes: &mut struct_shapes,
                 local_tys: HashMap::new(),
+                retyped_locals: HashMap::new(),
             };
             repair.visit_expr_mut(init);
         }
@@ -275,6 +288,7 @@ struct CallTypeRepair<'a> {
     converter: &'a ExprConverter,
     struct_shapes: &'a mut StructShapes,
     local_tys: HashMap<ts_aot_core::LocalId, TypeId>,
+    retyped_locals: HashMap<ts_aot_core::LocalId, (TypeId, TypeId)>,
 }
 
 impl CallTypeRepair<'_> {
@@ -364,6 +378,15 @@ impl CallTypeRepair<'_> {
                         }
                     }
                     Some(Type::Optional { inner, .. }) => {
+                        let mut present = inner;
+                        while let Some(Type::Optional { inner: next, .. }) =
+                            self.types.resolve(present).cloned()
+                        {
+                            if matches!(self.types.resolve(next), None | Some(Type::Error)) {
+                                break;
+                            }
+                            present = next;
+                        }
                         match self.types.resolve(rhs.ty()).cloned() {
                             Some(Type::Optional {
                                 inner: rhs_inner,
@@ -371,12 +394,60 @@ impl CallTypeRepair<'_> {
                             }) if rhs_inner == inner => {
                                 *ty = self.types.intern(&Type::Optional { inner, nullish });
                             }
-                            Some(Type::Null | Type::Void) => {
-                                *ty = lhs.ty();
+                            Some(Type::Optional {
+                                inner: rhs_inner,
+                                nullish,
+                            }) if rhs_inner == present => {
+                                *ty = self.types.intern(&Type::Optional {
+                                    inner: present,
+                                    nullish,
+                                });
                             }
-                            _ => {
-                                *ty = inner;
+                            Some(Type::Optional {
+                                inner: rhs_inner,
+                                nullish,
+                            }) => {
+                                *ty = if matches!(
+                                    self.types.resolve(rhs_inner),
+                                    Some(Type::Optional { .. })
+                                ) {
+                                    rhs.ty()
+                                } else {
+                                    self.types.intern(&Type::Optional {
+                                        inner: present,
+                                        nullish,
+                                    })
+                                };
                             }
+                            Some(Type::Null) => {
+                                *ty = self.types.intern(&Type::Optional {
+                                    inner: present,
+                                    nullish: NullishKinds::NULL_ONLY,
+                                });
+                            }
+                            Some(Type::Void) => {
+                                *ty = self.types.intern(&Type::Optional {
+                                    inner: present,
+                                    nullish: NullishKinds::UNDEFINED_ONLY,
+                                });
+                            }
+                            _ => match rhs.as_ref() {
+                                HirExpr::Null(_) => {
+                                    *ty = self.types.intern(&Type::Optional {
+                                        inner: present,
+                                        nullish: NullishKinds::NULL_ONLY,
+                                    });
+                                }
+                                HirExpr::Undefined(_) | HirExpr::Unit(_) => {
+                                    *ty = self.types.intern(&Type::Optional {
+                                        inner: present,
+                                        nullish: NullishKinds::UNDEFINED_ONLY,
+                                    });
+                                }
+                                _ => {
+                                    *ty = present;
+                                }
+                            },
                         }
                     }
                     _ => {
@@ -426,6 +497,11 @@ impl CallTypeRepair<'_> {
                 {
                     *ty = declared;
                 }
+                if let Some(&(from, to)) = self.retyped_locals.get(id)
+                    && *ty == from
+                {
+                    *ty = to;
+                }
                 Some(*ty)
             }
             HirExpr::Closure { captures, body, .. } => {
@@ -458,7 +534,11 @@ impl CallTypeRepair<'_> {
                     }
                     *target = value_ty;
                 }
-                repaired
+                if matches!(self.types.resolve(*target), None | Some(Type::Error)) {
+                    repaired
+                } else {
+                    Some(*target)
+                }
             }
             other => {
                 walk_expr_mut(self, other);
@@ -471,32 +551,39 @@ impl CallTypeRepair<'_> {
         let Some(Type::Array { element }) = self.types.resolve(*ty).cloned() else {
             return;
         };
-        if type_resolved(element, self.types) {
+        let Some(inferred) = self.uniform_element_ty(elements) else {
+            return;
+        };
+        if inferred == element {
             return;
         }
+        let widens_to_optional = type_resolved(element, self.types)
+            && matches!(
+                self.types.resolve(inferred),
+                Some(Type::Optional { inner, .. }) if *inner == element
+            );
+        if type_resolved(element, self.types) && !widens_to_optional {
+            return;
+        }
+        *ty = self.types.intern(&Type::Array { element: inferred });
+    }
+
+    fn uniform_element_ty(&mut self, elements: &[HirExpr]) -> Option<TypeId> {
         let mut inferred: Option<TypeId> = None;
         for element_expr in elements {
-            let Some(element_ty) = hir_expr_ty(element_expr, self.types) else {
-                return;
-            };
+            let element_ty = hir_expr_ty(element_expr, self.types)?;
             if !type_resolved(element_ty, self.types)
                 || matches!(self.types.resolve(element_ty), Some(Type::Error) | None)
             {
-                return;
+                return None;
             }
             match inferred {
                 None => inferred = Some(element_ty),
                 Some(previous) if previous == element_ty => {}
-                Some(_) => return,
+                Some(_) => return None,
             }
         }
-        if let Some(element_ty) = inferred
-            && element_ty != element
-        {
-            *ty = self.types.intern(&Type::Array {
-                element: element_ty,
-            });
-        }
+        inferred
     }
 
     fn repair_index_element(&mut self, owner: &HirExpr, ty: &mut TypeId) {
@@ -518,9 +605,19 @@ impl CallTypeRepair<'_> {
         if !matches!(self.types.resolve(ty), Some(Type::Struct { .. })) {
             return;
         }
-        let mut shape = Vec::with_capacity(fields.len());
-        for (_, value) in fields {
+        let mut slots: Vec<Option<TypeId>> = vec![None; fields.len()];
+        for (field, value) in fields {
+            let Some(slot) = slots.get_mut(field.raw() as usize) else {
+                return;
+            };
             let Some(field_ty) = hir_expr_ty(value, self.types) else {
+                return;
+            };
+            *slot = Some(field_ty);
+        }
+        let mut shape = Vec::with_capacity(slots.len());
+        for field_ty in slots {
+            let Some(field_ty) = field_ty else {
                 return;
             };
             shape.push(field_ty);
@@ -541,11 +638,46 @@ impl VisitorMut for CallTypeRepair<'_> {
     fn visit_stmt_mut(&mut self, stmt: &mut HirStmt) {
         match stmt {
             HirStmt::Let { id, ty, init, .. } => {
-                if let Some(init) = init.as_mut()
-                    && let Some(repaired) = self.repair_expr(init)
-                    && !type_resolved(*ty, self.types)
-                {
-                    *ty = repaired;
+                if let Some(init) = init.as_mut() {
+                    let inferred_from_init = *ty == init.ty();
+                    let nullish_literal_fallback = matches!(
+                        init,
+                        HirExpr::Binary {
+                            op: HirBinaryOp::Coalesce,
+                            rhs,
+                            ..
+                        } if matches!(
+                            rhs.as_ref(),
+                            HirExpr::Null(_) | HirExpr::Undefined(_) | HirExpr::Unit(_)
+                        )
+                    );
+                    let widened_container = matches!(init, HirExpr::ArrayLiteral { .. });
+                    let reads_retyped_local = matches!(init, HirExpr::Local { id, .. } if self.retyped_locals.contains_key(id));
+                    let coalescing = matches!(
+                        init,
+                        HirExpr::Binary {
+                            op: HirBinaryOp::Coalesce,
+                            ..
+                        }
+                    );
+                    if let Some(repaired) = self.repair_expr(init)
+                        && (!type_resolved(*ty, self.types)
+                            || (inferred_from_init
+                                && repaired != *ty
+                                && (nullish_literal_fallback
+                                    || widened_container
+                                    || reads_retyped_local
+                                    || (coalescing
+                                        && matches!(
+                                            self.types.resolve(repaired),
+                                            Some(Type::Optional { .. })
+                                        )))))
+                    {
+                        if type_resolved(*ty, self.types) {
+                            self.retyped_locals.insert(*id, (*ty, repaired));
+                        }
+                        *ty = repaired;
+                    }
                 }
                 self.local_tys.insert(*id, *ty);
             }
@@ -605,19 +737,37 @@ fn repair_struct_field_types(decls: &mut [HirDecl], shapes: &StructShapes, types
                 let mut mapping = TypeParamMap::new();
                 let mut unified = true;
                 for (field, actual) in class.fields.iter().zip(shape.iter()) {
-                    if !unify_field_ty(field.ty, *actual, &mut mapping, types) {
+                    if unify_field_ty(field.ty, *actual, &mut mapping, types) {
+                        continue;
+                    }
+                    if !matches!(
+                        types.resolve(*actual),
+                        Some(Type::Optional { inner, .. }) if *inner == field.ty
+                    ) {
                         unified = false;
                         break;
                     }
                 }
-                if !unified || mapping.is_empty() {
+                if !unified {
                     continue;
                 }
-                for field in class.fields.iter_mut() {
-                    let mut result = TypeSubstitutionResult::default();
-                    let substituted = substitute_type(field.ty, &mapping, types, &mut result);
-                    if substituted != field.ty {
-                        field.ty = substituted;
+                if !mapping.is_empty() {
+                    for field in class.fields.iter_mut() {
+                        let mut result = TypeSubstitutionResult::default();
+                        let substituted = substitute_type(field.ty, &mapping, types, &mut result);
+                        if substituted != field.ty {
+                            field.ty = substituted;
+                        }
+                    }
+                }
+                for (field, actual) in class.fields.iter_mut().zip(shape.iter()) {
+                    if field.ty != *actual
+                        && matches!(
+                            types.resolve(*actual),
+                            Some(Type::Optional { inner, .. }) if *inner == field.ty
+                        )
+                    {
+                        field.ty = *actual;
                     }
                 }
             }
@@ -663,6 +813,7 @@ fn repair_specialized_call_types(
             converter,
             struct_shapes,
             local_tys: HashMap::new(),
+            retyped_locals: HashMap::new(),
         };
         match decl {
             HirDecl::Function(f) => {
@@ -674,6 +825,7 @@ fn repair_specialized_call_types(
             HirDecl::Class(c) => {
                 for m in c.methods.iter_mut() {
                     repair.local_tys.clear();
+                    repair.retyped_locals.clear();
                     for stmt in m.body.iter_mut() {
                         repair.visit_stmt_mut(stmt);
                     }
@@ -782,44 +934,112 @@ fn infer_for_callee(
     infer_type_args(generic_fn, args, explicit_type_args, types, converter)
 }
 
+fn expr_writes_local(expr: &HirExpr, id: ts_aot_core::LocalId) -> bool {
+    struct Scan {
+        id: ts_aot_core::LocalId,
+        found: bool,
+    }
+    impl Visitor for Scan {
+        fn visit_expr(&mut self, expr: &HirExpr) {
+            match expr {
+                HirExpr::Assignment { target, value, .. } => {
+                    if matches!(target.as_ref(), HirExpr::Local { id, .. } if *id == self.id) {
+                        self.found = true;
+                    }
+                    self.visit_expr(target);
+                    self.visit_expr(value);
+                }
+                HirExpr::CompoundUpdate { target, rhs, .. } => {
+                    if matches!(target.as_ref(), HirExpr::Local { id, .. } if *id == self.id) {
+                        self.found = true;
+                    }
+                    self.visit_expr(target);
+                    self.visit_expr(rhs);
+                }
+                HirExpr::Closure { .. } => {}
+                other => walk_expr(self, other),
+            }
+        }
+    }
+    let mut scan = Scan { id, found: false };
+    scan.visit_expr(expr);
+    scan.found
+}
+
 fn narrow_optional_chain_receiver_args(
     callee: &HirCallee,
+    generic_fn: &HirFunction,
     args: &mut [HirExpr],
     types: &TypeTable,
-) {
+) -> Option<ts_aot_core::Span> {
     let HirCallee::Indirect(inner) = callee else {
-        return;
+        return None;
     };
     let HirExpr::Field { owner, .. } = inner.as_ref() else {
-        return;
+        return None;
     };
     let HirExpr::OptionalChain { base, ty, .. } = owner.as_ref() else {
-        return;
+        return None;
+    };
+    let HirExpr::Local { id: base_id, .. } = base.as_ref() else {
+        return None;
     };
     let Some(Type::Optional {
         inner: narrowed, ..
     }) = types.resolve(*ty).cloned()
     else {
-        return;
+        return None;
     };
-    for arg in args.iter_mut() {
+    let receiver_param_offset = usize::from(
+        generic_fn
+            .params
+            .first()
+            .is_some_and(|param| param.name.as_str() == "this"),
+    );
+    let writes: Vec<bool> = args
+        .iter()
+        .map(|arg| expr_writes_local(arg, *base_id))
+        .collect();
+    let mut reassigned_before = Vec::with_capacity(writes.len());
+    let mut reassigned = false;
+    for write in &writes {
+        reassigned_before.push(reassigned);
+        reassigned |= *write;
+    }
+    let mut reassigned_after = vec![false; writes.len()];
+    let mut reassigned = false;
+    for (index, write) in writes.iter().enumerate().rev() {
+        reassigned_after[index] = reassigned;
+        reassigned |= *write;
+    }
+    let mut blocked = None;
+    for (index, arg) in args.iter_mut().enumerate() {
         if arg.ty() != *ty {
             continue;
         }
-        let same_receiver = match (&*arg, base.as_ref()) {
-            (HirExpr::Local { id, .. }, HirExpr::Local { id: base_id, .. }) => id == base_id,
-            _ => false,
-        };
-        if same_receiver {
-            let span = arg.span();
-            let value = std::mem::replace(arg, HirExpr::Unit(span));
-            *arg = HirExpr::TypeAssertion {
-                expr: Box::new(value),
-                target: narrowed,
-                span,
-            };
+        let same_receiver = matches!(&*arg, HirExpr::Local { id, .. } if id == base_id);
+        if !same_receiver {
+            continue;
         }
+        let Some(param) = generic_fn.params.get(index + receiver_param_offset) else {
+            continue;
+        };
+        if !matches!(types.resolve(param.ty), Some(Type::GenericParam { .. })) {
+            continue;
+        }
+        if reassigned_before[index] || reassigned_after[index] {
+            blocked = Some(arg.span());
+            continue;
+        }
+        let span = arg.span();
+        let value = std::mem::replace(arg, HirExpr::Unit(span));
+        *arg = HirExpr::TypeAssertion {
+            expr: Box::new(value),
+            target: narrowed,
+            span,
+        };
     }
+    blocked
 }
 
 fn push_specialization(
@@ -847,7 +1067,7 @@ fn push_specialization(
     let Some(generic_fn) = fn_index.get(&fid) else {
         return;
     };
-    narrow_optional_chain_receiver_args(callee, args, types);
+    let _ = narrow_optional_chain_receiver_args(callee, generic_fn, args, types);
     let type_args = infer_for_callee(
         callee,
         method_to_generic,
@@ -887,9 +1107,6 @@ fn classify_decls(
             HirDecl::Class(c) => {
                 method_to_generic.class_types.insert(c.name.clone(), c.ty);
                 for m in &c.methods {
-                    if m.params.is_empty() {
-                        continue;
-                    }
                     let fid = FunctionId::from_raw(*next_fid);
                     *next_fid += 1;
                     let is_static = m.params.first().is_none_or(|p| p.name.as_str() != "this");

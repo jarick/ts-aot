@@ -27,6 +27,29 @@ fn e0405(out: &DriverOutput) -> bool {
     out.diagnostics.errors().any(|d| d.code.as_str() == "E0405")
 }
 
+fn runs_to(package: &str, source: &str, expected: &str) {
+    const MAIN: &str = "
+use ts_aot_runtime::{Bump, Ctx, Host};
+struct NoHost;
+impl Host for NoHost {}
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    println!(\"got={}\", PKG::got(&ctx));
+}
+";
+    let rust = rust_of(source);
+    check_generated_crate(package, &rust);
+    let main = MAIN.replace("PKG", package);
+    let stdout = run_generated_crate(package, &rust, &main);
+    assert_eq!(
+        stdout.trim(),
+        format!("got={expected}"),
+        "the generated crate must print the exact expected line; got stdout:\n{stdout}"
+    );
+}
+
 #[test]
 fn a_parameter_passed_to_a_typed_callee_takes_the_callee_parameter_type() {
     const SOURCE: &str = "function takes(a: i32): i32 { return a; } \
@@ -227,7 +250,10 @@ fn a_parameter_used_only_inside_a_nested_closure_still_reports_e0405() {
 
 #[test]
 fn a_shadowing_local_does_not_leak_its_type_into_the_parameter() {
-    let out = compile("export function f(x): i32 { { const x: string = \"s\"; x; } return 0; }");
+    let out = compile(
+        "function takes(a: string): string { return a; } \
+         export function f(x): i32 { { const x: string = \"s\"; takes(x); } return 0; }",
+    );
     assert!(
         e0405(&out),
         "a local that shadows the parameter must not be mistaken for it; got {:?}",
@@ -250,6 +276,120 @@ fn a_var_declared_below_shadows_a_module_function_for_a_call_above_it() {
 }
 
 #[test]
+fn a_try_block_shadow_does_not_discard_the_return_hint_in_finally() {
+    const SOURCE: &str = "function f(x): number { try { let x = 0; } finally { return x; } } \
+         export function got(): number { return f(7); }";
+    runs_to("param_infer_try_scope", SOURCE, "7");
+}
+
+#[test]
+fn a_catch_parameter_does_not_shadow_the_parameter_after_the_clause() {
+    const SOURCE: &str = "function f(x): number { try { } catch (x) { return 0; } \
+         return x; } \
+         export function got(): number { return f(7); }";
+    runs_to("param_infer_catch_scope", SOURCE, "7");
+}
+
+#[test]
+fn a_for_var_initializer_stays_shadowed_after_the_loop() {
+    let out = compile(
+        "function g(a: string): string { return a; } \
+         export function f(x): string { for (var g = (n: number): number => n + 1; false; ) {} \
+         return g(x); }",
+    );
+    assert!(
+        e0405(&out),
+        "a function-scoped `var` in a for initializer must stay shadowed after the loop; got {:?}",
+        out.diagnostics
+    );
+}
+
+#[test]
+fn a_for_let_initializer_does_not_shadow_the_parameter_after_the_loop() {
+    const SOURCE: &str = "function f(x): number { for (let x = 0; x < 1; x++) {} return x; } \
+         export function got(): number { return f(7); }";
+    runs_to("param_infer_for_scope", SOURCE, "7");
+}
+
+#[test]
+fn a_for_of_let_binding_does_not_shadow_the_parameter_after_the_loop() {
+    const SOURCE: &str = "function f(x): number { for (const x of [0]) {} return x; } \
+         export function got(): number { return f(7); }";
+    runs_to("param_infer_for_of_scope", SOURCE, "7");
+}
+
+#[test]
+fn a_for_var_initializer_shadowing_a_parameter_is_refused() {
+    let out = compile(
+        "export function f(x): i32 { for (var x = 0; false; ) { } return x; } \
+         export function got(): i32 { return f(7); }",
+    );
+    assert!(
+        e0405(&out),
+        "a function-scoped `var` in a for initializer shadows the parameter, so the `return x` \
+         hint must not type it; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "the shadowed parameter must not reach codegen as a silently wrong value; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_for_of_var_binding_shadowing_a_parameter_is_refused() {
+    let out = compile(
+        "export function f(x): i32 { for (var x of [0]) { } return x; } \
+         export function got(): i32 { return f(7); }",
+    );
+    assert!(
+        e0405(&out),
+        "a function-scoped `var` in a for-of binding shadows the parameter, so the `return x` \
+         hint must not type it; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "the shadowed parameter must not reach codegen as a silently wrong value; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_for_in_var_binding_shadowing_a_parameter_is_refused() {
+    let out = compile(
+        "export function f(x): i32 { for (var x in { a: 1 }) { } return x; } \
+         export function got(): i32 { return f(7); }",
+    );
+    assert!(
+        e0405(&out),
+        "a function-scoped `var` in a for-in binding shadows the parameter, so the `return x` \
+         hint must not type it; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "the shadowed parameter must not reach codegen as a silently wrong value; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_for_var_initializer_not_shadowing_the_parameter_keeps_the_return_hint() {
+    const SOURCE: &str = "export function f(x): i32 { for (var y = 0; false; ) { } return x; } \
+         export function got(): i32 { return f(7); }";
+    runs_to("param_infer_for_var_other_name", SOURCE, "7");
+}
+
+#[test]
+fn an_asserted_assignment_does_not_offer_the_underlying_literal_type() {
+    const SOURCE: &str = "export function f(x): i32 { x = 1 as i32; return x; } \
+         export function got(): i32 { return f(5); }";
+    runs_to("param_infer_asserted_assign", SOURCE, "1");
+}
+
+#[test]
 fn conflicting_hints_leave_the_parameter_unresolved() {
     let out = compile("export function f(x): i32 { x = 1; x = \"s\"; return 0; }");
     assert!(
@@ -262,12 +402,12 @@ fn conflicting_hints_leave_the_parameter_unresolved() {
 #[test]
 fn an_annotated_parameter_is_never_overwritten_by_inference() {
     const SOURCE: &str = "function takes(a: i32): i32 { return a; } \
-         export function f(x: string): i32 { return takes(0); }";
+         export function f(x: i32): i32 { x = 1; return takes(x); }";
     let rust = rust_of(SOURCE);
     let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        norm.contains("x:ts_aot_runtime::JsString<'a>)"),
-        "an explicit annotation wins over any contextual hint; got:\n{rust}"
+        norm.contains("x:i32)"),
+        "an explicit annotation wins over the literal assignment hint `f64`; got:\n{rust}"
     );
     check_generated_crate("param_infer_annotated_wins", &rust);
 }
@@ -357,8 +497,9 @@ fn main() {
     );
     check_generated_crate("param_infer_annotated_chain", &rust);
     let stdout = run_generated_crate("param_infer_annotated_chain", &rust, MAIN);
-    assert!(
-        stdout.contains("h=2.5"),
+    assert_eq!(
+        stdout.trim(),
+        "h=2.5",
         "f(1.5) through the annotated chain must return 2.5; got stdout:\n{stdout}"
     );
 }
@@ -387,8 +528,9 @@ fn main() {
     );
     check_generated_crate("param_infer_inferred_chain", &rust);
     let stdout = run_generated_crate("param_infer_inferred_chain", &rust, MAIN);
-    assert!(
-        stdout.contains("h=5"),
+    assert_eq!(
+        stdout.trim(),
+        "h=5",
         "f(2.5) through the inferred chain must return 5; got stdout:\n{stdout}"
     );
 }
@@ -563,21 +705,11 @@ fn nullish_arguments_still_report_only_p0018() {
         "function g(x: number): void {} \
          export function f(): void { g(undefined); }",
     );
-    let p0018 = out
-        .diagnostics
-        .errors()
-        .filter(|d| d.code.as_str() == "P0018")
-        .count();
+    let codes: Vec<&str> = out.diagnostics.errors().map(|d| d.code.as_str()).collect();
     assert_eq!(
-        p0018, 1,
-        "an `undefined` argument must keep exactly one P0018; got {:?}",
-        out.diagnostics
-    );
-    assert!(
-        !out.diagnostics
-            .errors()
-            .any(|d| matches!(d.code.as_str(), "E0408" | "E0410")),
-        "a nullish argument must not gain an assignment-compatibility error; got {:?}",
+        codes,
+        ["P0018"],
+        "an `undefined` argument must report exactly one P0018 and no other error; got {:?}",
         out.diagnostics
     );
 }
@@ -601,8 +733,9 @@ fn main() {
     let rust = rust_of(SOURCE);
     check_generated_crate("param_infer_call_through", &rust);
     let stdout = run_generated_crate("param_infer_call_through", &rust, MAIN);
-    assert!(
-        stdout.contains("f=s"),
+    assert_eq!(
+        stdout.trim(),
+        "f=s",
         "a string-returning call passed to a string parameter must return \"s\"; \
          got stdout:\n{stdout}"
     );
@@ -630,8 +763,9 @@ fn main() {
     let rust = rust_of(SOURCE);
     check_generated_crate("param_infer_numeric_args", &rust);
     let stdout = run_generated_crate("param_infer_numeric_args", &rust, MAIN);
-    assert!(
-        stdout.contains("a=6") && stdout.contains("b=-2") && stdout.contains("c=6"),
+    assert_eq!(
+        stdout.trim(),
+        "a=6\nb=-2\nc=6",
         "numeric sums, negations and ternaries must reach a numeric parameter; \
          got stdout:\n{stdout}"
     );
@@ -655,8 +789,9 @@ fn main() {
     let rust = rust_of(SOURCE);
     check_generated_crate("param_infer_ctor_arg", &rust);
     let stdout = run_generated_crate("param_infer_ctor_arg", &rust, MAIN);
-    assert!(
-        stdout.contains("f=2"),
+    assert_eq!(
+        stdout.trim(),
+        "f=2",
         "new C(2).x must return 2; got stdout:\n{stdout}"
     );
 }
@@ -690,4 +825,142 @@ fn main() {
     check_generated_crate("param_infer_void_arg", &rust);
     let stdout = run_generated_crate("param_infer_void_arg", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_dead_block_var_keeps_the_parameter_return_hint() {
+    const SOURCE: &str = "export function f(x): i32 { if (false) { var x = 0; } return x; } \
+         export function got(): i32 { return f(7); }";
+    runs_to("param_infer_dead_var_block", SOURCE, "7");
+}
+
+#[test]
+fn a_reachable_block_var_that_assigns_the_parameter_is_refused() {
+    let out = compile(
+        "export function f(x): i32 { if (true) { var x = 0; } return x; } \
+         export function got(): i32 { return f(7); }",
+    );
+    assert!(
+        e0405(&out),
+        "a reachable `var x = 0` assigns the parameter, so the `return x` hint must not type it; \
+         got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "the assigning `var` must not reach codegen as a silently wrong value; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_default_parameter_with_a_dead_block_var_keeps_the_hint() {
+    const SOURCE: &str = "export function f(x = 7): f64 { if (false) { var x = 0; } return x; } \
+         export function omitted(): f64 { return f(); } \
+         export function supplied(): f64 { return f(9); }";
+    const MAIN: &str = "
+use ts_aot_runtime::{Bump, Ctx, Host};
+struct NoHost;
+impl Host for NoHost {}
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    println!(\"omitted={}\", param_infer_default_dead_var::omitted(&ctx));
+    println!(\"supplied={}\", param_infer_default_dead_var::supplied(&ctx));
+}
+";
+    let rust = rust_of(SOURCE);
+    check_generated_crate("param_infer_default_dead_var", &rust);
+    let stdout = run_generated_crate("param_infer_default_dead_var", &rust, MAIN);
+    assert_eq!(
+        stdout.trim(),
+        "omitted=7\nsupplied=9",
+        "an omitted argument must take the `7` default while an explicit `f(9)` keeps `9`; \
+         got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn a_default_parameter_control_keeps_its_literal_type() {
+    const SOURCE: &str = "export function f(x = 7): f64 { return x; } \
+         export function omitted(): f64 { return f(); } \
+         export function supplied(): f64 { return f(9); }";
+    let rust = rust_of(SOURCE);
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("x:Option<f64>") || norm.contains("x:f64"),
+        "a default parameter keeps its literal type; got:\n{rust}"
+    );
+    check_generated_crate("param_infer_default_control", &rust);
+    let stdout = run_generated_crate(
+        "param_infer_default_control",
+        &rust,
+        "
+use ts_aot_runtime::{Bump, Ctx, Host};
+struct NoHost;
+impl Host for NoHost {}
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    println!(\"omitted={}\", param_infer_default_control::omitted(&ctx));
+    println!(\"supplied={}\", param_infer_default_control::supplied(&ctx));
+}
+",
+    );
+    assert_eq!(
+        stdout.trim(),
+        "omitted=7\nsupplied=9",
+        "an omitted argument must take the `7` default while an explicit `f(9)` keeps `9`; \
+         got stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn a_for_var_initializer_naming_an_annotated_parameter_assigns_it() {
+    const SOURCE: &str = "export function f(x: i32): i32 { for (var x = 0; false; ) { } return x; } \
+         export function got(): i32 { return f(7); }";
+    runs_to("param_infer_for_var_param_assign", SOURCE, "0");
+}
+
+#[test]
+fn a_block_var_naming_an_annotated_parameter_assigns_it() {
+    const SOURCE: &str = "export function f(x: i32): i32 { { var x = 0; } return x; } \
+         export function got(): i32 { return f(7); }";
+    runs_to("param_infer_block_var_param_assign", SOURCE, "0");
+}
+
+#[test]
+fn a_var_redeclaring_an_annotated_parameter_keeps_the_annotation() {
+    const SOURCE: &str = "export function f(x: i32): i32 { var x = 5; return x; } \
+         export function got(): i32 { return f(7); }";
+    let rust = rust_of(SOURCE);
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("mutx:i32"),
+        "`var x` names the parameter, so the parameter must stay the `i32` binding the \
+         initializer is assigned to; got:\n{rust}"
+    );
+    assert!(
+        !norm.contains("x_:i64"),
+        "the redeclaration must not create a fresh `i64` local against the `i32` annotation; got:\n\
+         {rust}"
+    );
+    runs_to("param_infer_var_param_type", SOURCE, "5");
+}
+
+#[test]
+fn a_var_redeclaring_a_parameter_with_an_incompatible_initializer_is_refused() {
+    let out = compile("export function f(x: i32): i32 { var x = \"s\"; return x; }");
+    assert!(
+        out.diagnostics.errors().any(|d| d.code.as_str() == "E0408"),
+        "a string initializer for an `i32` parameter must be a hard E0408; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "the refused redeclaration must not emit Rust; got:\n{:?}",
+        out.rust_source
+    );
 }

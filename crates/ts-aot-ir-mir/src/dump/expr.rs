@@ -620,6 +620,7 @@ fn fmt_op(op: RuntimeOp) -> &'static str {
         RuntimeOp::WeakMapDelete => "weak_map_delete",
         RuntimeOp::WeakMapClear => "weak_map_clear",
         RuntimeOp::ArrayGetOrDefault => "array_get_or_default",
+        RuntimeOp::ArrayGetOptional => "array_get_optional",
         RuntimeOp::ArrayConcat => "array_concat",
         RuntimeOp::ArrayHole => "array_hole",
         RuntimeOp::GeneratorNext => "generator_next",

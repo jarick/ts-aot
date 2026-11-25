@@ -153,6 +153,20 @@ fn nested_into_single_optional(value: &HirExpr, target_ty: TypeId, types: &TypeT
         && hir_expr_type_id(value).is_some_and(|source| nested_optional(source, types))
 }
 
+fn report_nested_into_single_optional(site: &str, span: Span, ctx: &mut PassContext) {
+    ctx.error(
+        NULLISH_NARROWING_DIAG,
+        format!(
+            "an optional value whose own value type is also optional is used where a single \
+             optional type is required ({site}); the AOT target represents the outer \
+             `undefined` and the value's own nullish kinds as two nested `Option`s, so the \
+             write has no Rust representation. Narrow the inner nullish case first, or use a \
+             target type that keeps the nesting"
+        ),
+        span,
+    );
+}
+
 pub(super) fn check_nullish_write(
     value: &HirExpr,
     target_ty: TypeId,
@@ -163,17 +177,7 @@ pub(super) fn check_nullish_write(
     allow_nullish_literal: bool,
 ) -> bool {
     if nested_into_single_optional(value, target_ty, types) {
-        ctx.error(
-            NULLISH_NARROWING_DIAG,
-            format!(
-                "an optional value whose own value type is also optional is used where a single \
-                 optional type is required ({site}); the AOT target represents the outer \
-                 `undefined` and the value's own nullish kinds as two nested `Option`s, so the \
-                 write has no Rust representation. Narrow the inner nullish case first, or use a \
-                 target type that keeps the nesting"
-            ),
-            span,
-        );
+        report_nested_into_single_optional(site, span, ctx);
         return false;
     }
     check_nullish_kinds(
@@ -185,6 +189,30 @@ pub(super) fn check_nullish_write(
         ctx,
         site,
         allow_nullish_literal,
+    )
+}
+
+pub(super) fn check_argument_nullish_write(
+    value: &HirExpr,
+    declared_ty: TypeId,
+    types: &mut TypeTable,
+    span: Span,
+    ctx: &mut PassContext,
+    site: &str,
+) -> bool {
+    if nested_into_single_optional(value, declared_ty, types) {
+        report_nested_into_single_optional(site, span, ctx);
+        return false;
+    }
+    check_nullish_kinds(
+        kinds_of_hir(value, types),
+        is_nullish_literal(value),
+        argument_check_ty(declared_ty, types),
+        types,
+        span,
+        ctx,
+        site,
+        false,
     )
 }
 

@@ -113,7 +113,47 @@ fn field_ty(senv: &SkeletonEnv<'_>, owner_ty: TypeId, name: &str) -> Option<Type
     {
         return Some(field.ty);
     }
-    struct_field_ty(senv, owner_ty, name)
+    if let Some(ty) = struct_field_ty(senv, owner_ty, name) {
+        return Some(ty);
+    }
+    let mut parent = class_parent_name(senv, owner_ty);
+    let mut visited: Vec<TypeId> = vec![owner_ty];
+    while let Some(parent_name) = parent {
+        let parent_ty = class_ty_by_name(senv, &parent_name)?;
+        if visited.contains(&parent_ty) {
+            return None;
+        }
+        visited.push(parent_ty);
+        if let Some(ty) = struct_field_ty(senv, parent_ty, name) {
+            return Some(ty);
+        }
+        parent = class_parent_name(senv, parent_ty);
+    }
+    None
+}
+
+fn class_parent_name(senv: &SkeletonEnv<'_>, ty: TypeId) -> Option<Atom> {
+    fn find(decls: &[HirDecl], ty: TypeId) -> Option<Atom> {
+        decls.iter().find_map(|decl| match decl {
+            HirDecl::Class(class) if class.ty == ty || class.pre_pass_ty == Some(ty) => {
+                class.extends.clone()
+            }
+            HirDecl::Namespace { members, .. } => find(members, ty),
+            _ => None,
+        })
+    }
+    find(&senv.program.declarations, ty)
+}
+
+fn class_ty_by_name(senv: &SkeletonEnv<'_>, name: &Atom) -> Option<TypeId> {
+    fn find(decls: &[HirDecl], name: &Atom) -> Option<TypeId> {
+        decls.iter().find_map(|decl| match decl {
+            HirDecl::Class(class) if class.name == *name => Some(class.ty),
+            HirDecl::Namespace { members, .. } => find(members, name),
+            _ => None,
+        })
+    }
+    find(&senv.program.declarations, name)
 }
 
 pub(crate) fn return_hint_ty(
@@ -241,9 +281,22 @@ impl ParamScanner<'_, '_> {
         }
     }
 
+    fn scope_pattern(&mut self, pattern: &oxc_ast::ast::BindingPattern<'_>) {
+        let mut names: Vec<Atom> = Vec::new();
+        collect_binding_names(pattern, &mut names);
+        for name in names {
+            self.local_bindings.insert(name.as_str().to_owned());
+        }
+    }
+
     fn hoist_function_scoped_names(&mut self, stmts: &[Statement<'_>]) {
+        let mut must_shadow: Vec<Atom> = Vec::new();
+        collect_hoist_shadow_names(stmts, &mut must_shadow, true);
         let mut names: Vec<Atom> = Vec::new();
         collect_function_scoped_var_names(stmts, &mut names);
+        for name in must_shadow {
+            self.shadow_name(name.as_str());
+        }
         for name in names {
             if !self.local_bindings.contains(name.as_str()) {
                 self.shadow_name(name.as_str());
@@ -268,8 +321,13 @@ impl ParamScanner<'_, '_> {
                     }
                 }
                 Declaration::VariableDeclaration(decl) => {
+                    let declares_var = matches!(decl.kind, VariableDeclarationKind::Var);
                     for declarator in &decl.declarations {
-                        self.shadow_pattern(&declarator.id);
+                        if declares_var && declarator.init.is_none() {
+                            self.scope_pattern(&declarator.id);
+                        } else {
+                            self.shadow_pattern(&declarator.id);
+                        }
                     }
                 }
                 _ => {}
@@ -374,6 +432,116 @@ fn collect_var_declarator_names(decl: &VariableDeclaration<'_>, out: &mut Vec<At
 fn collect_for_left_var_names(left: &oxc_ast::ast::ForStatementLeft<'_>, out: &mut Vec<Atom>) {
     if let oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) = left {
         collect_var_declarator_names(decl, out);
+    }
+}
+
+fn is_statically_false(expr: &Expression<'_>) -> bool {
+    matches!(unwrap_expr(expr), Expression::BooleanLiteral(lit) if !lit.value)
+}
+
+fn is_statically_true(expr: &Expression<'_>) -> bool {
+    matches!(unwrap_expr(expr), Expression::BooleanLiteral(lit) if lit.value)
+}
+
+fn collect_initialized_var_names(decl: &VariableDeclaration<'_>, out: &mut Vec<Atom>) {
+    if !matches!(decl.kind, VariableDeclarationKind::Var) {
+        return;
+    }
+    for declarator in &decl.declarations {
+        if declarator.init.is_some() {
+            collect_binding_names(&declarator.id, out);
+        }
+    }
+}
+
+fn collect_hoist_shadow_names(stmts: &[Statement<'_>], out: &mut Vec<Atom>, reachable: bool) {
+    let mut live = reachable;
+    for stmt in stmts {
+        match stmt {
+            Statement::VariableDeclaration(decl) if live => {
+                collect_initialized_var_names(decl, out);
+            }
+            Statement::BlockStatement(block) => {
+                collect_hoist_shadow_names(&block.body, out, live);
+            }
+            Statement::IfStatement(it) => {
+                collect_hoist_shadow_names(
+                    std::slice::from_ref(&it.consequent),
+                    out,
+                    live && !is_statically_false(&it.test),
+                );
+                if let Some(alternate) = &it.alternate {
+                    collect_hoist_shadow_names(
+                        std::slice::from_ref(alternate),
+                        out,
+                        live && !is_statically_true(&it.test),
+                    );
+                }
+            }
+            Statement::WhileStatement(while_stmt) => {
+                collect_hoist_shadow_names(
+                    std::slice::from_ref(&while_stmt.body),
+                    out,
+                    live && !is_statically_false(&while_stmt.test),
+                );
+            }
+            Statement::DoWhileStatement(do_stmt) => {
+                collect_hoist_shadow_names(std::slice::from_ref(&do_stmt.body), out, live);
+            }
+            Statement::WithStatement(with_stmt) => {
+                collect_hoist_shadow_names(std::slice::from_ref(&with_stmt.body), out, live);
+            }
+            Statement::ForStatement(for_stmt) => {
+                if live && let Some(ForStatementInit::VariableDeclaration(decl)) = &for_stmt.init {
+                    collect_initialized_var_names(decl, out);
+                }
+                let body_live = live
+                    && for_stmt
+                        .test
+                        .as_ref()
+                        .is_none_or(|test| !is_statically_false(test));
+                collect_hoist_shadow_names(std::slice::from_ref(&for_stmt.body), out, body_live);
+            }
+            Statement::ForInStatement(for_stmt) => {
+                if live {
+                    collect_for_left_var_names(&for_stmt.left, out);
+                }
+                collect_hoist_shadow_names(std::slice::from_ref(&for_stmt.body), out, live);
+            }
+            Statement::ForOfStatement(for_stmt) => {
+                if live {
+                    collect_for_left_var_names(&for_stmt.left, out);
+                }
+                collect_hoist_shadow_names(std::slice::from_ref(&for_stmt.body), out, live);
+            }
+            Statement::SwitchStatement(switch_stmt) => {
+                for case in &switch_stmt.cases {
+                    collect_hoist_shadow_names(&case.consequent, out, live);
+                }
+            }
+            Statement::TryStatement(try_stmt) => {
+                collect_hoist_shadow_names(&try_stmt.block.body, out, live);
+                if let Some(handler) = &try_stmt.handler {
+                    collect_hoist_shadow_names(&handler.body.body, out, live);
+                }
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    collect_hoist_shadow_names(&finalizer.body, out, live);
+                }
+            }
+            Statement::LabeledStatement(labeled) => {
+                collect_hoist_shadow_names(std::slice::from_ref(&labeled.body), out, live);
+            }
+            _ => {}
+        }
+        if matches!(
+            stmt,
+            Statement::ReturnStatement(_)
+                | Statement::ThrowStatement(_)
+                | Statement::BreakStatement(_)
+                | Statement::ContinueStatement(_)
+        ) {
+            live = false;
+        }
     }
 }
 
@@ -516,11 +684,13 @@ impl ParamScanner<'_, '_> {
             match target {
                 SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
                     let name = id.name.as_str().to_owned();
-                    if let Some(ty) = self.literal_ty(&a.right) {
-                        self.offer(&name, ty);
-                    }
-                    if let Some(ty) = self.member_read_ty(&a.right) {
-                        self.offer(&name, ty);
+                    if !is_type_asserted(&a.right) {
+                        if let Some(ty) = self.literal_ty(&a.right) {
+                            self.offer(&name, ty);
+                        }
+                        if let Some(ty) = self.member_read_ty(&a.right) {
+                            self.offer(&name, ty);
+                        }
                     }
                 }
                 other @ match_member_expression!(SimpleAssignmentTarget) => {
@@ -650,8 +820,13 @@ impl ParamScanner<'_, '_> {
     }
 
     fn scan_var_decl(&mut self, decl: &VariableDeclaration<'_>) {
+        let declares_var = matches!(decl.kind, VariableDeclarationKind::Var);
         for declarator in &decl.declarations {
-            self.shadow_pattern(&declarator.id);
+            if declares_var && declarator.init.is_none() {
+                self.scope_pattern(&declarator.id);
+            } else {
+                self.shadow_pattern(&declarator.id);
+            }
             if let Some(init) = &declarator.init {
                 self.scan_expr(init);
             }
@@ -685,8 +860,12 @@ impl ParamScanner<'_, '_> {
             }
             Statement::IfStatement(i) => {
                 self.scan_expr(&i.test);
-                self.scan_stmt(&i.consequent);
-                if let Some(alternate) = &i.alternate {
+                if !is_statically_false(&i.test) {
+                    self.scan_stmt(&i.consequent);
+                }
+                if let Some(alternate) = &i.alternate
+                    && !is_statically_true(&i.test)
+                {
                     self.scan_stmt(alternate);
                 }
             }
@@ -699,6 +878,8 @@ impl ParamScanner<'_, '_> {
                 self.scan_expr(&d.test);
             }
             Statement::ForStatement(f) => {
+                let prior = self.local_bindings.clone();
+                let prior_shadowed = self.shadowed.clone();
                 if let Some(init) = &f.init {
                     self.scan_for_init(init);
                 }
@@ -709,16 +890,26 @@ impl ParamScanner<'_, '_> {
                     self.scan_expr(update);
                 }
                 self.scan_stmt(&f.body);
+                self.local_bindings = prior;
+                self.shadowed = prior_shadowed;
             }
             Statement::ForInStatement(f) => {
+                let prior = self.local_bindings.clone();
+                let prior_shadowed = self.shadowed.clone();
                 self.scan_for_init_left(&f.left);
                 self.scan_expr(&f.right);
                 self.scan_stmt(&f.body);
+                self.local_bindings = prior;
+                self.shadowed = prior_shadowed;
             }
             Statement::ForOfStatement(f) => {
+                let prior = self.local_bindings.clone();
+                let prior_shadowed = self.shadowed.clone();
                 self.scan_for_init_left(&f.left);
                 self.scan_expr(&f.right);
                 self.scan_stmt(&f.body);
+                self.local_bindings = prior;
+                self.shadowed = prior_shadowed;
             }
             Statement::SwitchStatement(s) => {
                 let prior = self.local_bindings.clone();
@@ -745,6 +936,8 @@ impl ParamScanner<'_, '_> {
                 for inner in &t.block.body {
                     self.scan_stmt(inner);
                 }
+                self.local_bindings = prior.clone();
+                self.shadowed = prior_shadowed.clone();
                 if let Some(handler) = &t.handler {
                     if let Some(param) = &handler.param {
                         self.shadow_pattern(&param.pattern);
@@ -753,6 +946,8 @@ impl ParamScanner<'_, '_> {
                     for inner in &handler.body.body {
                         self.scan_stmt(inner);
                     }
+                    self.local_bindings = prior.clone();
+                    self.shadowed = prior_shadowed.clone();
                 }
                 if let Some(finalizer) = &t.finalizer {
                     self.shadow_declared(&finalizer.body);

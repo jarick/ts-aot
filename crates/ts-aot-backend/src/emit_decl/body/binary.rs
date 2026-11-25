@@ -1,17 +1,22 @@
 use super::super::ctx::{BodyCtx, EmitCtx, EmitEnv};
 use super::super::types::emit_type_id_with_ctx;
-use super::coerce::{common_numeric_target, numeric_coerce_exact};
+use super::coerce::{
+    bitwise_operand_ty, common_numeric_target, existing_f64_id, is_js_bitwise_expr,
+    numeric_coerce_exact, numeric_expr_ty,
+};
 use super::equality::emit_nullish_literal_equality;
 use super::equality_optional::{
     check_optional_strict_equality_inner_types, check_optional_strict_equality_kinds,
     emit_dynamic_equality, emit_mixed_optional_equality,
 };
 use super::expr::emit_expr;
-use super::helpers::{is_function_value, is_numeric_primitive_target, value_ty};
+use super::helpers::{
+    is_function_value, is_integer_type, is_numeric_primitive_target, is_numeric_type, value_ty,
+};
 use crate::error::BackendError;
 use proc_macro2::TokenStream;
 use quote::quote;
-use ts_aot_core::TypeId;
+use ts_aot_core::{Type, TypeId};
 use ts_aot_ir_mir::{BinaryOp, MirExpr, MirPlace, MirPlaceBase, UnaryOp};
 
 pub(super) fn optional_chain_map_arm(
@@ -92,6 +97,90 @@ pub(super) fn emit_optional_chain_assign(
     }))
 }
 
+fn is_bitwise_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr
+    )
+}
+
+fn is_unknown_numeric_type(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Error | Type::Union { .. } | Type::Intersection { .. } | Type::GenericParam { .. }
+    )
+}
+
+fn js_int32_from_float(value: &TokenStream) -> TokenStream {
+    quote!({
+        let __ts_aot_bitwise_value: f64 = #value;
+        if __ts_aot_bitwise_value.is_finite() {
+            let __ts_aot_bitwise_wrapped =
+                __ts_aot_bitwise_value.trunc().rem_euclid(4294967296.0);
+            let __ts_aot_bitwise_signed = if __ts_aot_bitwise_wrapped >= 2147483648.0 {
+                __ts_aot_bitwise_wrapped - 4294967296.0
+            } else {
+                __ts_aot_bitwise_wrapped
+            };
+            __ts_aot_bitwise_signed as i32
+        } else {
+            0i32
+        }
+    })
+}
+
+fn js_int32_operand(
+    expr: &MirExpr,
+    tokens: TokenStream,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Result<TokenStream, BackendError> {
+    if matches!(expr, MirExpr::Unit | MirExpr::Null { .. }) {
+        return Ok(quote!({
+            let _ = #tokens;
+            0i32
+        }));
+    }
+    if is_js_bitwise_expr(expr) {
+        return Ok(tokens);
+    }
+    let declared = value_ty(expr, ctx, emit_env, body_ctx)
+        .and_then(|ty| emit_env.types.resolve(ty).map(|resolved| (ty, resolved)));
+    Ok(match declared {
+        Some((_, Type::Void | Type::Null)) => quote!({
+            let _ = #tokens;
+            0i32
+        }),
+        Some((_, Type::Bool)) => quote!((#tokens) as i32),
+        Some((_, ty)) if !is_numeric_type(ty) && !is_unknown_numeric_type(ty) => {
+            return Err(BackendError::NotImplemented(
+                "a bitwise operator needs numeric operands: JavaScript applies ToInt32 to both \
+                 operands, and this AOT target has no runtime ToNumber conversion for this \
+                 operand type, so the operation cannot be lowered without guessing the value; \
+                 convert the operand to a number first",
+            ));
+        }
+        _ => {
+            let resolved = numeric_expr_ty(expr, ctx, emit_env, body_ctx)
+                .and_then(|ty| emit_env.types.resolve(ty).map(|resolved| (ty, resolved)));
+            match resolved {
+                Some((_, Type::I32)) => tokens,
+                Some((ty, ty_kind)) if is_integer_type(ty_kind) => {
+                    let int_tokens = emit_type_id_with_ctx(ty, emit_env, ctx);
+                    let converted = quote!(((#tokens) as #int_tokens) as f64);
+                    js_int32_from_float(&converted)
+                }
+                Some(_) => {
+                    let converted = quote!((#tokens) as f64);
+                    js_int32_from_float(&converted)
+                }
+                None => quote!((#tokens) as i32),
+            }
+        }
+    })
+}
+
 pub(super) fn emit_binary_expr(
     op: BinaryOp,
     left: &MirExpr,
@@ -154,11 +243,16 @@ pub(super) fn emit_binary_expr(
             | BinaryOp::Gt
             | BinaryOp::Ge
     ) {
-        common_numeric_target(
-            value_ty(left, ctx, emit_env, body_ctx),
-            value_ty(right, ctx, emit_env, body_ctx),
-            emit_env,
-        )
+        let left_base = numeric_expr_ty(left, ctx, emit_env, body_ctx);
+        let right_base = numeric_expr_ty(right, ctx, emit_env, body_ctx);
+        let left_ty = bitwise_operand_ty(left, right_base, emit_env).or(left_base);
+        let right_ty = bitwise_operand_ty(right, left_base, emit_env).or(right_base);
+        if matches!(op, BinaryOp::Div) && (is_js_bitwise_expr(left) || is_js_bitwise_expr(right)) {
+            existing_f64_id(emit_env.types)
+                .or_else(|| common_numeric_target(left_ty, right_ty, emit_env))
+        } else {
+            common_numeric_target(left_ty, right_ty, emit_env)
+        }
     } else {
         None
     };
@@ -167,6 +261,10 @@ pub(super) fn emit_binary_expr(
     if let Some(t) = target {
         left_tokens = numeric_coerce_exact(left, left_tokens, t, ctx, emit_env, body_ctx);
         right_tokens = numeric_coerce_exact(right, right_tokens, t, ctx, emit_env, body_ctx);
+    }
+    if is_bitwise_op(op) {
+        left_tokens = js_int32_operand(left, left_tokens, ctx, emit_env, body_ctx)?;
+        right_tokens = js_int32_operand(right, right_tokens, ctx, emit_env, body_ctx)?;
     }
     Ok(match op {
         BinaryOp::Add => quote!(#left_tokens + #right_tokens),
@@ -185,8 +283,8 @@ pub(super) fn emit_binary_expr(
         BinaryOp::BitAnd => quote!(#left_tokens & #right_tokens),
         BinaryOp::BitOr => quote!(#left_tokens | #right_tokens),
         BinaryOp::BitXor => quote!(#left_tokens ^ #right_tokens),
-        BinaryOp::Shl => quote!(#left_tokens << #right_tokens),
-        BinaryOp::Shr => quote!(#left_tokens >> #right_tokens),
+        BinaryOp::Shl => quote!((#left_tokens).wrapping_shl((#right_tokens) as u32)),
+        BinaryOp::Shr => quote!((#left_tokens).wrapping_shr((#right_tokens) as u32)),
     })
 }
 
@@ -197,10 +295,14 @@ pub(super) fn emit_unary_expr(
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
-    let expr = emit_expr(expr, ctx, emit_env, body_ctx)?;
+    let tokens = emit_expr(expr, ctx, emit_env, body_ctx)?;
     Ok(match op {
-        UnaryOp::Neg => quote!(-(#expr)),
-        UnaryOp::Not | UnaryOp::BitNot => quote!(!(#expr)),
+        UnaryOp::Neg => quote!(-(#tokens)),
+        UnaryOp::Not => quote!(!(#tokens)),
+        UnaryOp::BitNot => {
+            let tokens = js_int32_operand(expr, tokens, ctx, emit_env, body_ctx)?;
+            quote!(!(#tokens))
+        }
     })
 }
 

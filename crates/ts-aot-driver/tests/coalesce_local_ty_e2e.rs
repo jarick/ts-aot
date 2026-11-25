@@ -146,14 +146,26 @@ fn main() {
 
 #[test]
 fn an_optional_coalescing_result_in_a_non_optional_return_is_still_reported() {
+    const EXPECTED: &str = "an optional value (it may be `null`) is used where a non-optional \
+         value is required (the declared return type of this function); the AOT target represents \
+         optional values as `Option<T>` and has no implicit nullish-to-value unwrapping. Handle \
+         the nullish case first (for example with `x!` after a check, or by widening the target \
+         type)";
     let out =
         compile_module("export function f(a: number | undefined): number { return a ?? null; }");
     assert!(out.has_errors(), "got {:?}", out.diagnostics);
     assert!(
-        out.diagnostics.iter().any(|d| d.code.as_str() == "P0018"
-            && d.message.contains("result of `??`")
-            && d.message.contains("number | null")),
-        "a nullish `??` result returned as `number` must be a P0018 naming the operator; got {:?}",
         out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "P0018" && d.message == EXPECTED),
+        "a nullish `??` result returned as `number` is an optional value written where a \
+         non-optional one is required; the repaired `??` type makes the write check report it by \
+         its site; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a rejected program must not emit Rust; got {:?}",
+        out.rust_source
     );
 }

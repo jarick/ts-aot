@@ -12,9 +12,12 @@ Thumbs.db
 .claude/
 .mavis/
 target
+.tmp-*/
 
 # test262 harness artifacts
 tests/harness-out/
+tests/harness-out-excluded/
+tests/harness-out-nonapplicable/
 tests/test262-report.json
 
 # python bytecode (test262 harness)

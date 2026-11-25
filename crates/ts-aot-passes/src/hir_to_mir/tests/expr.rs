@@ -3197,8 +3197,8 @@ fn convert_expr_assignment_with_void_rhs_to_typed_target_emits_diagnostic() {
         diag.message
     );
     assert!(
-        !out.is_empty(),
-        "a relaxed void/Unit assignment must still be lowered, got: {:?}",
+        out.is_empty(),
+        "a void/Unit assignment into a non-optional target must not be lowered, got: {:?}",
         out
     );
 }
@@ -3248,8 +3248,8 @@ fn convert_expr_assignment_with_undefined_rhs_to_error_typed_target_emits_diagno
         diag.message
     );
     assert!(
-        !out.is_empty(),
-        "a relaxed assignment must still be lowered, got: {:?}",
+        out.is_empty(),
+        "an Undefined assignment into a non-optional target must not be lowered, got: {:?}",
         out
     );
 }
@@ -4111,6 +4111,67 @@ fn convert_expr_compound_update_with_i64_rhs_casts_to_f64_target_in_postfix_and_
     assert_eq!(
         pre_returned, *new_temp_pre,
         "prefix CompoundUpdate must return new_temp (the post-update value)"
+    );
+}
+
+#[test]
+fn convert_expr_assignment_of_a_void_call_is_refused_before_the_operand_is_lowered() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let num_ty = types.intern(&Type::F64);
+    let error_ty = types.intern(&Type::Error);
+    let mut prog = empty_hir();
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("nothing"),
+        ret: void_ty,
+        ..Default::default()
+    }));
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    let out = &mut Vec::new();
+    let mut cx = ctx();
+    let assignment = HirExpr::Assignment {
+        target: Box::new(HirExpr::Local {
+            id: LocalId::from_raw(0),
+            ty: num_ty,
+            span: Span::default(),
+        }),
+        value: Box::new(HirExpr::Call {
+            callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+                name: Atom::new_inline("nothing"),
+                ty: error_ty,
+                span: Span::default(),
+            })),
+            args: Vec::new(),
+            type_args: Vec::new(),
+            ty: error_ty,
+            span: Span::default(),
+        }),
+        ty: num_ty,
+        span: Span::default(),
+    };
+    let mir = c.convert_expr(
+        &assignment,
+        out,
+        &mut empty_struct_ids(),
+        &mut empty_next_struct(),
+        &mut types,
+        &mut cx,
+    );
+    assert_eq!(
+        diag_count(cx.diagnostics(), "E0409"),
+        1,
+        "assigning a `void`-returning call to a non-optional target must be one E0409, got {:?}",
+        cx.diagnostics()
+    );
+    assert!(
+        out.is_empty(),
+        "the refused value must not be lowered at all, so its side effects cannot run; got \
+         {out:?}"
+    );
+    assert!(
+        matches!(mir, MirExpr::Unit),
+        "a refused assignment must lower to Unit, got {mir:?}"
     );
 }
 

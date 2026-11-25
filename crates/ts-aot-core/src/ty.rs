@@ -1,3 +1,4 @@
+use crate::TypeTable;
 use crate::ids::{Atom, GenericParamId, StructId, TypeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -122,6 +123,42 @@ impl Type {
             Type::Fn { optional, .. } => optional.get(index).copied().unwrap_or(false),
             _ => false,
         }
+    }
+
+    #[must_use]
+    pub fn has_rust_default(&self, types: &TypeTable) -> bool {
+        if let Type::Tuple { elements } = self {
+            return elements.len() <= 12
+                && elements.iter().all(|element| {
+                    types
+                        .resolve(*element)
+                        .is_some_and(|element_ty| element_ty.has_rust_default(types))
+                });
+        }
+        matches!(
+            self,
+            Type::Void
+                | Type::Null
+                | Type::Error
+                | Type::Bool
+                | Type::I8
+                | Type::I16
+                | Type::I32
+                | Type::I64
+                | Type::U8
+                | Type::U16
+                | Type::U32
+                | Type::U64
+                | Type::F32
+                | Type::F64
+                | Type::String
+                | Type::Date
+                | Type::Symbol
+                | Type::Optional { .. }
+                | Type::Union { .. }
+                | Type::Intersection { .. }
+                | Type::WeakMap { .. }
+        )
     }
 }
 
@@ -527,6 +564,55 @@ mod tests {
         assert_eq!(
             id_empty, id_again,
             "interning two empty Tuples must yield the same TypeId (dedup)"
+        );
+    }
+
+    #[test]
+    fn tuple_rust_default_respects_the_rust_arity_limit() {
+        let mut types = TypeTable::new();
+        let i64_ty = types.intern(&Type::I64);
+        let empty = Type::Tuple { elements: vec![] };
+        assert!(
+            empty.has_rust_default(&types),
+            "the empty tuple is `()` and implements Rust `Default`"
+        );
+        let twelve = Type::Tuple {
+            elements: vec![i64_ty; 12],
+        };
+        assert!(
+            twelve.has_rust_default(&types),
+            "Rust implements `Default` for tuples of up to twelve elements"
+        );
+        let thirteen = Type::Tuple {
+            elements: vec![i64_ty; 13],
+        };
+        assert!(
+            !thirteen.has_rust_default(&types),
+            "Rust implements `Default` only up to twelve tuple elements, so a thirteen-element \
+             tuple has none"
+        );
+    }
+
+    #[test]
+    fn tuple_rust_default_requires_every_element_to_have_one() {
+        let mut types = TypeTable::new();
+        let i64_ty = types.intern(&Type::I64);
+        let fn_ty = types.intern(&Type::Fn {
+            params: vec![],
+            optional: vec![],
+            ret: i64_ty,
+            err: None,
+        });
+        let mixed = Type::Tuple {
+            elements: vec![i64_ty, fn_ty],
+        };
+        assert!(
+            !mixed.has_rust_default(&types),
+            "a tuple is only `Default` when every element is"
+        );
+        assert!(
+            Type::I64.has_rust_default(&types),
+            "a primitive keeps its own `Default`"
         );
     }
 

@@ -307,19 +307,20 @@ fn an_aliased_escaping_this_capture_is_refused_by_the_backend() {
     const SOURCE: &str = r"
 class C {
   x: number = 3;
-  grab(): () => number {
+  grab(): (() => number)[] {
     const a = (): number => this.x;
     const b = a;
-    this.x = 5;
-    return b;
+    const arr: (() => number)[] = [];
+    arr[0] = b;
+    return arr;
   }
 }
-export function got0(): number { return new C().grab()(); }
+export function got0(): number { return new C().grab()[0](); }
 ";
     let out = compile(SOURCE);
     assert!(
         out.has_errors(),
-        "an escaping `this` capture through an alias must be refused; got {:?}",
+        "an escaping `this` capture through an alias in a returned array must be refused; got {:?}",
         out.diagnostics
     );
     assert!(
@@ -328,8 +329,12 @@ export function got0(): number { return new C().grab()(); }
         out.rust_source.unwrap_or_default()
     );
     assert!(
-        out.diagnostics.iter().any(|d| d.code.as_str() == "E0513"),
-        "expected the E0513 escaping-`this`-capture refusal; got {:?}",
+        out.diagnostics.iter().any(|d| {
+            d.code.as_str() == "E0513" && d.message.contains("outlive the method frame")
+        }),
+        "the frontend walk tracks only direct return/`this`-store escapes, so the aliased capture \
+         that escapes through a local array element must be caught by the BACKEND taint scan and \
+         report the frame-lifetime E0513; got {:?}",
         out.diagnostics
     );
 }
@@ -608,7 +613,7 @@ class C {
     const a: (() => number)[] = [(): number => this.x];
     const nums: number[] = Array.from(a, toNumber);
     const [n] = nums;
-    return n + nums[0];
+    return n! + nums[0];
   }
   firstLocal(): number {
     const numbers: number[] = [1, 2];
@@ -711,4 +716,455 @@ class C {
 export function got0(): number { return new C().m(); }
 ";
     check("this_capture_indexed_number_field", SOURCE, &[7.0]);
+}
+
+#[test]
+fn a_mutation_before_a_later_alias_rebinding_is_refused() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2];
+  const other: number[] = [9, 9];
+  let alias: number[] = items;
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 7;
+  alias = other;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    let out = compile(SOURCE);
+    assert!(
+        out.has_errors(),
+        "the mutation through `alias` runs while `alias` still names `items`, so the snapshot the \
+         class took is stale even though a later statement rebinds `alias`; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+        "expected the E0419 mutation refusal; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{}",
+        out.rust_source.unwrap_or_default()
+    );
+}
+
+#[test]
+fn a_mutation_before_an_alias_rebinding_to_the_capture_is_accepted() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2];
+  const other: number[] = [9, 9];
+  let alias: number[] = other;
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 7;
+  alias = items;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    check("this_alias_rebind_after", SOURCE, &[1.0]);
+}
+
+#[test]
+fn a_mutation_before_a_later_closure_rebinding_is_refused() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2];
+  const other: number[] = [9, 9];
+  let alias: number[] = items;
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 7;
+  const rebind = (): void => { alias = other; };
+  rebind();
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    let out = compile(SOURCE);
+    assert!(
+        out.has_errors(),
+        "the mutation runs before the closure that rebinds `alias`, so it still hits `items`; got \
+         {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+        "expected the E0419 mutation refusal; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{}",
+        out.rust_source.unwrap_or_default()
+    );
+}
+
+#[test]
+fn a_mutation_after_a_closure_rebinding_the_alias_is_accepted() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2];
+  const other: number[] = [9, 9];
+  let alias: number[] = items;
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  const rebind = (): void => { alias = other; };
+  rebind();
+  alias[0] = 7;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    check("this_alias_closure_rebind", SOURCE, &[1.0]);
+}
+
+#[test]
+fn an_aliased_escaping_this_capture_is_refused_by_the_frontend_walk() {
+    const SOURCE: &str = r"
+class C {
+  x: number = 3;
+  grab(): () => number {
+    const a = (): number => this.x;
+    const b = a;
+    this.x = 5;
+    return b;
+  }
+}
+export function got0(): number { return new C().grab()(); }
+";
+    let out = compile(SOURCE);
+    assert!(
+        out.has_errors(),
+        "an escaping `this` capture reached through the alias `b` must be refused; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{}",
+        out.rust_source.unwrap_or_default()
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "E0513" && d.message.contains("snapshot copy")),
+        "the frontend walk must classify the aliased local as an escaping `this` capture at the \
+         return; got {:?}",
+        out.diagnostics
+    );
+}
+
+#[test]
+fn an_aliased_this_capture_called_in_place_is_accepted() {
+    const SOURCE: &str = r"
+class C {
+  x: number = 3;
+  m(): number {
+    const f = (): number => this.x;
+    const g = f;
+    return g();
+  }
+}
+export function got0(): number { return new C().m(); }
+";
+    check("this_alias_called", SOURCE, &[3.0]);
+}
+
+#[test]
+fn a_rebinding_closure_defined_before_the_mutation_does_not_hide_it() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2]; const other: number[] = [9, 9];
+  let alias: number[] = items;
+  const rebind = (): void => { alias = other; };
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 7;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    let out = compile(SOURCE);
+    assert!(
+        out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+        "the closure `rebind` is never called, so `alias` still names `items` when `alias[0] = 7` \
+         runs, the class snapshot goes stale and node prints 7; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{}",
+        out.rust_source.unwrap_or_default()
+    );
+}
+
+#[test]
+fn a_called_closure_rebinding_the_alias_moves_the_mutation_to_the_new_array() {
+    const SOURCE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2]; const other: number[] = [9, 9];
+  let alias: number[] = items;
+  const rebind = (): void => { alias = other; };
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  rebind();
+  alias[0] = 7;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    check("this_alias_closure_effect_at_call", SOURCE, &[1.0]);
+}
+
+#[test]
+fn a_cyclic_alias_chain_still_shares_the_capture() {
+    const CYCLIC: &str = r"
+const src: number[] = [1, 2];
+const other: number[] = [9, 9];
+function f(a: number[], b: number[]): number {
+  b = a; a = b;
+  class C { read(): number { return a[0]; } }
+  const c = new C();
+  b[0] = 7;
+  return c.read();
+}
+export function got0(): number { return f(src, other); }
+";
+    const CHAIN: &str = r"
+const src: number[] = [1, 2];
+const other: number[] = [9, 9];
+function f(a: number[], b: number[]): number {
+  b = a;
+  class C { read(): number { return a[0]; } }
+  const c = new C();
+  b[0] = 7;
+  return c.read();
+}
+export function got0(): number { return f(src, other); }
+";
+    for (label, source) in [("cyclic", CYCLIC), ("chain", CHAIN)] {
+        let out = compile(source);
+        assert!(
+            out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+            "`b = a` makes `b` share the array the class snapshot reads, so `b[0] = 7` leaves the \
+             snapshot stale and node prints 7; the {label} source must be refused; got {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.rust_source.is_none(),
+            "a refused source must not emit rust; got:\n{}",
+            out.rust_source.unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn a_control_write_through_a_distinct_parameter_leaves_the_captured_array_unchanged() {
+    const SOURCE: &str = r"
+function f(a: number[], b: number[]): number {
+  class C { read(): number { return a[0]; } }
+  const c = new C();
+  b[0] = 7;
+  return c.read();
+}
+export function got0(): number {
+  const src: number[] = [1, 2];
+  const other: number[] = [9, 9];
+  return f(src, other);
+}
+";
+    check("this_alias_distinct_control", SOURCE, &[1.0]);
+}
+
+#[test]
+fn a_definite_rebinding_join_does_not_resurrect_the_old_alias() {
+    let rebinds: &[(&str, &str)] = &[
+        ("if_true", "if (true) { alias = other; }"),
+        (
+            "for_count",
+            "for (let i = 0; i < 1; i++) { alias = other; }",
+        ),
+        (
+            "while_count",
+            "let i = 0; while (i < 1) { alias = other; i++; }",
+        ),
+        (
+            "do_while",
+            "let i = 0; do { alias = other; i++; } while (i < 1);",
+        ),
+        ("for_of", "for (const x of [1]) { alias = other; }"),
+        (
+            "switch_default",
+            "switch (1) { default: alias = other; break; }",
+        ),
+        ("try_catch", "try { alias = other; } catch {}"),
+    ];
+    for (label, rebind) in rebinds {
+        let source = format!(
+            "function f(): number {{\n  const items: number[] = [1, 2]; const other: number[] = \
+             [9, 9];\n  let alias: number[] = items;\n  {rebind}\n  class C {{ read(): number {{ \
+             return items[0]; }} }}\n  const c = new C();\n  alias[0] = 9;\n  return c.read();\n}}\n\
+             export function got0(): number {{ return f(); }}\n"
+        );
+        check(&format!("this_join_rebind_{label}"), &source, &[1.0]);
+    }
+    let non_rebinds: &[(&str, &str)] = &[
+        (
+            "for_empty_literal",
+            "for (const x of []) { alias = other; }",
+        ),
+        (
+            "for_empty_string",
+            "for (const x of \"\") { alias = other; }",
+        ),
+        ("for_parameter", "for (const x of flag) { alias = other; }"),
+        ("while_zero", "while (0) { alias = other; }"),
+        (
+            "switch_without_a_matching_case",
+            "switch (1) { case 2: alias = other; break; }",
+        ),
+        (
+            "try_with_a_throwing_call",
+            "try { boom(); alias = other; } catch {}",
+        ),
+    ];
+    for (label, rebind) in non_rebinds {
+        let source = format!(
+            "function boom(): void {{ throw 1; }}\nfunction f(flag: number[]): number {{\n  const \
+             items: number[] = [1, 2]; const other: number[] = [9, 9];\n  let alias: number[] = \
+             items;\n  {rebind}\n  class C {{ read(): number {{ return items[0]; }} }}\n  const c = \
+             new C();\n  alias[0] = 9;\n  return c.read();\n}}\nexport function got0(): number {{ \
+             return f([]); }}\n"
+        );
+        let out = compile(&source);
+        assert!(
+            out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+            "`{label}` never runs the rebinding, so `alias` still names `items` when `alias[0] = 9` \
+             runs and the class snapshot goes stale (node prints 9); the source must be refused; \
+             got {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.rust_source.is_none(),
+            "a refused source must not emit rust; got:\n{}",
+            out.rust_source.unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn a_rebinding_that_does_not_dominate_the_mutation_still_refuses() {
+    const IF_FALSE: &str = r"
+function f(): number {
+  const items: number[] = [1, 2]; const other: number[] = [9, 9];
+  let alias: number[] = items;
+  if (false) { alias = other; }
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 9;
+  return c.read();
+}
+export function got0(): number { return f(); }
+";
+    const IF_FLAG: &str = r"
+function f(flag: boolean): number {
+  const items: number[] = [1, 2]; const other: number[] = [9, 9];
+  let alias: number[] = items;
+  if (flag) { alias = other; }
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 9;
+  return c.read();
+}
+export function got0(): number { return f(false); }
+";
+    const WHILE_FLAG: &str = r"
+function f(flag: boolean): number {
+  const items: number[] = [1, 2]; const other: number[] = [9, 9];
+  let alias: number[] = items;
+  while (flag) { alias = other; }
+  class C { read(): number { return items[0]; } }
+  const c = new C();
+  alias[0] = 9;
+  return c.read();
+}
+export function got0(): number { return f(false); }
+";
+    for (label, source) in [
+        ("if (false)", IF_FALSE),
+        ("if (flag)", IF_FLAG),
+        ("while (flag)", WHILE_FLAG),
+    ] {
+        let out = compile(source);
+        assert!(
+            out.diagnostics.iter().any(|d| d.code.as_str() == "E0419"),
+            "`{label}` leaves a path that reaches `alias[0] = 9` with `alias` still naming `items`, \
+             so the mutation can stale the class snapshot (node prints 9) and the source must be \
+             refused; got {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.rust_source.is_none(),
+            "a refused source must not emit rust; got:\n{}",
+            out.rust_source.unwrap_or_default()
+        );
+    }
+}
+
+#[test]
+fn a_logical_or_asserted_callback_keeps_its_provenance() {
+    for (label, call) in [
+        ("`||`", "callIt(cb || cb)"),
+        ("`&&`", "callIt(cb && cb)"),
+        ("`as`", "callIt(cb as () => void)"),
+    ] {
+        let source = format!(
+            "class Holder {{ n: number = 0; run(cb: () => void): number {{ this.n = this.n + 1; \
+             {call}; return this.n; }} }}\n\
+             function callIt(cb: () => void): void {{ cb(); }}\n\
+             export function got0(): number {{\n  let h = new Holder();\n  h.run((): void => {{ h = \
+             new Holder(); }});\n  return h.n;\n}}\n"
+        );
+        let out = compile(&source);
+        assert!(
+            out.diagnostics
+                .errors()
+                .any(|d| d.code.as_str() == "E0419" && d.message.contains("may reassign")),
+            "the callback reaches `callIt` through {label}, so its caller provenance must survive \
+             and the receiver reassignment must still be refused; got {:?}",
+            out.diagnostics
+        );
+        assert!(
+            out.rust_source.is_none(),
+            "no Rust may be produced for a receiver reassigned through a forwarded callback; \
+             got:\n{:?}",
+            out.rust_source
+        );
+    }
+}
+
+#[test]
+fn a_local_class_method_local_does_not_alias_the_enclosing_this_capture() {
+    const SOURCE: &str = r"
+class Outer {
+  x: number = 1;
+  m(): number {
+    const f = (): number => this.x;
+    class Inner {
+      read(): number {
+        const a = 1;
+        return a;
+      }
+    }
+    return f() + new Inner().read();
+  }
+}
+export function got0(): number { return new Outer().m(); }
+";
+    check("this_capture_local_class", SOURCE, &[2.0]);
 }

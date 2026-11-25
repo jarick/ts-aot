@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{LocalId, NullishKinds, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirExpr};
+use ts_aot_ir_hir::{HirBinaryOp, HirExpr, HirUnaryOp};
 use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt};
 
 use crate::PassContext;
@@ -355,7 +355,7 @@ impl ExprConverter {
                 self.resolve_accessor_setter(owner, field_name, shared_struct_ids, types)
         {
             let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
-            if !is_assignment_compatible(value, rhs_ty, value_ty, types, target.span(), ctx) {
+            if !is_assignment_compatible(value, rhs_ty, value_ty, types, target.span(), ctx, self) {
                 return MirExpr::Unit;
             }
             let receiver = self.convert_accessor_receiver(
@@ -408,7 +408,7 @@ impl ExprConverter {
         }
         let rhs_ty = hir_expr_type_id(value).unwrap_or(ty);
         let target_ty = self.assignment_target_ty(target, ty, types);
-        if !is_assignment_compatible(value, rhs_ty, target_ty, types, target.span(), ctx) {
+        if !is_assignment_compatible(value, rhs_ty, target_ty, types, target.span(), ctx, self) {
             return MirExpr::Unit;
         }
         let value_ty = match types.resolve(rhs_ty) {
@@ -501,7 +501,7 @@ impl ExprConverter {
 
         let target_ty = self.assignment_target_ty(target, ty, types);
         let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
-        if !is_assignment_compatible(rhs, rhs_ty, target_ty, types, target.span(), ctx) {
+        if !is_assignment_compatible(rhs, rhs_ty, target_ty, types, target.span(), ctx, self) {
             return MirExpr::Unit;
         }
 
@@ -710,7 +710,7 @@ impl ExprConverter {
         );
 
         let rhs_ty = hir_expr_type_id(rhs).unwrap_or(ty);
-        if !is_assignment_compatible(rhs, rhs_ty, value_ty, types, target.span(), ctx) {
+        if !is_assignment_compatible(rhs, rhs_ty, value_ty, types, target.span(), ctx, self) {
             return Some(MirExpr::Unit);
         }
 
@@ -931,6 +931,13 @@ fn classify(ty: Option<&Type>) -> TypeCategory {
     }
 }
 
+fn is_primitive_category(category: TypeCategory) -> bool {
+    matches!(
+        category,
+        TypeCategory::Numeric | TypeCategory::String | TypeCategory::Bool | TypeCategory::BigInt
+    )
+}
+
 fn is_nullable(ty: Option<&Type>, types: &TypeTable) -> bool {
     match ty {
         Some(Type::Null) => true,
@@ -946,6 +953,16 @@ fn is_nullish_branch(expr: &HirExpr) -> bool {
     matches!(
         expr,
         HirExpr::Null(_) | HirExpr::Undefined(_) | HirExpr::Unit(_)
+    )
+}
+
+fn is_void_expression(expr: &HirExpr) -> bool {
+    matches!(
+        expr,
+        HirExpr::Unary {
+            op: HirUnaryOp::Void,
+            ..
+        }
     )
 }
 
@@ -988,13 +1005,29 @@ fn expected_value_types(expected: TypeId, types: &TypeTable) -> Vec<TypeId> {
     }
 }
 
-fn classify_hir(value: &HirExpr, value_ty: TypeId, types: &TypeTable) -> TypeCategory {
+fn optional_payload_ty(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
+    let mut current = ty;
+    let mut optional = false;
+    while let Some(Type::Optional { inner, .. }) = types.resolve(current) {
+        optional = true;
+        current = *inner;
+    }
+    optional.then_some(current)
+}
+
+fn classify_hir(
+    value: &HirExpr,
+    value_ty: TypeId,
+    types: &TypeTable,
+    converter: &ExprConverter,
+) -> TypeCategory {
     match value {
         HirExpr::String(_, _) => TypeCategory::String,
         HirExpr::Bool(_, _) => TypeCategory::Bool,
         HirExpr::Int(_, _) | HirExpr::Float(_, _) => TypeCategory::Numeric,
         HirExpr::Null(_) => TypeCategory::Null,
         HirExpr::Unit(_) | HirExpr::Undefined(_) => TypeCategory::Void,
+        HirExpr::Call { .. } if converter.declared_void_result(value, types) => TypeCategory::Void,
         _ => classify(types.resolve(value_ty)),
     }
 }
@@ -1009,92 +1042,12 @@ fn report_compat_warning(ctx: &mut PassContext, code: &str, message: &str, span:
     true
 }
 
-pub(super) fn is_call_argument_compatible(
-    value: &HirExpr,
-    value_ty: TypeId,
-    param_ty: TypeId,
-    types: &TypeTable,
+fn report_category_mismatch(
+    target_cat: TypeCategory,
+    value_cat: TypeCategory,
     span: Span,
     ctx: &mut PassContext,
 ) -> bool {
-    let target_ty = match types.resolve(param_ty) {
-        Some(Type::Optional { inner, .. }) => *inner,
-        _ => param_ty,
-    };
-    let value_cat = classify_hir(value, value_ty, types);
-    let target_cat = classify(types.resolve(target_ty));
-    if matches!(target_cat, TypeCategory::Void | TypeCategory::Other) {
-        return true;
-    }
-    if value_cat == TypeCategory::Void {
-        if is_nullish_branch(value) {
-            return true;
-        }
-        return report_compat_error(
-            ctx,
-            "E0410",
-            "a `void` value cannot be passed to a parameter that is not `void`; this AOT target \
-             has no implicit Unit-to-value coercion",
-            span,
-        );
-    }
-    if !matches!(
-        value_cat,
-        TypeCategory::Numeric | TypeCategory::String | TypeCategory::Bool | TypeCategory::BigInt
-    ) {
-        return true;
-    }
-    is_assignment_compatible(value, value_ty, target_ty, types, span, ctx)
-}
-
-pub(super) fn is_assignment_compatible(
-    value: &HirExpr,
-    value_ty: TypeId,
-    target_ty: TypeId,
-    types: &TypeTable,
-    span: Span,
-    ctx: &mut PassContext,
-) -> bool {
-    let target_resolved = types.resolve(target_ty);
-    let value_cat = classify_hir(value, value_ty, types);
-    if value_cat == TypeCategory::Void
-        && !matches!(target_resolved, Some(Type::Void))
-        && !is_nullable(target_resolved, types)
-    {
-        return report_compat_warning(
-            ctx,
-            "E0409",
-            "void/Unit value assigned to a typed target; this AOT target has no implicit \
-             Unit-to-value coercion, the value is lowered as-is",
-            span,
-        );
-    }
-
-    if target_resolved.is_none() || matches!(target_resolved, Some(Type::Error)) {
-        return true;
-    }
-    if !crate::hir_to_mir::nullish::check_nullish_write(
-        value,
-        target_ty,
-        types,
-        span,
-        ctx,
-        "the assignment target",
-        true,
-    ) {
-        return false;
-    }
-    let target_cat = classify(target_resolved);
-
-    if target_cat == value_cat {
-        return true;
-    }
-    if target_cat == TypeCategory::Numeric && value_cat == TypeCategory::Numeric {
-        return true;
-    }
-    if value_cat == TypeCategory::Null && is_nullable(types.resolve(target_ty), types) {
-        return true;
-    }
     match (target_cat, value_cat) {
         (TypeCategory::Void, _) => report_compat_warning(
             ctx,
@@ -1162,4 +1115,107 @@ pub(super) fn is_assignment_compatible(
         ),
         _ => true,
     }
+}
+
+pub(super) fn is_call_argument_compatible(
+    value: &HirExpr,
+    value_ty: TypeId,
+    param_ty: TypeId,
+    types: &TypeTable,
+    span: Span,
+    ctx: &mut PassContext,
+    converter: &ExprConverter,
+) -> bool {
+    let param_optional = matches!(types.resolve(param_ty), Some(Type::Optional { .. }));
+    let target_ty = optional_payload_ty(param_ty, types).unwrap_or(param_ty);
+    let value_cat = classify_hir(value, value_ty, types, converter);
+    let target_cat = classify(types.resolve(target_ty));
+    if matches!(target_cat, TypeCategory::Void | TypeCategory::Other) {
+        return true;
+    }
+    if value_cat == TypeCategory::Void {
+        if is_nullish_branch(value) {
+            return true;
+        }
+        let value_is_undefined = is_void_expression(value)
+            || converter.declared_void_result(value, types)
+            || matches!(types.resolve(value_ty), Some(Type::Void));
+        if value_is_undefined && crate::hir_to_mir::nullish::kinds_of_ty(param_ty, types).undefined
+        {
+            return true;
+        }
+        return report_compat_error(
+            ctx,
+            "E0410",
+            "a `void` value cannot be passed to a parameter that is not `void`; this AOT target \
+             has no implicit Unit-to-value coercion",
+            span,
+        );
+    }
+    if !is_primitive_category(value_cat) {
+        if value_cat == TypeCategory::Other
+            && param_optional
+            && let Some(payload_ty) = optional_payload_ty(value_ty, types)
+        {
+            let inner_cat = classify_hir(value, payload_ty, types, converter);
+            if is_primitive_category(inner_cat) {
+                return report_category_mismatch(target_cat, inner_cat, span, ctx);
+            }
+        }
+        return true;
+    }
+    is_assignment_compatible(value, value_ty, target_ty, types, span, ctx, converter)
+}
+
+pub(super) fn is_assignment_compatible(
+    value: &HirExpr,
+    value_ty: TypeId,
+    target_ty: TypeId,
+    types: &TypeTable,
+    span: Span,
+    ctx: &mut PassContext,
+    converter: &ExprConverter,
+) -> bool {
+    let target_resolved = types.resolve(target_ty);
+    if target_resolved.is_none() || matches!(target_resolved, Some(Type::Error)) {
+        return true;
+    }
+    let value_cat = classify_hir(value, value_ty, types, converter);
+    if value_cat == TypeCategory::Void
+        && !matches!(target_resolved, Some(Type::Void))
+        && !is_nullable(target_resolved, types)
+    {
+        return report_compat_error(
+            ctx,
+            "E0409",
+            "a `void`/`undefined` value is assigned to a target that is neither `void` nor \
+             optional; this AOT target has no implicit Unit-to-value coercion, so the generated \
+             crate would not compile. Widen the target type to accept `undefined`, or use the \
+             value the target expects",
+            span,
+        );
+    }
+    if !crate::hir_to_mir::nullish::check_nullish_write(
+        value,
+        target_ty,
+        types,
+        span,
+        ctx,
+        "the assignment target",
+        true,
+    ) {
+        return false;
+    }
+    let target_cat = classify(target_resolved);
+
+    if target_cat == value_cat {
+        return true;
+    }
+    if target_cat == TypeCategory::Numeric && value_cat == TypeCategory::Numeric {
+        return true;
+    }
+    if value_cat == TypeCategory::Null && is_nullable(types.resolve(target_ty), types) {
+        return true;
+    }
+    report_category_mismatch(target_cat, value_cat, span, ctx)
 }

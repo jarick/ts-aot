@@ -324,7 +324,7 @@ fn a_write_to_a_case_declaration_on_a_skipping_path_is_refused() {
 }
 
 #[test]
-fn a_var_declared_in_a_skipped_case_is_not_a_temporal_dead_zone_error() {
+fn a_var_declared_in_a_skipped_case_is_hoisted_with_the_target_zero_value() {
     const SOURCE: &str = "export function assigned(): number { \
          let k = 1; \
          switch (k) { case 1: var v = 5; return v; case 2: return v; } \
@@ -346,11 +346,27 @@ fn main() {
     let bump = Bump::new();
     let ctx = Ctx { arena: &bump, host: &host };
     assert_eq!(var_case_scope::assigned(&ctx), 5.0);
-    assert_eq!(var_case_scope::skipped(&ctx), 0.0);
+    assert_eq!(
+        var_case_scope::skipped(&ctx),
+        0.0,
+        "AOT extension: the `var v` is hoisted out of the skipped `case 1` and zero-initialized, \
+         so reading it in `case 2` yields the numeric zero value. `node --experimental-strip-types` \
+         yields `undefined` for this program, so this assertion records a deliberate divergence of \
+         the target (a hoisted numeric `var` has no `undefined` representation) rather than a \
+         JavaScript-conformant result"
+    );
     println!("ok");
 }
 "#;
-    let stdout = run(SOURCE, "var_case_scope", MAIN);
+    let rust = rust_of(SOURCE);
+    let norm: String = rust.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        norm.contains("letmutv:i64=0;"),
+        "AOT extension: a `var` hoisted out of a skipped `switch` case is zero-initialized by the \
+         target, while JavaScript reads `undefined` there; the zero initializer is pinned here so \
+         the divergence cannot change silently. got:\n{rust}"
+    );
+    let stdout = run_generated_crate("var_case_scope", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
 

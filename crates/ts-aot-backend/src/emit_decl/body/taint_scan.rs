@@ -304,8 +304,12 @@ fn self_capture_scan_throwing(
                 {
                     taint.taint_whole(*dest);
                 }
-                if matches!(op, RuntimeOp::ArrayGet | RuntimeOp::ArrayGetOrDefault)
-                    && let Some(dest) = dest
+                if matches!(
+                    op,
+                    RuntimeOp::ArrayGet
+                        | RuntimeOp::ArrayGetOrDefault
+                        | RuntimeOp::ArrayGetOptional
+                ) && let Some(dest) = dest
                     && args.first().is_some_and(|container| {
                         expr_may_hold_self_capture(container, self_param, taint, emit_env)
                     })

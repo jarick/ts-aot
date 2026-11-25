@@ -3,12 +3,12 @@ use std::collections::HashMap;
 use oxc_ast::ast::{
     Argument, AssignmentExpression, BinaryExpression, CallExpression, ChainElement,
     ChainExpression, Expression, LogicalExpression, SequenceExpression, SimpleAssignmentTarget,
-    TaggedTemplateExpression, TemplateLiteral, UnaryExpression, UpdateExpression, match_expression,
-    match_member_expression,
+    TSType, TSTypeAnnotation, TaggedTemplateExpression, TemplateLiteral, UnaryExpression,
+    UpdateExpression, match_expression, match_member_expression,
 };
 use oxc_ecmascript::{ToBigInt, WithoutGlobalReferenceInformation};
 use oxc_span::GetSpan;
-use oxc_syntax::operator::{AssignmentOperator, UpdateOperator};
+use oxc_syntax::operator::{AssignmentOperator, UnaryOperator, UpdateOperator};
 use ts_aot_core::{
     Atom, Diagnostic, FieldId, LocalId, NullishKinds, Span, Type, TypeId, TypeTable,
 };
@@ -33,6 +33,158 @@ const CLASS_VALUE_FIELD_LOGICAL_ASSIGN_CODE: &str = "E0419";
 const CLASS_VALUE_FIELD_LOGICAL_ASSIGN: &str = "logical assignment `&&=` to a class-value field is not supported here: the field is \
      not provably a class value at this point, so its truthiness test cannot be lowered soundly; \
      assign the class value with `=`, or make the field provably a class value first";
+
+fn nullish_initializer_kinds(value: &Expression<'_>) -> Option<NullishKinds> {
+    match value {
+        Expression::ParenthesizedExpression(p) => nullish_initializer_kinds(&p.expression),
+        Expression::NullLiteral(_) => Some(NullishKinds::NULL_ONLY),
+        Expression::Identifier(id) if id.name.as_str() == "undefined" => {
+            Some(NullishKinds::UNDEFINED_ONLY)
+        }
+        Expression::UnaryExpression(u)
+            if u.operator == UnaryOperator::Void
+                && matches!(&u.argument, Expression::NumericLiteral(_)) =>
+        {
+            Some(NullishKinds::UNDEFINED_ONLY)
+        }
+        _ => None,
+    }
+}
+
+fn nullish_annotation_kinds(ty: &TSType<'_>) -> Option<NullishKinds> {
+    match ty {
+        TSType::TSNullKeyword(_) => Some(NullishKinds::NULL_ONLY),
+        TSType::TSUndefinedKeyword(_) | TSType::TSVoidKeyword(_) => {
+            Some(NullishKinds::UNDEFINED_ONLY)
+        }
+        TSType::TSParenthesizedType(p) => nullish_annotation_kinds(&p.type_annotation),
+        _ => None,
+    }
+}
+
+fn numeric_literal_value(expr: &Expression<'_>) -> Option<f64> {
+    match expr {
+        Expression::NumericLiteral(n) => Some(n.value),
+        Expression::ParenthesizedExpression(inner) => numeric_literal_value(&inner.expression),
+        _ => None,
+    }
+}
+
+fn is_concrete_keyword_type(ty: &TSType<'_>) -> bool {
+    matches!(
+        ty,
+        TSType::TSNumberKeyword(_) | TSType::TSStringKeyword(_) | TSType::TSBooleanKeyword(_)
+    )
+}
+
+fn strip_parenthesized_type<'a>(mut ty: &'a TSType<'a>) -> &'a TSType<'a> {
+    while let TSType::TSParenthesizedType(inner) = ty {
+        ty = &inner.type_annotation;
+    }
+    ty
+}
+
+fn annotation_admits_nullish(
+    annotation: Option<&TSTypeAnnotation<'_>>,
+    kinds: NullishKinds,
+) -> bool {
+    let Some(inner) = annotation.map(|annotation| &annotation.type_annotation) else {
+        return false;
+    };
+    let members: Vec<&TSType<'_>> = match strip_parenthesized_type(inner) {
+        TSType::TSUnionType(union) => union.types.iter().map(strip_parenthesized_type).collect(),
+        other => vec![other],
+    };
+    let mut admitted = false;
+    let mut concrete = 0usize;
+    for member in members {
+        if let Some(member_kinds) = nullish_annotation_kinds(member) {
+            if (member_kinds.null && kinds.null) || (member_kinds.undefined && kinds.undefined) {
+                admitted = true;
+            }
+            continue;
+        }
+        if !is_concrete_keyword_type(member) {
+            return false;
+        }
+        concrete += 1;
+    }
+    admitted && concrete <= 1
+}
+
+pub(crate) fn static_field_initializer_is_supported(
+    value: &Expression<'_>,
+    type_annotation: Option<&TSTypeAnnotation<'_>>,
+) -> bool {
+    match value {
+        Expression::ParenthesizedExpression(inner) => {
+            static_field_initializer_is_supported(&inner.expression, type_annotation)
+        }
+        Expression::NumericLiteral(_) | Expression::BooleanLiteral(_) => true,
+        Expression::UnaryExpression(u)
+            if matches!(
+                u.operator,
+                UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus | UnaryOperator::BitwiseNot
+            ) && matches!(&u.argument, Expression::NumericLiteral(_)) =>
+        {
+            true
+        }
+        _ => nullish_initializer_kinds(value)
+            .is_some_and(|kinds| annotation_admits_nullish(type_annotation, kinds)),
+    }
+}
+
+fn call_declared_void(senv: &SkeletonEnv<'_>, expr: &HirExpr) -> bool {
+    let HirExpr::Call { callee, .. } = expr else {
+        return false;
+    };
+    let HirCallee::Indirect(inner) = callee else {
+        return false;
+    };
+    let HirExpr::Global { name, .. } = inner.as_ref() else {
+        return false;
+    };
+    senv.program
+        .find_function_by_name(name)
+        .is_some_and(|function| matches!(senv.types.resolve(function.ret), Some(Type::Void)))
+}
+
+fn refuse_non_literal_static_field_initializers(
+    senv: &mut SkeletonEnv<'_>,
+    class_expr: &oxc_ast::ast::Class<'_>,
+) {
+    let class_name = class_expr.id.as_ref().map_or("", |id| id.name.as_str());
+    for element in &class_expr.body.body {
+        let oxc_ast::ast::ClassElement::PropertyDefinition(p) = element else {
+            continue;
+        };
+        if !p.r#static {
+            continue;
+        }
+        let Some(value) = &p.value else {
+            continue;
+        };
+        if static_field_initializer_is_supported(value, p.type_annotation.as_deref()) {
+            continue;
+        }
+        senv.report_unsupported(
+            "E0419",
+            format!(
+                "the static field `{}.{}` of a class declared inside a function cannot be \
+                 initialized here: a local class is lowered to one module-level global that is \
+                 seeded before the function runs, so a non-literal initializer would silently \
+                 become the field's zero value; move the class to the top level, make the \
+                 initializer a literal, or drop the static field",
+                class_name,
+                p.key
+                    .static_name()
+                    .map_or_else(|| "<computed>".to_owned(), std::borrow::Cow::into_owned)
+            )
+            .as_str(),
+            value.span(),
+        );
+    }
+}
 
 fn same_number_expr(lhs: &HirExpr, rhs: &HirExpr) -> bool {
     match (lhs, rhs) {
@@ -1470,8 +1622,11 @@ impl SkeletonBuilder {
         class_expr: &oxc_ast::ast::Class<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
+        if self.body_depth > 0 {
+            refuse_non_literal_static_field_initializers(senv, class_expr);
+        }
         let unique_name = self.fresh_anon_class_name(senv);
-        let mut hir_class = self.build_class(senv, class_expr, false, false, Some(scope));
+        let mut hir_class = self.build_class(senv, class_expr, false, false, Some(&mut *scope));
         hir_class.name = unique_name.clone();
         self.register_static_methods(senv, &hir_class, &unique_name);
         let class_ty = hir_class.ty;
@@ -1584,17 +1739,36 @@ impl SkeletonBuilder {
             let lhs_resolved = senv.types.resolve(lhs_ty).cloned();
             match lhs_resolved {
                 Some(Type::Optional { inner, .. }) => {
-                    let rhs_resolved = senv.types.resolve(rhs.ty()).cloned();
-                    match rhs_resolved {
-                        Some(Type::Optional {
-                            inner: rhs_inner,
-                            nullish: rhs_kinds,
-                        }) if rhs_inner == inner => senv.types.intern(&Type::Optional {
-                            inner: rhs_inner,
-                            nullish: rhs_kinds,
-                        }),
-                        Some(Type::Null | Type::Void) => lhs_ty,
-                        _ => inner,
+                    let literal_kinds = match &rhs {
+                        HirExpr::Null(_) => Some(NullishKinds::NULL_ONLY),
+                        HirExpr::Undefined(_)
+                        | HirExpr::Unit(_)
+                        | HirExpr::Unary {
+                            op: HirUnaryOp::Void,
+                            ..
+                        } => Some(NullishKinds::UNDEFINED_ONLY),
+                        _ => None,
+                    };
+                    if let Some(nullish) = literal_kinds {
+                        senv.types.intern(&Type::Optional { inner, nullish })
+                    } else {
+                        let rhs_resolved = senv.types.resolve(rhs.ty()).cloned();
+                        let fallback_nullish = match rhs_resolved {
+                            Some(Type::Optional {
+                                inner: rhs_inner,
+                                nullish: rhs_kinds,
+                            }) if rhs_inner == inner => Some(rhs_kinds),
+                            Some(Type::Null) => Some(NullishKinds::NULL_ONLY),
+                            Some(Type::Void) => Some(NullishKinds::UNDEFINED_ONLY),
+                            Some(Type::Error) if call_declared_void(senv, &rhs) => {
+                                Some(NullishKinds::UNDEFINED_ONLY)
+                            }
+                            _ => None,
+                        };
+                        match fallback_nullish {
+                            Some(nullish) => senv.types.intern(&Type::Optional { inner, nullish }),
+                            None => inner,
+                        }
                     }
                 }
                 _ => lhs_ty,
@@ -1619,8 +1793,14 @@ impl SkeletonBuilder {
         unary: &UnaryExpression<'_>,
         scope: &mut BodyScope,
     ) -> HirExpr {
-        let inner = self.walk_expr(senv, &unary.argument, scope);
         let span = core_span_from_oxc(unary.span);
+        if unary.operator == UnaryOperator::UnaryNegation
+            && let Some(value) = numeric_literal_value(&unary.argument)
+            && value == 0.0
+        {
+            return HirExpr::Float((-value).to_bits(), span);
+        }
+        let inner = self.walk_expr(senv, &unary.argument, scope);
         match map_unary_op(unary.operator) {
             Some(HirUnaryOp::Not) if self.is_class_value_expr(&inner, scope.body_id()) => {
                 let ty = senv.types.intern(&Type::Bool);
@@ -1642,6 +1822,7 @@ impl SkeletonBuilder {
             Some(op) => {
                 let ty = match op {
                     HirUnaryOp::Not => senv.types.intern(&Type::Bool),
+                    HirUnaryOp::Void => senv.types.intern(&Type::Void),
                     _ => senv.error_ty(),
                 };
                 HirExpr::Unary {
@@ -1806,6 +1987,22 @@ impl SkeletonBuilder {
                 self.unknown_class_value_globals
                     .insert(name.as_str().to_owned());
             }
+            if self.local_class_static_field(name.as_str()).is_some() {
+                senv.report_unsupported(
+                    "E0419",
+                    format!(
+                        "the static field global `{}` belongs to a class declared inside a \
+                         function; this target stores that field in one module-level global shared \
+                         by every evaluation of the class, so a write here would also change the \
+                         state seen by instances of earlier evaluations; move the class to the top \
+                         level or pass the state through the instance",
+                        name.as_str()
+                    )
+                    .as_str(),
+                    update.span,
+                );
+                return HirExpr::Unit(core_span_from_oxc(update.span));
+            }
         }
         if let HirExpr::Field {
             owner, field_name, ..
@@ -1856,6 +2053,19 @@ impl SkeletonBuilder {
             ty,
             span: core_span_from_oxc(update.span),
         }
+    }
+
+    fn local_class_static_field(&self, global: &str) -> Option<TypeId> {
+        let class_ty = self.static_field_globals.iter().find_map(|(ty, fields)| {
+            fields
+                .values()
+                .any(|(name, _)| name.as_str() == global)
+                .then_some(*ty)
+        })?;
+        if self.module_static_class_types.contains(&class_ty) {
+            return None;
+        }
+        Some(class_ty)
     }
 
     fn record_global_receiver_call(
@@ -2005,7 +2215,7 @@ impl SkeletonBuilder {
         self.in_callee_position = true;
         let callee_expr = self.walk_expr(senv, &call.callee, scope);
         self.in_callee_position = previous_callee_position;
-        let callee_expr = self.resolve_static_method_callee(
+        let (callee_expr, static_owner) = self.resolve_static_method_callee(
             senv,
             callee_expr,
             core_span_from_oxc(call.callee.span()),
@@ -2058,7 +2268,7 @@ impl SkeletonBuilder {
                 source,
                 local,
                 body_id,
-                ty: _,
+                ty,
             } in captures
             {
                 let bound = if scope.body_id() == body_id {
@@ -2066,13 +2276,17 @@ impl SkeletonBuilder {
                 } else {
                     None
                 };
-                let in_scope = bound.is_some_and(|(bound, _)| {
-                    bound == local
+                let direct = bound.filter(|(bound, _)| {
+                    *bound == local
                         || self
-                            .narrowed_storage(bound)
+                            .narrowed_storage(*bound)
                             .is_some_and(|(storage_id, _)| storage_id == local)
                 });
-                if !in_scope {
+                let recorded_is_live =
+                    scope.body_id() == body_id && scope.name_of_local(local).is_some();
+                let Some((bound_id, bound_ty)) =
+                    direct.or_else(|| recorded_is_live.then_some((local, ty)))
+                else {
                     senv.report_unsupported(
                         "E0419",
                         format!(
@@ -2085,9 +2299,6 @@ impl SkeletonBuilder {
                         .as_str(),
                         call.callee.span(),
                     );
-                    return HirExpr::Unit(core_span_from_oxc(call.span));
-                }
-                let Some((bound_id, bound_ty)) = bound else {
                     return HirExpr::Unit(core_span_from_oxc(call.span));
                 };
                 args.push(HirExpr::Local {
@@ -2196,7 +2407,7 @@ impl SkeletonBuilder {
                 }
                 _ => senv.error_ty(),
             },
-            HirExpr::Global { ty, .. } => match senv.types.resolve(*ty) {
+            HirExpr::Global { name, ty, .. } => match senv.types.resolve(*ty) {
                 Some(ts_aot_core::Type::Fn { ret, .. })
                     if !matches!(
                         senv.types.resolve(*ret),
@@ -2212,16 +2423,26 @@ impl SkeletonBuilder {
                 {
                     *ty
                 }
-                _ => senv.error_ty(),
+                _ => function_return_ty_in_program(senv, name.as_str())
+                    .unwrap_or_else(|| senv.error_ty()),
             },
             _ => senv.error_ty(),
         };
-        HirExpr::Call {
+        let call_expr = HirExpr::Call {
             callee: HirCallee::Indirect(Box::new(callee_expr)),
             args,
             type_args,
             ty,
             span: core_span_from_oxc(call.span),
+        };
+        if let Some(owner) = static_owner {
+            HirExpr::Sequence {
+                exprs: vec![owner, call_expr],
+                ty,
+                span: core_span_from_oxc(call.span),
+            }
+        } else {
+            call_expr
         }
     }
 
@@ -2423,6 +2644,8 @@ impl SkeletonBuilder {
             Expression::Identifier(id)
                 if id.name.as_str() == "Date"
                     && scope.lookup("Date").is_none()
+                    && scope.visible_class("Date").is_none()
+                    && self.captured_local_id("Date").is_none()
                     && !date_shadowed =>
             {
                 senv.types.intern(&ts_aot_core::Type::Date)
@@ -2811,17 +3034,18 @@ impl SkeletonBuilder {
                     senv.types.resolve(lookup_ty),
                     Some(ts_aot_core::Type::Struct { .. })
                 ) {
-                    class_field_ty_in_program(senv, lookup_ty, prop).or_else(|| {
-                        senv.program
-                            .class_fields
-                            .get(&lookup_ty)
-                            .and_then(|fields| {
-                                fields
-                                    .iter()
-                                    .find(|f| f.name.as_str() == prop)
-                                    .map(|f| f.ty)
-                            })
-                    })
+                    self.resolved_class_field_ty(senv, lookup_ty, prop)
+                        .or_else(|| {
+                            senv.program
+                                .class_fields
+                                .get(&lookup_ty)
+                                .and_then(|fields| {
+                                    fields
+                                        .iter()
+                                        .find(|f| f.name.as_str() == prop)
+                                        .map(|f| f.ty)
+                                })
+                        })
                 } else if let Some(inner) = generator_result_inner {
                     match prop {
                         "value" => Some(senv.types.intern(&ts_aot_core::Type::Optional {
@@ -2898,6 +3122,20 @@ impl SkeletonBuilder {
             }
             ME::PrivateFieldExpression(p) => self.walk_private_field(senv, p, scope),
         }
+    }
+
+    fn resolved_class_field_ty(
+        &self,
+        senv: &SkeletonEnv<'_>,
+        ty: TypeId,
+        field_name: &str,
+    ) -> Option<TypeId> {
+        let unpublished_parent = if self.current_class_ty == Some(ty) {
+            self.current_super_class.as_ref()
+        } else {
+            None
+        };
+        class_field_ty_in_program(senv, ty, field_name, unpublished_parent)
     }
 
     fn walk_private_field(
@@ -2993,7 +3231,8 @@ impl SkeletonBuilder {
             Some(ts_aot_core::Type::Optional { inner, nullish }) => (*inner, Some(*nullish)),
             _ => (owner_ty, None),
         };
-        let declared = class_field_ty_in_program(senv, lookup_ty, member.lowered.as_str())
+        let declared = self
+            .resolved_class_field_ty(senv, lookup_ty, member.lowered.as_str())
             .or_else(|| {
                 senv.program
                     .class_fields
@@ -3119,12 +3358,35 @@ impl SkeletonBuilder {
             );
             return HirExpr::Unit(span);
         }
-        let present = class_field_ty_in_program(senv, owner_ty, member.lowered.as_str()).is_some()
+        let present = self
+            .resolved_class_field_ty(senv, owner_ty, member.lowered.as_str())
+            .is_some()
             || senv
                 .program
                 .class_fields
                 .get(&owner_ty)
                 .is_some_and(|fields| fields.iter().any(|f| f.name == member.lowered));
+        if !present
+            && senv.program.class_fields.contains_key(&owner_ty)
+            && !senv
+                .program
+                .declarations
+                .iter()
+                .any(|decl| matches!(decl, HirDecl::Class(class) if class.ty == owner_ty))
+        {
+            senv.report_unsupported(
+                "E0500",
+                format!(
+                    "`#{name} in obj` cannot be decided here: the class of `obj` is declared later \
+                     in the module, so its inheritance chain is not resolved yet and an inherited \
+                     private field cannot be ruled out; move the class declaration before the \
+                     brand check"
+                )
+                .as_str(),
+                p.span,
+            );
+            return HirExpr::Unit(span);
+        }
         HirExpr::Sequence {
             exprs: vec![object, HirExpr::Bool(present, span)],
             ty: bool_ty,
@@ -3638,6 +3900,47 @@ impl SkeletonBuilder {
         });
     }
 
+    fn forget_replaced_fresh_field_classes(
+        &mut self,
+        owner_ty: TypeId,
+        field: &Atom,
+        fresh_base: &ClassValueFieldBase,
+        replaced: &[TypeId],
+    ) {
+        if replaced.is_empty() {
+            return;
+        }
+        let escaping_write = self.class_value_poison_writes.iter().any(|write| {
+            write.owner_ty == owner_ty
+                && write.field == *field
+                && write.holds_class_value
+                && !self.class_value_field_base_is_fresh(&write.base)
+        });
+        if escaping_write {
+            return;
+        }
+        let initials = self.initial_class_value_field_classes(owner_ty, field);
+        let other_holders: Vec<TypeId> = self
+            .fresh_field_classes
+            .iter()
+            .filter(|((base, owner, holder_field), _)| {
+                *owner == owner_ty && holder_field == field && base != fresh_base
+            })
+            .flat_map(|(_, classes)| classes.iter().copied())
+            .collect();
+        if let Some(target) = self
+            .class_value_fields
+            .get_mut(&owner_ty)
+            .and_then(|fields| fields.get_mut(field))
+        {
+            target.retain(|class_ty| {
+                !replaced.contains(class_ty)
+                    || initials.contains(class_ty)
+                    || other_holders.contains(class_ty)
+            });
+        }
+    }
+
     fn record_joined_class_value_field_class_write(
         &mut self,
         owner_ty: TypeId,
@@ -3839,12 +4142,13 @@ impl SkeletonBuilder {
                 {
                     return None;
                 }
-                self.class_value_globals.get(&name).cloned().or_else(|| {
-                    self.class_types
-                        .get(&name)
-                        .copied()
-                        .map(|class_ty| vec![class_ty])
-                })
+                if let Some(classes) = self.class_value_globals.get(&name).cloned() {
+                    return Some(classes);
+                }
+                let class_ty = *self.class_types.get(&name)?;
+                let tag = self.class_value_tag(class_ty);
+                *rhs = HirExpr::Int(tag, span);
+                Some(vec![class_ty])
             }
             HirExpr::Local { id, .. } => {
                 let storage = self.class_value_storage(*id);
@@ -3880,12 +4184,12 @@ impl SkeletonBuilder {
         callee: HirExpr,
         span: oxc_span::Span,
         scope: &BodyScope,
-    ) -> HirExpr {
+    ) -> (HirExpr, Option<HirExpr>) {
         let HirExpr::Field {
             owner, field_name, ..
         } = &callee
         else {
-            return callee;
+            return (callee, None);
         };
         if let HirExpr::Global { name, .. } = owner.as_ref()
             && self.class_types.contains_key(name.as_str())
@@ -3893,7 +4197,7 @@ impl SkeletonBuilder {
             && self.captured_local_id(name.as_str()).is_none()
             && !SkeletonBuilder::captured_name_is_visible(senv, name.as_str())
         {
-            return callee;
+            return (callee, None);
         }
         let owner_ty = owner.ty();
         let base = self.class_value_field_base(owner, scope.body_id());
@@ -3928,18 +4232,35 @@ impl SkeletonBuilder {
                 .as_str(),
                 span,
             );
-            return HirExpr::Unit(core_span_from_oxc(span));
+            return (HirExpr::Unit(core_span_from_oxc(span)), None);
         }
-        let mut owner_expr = owner.as_ref().clone();
-        let Some(classes) = self.rhs_final_class_value_classes(&mut owner_expr, span) else {
-            return callee;
+        let fresh_receiver = match owner.as_ref() {
+            HirExpr::Field {
+                owner: holder,
+                field_name: receiver_field,
+                ..
+            } => self
+                .class_value_field_base(holder, scope.body_id())
+                .filter(|base| self.class_value_field_base_is_fresh(base))
+                .map(|base| (base, holder.ty(), receiver_field.clone())),
+            _ => None,
+        };
+        let classes = if let Some((base, holder_ty, receiver_field)) = fresh_receiver {
+            self.fresh_field_base_classes(&base, holder_ty, &receiver_field)
+        } else {
+            let mut owner_expr = owner.as_ref().clone();
+            let Some(classes) = self.rhs_final_class_value_classes(&mut owner_expr, span) else {
+                return (callee, None);
+            };
+            classes
         };
         if classes.is_empty() {
-            return callee;
+            return (callee, None);
         }
+        let dropped_owner = owner.as_ref().clone();
         match self.static_method_access(&classes, field_name.as_str(), span, senv) {
-            Some(replacement) => replacement,
-            None => callee,
+            Some(replacement) => (replacement, Some(dropped_owner)),
+            None => (callee, None),
         }
     }
 
@@ -4070,9 +4391,10 @@ impl SkeletonBuilder {
         scope: &mut BodyScope,
     ) -> HirExpr {
         let Some(simple_target) = a.left.as_simple_assignment_target() else {
-            senv.report_unwalked(
-                "destructuring assignment target is not supported; the assignment is skipped \
-                 and the right-hand side is evaluated for its effects",
+            senv.report_unsupported(
+                "E0500",
+                "a destructuring assignment used as an expression is not supported by the body \
+                 walker; write the destructuring assignment as its own statement",
                 a.span,
             );
             return self.walk_expr(senv, &a.right, scope);
@@ -4108,6 +4430,24 @@ impl SkeletonBuilder {
                  not supported; assign through the class name instead",
                 a.span,
             );
+        }
+        if let HirExpr::Global { name, .. } = &target
+            && self.local_class_static_field(name.as_str()).is_some()
+        {
+            senv.report_unsupported(
+                "E0419",
+                format!(
+                    "the static field global `{}` belongs to a class declared inside a function; \
+                     this target stores that field in one module-level global shared by every \
+                     evaluation of the class, so a write here would also change the state seen by \
+                     instances of earlier evaluations; move the class to the top level or pass the \
+                     state through the instance",
+                    name.as_str()
+                )
+                .as_str(),
+                a.span,
+            );
+            return HirExpr::Unit(core_span_from_oxc(a.span));
         }
         let mut rhs = self.walk_expr(senv, &a.right, scope);
         if let HirExpr::Local { id, .. } = &target {
@@ -4528,11 +4868,19 @@ impl SkeletonBuilder {
                                 .filter(|base| self.class_value_field_base_is_fresh(base))
                                 .cloned()
                             {
-                                let mut updated = self.fresh_field_base_classes_or_initials(
+                                let unconditional = matches!(op, CompoundOp::Assign)
+                                    && self.class_value_branch_ids.is_empty()
+                                    && self.try_body_skips != Some(true);
+                                let previous = self.fresh_field_base_classes_or_initials(
                                     &fresh_base,
                                     owner_ty,
                                     &field_name,
                                 );
+                                let mut updated = if unconditional {
+                                    Vec::new()
+                                } else {
+                                    previous.clone()
+                                };
                                 for class_ty in &classes {
                                     if !updated.contains(class_ty) {
                                         updated.push(*class_ty);
@@ -4544,6 +4892,14 @@ impl SkeletonBuilder {
                                     &field_name,
                                     updated,
                                 );
+                                if unconditional {
+                                    self.forget_replaced_fresh_field_classes(
+                                        owner_ty,
+                                        &field_name,
+                                        &fresh_base,
+                                        &previous,
+                                    );
+                                }
                             }
                             let target = self
                                 .class_value_fields
@@ -4952,12 +5308,24 @@ fn mentions_generic_param(types: &TypeTable, ty: TypeId) -> bool {
     }
 }
 
+fn class_ty_by_name(senv: &SkeletonEnv<'_>, name: &Atom) -> Option<TypeId> {
+    senv.program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Class(class) if class.name == *name => Some(class.ty),
+            _ => None,
+        })
+}
+
 fn class_field_ty_in_program(
     senv: &SkeletonEnv<'_>,
     ty: TypeId,
     field_name: &str,
+    unpublished_parent: Option<&Atom>,
 ) -> Option<TypeId> {
     let mut current = ty;
+    let mut unpublished_parent = unpublished_parent;
     let mut visited: Vec<TypeId> = Vec::new();
     loop {
         if visited.contains(&current) {
@@ -4971,24 +5339,50 @@ fn class_field_ty_in_program(
             .find_map(|decl| match decl {
                 HirDecl::Class(class) if class.ty == current => Some(class),
                 _ => None,
-            })?;
-        if let Some(field) = class
-            .fields
+            });
+        let (fields, parent) = if let Some(class) = class {
+            (class.fields.as_slice(), class.extends.clone())
+        } else {
+            let fields = senv.program.class_fields.get(&current)?;
+            if let Some(field) = fields
+                .iter()
+                .find(|field| field.name.as_str() == field_name)
+            {
+                return Some(field.ty);
+            }
+            let parent = unpublished_parent.take()?;
+            current = class_ty_by_name(senv, parent)?;
+            continue;
+        };
+        if let Some(field) = fields
             .iter()
             .find(|field| field.name.as_str() == field_name)
         {
             return Some(field.ty);
         }
-        let parent = class.extends.as_ref()?;
-        current = senv
-            .program
-            .declarations
-            .iter()
-            .find_map(|decl| match decl {
-                HirDecl::Class(class) if class.name == *parent => Some(class.ty),
-                _ => None,
-            })?;
+        let parent = parent?;
+        current = class_ty_by_name(senv, &parent)?;
     }
+}
+
+fn function_return_ty_in_program(senv: &SkeletonEnv<'_>, name: &str) -> Option<TypeId> {
+    senv.program
+        .declarations
+        .iter()
+        .find_map(|decl| match decl {
+            HirDecl::Function(function)
+                if !function.is_async
+                    && !function.is_generator
+                    && function.name.as_str() == name =>
+            {
+                (!matches!(
+                    senv.types.resolve(function.ret),
+                    None | Some(Type::Error | Type::Void)
+                ) && !mentions_generic_param(senv.types, function.ret))
+                .then_some(function.ret)
+            }
+            _ => None,
+        })
 }
 
 fn class_method_ret_in_program(
@@ -5162,10 +5556,7 @@ pub(crate) fn capture_binding_map(
 ) -> std::collections::HashMap<String, (LocalId, TypeId)> {
     let mut map = std::collections::HashMap::new();
     for name in scope.names() {
-        let Some(id) = scope.visible_binding(&name) else {
-            continue;
-        };
-        let Some(ty) = scope.type_of_visible(&name) else {
+        let Some((id, ty)) = scope.visible_binding_with_type(&name) else {
             continue;
         };
         let binding = narrowed.get(&id).copied().unwrap_or((id, ty));

@@ -348,6 +348,7 @@ fn collect_class_keys(
 
 pub struct ExprConverter {
     pub(super) local_map: HashMap<LocalId, LocalId>,
+    pub(super) param_locals: HashSet<LocalId>,
     pub(super) local_names: HashMap<LocalId, Atom>,
     pub(super) function_remap: HashMap<FunctionId, FunctionId>,
     pub(super) name_to_function: Arc<HashMap<Atom, FunctionId>>,
@@ -394,6 +395,7 @@ impl ExprConverter {
     ) -> Self {
         Self {
             local_map: HashMap::new(),
+            param_locals: HashSet::new(),
             local_names: HashMap::new(),
             function_remap: remap,
             name_to_function: Arc::new(HashMap::new()),
@@ -590,6 +592,7 @@ impl ExprConverter {
     pub fn seed_params(&mut self, param_ids: &[LocalId]) {
         for &id in param_ids {
             self.local_map.insert(id, id);
+            self.param_locals.insert(id);
         }
         let next = param_ids
             .iter()
@@ -608,6 +611,7 @@ impl ExprConverter {
         namespace_path: &[String],
     ) {
         self.local_map.clear();
+        self.param_locals.clear();
         self.local_names.clear();
         self.function_remap = function_remap;
         self.namespace_path.clear();

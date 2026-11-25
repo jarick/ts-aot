@@ -27,6 +27,24 @@ fn codes(out: &ts_aot_driver::DriverOutput) -> Vec<&str> {
     out.diagnostics.iter().map(|d| d.code.as_str()).collect()
 }
 
+fn crate_rust_of(source: &str) -> String {
+    let out = Driver::new().compile_source(
+        "test.ts",
+        source,
+        &CompileOptions {
+            emit: EmitStage::Crate,
+            module: true,
+        },
+    );
+    assert!(
+        !out.has_errors(),
+        "must compile through the full pipeline; got {:?}",
+        out.diagnostics
+    );
+    out.rust_source
+        .expect("emit-crate must populate rust_source")
+}
+
 const HOLDER: &str = "class Holder { C = class { static k: number = 1; }; }";
 
 #[test]
@@ -2690,5 +2708,242 @@ fn main() {
 "#;
     let rust = rust_of(SOURCE);
     let stdout = run_generated_crate("method_and_function", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn an_unconditional_plain_assignment_replaces_the_initial_field_class() {
+    const SOURCE: &str = "class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(): number { \
+             const h = new Holder(); \
+             h.C = class { static run(): number { return 2; } }; \
+             return h.C.run(); \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(plain_assign_replaces::got(&ctx), 2.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let stdout = run_generated_crate("plain_assign_replaces", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_conditional_plain_assignment_keeps_both_field_classes_and_is_refused() {
+    const SOURCE: &str = "class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(flag: boolean): number { \
+             const h = new Holder(); \
+             if (flag) { h.C = class { static run(): number { return 2; } }; } \
+             return h.C.run(); \
+         }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.diagnostics
+            .errors()
+            .any(|d| d.code.as_str() == "E0419" && d.message.contains("more than one class")),
+        "only an unconditional plain assignment may replace the initial class, so an `if` that \
+         may leave either class must stay refused; got {:?}",
+        codes(&out)
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn two_conditionally_assigned_fresh_classes_stay_refused() {
+    const SOURCE: &str = "class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(flag: boolean): number { \
+             const h = new Holder(); \
+             if (flag) { h.C = class { static run(): number { return 2; } }; } \
+             else { h.C = class { static run(): number { return 3; } }; } \
+             return h.C.run(); \
+         }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.diagnostics
+            .errors()
+            .any(|d| d.code.as_str() == "E0419" && d.message.contains("more than one class")),
+        "two different fresh classes assigned in the two branches are both possible, so the static \
+         call must stay refused; got {:?}",
+        codes(&out)
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_compound_assignment_over_a_maybe_falsy_field_keeps_the_union_and_is_refused() {
+    const SOURCE: &str = "class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(flag: boolean): number { \
+             const h = new Holder(); \
+             if (flag) { h.C = 0; } \
+             h.C ||= class { static run(): number { return 2; } }; \
+             return h.C.run(); \
+         }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.diagnostics
+            .errors()
+            .any(|d| d.code.as_str() == "E0419" && d.message.contains("more than one class")),
+        "a compound write may keep the initial class or store the new one, so it must keep the \
+         union; got {:?}",
+        codes(&out)
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_module_class_value_assigned_to_a_fresh_field_keeps_its_class_value_tag() {
+    const SOURCE: &str = "class K { static run(): number { return 4; } } \
+         class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(): number { \
+             const h = new Holder(); \
+             h.C = K; \
+             return h.C.run(); \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(flat_module_class_value::got(&ctx), 4.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let stdout = run_generated_crate("flat_module_class_value", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_module_class_value_assigned_to_a_nested_field_keeps_its_class_value_tag() {
+    const SOURCE: &str = "class K { static k: number = 4; } \
+         class Inner { C = class { static k: number = 1; }; } \
+         class Outer { I: Inner; } \
+         export function got(): number { \
+             const o = new Outer(); \
+             o.I = new Inner(); \
+             o.I.C = K; \
+             return o.I.C.k; \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    nested_module_class_value::__ts_aot_init();
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(nested_module_class_value::got(&ctx), 4.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let stdout = run_generated_crate("nested_module_class_value", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_module_class_value_assigned_to_a_static_class_value_field_is_refused() {
+    const SOURCE: &str = "class K { static run(): number { return 4; } } \
+         class Holder { static C = class { static run(): number { return 1; } }; } \
+         export function got(): number { \
+             Holder.C = K; \
+             return Holder.C.run(); \
+         }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.diagnostics
+            .errors()
+            .any(|d| d.code.as_str() == "E0419" && d.message.contains("static field")),
+        "a static class-value field cannot store a module class value, so the assignment must be \
+         refused; got {:?}",
+        codes(&out)
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_class_assigned_from_a_parameter_must_stay_refused() {
+    const SOURCE: &str = "class K { static run(): number { return 4; } } \
+         class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(k: K): number { \
+             const h = new Holder(); \
+             h.C = k; \
+             return h.C.run(); \
+         }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.diagnostics
+            .errors()
+            .any(|d| d.code.as_str() == "E0419" && d.message.contains("not a class value")),
+        "an instance passed in from a parameter is not a class value, so the assignment must be \
+         refused; got {:?}",
+        codes(&out)
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a refused source must not emit rust; got:\n{:?}",
+        out.rust_source
+    );
+}
+
+#[test]
+fn a_second_unconditional_plain_assignment_replaces_the_first_class() {
+    const SOURCE: &str = "class Holder { C = class { static run(): number { return 1; } }; } \
+         export function got(): number { \
+             const h = new Holder(); \
+             h.C = class { static run(): number { return 2; } }; \
+             h.C = class { static run(): number { return 3; } }; \
+             return h.C.run(); \
+         }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(second_plain_assign::got(&ctx), 3.0);
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let stdout = run_generated_crate("second_plain_assign", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

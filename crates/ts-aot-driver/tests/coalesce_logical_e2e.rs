@@ -370,6 +370,146 @@ fn main() {
 }
 
 #[test]
+fn a_void_fallback_behaves_like_the_undefined_literal() {
+    const SOURCE: &str = r"
+let hits: number = 0;
+function bump(): number { hits = hits + 1; return hits; }
+class K { m(): number | undefined { return 3; } }
+export function fromUndef(a: number | undefined): number | undefined { const r = a ?? void 0; return r; }
+export function fromNull(a: number | null): number | undefined { const r = a ?? void 0; return r; }
+export function fromBoth(a: number | null | undefined): number | undefined { const r = a ?? void 0; return r; }
+export function fromClass(k: K | undefined): K | undefined { const r = k ?? void 0; return r; }
+export function fromString(s: string | undefined): string | undefined { const r = s ?? void 0; return r; }
+export function fromPlain(n: number): number { const r = n ?? void 0; return r; }
+export function fromCall(a: number | undefined): number | undefined { const r = a ?? void bump(); return r; }
+export function classPresent(): K | undefined { return fromClass(new K()); }
+export function classAbsent(): K | undefined { return fromClass(undefined); }
+export function coNull(a: number | null): boolean { return (a ?? void 0) === null; }
+export function coUndef(a: number | null): boolean { return (a ?? void 0) === undefined; }
+export function hitsNow(): number { return hits; }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    let some = ::core::option::Option::Some;
+    let none = ::core::option::Option::None;
+    // node: `void` yields `undefined`, so `a ?? void 0` is `a` when present and
+    // `undefined` otherwise.
+    assert_eq!(void_literal::fromUndef(&ctx, none), none);
+    assert_eq!(void_literal::fromUndef(&ctx, some(2.0)), some(2.0));
+    assert_eq!(void_literal::fromNull(&ctx, none), none);
+    assert_eq!(void_literal::fromNull(&ctx, some(3.0)), some(3.0));
+    assert_eq!(void_literal::fromBoth(&ctx, none), none);
+    assert_eq!(void_literal::fromBoth(&ctx, some(4.0)), some(4.0));
+    assert_eq!(void_literal::fromPlain(&ctx, 5.0), 5.0);
+    assert!(void_literal::classPresent(&ctx).is_some());
+    assert!(void_literal::classAbsent(&ctx).is_none());
+    assert_eq!(void_literal::fromCall(&ctx, some(6.0)), some(6.0));
+    assert_eq!(
+        void_literal::hitsNow(&ctx),
+        0.0,
+        "the fallback must not run when the left operand holds a value"
+    );
+    assert_eq!(void_literal::fromCall(&ctx, none), none);
+    assert_eq!(
+        void_literal::hitsNow(&ctx),
+        1.0,
+        "`void bump()` must still evaluate `bump()` in the fallback"
+    );
+    // `a ?? void 0` is `number | undefined` (never `null`), so `=== null` is
+    // false and `=== undefined` is presence.
+    assert!(!void_literal::coNull(&ctx, none));
+    assert!(!void_literal::coNull(&ctx, some(1.0)));
+    assert!(void_literal::coUndef(&ctx, none));
+    assert!(!void_literal::coUndef(&ctx, some(1.0)));
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let norm = normalized(&rust);
+    assert!(
+        !norm.contains("=()"),
+        "a `void` fallback must lower as `None` and must never be assigned as `()` into a value \
+         slot; got:\n{rust}"
+    );
+    for name in ["fromUndef", "fromNull", "fromBoth"] {
+        assert!(
+            normalized(body_of(&rust, name)).contains("Option<f64>"),
+            "`{name}` must keep an optional destination, whatever the left operand's nullish \
+             kinds are; got:\n{}",
+            body_of(&rust, name)
+        );
+    }
+    assert!(
+        normalized(body_of(&rust, "fromClass")).contains("Option<K>"),
+        "a class `T | undefined` left operand keeps an optional destination; got:\n{}",
+        body_of(&rust, "fromClass")
+    );
+    assert!(
+        normalized(body_of(&rust, "fromString")).contains("Option<ts_aot_runtime::JsString"),
+        "a string `T | undefined` left operand keeps an optional destination; got:\n{}",
+        body_of(&rust, "fromString")
+    );
+    assert!(
+        !normalized(body_of(&rust, "fromPlain")).contains("Option<"),
+        "a non-optional left operand stays non-optional; got:\n{}",
+        body_of(&rust, "fromPlain")
+    );
+    assert!(
+        normalized(body_of(&rust, "coNull")).contains("returnfalse;"),
+        "`a ?? void 0` over `number | null` can never be `null`, so `=== null` is `false`; got:\n\
+         {rust}"
+    );
+    assert!(
+        normalized(body_of(&rust, "coUndef")).contains("is_none()"),
+        "`a ?? void 0` can be `undefined`, so `=== undefined` must test presence; got:\n{rust}"
+    );
+    check_generated_crate("void_literal", &rust);
+    let stdout = run_generated_crate("void_literal", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_void_fallback_is_not_widened_into_a_non_optional_binding() {
+    const SOURCE: &str = "let hits: number = 0; \
+         function bump(): number { hits = hits + 1; return hits; } \
+         class K { m(): number | undefined { return 3; } } \
+         export function a(k: K | null): number { let r: number = k?.m() ?? void 0; return r ? 1 : 0; } \
+         export function b(k: K | null): number { let r: number = k?.m() ?? void bump(); return r ? 1 : 0; }";
+    let out = compile_module(SOURCE);
+    assert!(
+        out.has_errors(),
+        "a `void` fallback may be `undefined`, so the `number` annotations must be rejected; got \
+         {:?}",
+        out.diagnostics
+    );
+    let sites: Vec<&str> = out
+        .diagnostics
+        .errors()
+        .filter(|d| d.code.as_str() == "P0018" && d.message.contains("the annotation of `r`"))
+        .map(|d| &SOURCE[d.span.start as usize..d.span.end as usize])
+        .collect();
+    assert_eq!(
+        sites,
+        ["k?.m() ?? void 0", "k?.m() ?? void bump()"],
+        "both annotated bindings must report P0018 at their own fallback expression; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a rejected annotated void fallback must not emit Rust; got {:?}",
+        out.rust_source
+    );
+}
+
+#[test]
 fn a_nullish_fallback_selects_a_destination_that_accepts_it() {
     const SOURCE: &str = "export function f6(a: number | null): number | null { return a ?? null; } \
          export function f9(a: number | null): number | undefined { return a ?? undefined; } \
@@ -482,14 +622,26 @@ fn main() {
 
 #[test]
 fn an_optional_coalescing_result_in_a_non_optional_position_is_reported() {
+    const EXPECTED: &str = "an optional value (it may be `null`) is used where a non-optional \
+         value is required (the declared return type of this function); the AOT target represents \
+         optional values as `Option<T>` and has no implicit nullish-to-value unwrapping. Handle \
+         the nullish case first (for example with `x!` after a check, or by widening the target \
+         type)";
     let out = compile_module("export function f(a: number | null): number { return a ?? null; }");
     assert!(out.has_errors(), "got {:?}", out.diagnostics);
     assert!(
-        out.diagnostics.iter().any(|d| d.code.as_str() == "P0018"
-            && d.message.contains("result of `??`")
-            && d.message.contains("number | null")),
-        "a nullish `??` result returned as `number` must be a P0018 naming the operator; got {:?}",
         out.diagnostics
+            .iter()
+            .any(|d| d.code.as_str() == "P0018" && d.message == EXPECTED),
+        "a nullish `??` result returned as `number` is an optional value written where a \
+         non-optional one is required; the repaired `??` type makes the write check report it by \
+         its site; got {:?}",
+        out.diagnostics
+    );
+    assert!(
+        out.rust_source.is_none(),
+        "a rejected program must not emit Rust; got {:?}",
+        out.rust_source
     );
     assert!(
         codes("export function f(a: number | null): number { return a ?? 1; }").is_empty(),
@@ -1019,5 +1171,260 @@ fn main() {
     let rust = crate_rust_of(SOURCE);
     check_generated_crate("not_literals", &rust);
     let stdout = run_generated_crate("not_literals", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_nested_optional_fallback_keeps_its_inner_null_allowance() {
+    const SOURCE: &str = "class K { m(v: number): number | null { return v > 0 ? v : null; } } \
+         export function got(k: K | null, x: number | undefined, v: number): number { \
+             const z = x ?? k?.m(v); return z === undefined ? 1 : 2; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(
+        nested_fallback_null::got(
+            &ctx,
+            ::core::option::Option::None,
+            ::core::option::Option::None,
+            5.0
+        ),
+        1.0
+    );
+    assert_eq!(
+        nested_fallback_null::got(
+            &ctx,
+            ::core::option::Option::None,
+            ::core::option::Option::Some(5.0),
+            5.0
+        ),
+        2.0
+    );
+    assert_eq!(
+        nested_fallback_null::got(
+            &ctx,
+            ::core::option::Option::Some(nested_fallback_null::K {}),
+            ::core::option::Option::None,
+            5.0
+        ),
+        2.0
+    );
+    assert_eq!(
+        nested_fallback_null::got(
+            &ctx,
+            ::core::option::Option::Some(nested_fallback_null::K {}),
+            ::core::option::Option::None,
+            -1.0
+        ),
+        2.0,
+        "`k?.m(-1)` is `null`, which is not `undefined`, so the fallback must not be taken"
+    );
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    assert!(
+        normalized(&rust).contains("letz:Option<Option<f64>>"),
+        "the fallback's nested optional must be preserved with its inner `null` allowance; \
+         got:\n{rust}"
+    );
+    check_generated_crate("nested_fallback_null", &rust);
+    let stdout = run_generated_crate("nested_fallback_null", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_chain_call_lhs_with_a_non_optional_fallback_flattens_the_nested_optional() {
+    const SOURCE: &str = "class K { m(v: number): number | null { return v > 0 ? v : null; } } \
+         export function got(): number { const k: K | null = new K(); \
+             const z = k?.m(-1) ?? 9; return z === 9 ? 1 : 0; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(
+        chain_call_nested_lhs::got(&ctx),
+        1.0,
+        "`k?.m(-1)` is `null`, and `??` falls back on `null` too, so `z` is 9"
+    );
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let norm = normalized(&rust);
+    assert!(
+        norm.contains("unwrap().is_some()"),
+        "a chain LHS whose value is a nested optional must test the inner layer too, even when \
+         the coalesce's inferred type equals the LHS's inner type; got:\n{rust}"
+    );
+    check_generated_crate("chain_call_nested_lhs", &rust);
+    let stdout = run_generated_crate("chain_call_nested_lhs", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_local_read_of_a_nested_optional_is_flattened_for_coalescing() {
+    const SOURCE: &str = "class K { m(v: number): number | null { return v > 0 ? v : null; } } \
+         export function got(k: K | null, v: number): number { \
+             const c = k?.m(v); const z = c ?? 9; \
+             return z!; } \
+         export function isNull(k: K | null, v: number): boolean { \
+             const c = k?.m(v); const z = c ?? 9; return z === null; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    use ::core::option::Option::{None, Some};
+    assert_eq!(
+        local_nested_lhs::got(&ctx, Some(local_nested_lhs::K {}), -1.0),
+        9.0,
+        "the local reads the chain's `null`, so `??` must take the 9 fallback"
+    );
+    assert_eq!(
+        local_nested_lhs::got(&ctx, Some(local_nested_lhs::K {}), 5.0),
+        5.0,
+        "a non-nullish value is kept exactly, not replaced by the fallback or by a branch code"
+    );
+    assert_eq!(
+        local_nested_lhs::got(&ctx, None, 5.0),
+        9.0,
+        "an absent receiver is `undefined`, which also takes the 9 fallback"
+    );
+    assert!(
+        !local_nested_lhs::isNull(&ctx, Some(local_nested_lhs::K {}), -1.0),
+        "the flattened result is 9, never `null`"
+    );
+    assert!(
+        !local_nested_lhs::isNull(&ctx, Some(local_nested_lhs::K {}), 5.0),
+        "a non-nullish chain result is kept, never `null`"
+    );
+    assert!(
+        !local_nested_lhs::isNull(&ctx, None, 5.0),
+        "an absent receiver falls back to 9, never `null`"
+    );
+    println!("ok");
+}
+"#;
+    let rust = rust_of(SOURCE);
+    let norm = normalized(&rust);
+    assert!(
+        norm.contains("letz:Option<f64>"),
+        "a local read whose type is a nested optional must be flattened by its depth for `??`; \
+         got:\n{rust}"
+    );
+    assert!(
+        norm.contains("unwrap().is_some()"),
+        "the local read's inner `null` layer must be tested as well; got:\n{rust}"
+    );
+    check_generated_crate("local_nested_lhs", &rust);
+    let stdout = run_generated_crate("local_nested_lhs", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn two_nested_optional_chains_coalesce_at_the_same_depth() {
+    const SOURCE: &str = "class K { m(v: number): number | null { return v > 0 ? v : null; } } \
+         export function got(a: K | null, b: K | null, x: number, y: number): number { \
+             const z = a?.m(x) ?? b?.m(y); return z === null ? 1 : 2; }";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(
+        nested_chain_fallback::got(
+            &ctx,
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            ::core::option::Option::None,
+            5.0,
+            0.0
+        ),
+        2.0
+    );
+    assert_eq!(
+        nested_chain_fallback::got(
+            &ctx,
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            -1.0,
+            5.0
+        ),
+        2.0
+    );
+    assert_eq!(
+        nested_chain_fallback::got(
+            &ctx,
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            -1.0,
+            -1.0
+        ),
+        1.0,
+        "both operands are `null`, so the coalescing result is `null`"
+    );
+    assert_eq!(
+        nested_chain_fallback::got(
+            &ctx,
+            ::core::option::Option::None,
+            ::core::option::Option::Some(nested_chain_fallback::K {}),
+            0.0,
+            -1.0
+        ),
+        1.0,
+        "the left receiver is absent, so the fallback's `null` is the result"
+    );
+    assert_eq!(
+        nested_chain_fallback::got(
+            &ctx,
+            ::core::option::Option::None,
+            ::core::option::Option::None,
+            0.0,
+            0.0
+        ),
+        2.0
+    );
+    println!("ok");
+}
+"#;
+    let out = compile_module(SOURCE);
+    assert!(
+        !out.diagnostics.iter().any(|d| d.code.as_str() == "P0021"),
+        "both operands are nested optionals of the same shape, so no incompatibility belongs \
+         here; got {:?}",
+        out.diagnostics
+    );
+    let rust = out
+        .rust_source
+        .expect("emit-rust must populate rust_source");
+    assert!(
+        normalized(&rust).contains("letz:Option<Option<f64>>"),
+        "the nested chain result must keep the nested representation; got:\n{rust}"
+    );
+    check_generated_crate("nested_chain_fallback", &rust);
+    let stdout = run_generated_crate("nested_chain_fallback", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }

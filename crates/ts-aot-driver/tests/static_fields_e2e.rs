@@ -2198,10 +2198,10 @@ fn main() {
 fn two_static_generic_methods_are_specialized_independently() {
     const SOURCE: &str = r"
 class C {
-  static a<T>(x: T): T { return x; }
-  static b<T>(x: T): T { return x; }
+  static a<T>(x: T, y: T): T { return x; }
+  static b<T>(x: T, y: T): T { return y; }
 }
-export function got(): number { return C.a(3) * 10 + C.b(4.5); }
+export function got(): number { return C.a(3, 30) * 100 + C.b(4, 400); }
 ";
     const MAIN: &str = r#"
 use ts_aot_runtime::{Bump, Ctx, Host};
@@ -2213,7 +2213,7 @@ fn main() {
     let host = NoHost;
     let bump = Bump::new();
     let ctx = Ctx { arena: &bump, host: &host };
-    assert_eq!(two_static_generics::got(&ctx), 34.5);
+    assert_eq!(two_static_generics::got(&ctx), 700.0);
     println!("ok");
 }
 "#;
