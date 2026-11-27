@@ -27,6 +27,7 @@ pub(super) fn emit_runtime_call(
     match op {
         RuntimeOp::TypedArrayNew
         | RuntimeOp::ArrayGetOrDefault
+        | RuntimeOp::ArrayGetOptional
         | RuntimeOp::ArrayFromMapped
         | RuntimeOp::ArrayBufferSlice
         | RuntimeOp::ArrayCreate

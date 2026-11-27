@@ -1,5 +1,6 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static GENERATED_CRATE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -126,28 +127,74 @@ fn materialize_generated_crate(package: &str, rust: &str) -> (PathBuf, String, C
 fn generated_crate_target_dir() -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("generated-crate-cargo-check"),
-        _ => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target"))
-            .join("generated-crate-cargo-check"),
+        _ => std::env::temp_dir().join("ts_aot_generated_crate_target"),
     }
+}
+
+fn rustup_toolchain() -> Option<OsString> {
+    if let Some(toolchain) = std::env::var_os("RUSTUP_TOOLCHAIN")
+        && !toolchain.is_empty()
+    {
+        return Some(toolchain);
+    }
+    let cargo = env!("CARGO").replace('\\', "/");
+    let (_, rest) = cargo.split_once("/toolchains/")?;
+    let (toolchain, _) = rest.split_once('/')?;
+    Some(OsString::from(toolchain))
 }
 
 fn run_cargo(dir: &Path, args: &[&str]) -> Output {
     let target_dir = generated_crate_target_dir();
-    std::process::Command::new(env!("CARGO"))
+    let mut command = Command::new(env!("CARGO"));
+    command
         .args(args)
         .arg("--manifest-path")
         .arg(dir.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target_dir)
         .env("CARGO_INCREMENTAL", "0")
         .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .output()
-        .expect("run cargo on the generated crate")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS");
+    if let Some(toolchain) = rustup_toolchain() {
+        command.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    command.output().expect("run cargo on the generated crate")
+}
+
+fn build_generated_crate(package: &str, rust: &str) -> Output {
+    let mut last = None;
+    for _ in 0..2 {
+        let (dir, _name, cleanup) = materialize_generated_crate(package, rust);
+        let output = run_cargo(&dir, &["check"]);
+        drop(cleanup);
+        if output.status.success() {
+            return output;
+        }
+        last = Some(output);
+    }
+    last.expect("the generated crate build ran at least once")
+}
+
+#[must_use]
+pub fn run_generated_crate_output(package: &str, rust: &str, main: &str) -> Output {
+    let mut last_build = None;
+    for _ in 0..2 {
+        let (dir, name, cleanup) = materialize_generated_crate(package, rust);
+        std::fs::write(dir.join("src").join("main.rs"), main)
+            .expect("write generated crate main.rs");
+        let build = run_cargo(&dir, &["build", "--quiet", "--bin", &name]);
+        if build.status.success() {
+            let output = run_cargo(&dir, &["run", "--quiet", "--bin", &name]);
+            drop(cleanup);
+            return output;
+        }
+        drop(cleanup);
+        last_build = Some(build);
+    }
+    last_build.expect("the generated crate build ran at least once")
 }
 
 pub fn check_generated_crate(package: &str, rust: &str) {
-    let (dir, _name, _cleanup) = materialize_generated_crate(package, rust);
-    let output = run_cargo(&dir, &["check"]);
+    let output = build_generated_crate(package, rust);
     assert!(
         output.status.success(),
         "a generated crate depending only on ts-aot-runtime must pass `cargo check`;\nstdout:\n{}stderr:\n{}",
@@ -158,9 +205,7 @@ pub fn check_generated_crate(package: &str, rust: &str) {
 
 #[must_use]
 pub fn run_generated_crate(package: &str, rust: &str, main: &str) -> String {
-    let (dir, name, _cleanup) = materialize_generated_crate(package, rust);
-    std::fs::write(dir.join("src").join("main.rs"), main).expect("write generated crate main.rs");
-    let output = run_cargo(&dir, &["run", "--quiet", "--bin", &name]);
+    let output = run_generated_crate_output(package, rust, main);
     assert!(
         output.status.success(),
         "a generated crate depending only on ts-aot-runtime must build and run;\nstdout:\n{}stderr:\n{}",
@@ -184,7 +229,7 @@ pub fn assert_exact_f64(actual: f64, expected: f64) {
 mod tests {
     use super::{
         assert_exact_f64, generated_crate_manifest, metadata_hash_suffixes,
-        prepare_generated_crate_dir,
+        prepare_generated_crate_dir, run_generated_crate, run_generated_crate_output,
     };
 
     fn panics(f: impl FnOnce() + std::panic::UnwindSafe) -> bool {
@@ -281,5 +326,69 @@ mod tests {
         assert!(!manifest.contains("name = \"probe-name\""));
         let plain = generated_crate_manifest("probe_1_2_", "probe", "/runtime");
         assert!(plain.contains("[lib]\nname = \"probe\"\npath = \"src/lib.rs\""));
+    }
+
+    fn unique_marker(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        std::env::temp_dir().join(format!(
+            "ts_aot_side_effect_{label}_{}_{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn side_effect_main(marker: &std::path::Path, failing: bool) -> String {
+        let path = marker.to_string_lossy().replace('\\', "\\\\");
+        let tail = if failing {
+            "std::process::exit(3);"
+        } else {
+            "println!(\"ok\");"
+        };
+        format!(
+            "use std::io::Write as _;\n\
+             fn main() {{\n\
+             let mut file = std::fs::OpenOptions::new().create(true).append(true).open(\"{path}\").unwrap();\n\
+             writeln!(file, \"run\").unwrap();\n\
+             {tail}\n\
+             }}\n"
+        )
+    }
+
+    fn marker_lines(marker: &std::path::Path) -> usize {
+        std::fs::read_to_string(marker).map_or(0, |text| {
+            text.lines().filter(|line| !line.is_empty()).count()
+        })
+    }
+
+    #[test]
+    fn a_generated_program_with_a_side_effect_runs_exactly_once() {
+        let marker = unique_marker("success");
+        let main = side_effect_main(&marker, false);
+        let stdout = run_generated_crate("side_effect_success", "pub fn probe() {}", &main);
+        assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+        assert_eq!(
+            marker_lines(&marker),
+            1,
+            "a successful generated program must execute exactly once"
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn a_failing_generated_program_is_surfaced_and_executes_exactly_once() {
+        let marker = unique_marker("failure");
+        let main = side_effect_main(&marker, true);
+        let output = run_generated_crate_output("side_effect_failure", "pub fn probe() {}", &main);
+        assert!(
+            !output.status.success(),
+            "a failing generated program's failure must be returned, not swallowed"
+        );
+        assert_eq!(
+            marker_lines(&marker),
+            1,
+            "a failing generated program must execute exactly once"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 }

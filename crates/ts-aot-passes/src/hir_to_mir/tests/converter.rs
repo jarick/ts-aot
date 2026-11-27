@@ -245,6 +245,91 @@ fn value_static_ty_prefers_namespace_qualified_function() {
 }
 
 #[test]
+fn declared_call_result_ty_keeps_a_void_result_for_a_free_function() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let error_ty = types.intern(&Type::Error);
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Function(HirFunction {
+        name: Atom::new_inline("nothing"),
+        ret: void_ty,
+        ..Default::default()
+    }));
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    let call = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Global {
+            name: Atom::new_inline("nothing"),
+            ty: error_ty,
+            span: Span::default(),
+        })),
+        args: vec![],
+        type_args: vec![],
+        ty: error_ty,
+        span: Span::default(),
+    };
+    assert_eq!(
+        c.declared_call_result_ty(&call, &types),
+        Some(void_ty),
+        "the declared result of a call to a `void`-returning function must stay `void`, even \
+         though the frontend types the call as `Error`"
+    );
+}
+
+#[test]
+fn declared_call_result_ty_keeps_a_void_result_for_a_method() {
+    let mut types = TypeTable::new();
+    let void_ty = types.intern(&Type::Void);
+    let error_ty = types.intern(&Type::Error);
+    let sid = StructId::from_raw(4);
+    let class_ty = types.intern(&Type::Struct { id: sid });
+    let mut prog = HirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(HirDecl::Class(ts_aot_ir_hir::HirClass {
+        name: Atom::new_inline("C"),
+        ty: class_ty,
+        ..Default::default()
+    }));
+    let mut c = ExprConverter::new();
+    c.set_program(Arc::new(prog));
+    c.set_program_tables(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([((sid, Atom::new_inline("m"), false), void_ty)]),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([(Atom::new_inline("C"), sid)]),
+    );
+    let call = HirExpr::Call {
+        callee: HirCallee::Indirect(Box::new(HirExpr::Field {
+            owner: Box::new(HirExpr::Local {
+                id: LocalId::from_raw(0),
+                ty: class_ty,
+                span: Span::default(),
+            }),
+            field: FieldId::from_raw(0),
+            field_name: Atom::new_inline("m"),
+            ty: error_ty,
+            span: Span::default(),
+        })),
+        args: vec![],
+        type_args: vec![],
+        ty: error_ty,
+        span: Span::default(),
+    };
+    assert_eq!(
+        c.declared_call_result_ty(&call, &types),
+        Some(void_ty),
+        "a method's declared `void` return must be recovered from the program tables"
+    );
+    assert_eq!(
+        c.expr_type(&call, &mut types),
+        None,
+        "the existing call-type recovery reads the callee expression's `Error` type, so it \
+         cannot see a method's `void` result"
+    );
+}
+
+#[test]
 fn expr_type_recovers_a_literal() {
     let mut types = TypeTable::new();
     let c = ExprConverter::new();

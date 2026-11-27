@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use ts_aot_core::{Atom, FunctionId, MAX_DENSE_ARRAY_LEN, Span, StructId, Type, TypeId, TypeTable};
-use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirFunction};
+use ts_aot_ir_hir::{
+    HirBinaryOp, HirCallee, HirDecl, HirExpr, HirFunction, HirProgram, HirUnaryOp, Visitor,
+    walk_expr,
+};
 use ts_aot_ir_mir::{MirBlock, MirExpr, MirPlace, MirStmt, RuntimeOp};
 
 use crate::PassContext;
@@ -31,7 +34,7 @@ fn call_span(callee: &HirCallee, args: &[HirExpr]) -> Span {
 }
 
 use super::globals::{array_from_object_literal, array_push_receiver};
-use super::util::{is_place, is_pure_place};
+use super::util::{hir_expr_type_id, is_place, is_pure_place};
 
 const PROMISE_HANDLER_UNKNOWN_DIAG: &str = "E0508";
 const PROMISE_HANDLER_MISMATCH_DIAG: &str = "E0509";
@@ -39,6 +42,76 @@ const PROMISE_HANDLER_MISMATCH_DIAG: &str = "E0509";
 pub(super) struct CalleeParam {
     pub ty: TypeId,
     pub optional: bool,
+}
+
+fn field_value_is_callable(ty: TypeId, types: &TypeTable) -> bool {
+    match types.resolve(ty) {
+        Some(Type::Fn { .. }) => true,
+        Some(Type::Optional { inner, .. }) => {
+            matches!(types.resolve(*inner), Some(Type::Fn { .. }))
+        }
+        _ => false,
+    }
+}
+
+struct FieldWriteScan<'a> {
+    field_name: &'a Atom,
+    found: bool,
+}
+
+impl Visitor for FieldWriteScan<'_> {
+    fn visit_expr(&mut self, expr: &HirExpr) {
+        if let HirExpr::Assignment { target, .. } = expr
+            && let HirExpr::Field { field_name, .. } = target.as_ref()
+            && field_name == self.field_name
+        {
+            self.found = true;
+        }
+        walk_expr(self, expr);
+    }
+}
+
+fn method_writes_field(method: &HirFunction, field_name: &Atom) -> bool {
+    let mut scan = FieldWriteScan {
+        field_name,
+        found: false,
+    };
+    for stmt in &method.body {
+        scan.visit_stmt(stmt);
+    }
+    scan.found
+}
+
+fn program_writes_field(program: &HirProgram, field_name: &Atom) -> bool {
+    fn scan_decls(decls: &[HirDecl], scan: &mut FieldWriteScan<'_>) {
+        for decl in decls {
+            match decl {
+                HirDecl::Function(f) => {
+                    for stmt in &f.body {
+                        scan.visit_stmt(stmt);
+                    }
+                }
+                HirDecl::Class(c) => {
+                    for method in &c.methods {
+                        for stmt in &method.body {
+                            scan.visit_stmt(stmt);
+                        }
+                    }
+                }
+                HirDecl::Global {
+                    init: Some(init), ..
+                } => scan.visit_expr(init),
+                HirDecl::Namespace { members, .. } => scan_decls(members, scan),
+                _ => {}
+            }
+        }
+    }
+    let mut scan = FieldWriteScan {
+        field_name,
+        found: false,
+    };
+    scan_decls(&program.declarations, &mut scan);
+    scan.found
 }
 
 fn types_compatible(declared: &TypeId, expected: &TypeId, types: &TypeTable) -> bool {
@@ -79,6 +152,30 @@ fn known_static_ty(ty: TypeId, types: &TypeTable) -> Option<TypeId> {
     match types.resolve(ty) {
         None | Some(Type::Error) => None,
         Some(_) => Some(ty),
+    }
+}
+
+fn optional_chain_callee(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::OptionalChain { .. } => true,
+        HirExpr::Field { owner, .. } | HirExpr::Index { owner, .. } => optional_chain_callee(owner),
+        _ => false,
+    }
+}
+
+fn unwrap_optional_callee(value: MirExpr, callee: &HirExpr, types: &TypeTable) -> MirExpr {
+    if optional_chain_callee(callee) {
+        return value;
+    }
+    let Some(ty) = hir_expr_type_id(callee) else {
+        return value;
+    };
+    let Some(Type::Optional { inner, .. }) = types.resolve(ty) else {
+        return value;
+    };
+    MirExpr::UnwrapOptional {
+        expr: Box::new(value),
+        ty: *inner,
     }
 }
 
@@ -151,7 +248,7 @@ impl ExprConverter {
             ctx,
         );
         self.current_call_type_args = prev_type_args;
-        self.propagate_callee_throws(callee, args, result, out, types, ctx)
+        self.propagate_callee_throws(callee, args, result, out, shared_struct_ids, types, ctx)
     }
 
     pub(super) fn function_id_throws(&self, id: FunctionId) -> Option<(String, TypeId)> {
@@ -169,6 +266,7 @@ impl ExprConverter {
         args: &[HirExpr],
         result: MirExpr,
         out: &mut Vec<MirStmt>,
+        shared_struct_ids: &HashMap<TypeId, StructId>,
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
@@ -211,9 +309,12 @@ impl ExprConverter {
         match self.current_throws {
             Some(current) if types.resolve(current) == types.resolve(callee_throws) => {
                 if transposable {
+                    let declared_ret =
+                        self.chain_receiver_declared_ret(callee, shared_struct_ids, types);
                     return self.transpose_optional_receiver_call(
                         result,
                         callee_throws,
+                        declared_ret,
                         out,
                         types,
                     );
@@ -260,10 +361,42 @@ impl ExprConverter {
         }
     }
 
+    fn chain_receiver_declared_ret(
+        &self,
+        callee: &HirCallee,
+        shared_struct_ids: &HashMap<TypeId, StructId>,
+        types: &mut TypeTable,
+    ) -> Option<TypeId> {
+        let HirCallee::Indirect(inner) = callee else {
+            return None;
+        };
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        else {
+            return None;
+        };
+        let static_sid = match owner.as_ref() {
+            HirExpr::Global { name, .. } => self.lookup_class_struct_by_name(name),
+            _ => None,
+        };
+        let (sid, is_static) = match static_sid {
+            Some(sid) => (sid, true),
+            None => (
+                self.receiver_struct_id(owner, shared_struct_ids, types)?,
+                false,
+            ),
+        };
+        self.method_ret
+            .get(&(sid, field_name.clone(), is_static))
+            .copied()
+    }
+
     fn transpose_optional_receiver_call(
         &mut self,
         mapped: MirExpr,
         err_ty: TypeId,
+        declared_ret: Option<TypeId>,
         out: &mut Vec<MirStmt>,
         types: &mut TypeTable,
     ) -> MirExpr {
@@ -276,8 +409,9 @@ impl ExprConverter {
             return mapped;
         };
         let (ok_ty, nullish) = (*ok_ty, *nullish);
+        let payload_ty = declared_ret.unwrap_or(ok_ty);
         let result_ty = types.intern(&Type::Result {
-            ok: ok_ty,
+            ok: payload_ty,
             err: err_ty,
         });
         let mapped_ty = types.intern(&Type::Optional {
@@ -313,7 +447,7 @@ impl ExprConverter {
                         expr: Box::new(MirExpr::Local(mapped_local)),
                         ty: result_ty,
                     }),
-                    ty: ok_ty,
+                    ty: payload_ty,
                 },
             }),
             else_block: Some(MirBlock::with(MirStmt::Assign {
@@ -679,14 +813,22 @@ impl ExprConverter {
             }
             for (i, arg) in args.iter().enumerate() {
                 if let Some(param) = params.get(i) {
-                    crate::hir_to_mir::nullish::check_nullish_write(
+                    crate::hir_to_mir::nullish::check_argument_nullish_write(
                         arg,
-                        crate::hir_to_mir::nullish::argument_check_ty(param.ty, types),
+                        param.ty,
                         types,
                         arg.span(),
                         ctx,
                         &format!("parameter {} of this call", i + 1),
-                        false,
+                    );
+                    super::control::is_call_argument_compatible(
+                        arg,
+                        self.call_argument_effective_ty(arg, types),
+                        param.ty,
+                        types,
+                        arg.span(),
+                        ctx,
+                        self,
                     );
                 }
             }
@@ -769,6 +911,7 @@ impl ExprConverter {
                 types,
                 ctx,
             );
+            let callee_value = unwrap_optional_callee(callee_value, inner, types);
             return MirExpr::IndirectCall {
                 callee: Box::new(callee_value),
                 args: mir_args,
@@ -1364,11 +1507,163 @@ impl ExprConverter {
         }
     }
 
+    pub(crate) fn declared_call_result_ty(
+        &self,
+        expr: &HirExpr,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let HirExpr::Call { callee, .. } = expr else {
+            return None;
+        };
+        match callee {
+            HirCallee::Function(id) => self.named_function_ret(*id),
+            HirCallee::Indirect(inner) => self.indirect_callee_result_ty(inner, types),
+            HirCallee::Closure(_) | HirCallee::Runtime { .. } => None,
+        }
+    }
+
+    pub(crate) fn declared_void_result(&self, value: &HirExpr, types: &TypeTable) -> bool {
+        self.declared_call_result_ty(value, types)
+            .is_some_and(|ty| matches!(types.resolve(ty), Some(Type::Void)))
+    }
+
+    fn named_function_ret(&self, id: FunctionId) -> Option<TypeId> {
+        let name = self
+            .name_to_function
+            .iter()
+            .find_map(|(name, fid)| (*fid == id).then(|| name.clone()))?;
+        self.program
+            .find_function_by_qualified_name(&name)
+            .map(|f| f.ret)
+    }
+
+    fn indirect_callee_result_ty(&self, inner: &HirExpr, types: &TypeTable) -> Option<TypeId> {
+        match inner {
+            HirExpr::Global { name, ty, .. } => {
+                for depth in (0..=self.namespace_path.len()).rev() {
+                    let probe = qualified_name(&self.namespace_path[..depth], name.as_str());
+                    if let Some(f) = self.program.find_function_by_qualified_name(&probe) {
+                        return Some(f.ret);
+                    }
+                }
+                self.program
+                    .find_function_by_name(name)
+                    .map(|f| f.ret)
+                    .or_else(|| match types.resolve(*ty) {
+                        Some(Type::Fn { ret, .. }) => Some(*ret),
+                        _ => None,
+                    })
+            }
+            HirExpr::Field {
+                owner, field_name, ..
+            } => self.declared_method_ret(owner, field_name, types),
+            HirExpr::Local { ty, .. } => match types.resolve(*ty) {
+                Some(Type::Fn { ret, .. }) => Some(*ret),
+                _ => None,
+            },
+            HirExpr::Call { .. } => {
+                match types.resolve(self.declared_call_result_ty(inner, types)?) {
+                    Some(Type::Fn { ret, .. }) => Some(*ret),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn declared_method_ret(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        if let HirExpr::Global { name, .. } = owner
+            && let Some(sid) = self.lookup_class_struct_by_name(name)
+            && let Some(ret) = self.method_ret.get(&(sid, field_name.clone(), true))
+        {
+            return Some(*ret);
+        }
+        let owner_ty = self.declared_receiver_ty(owner, types);
+        let sid = types.struct_id(owner_ty)?;
+        self.method_ret
+            .get(&(sid, field_name.clone(), false))
+            .copied()
+    }
+
+    fn declared_receiver_ty(&self, owner: &HirExpr, types: &TypeTable) -> TypeId {
+        let ty = match owner {
+            HirExpr::Call { .. } => self
+                .declared_call_result_ty(owner, types)
+                .unwrap_or_else(|| owner.ty()),
+            _ => owner.ty(),
+        };
+        match types.resolve(ty) {
+            Some(Type::Optional { inner, .. }) => *inner,
+            _ => ty,
+        }
+    }
+
     fn recovered_static_ty(&self, expr: &HirExpr, types: &mut TypeTable) -> Option<TypeId> {
         if !expr.has_static_type() {
             return None;
         }
         known_static_ty(expr.ty(), types)
+    }
+
+    fn math_numeric_call(callee: &HirCallee) -> bool {
+        let HirCallee::Indirect(inner) = callee else {
+            return false;
+        };
+        let HirExpr::Field {
+            owner, field_name, ..
+        } = inner.as_ref()
+        else {
+            return false;
+        };
+        super::globals::is_global_math_reference(owner)
+            && super::fallback_dispatch::math_runtime_op(field_name.as_str()).is_some()
+    }
+
+    fn unary_result_ty(
+        &self,
+        op: HirUnaryOp,
+        operand: &HirExpr,
+        types: &mut TypeTable,
+    ) -> Option<TypeId> {
+        match op {
+            HirUnaryOp::Neg | HirUnaryOp::BitNot => {
+                let operand_ty = self.call_argument_effective_ty(operand, types);
+                match types.resolve(operand_ty) {
+                    Some(Type::BigInt) => Some(operand_ty),
+                    _ => Some(types.intern(&Type::F64)),
+                }
+            }
+            HirUnaryOp::Not | HirUnaryOp::Delete => Some(types.intern(&Type::Bool)),
+            HirUnaryOp::TypeOf => Some(types.intern(&Type::String)),
+            HirUnaryOp::Void => Some(types.intern(&Type::Void)),
+        }
+    }
+
+    pub(super) fn call_argument_effective_ty(
+        &self,
+        arg: &HirExpr,
+        types: &mut TypeTable,
+    ) -> TypeId {
+        let declared = arg.ty();
+        if !matches!(types.resolve(declared), None | Some(Type::Error)) {
+            return declared;
+        }
+        let recovered = match arg {
+            HirExpr::Unary { op, expr, .. } => self.unary_result_ty(*op, expr, types),
+            HirExpr::Call { callee, .. } if Self::math_numeric_call(callee) => {
+                Some(types.intern(&Type::F64))
+            }
+            _ => self.expr_type(arg, types),
+        };
+        match recovered {
+            Some(ty) if !matches!(types.resolve(ty), None | Some(Type::Error)) => ty,
+            _ => declared,
+        }
     }
 
     pub(super) fn join_expr_types(
@@ -1606,6 +1901,43 @@ impl ExprConverter {
         self.owner_struct_id(owner, shared_struct_ids, types)
     }
 
+    fn field_value_needs_initialization(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        types: &mut TypeTable,
+    ) -> bool {
+        let owner_ty = self.recovered_receiver_ty(owner, types);
+        if matches!(types.resolve(owner_ty), Some(Type::Optional { .. })) {
+            return false;
+        }
+        if !self.program.class_fields.contains_key(&owner_ty) {
+            return false;
+        }
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(&self.program.declarations));
+        let Some(class) = class_index
+            .get(&owner_ty)
+            .and_then(|path| class_at_path(&self.program.declarations, path.clone()))
+        else {
+            return false;
+        };
+        if self
+            .program
+            .class_field_inits
+            .get(&owner_ty)
+            .is_some_and(|inits| inits.iter().any(|(name, _)| name == field_name))
+        {
+            return false;
+        }
+        !(class
+            .methods
+            .iter()
+            .any(|method| method_writes_field(method, field_name))
+            || program_writes_field(&self.program, field_name))
+    }
+
     fn try_user_method_dispatch(
         &mut self,
         callee: &HirCallee,
@@ -1621,7 +1953,10 @@ impl ExprConverter {
             return None;
         };
         let HirExpr::Field {
-            owner, field_name, ..
+            owner,
+            field_name,
+            ty: field_ty,
+            ..
         } = inner.as_ref()
         else {
             return None;
@@ -1638,12 +1973,18 @@ impl ExprConverter {
             ),
         };
         let key = (sid, field_name.clone(), is_static);
-        let fid = *self.method_map.get(&key)?;
-        if !is_static
+        let is_field = !is_static
             && self
                 .field_id_lookup
-                .contains_key(&(sid, field_name.clone()))
-        {
+                .contains_key(&(sid, field_name.clone()));
+        let fid = self.method_map.get(&key).copied();
+        let field_value_ty = if matches!(types.resolve(*field_ty), None | Some(Type::Error)) {
+            self.declared_field_value_ty(owner, field_name, types)
+                .unwrap_or(*field_ty)
+        } else {
+            *field_ty
+        };
+        if is_field && (fid.is_some() || !field_value_is_callable(field_value_ty, types)) {
             ctx.error(
                 "E0418",
                 format!(
@@ -1652,7 +1993,29 @@ impl ExprConverter {
                 ),
                 owner.span(),
             );
+            if fid.is_none() {
+                return Some(MirExpr::Unit);
+            }
         }
+        if is_field
+            && fid.is_none()
+            && field_value_is_callable(field_value_ty, types)
+            && self.field_value_needs_initialization(owner, field_name, types)
+        {
+            ctx.error(
+                "E0421",
+                format!(
+                    "`{}` holds a function value, but this AOT target does not emit a \
+                     closure-valued class field initializer, and nothing in the program assigns \
+                     the field, so the call would run an unset function value; assign the \
+                     closure in the constructor, or call it through a local variable",
+                    field_name.as_str()
+                ),
+                owner.span(),
+            );
+            return Some(MirExpr::Unit);
+        }
+        let fid = fid?;
         let receiver_full_ty = self.recovered_receiver_ty(owner, types);
         let owner_optional = matches!(types.resolve(receiver_full_ty), Some(Type::Optional { .. }));
         let chain_receiver =
@@ -1674,10 +2037,7 @@ impl ExprConverter {
         }
         let declared_ret = self.method_ret.get(&key).copied().unwrap_or(ty);
         let call_ty = if chain_receiver {
-            types.intern(&Type::Optional {
-                inner: declared_ret,
-                nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
-            })
+            crate::hir_to_mir::nullish::optional_chain_result(declared_ret, types)
         } else {
             declared_ret
         };
@@ -1710,14 +2070,22 @@ impl ExprConverter {
                     .as_ref()
                     .and_then(|tys| tys.get(i + receiver_offset))
                 {
-                    crate::hir_to_mir::nullish::check_nullish_write(
+                    crate::hir_to_mir::nullish::check_argument_nullish_write(
                         arg,
-                        crate::hir_to_mir::nullish::argument_check_ty(*param_ty, types),
+                        *param_ty,
                         types,
                         arg.span(),
                         ctx,
                         &format!("parameter {} of this call", i + 1),
-                        false,
+                    );
+                    super::control::is_call_argument_compatible(
+                        arg,
+                        self.call_argument_effective_ty(arg, types),
+                        *param_ty,
+                        types,
+                        arg.span(),
+                        ctx,
+                        self,
                     );
                 }
             }
@@ -1736,21 +2104,75 @@ impl ExprConverter {
             );
             Some((recv, out.len()))
         };
+        let split_arguments = chain_receiver;
+        let mut argument_out: Vec<MirStmt> = Vec::new();
+        let mut argument_marks: Vec<usize> = Vec::with_capacity(args.len() + 1);
         for (i, a) in args.iter().enumerate() {
             let expected = param_tys
                 .as_ref()
                 .and_then(|tys| tys.get(i + receiver_offset).copied());
+            let target: &mut Vec<MirStmt> = if split_arguments {
+                &mut argument_out
+            } else {
+                &mut *out
+            };
+            argument_marks.push(target.len());
             mir_args.push(self.convert_call_arg(
                 a,
                 expected,
-                out,
+                target,
                 shared_struct_ids,
                 shared_next_struct,
                 types,
                 ctx,
             ));
         }
-        if let Some((recv, mark)) = receiver {
+        argument_marks.push(if split_arguments {
+            argument_out.len()
+        } else {
+            out.len()
+        });
+        if split_arguments {
+            let emitted = argument_marks[args.len()];
+            for i in (0..args.len()).rev() {
+                if argument_marks[i + 1] == emitted {
+                    continue;
+                }
+                let known = self.mir_expr_static_ty(&mir_args[i], types).or_else(|| {
+                    let ty = self.call_argument_effective_ty(&args[i], types);
+                    (!matches!(types.resolve(ty), None | Some(Type::Error))).then_some(ty)
+                });
+                let Some(ty) = known else {
+                    continue;
+                };
+                let local = self.fresh_local();
+                self.push_temp_local_with_mut(local, ty, false);
+                let init = std::mem::replace(&mut mir_args[i], MirExpr::Local(local));
+                argument_out.insert(
+                    argument_marks[i + 1],
+                    MirStmt::Let {
+                        local,
+                        ty,
+                        init: Some(init),
+                        mutable: false,
+                    },
+                );
+            }
+        }
+        let callee_throws = self.function_id_throws(fid);
+        let transposes_call = match &callee_throws {
+            Some((_, callee_err)) => {
+                self.try_depth == 0
+                    && self
+                        .current_throws
+                        .is_some_and(|current| types.resolve(current) == types.resolve(*callee_err))
+            }
+            None => false,
+        };
+        let guard_arguments = chain_receiver
+            && !argument_out.is_empty()
+            && (callee_throws.is_none() || transposes_call);
+        let guarded_receiver = if let Some((recv, mark)) = receiver {
             let recv = if out.len() != mark && is_place(&recv) {
                 let mut hoisted = Vec::new();
                 let recv = self.capture_place_indices(owner, recv, types, &mut hoisted);
@@ -1783,14 +2205,85 @@ impl ExprConverter {
                 );
                 MirExpr::Local(temp)
             };
-            mir_args.insert(0, recv);
-        }
+            if guard_arguments {
+                let recv = match recv {
+                    MirExpr::OptionalChain { base, .. } if is_place(base.as_ref()) => *base,
+                    other => other,
+                };
+                let recv_local = self.fresh_local();
+                self.push_temp_local_with_mut(recv_local, receiver_full_ty, false);
+                out.push(MirStmt::Let {
+                    local: recv_local,
+                    ty: receiver_full_ty,
+                    init: Some(recv),
+                    mutable: false,
+                });
+                mir_args.insert(
+                    0,
+                    MirExpr::OptionalChain {
+                        base: Box::new(MirExpr::Local(recv_local)),
+                        ty: receiver_full_ty,
+                    },
+                );
+                Some(recv_local)
+            } else {
+                mir_args.insert(0, recv);
+                None
+            }
+        } else {
+            None
+        };
         if let Some(optional) = &param_optional {
             let expected_args = optional.len().saturating_sub(receiver_offset);
             while mir_args.len() < expected_args + receiver_offset {
                 mir_args.push(MirExpr::Unit);
             }
         }
+        if let Some(recv_local) = guarded_receiver {
+            let result_local = self.fresh_local();
+            self.push_temp_local_with_mut(result_local, call_ty, true);
+            out.push(MirStmt::Let {
+                local: result_local,
+                ty: call_ty,
+                init: Some(MirExpr::Unit),
+                mutable: true,
+            });
+            let mut then_stmts = argument_out;
+            let call = MirExpr::Call {
+                callee: fid,
+                args: mir_args,
+                ty: call_ty,
+            };
+            let value = match callee_throws {
+                Some((_, err_ty)) => {
+                    let declared_ret =
+                        self.chain_receiver_declared_ret(callee, shared_struct_ids, types);
+                    self.transpose_optional_receiver_call(
+                        call,
+                        err_ty,
+                        declared_ret,
+                        &mut then_stmts,
+                        types,
+                    )
+                }
+                None => call,
+            };
+            then_stmts.push(MirStmt::Assign {
+                target: MirPlace::Local { id: result_local },
+                value,
+            });
+            let bool_ty = types.intern(&Type::Bool);
+            out.push(MirStmt::If {
+                cond: MirExpr::IsSome {
+                    expr: Box::new(MirExpr::Local(recv_local)),
+                    ty: bool_ty,
+                },
+                then_block: MirBlock { stmts: then_stmts },
+                else_block: None,
+            });
+            return Some(MirExpr::Local(result_local));
+        }
+        out.extend(argument_out);
         Some(MirExpr::Call {
             callee: fid,
             args: mir_args,

@@ -85,9 +85,9 @@ fn a_strict_nullish_literal_comparison_needs_one_nullish_kind() {
     );
     let messages = diagnostic_messages(BOTH_STRICT_CALL);
     assert!(
-        messages.contains("compares an optional value that allows both"),
-        "a *call* operand is only typed after lowering, so the backend check must reject it, \
-         got:\n{messages}"
+        messages.contains("compares against a `null`/`undefined` literal"),
+        "a call operand keeps the nullish kinds of the closure's declared return type, so the \
+         HIR→MIR check rejects it, got:\n{messages}"
     );
     assert!(
         messages.contains("P0020:"),

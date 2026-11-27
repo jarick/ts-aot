@@ -16,6 +16,13 @@ pub(super) fn runtime_op_ident(op: RuntimeOp) -> Result<Ident, BackendError> {
         RuntimeOp::ArrayCreate => format_ident!("__ts_aot_array_create"),
         RuntimeOp::ArrayCreateWithLen => format_ident!("__ts_aot_array_create_with_len"),
         RuntimeOp::ArrayGet => format_ident!("__ts_aot_array_get"),
+        RuntimeOp::ArrayGetOptional => {
+            return Err(BackendError::Internal(
+                "RuntimeOp::ArrayGetOptional must be emitted by emit_arrays_runtime_call, not by \
+                 runtime_op_ident"
+                    .to_string(),
+            ));
+        }
         RuntimeOp::ArraySet => format_ident!("__ts_aot_array_set"),
         RuntimeOp::ArrayLen => format_ident!("__ts_aot_array_len"),
         RuntimeOp::ArrayPush => format_ident!("__ts_aot_array_push"),

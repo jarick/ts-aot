@@ -1,6 +1,6 @@
 use super::super::emit_decls;
 use super::{empty_func, norm, signature_fragment};
-use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, FunctionId, LocalId, ModuleId, NullishKinds, Type, TypeId, TypeTable};
 use ts_aot_ir_mir::{
     MirBlock, MirBody, MirDecl, MirExpr, MirLocalDecl, MirParam, MirProgram, MirStmt, RuntimeOp,
 };
@@ -379,6 +379,119 @@ fn array_get_or_default_evaluates_the_receiver_before_the_index() {
     let lookup_at = s
         .find("__ts_aot_array_get_or_default")
         .expect("the lookup must use the bound receiver and index");
+    assert_eq!(
+        s.matches("grid[whichasusize]").count(),
+        1,
+        "the receiver must be selected exactly once, before the index can change the selection; \
+         got: {s}"
+    );
+    assert!(
+        receiver_at < index_at,
+        "`arr[i]` evaluates the receiver before the index, so the row selected by `which` must be \
+         read before the index call runs; got: {s}"
+    );
+    assert!(
+        index_at < lookup_at,
+        "the lookup must run after both the receiver and the index have been evaluated; got: {s}"
+    );
+}
+
+#[test]
+fn array_get_optional_evaluates_the_receiver_before_the_index() {
+    let mut types = TypeTable::new();
+    let i32_ty = types.intern(&Type::I32);
+    let i64_ty = types.intern(&Type::I64);
+    let row_ty = types.intern(&Type::Array { element: i32_ty });
+    let matrix_ty = types.intern(&Type::Array { element: row_ty });
+    let grid_ty = types.intern(&Type::Array { element: matrix_ty });
+    let optional_row_ty = types.intern(&Type::Optional {
+        inner: row_ty,
+        nullish: NullishKinds::UNDEFINED_ONLY,
+    });
+    let grid_param = LocalId::from_raw(0);
+    let which_param = LocalId::from_raw(1);
+    let dest = LocalId::from_raw(2);
+    let advance_id = FunctionId::from_raw(21);
+    let mut advance = empty_func("advance");
+    advance.id = advance_id;
+    advance.ret = i64_ty;
+    advance.body = MirBody {
+        locals: Vec::new(),
+        block: MirBlock {
+            stmts: vec![MirStmt::Return(Some(MirExpr::Int {
+                value: 1,
+                ty: i64_ty,
+            }))],
+        },
+    };
+    let mut f = empty_func("pick");
+    f.ret = optional_row_ty;
+    f.params = vec![
+        MirParam {
+            id: grid_param,
+            name: Atom::from("grid"),
+            ty: grid_ty,
+        },
+        MirParam {
+            id: which_param,
+            name: Atom::from("which"),
+            ty: i64_ty,
+        },
+    ];
+    f.body = MirBody {
+        locals: vec![MirLocalDecl {
+            id: dest,
+            name: Atom::from("v"),
+            ty: optional_row_ty,
+            mutable: false,
+            narrowed: false,
+        }],
+        block: MirBlock {
+            stmts: vec![
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayGetOptional,
+                    args: vec![
+                        MirExpr::Index {
+                            base: Box::new(MirExpr::Local(grid_param)),
+                            index: Box::new(MirExpr::Local(which_param)),
+                            ty: matrix_ty,
+                        },
+                        MirExpr::Call {
+                            callee: advance_id,
+                            args: Vec::new(),
+                            ty: i64_ty,
+                        },
+                    ],
+                    dest: Some(dest),
+                    ty: optional_row_ty,
+                    target_ty: None,
+                },
+                MirStmt::Return(Some(MirExpr::Local(dest))),
+            ],
+        },
+    };
+    let mut prog = MirProgram::new(ModuleId::from_raw(0));
+    prog.push_decl(MirDecl::Function(advance));
+    prog.push_decl(MirDecl::Function(f));
+    let tokens = emit_decls(&prog, &types).expect("decls should emit");
+    let rust = tokens.to_string();
+    let s = norm(&rust);
+    let receiver_at = s
+        .find("grid[whichasusize]")
+        .expect("the receiver must select the row before the index runs");
+    let index_at = s
+        .find("advance(__ctx)")
+        .expect("the index expression must be evaluated");
+    let lookup_at = s
+        .find("__ts_aot_array_get")
+        .expect("the lookup must use the fallible accessor");
+    ts_aot_test_support::check_generated_crate("array_get_optional_receiver_ty", &rust);
+    assert_eq!(
+        s.matches("__ts_aot_array_get_or_default").count(),
+        0,
+        "an absent element must stay `None` instead of falling back to the element's `Default`; \
+         got: {s}"
+    );
     assert_eq!(
         s.matches("grid[whichasusize]").count(),
         1,

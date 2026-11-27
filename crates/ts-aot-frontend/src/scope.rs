@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ts_aot_core::{LocalId, TypeId};
+use ts_aot_core::{Atom, LocalId, TypeId};
 use ts_aot_ir_hir::{HirParam, HirStmt};
 
 static NEXT_BODY_ID: AtomicU32 = AtomicU32::new(0);
@@ -11,6 +11,18 @@ static NEXT_BODY_ID: AtomicU32 = AtomicU32::new(0);
 pub(crate) struct ClosureBody {
     pub(crate) params: Vec<HirParam>,
     pub(crate) body: Vec<HirStmt>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LocalClassBinding {
+    pub(crate) ty: TypeId,
+    pub(crate) unique: Atom,
+}
+
+pub(crate) enum ClassLookup {
+    Class(LocalClassBinding),
+    Shadowed,
+    Missing,
 }
 
 #[derive(Clone, Copy)]
@@ -33,10 +45,15 @@ pub(crate) struct BodyScope {
     body_id: u32,
     next_local: Cell<u32>,
     scopes: Vec<HashMap<String, LocalEntry>>,
+    classes: Vec<HashMap<String, LocalClassBinding>>,
+    inherited_classes: Vec<HashSet<String>>,
+    inherited_shadowed: Vec<HashSet<String>>,
     predeclared: Vec<HashMap<String, PredeclaredEntry>>,
     narrowings: Vec<HashMap<String, Option<LocalEntry>>>,
     closure_bodies: Vec<HashMap<LocalId, Vec<ClosureBody>>>,
     poisoned_closure_bodies: Vec<HashSet<LocalId>>,
+    parameters: HashMap<String, LocalEntry>,
+    function_scoped: HashMap<String, LocalEntry>,
 }
 
 impl BodyScope {
@@ -45,10 +62,15 @@ impl BodyScope {
             body_id: NEXT_BODY_ID.fetch_add(1, Ordering::Relaxed),
             next_local: Cell::new(param_count),
             scopes: vec![HashMap::new()],
+            classes: vec![HashMap::new()],
+            inherited_classes: vec![HashSet::new()],
+            inherited_shadowed: vec![HashSet::new()],
             predeclared: vec![HashMap::new()],
             narrowings: vec![HashMap::new()],
             closure_bodies: vec![HashMap::new()],
             poisoned_closure_bodies: vec![HashSet::new()],
+            parameters: HashMap::new(),
+            function_scoped: HashMap::new(),
         }
     }
 
@@ -62,6 +84,9 @@ impl BodyScope {
 
     pub(crate) fn push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.classes.push(HashMap::new());
+        self.inherited_classes.push(HashSet::new());
+        self.inherited_shadowed.push(HashSet::new());
         self.predeclared.push(HashMap::new());
         self.narrowings.push(HashMap::new());
         self.closure_bodies.push(HashMap::new());
@@ -70,10 +95,121 @@ impl BodyScope {
 
     pub(crate) fn pop(&mut self) {
         self.scopes.pop();
+        self.classes.pop();
+        self.inherited_classes.pop();
+        self.inherited_shadowed.pop();
         self.predeclared.pop();
         self.narrowings.pop();
         self.closure_bodies.pop();
         self.poisoned_closure_bodies.pop();
+    }
+
+    pub(crate) fn declare_class(&mut self, name: &str, ty: TypeId, unique: Atom) {
+        if let Some(inherited) = self.inherited_classes.last_mut() {
+            inherited.remove(name);
+        }
+        if let Some(shadowed) = self.inherited_shadowed.last_mut() {
+            shadowed.remove(name);
+        }
+        if let Some(top) = self.classes.last_mut() {
+            top.insert(name.to_string(), LocalClassBinding { ty, unique });
+        }
+    }
+
+    pub(crate) fn visible_class(&self, name: &str) -> Option<LocalClassBinding> {
+        self.classes
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).cloned())
+    }
+
+    pub(crate) fn nearest_class_binding(&self, name: &str) -> ClassLookup {
+        for index in (0..self.scopes.len()).rev() {
+            if self
+                .inherited_shadowed
+                .get(index)
+                .is_some_and(|frame| frame.contains(name))
+            {
+                return ClassLookup::Shadowed;
+            }
+            let class_here = self.classes.get(index).and_then(|frame| frame.get(name));
+            let value_here = self.scopes[index].contains_key(name)
+                || self
+                    .predeclared
+                    .get(index)
+                    .is_some_and(|frame| frame.contains_key(name));
+            let inherited_here = self
+                .inherited_classes
+                .get(index)
+                .is_some_and(|frame| frame.contains(name));
+            if let Some(binding) = class_here {
+                if inherited_here && value_here {
+                    return ClassLookup::Shadowed;
+                }
+                return ClassLookup::Class(binding.clone());
+            }
+            if value_here {
+                return ClassLookup::Shadowed;
+            }
+        }
+        ClassLookup::Missing
+    }
+
+    pub(crate) fn visible_class_types(&self) -> HashMap<String, TypeId> {
+        let mut out: HashMap<String, TypeId> = HashMap::new();
+        for frame in &self.classes {
+            for (name, binding) in frame {
+                out.insert(name.clone(), binding.ty);
+            }
+        }
+        out
+    }
+
+    pub(crate) fn inherit_classes(&mut self, outer: &BodyScope) {
+        let mut names: HashSet<String> = HashSet::new();
+        for frame in &outer.classes {
+            names.extend(frame.keys().cloned());
+        }
+        for frame in &outer.inherited_shadowed {
+            names.extend(frame.iter().cloned());
+        }
+        for frame in &outer.scopes {
+            names.extend(frame.keys().cloned());
+        }
+        for frame in &outer.predeclared {
+            names.extend(frame.keys().cloned());
+        }
+        let resolved: Vec<(String, ClassLookup)> = names
+            .into_iter()
+            .map(|name| {
+                let lookup = outer.nearest_class_binding(name.as_str());
+                (name, lookup)
+            })
+            .collect();
+        let (Some(classes), Some(inherited), Some(shadowed)) = (
+            self.classes.first_mut(),
+            self.inherited_classes.first_mut(),
+            self.inherited_shadowed.first_mut(),
+        ) else {
+            return;
+        };
+        for (name, lookup) in resolved {
+            inherited.remove(&name);
+            shadowed.remove(&name);
+            match lookup {
+                ClassLookup::Class(binding) => {
+                    classes.insert(name.clone(), binding);
+                    inherited.insert(name);
+                }
+                ClassLookup::Shadowed => {
+                    classes.remove(&name);
+                    shadowed.insert(name);
+                }
+                ClassLookup::Missing => {
+                    classes.remove(&name);
+                }
+            }
+        }
     }
 
     fn closure_body_frame(
@@ -202,6 +338,11 @@ impl BodyScope {
 
     pub(crate) fn visible_binding(&self, name: &str) -> Option<LocalId> {
         self.lookup_in_scopes(name).map(|entry| entry.id)
+    }
+
+    pub(crate) fn visible_binding_with_type(&self, name: &str) -> Option<(LocalId, TypeId)> {
+        self.lookup_in_scopes(name)
+            .map(|entry| (entry.id, entry.ty))
     }
 
     pub(crate) fn widen_id(&mut self, id: LocalId) {
@@ -336,19 +477,126 @@ impl BodyScope {
         }
     }
 
+    pub(crate) fn predeclare_var(&mut self, name: &str, ty: TypeId) {
+        if self.function_scoped.contains_key(name) {
+            return;
+        }
+        if let Some(top) = self.scopes.last()
+            && top.contains_key(name)
+        {
+            return;
+        }
+        if let Some(body) = self.predeclared.first_mut()
+            && !body.contains_key(name)
+        {
+            body.insert(
+                name.to_string(),
+                PredeclaredEntry {
+                    ty,
+                    allocated: Cell::new(None),
+                },
+            );
+        }
+    }
+
     pub(crate) fn declare_param(&mut self, name: &str, id: LocalId, ty: TypeId) {
         if let Some(top_pre) = self.predeclared.last_mut() {
             top_pre.remove(name);
         }
+        self.parameters
+            .insert(name.to_string(), LocalEntry { id, ty });
         self.insert(name, LocalEntry { id, ty });
     }
 
-    pub(crate) fn lookup(&self, name: &str) -> Option<(LocalId, TypeId)> {
-        if let Some(entry) = self.lookup_in_scopes(name) {
-            return Some((entry.id, entry.ty));
+    pub(crate) fn parameter_binding(&self, name: &str) -> Option<(LocalId, TypeId)> {
+        self.parameters.get(name).map(|entry| (entry.id, entry.ty))
+    }
+
+    pub(crate) fn function_scoped_binding(&self, name: &str) -> Option<(LocalId, TypeId)> {
+        self.function_scoped
+            .get(name)
+            .map(|entry| (entry.id, entry.ty))
+    }
+
+    pub(crate) fn declare_function_scoped(&mut self, name: &str, ty: TypeId) -> LocalId {
+        if let Some(id) = self.function_scoped.get(name).map(|entry| entry.id) {
+            return id;
         }
-        for frame in self.predeclared.iter().rev() {
-            if let Some(pre) = frame.get(name) {
+        if let Some(entry) = self
+            .scopes
+            .first()
+            .and_then(|frame| frame.get(name))
+            .copied()
+        {
+            self.function_scoped.insert(name.to_string(), entry);
+            return entry.id;
+        }
+        let mut preexisting = None;
+        for frame in self.predeclared.iter_mut().rev() {
+            if let Some(pre) = frame.remove(name) {
+                preexisting = Some(pre);
+                break;
+            }
+        }
+        let id = match preexisting {
+            Some(pre) => self.alloc_for_predeclared(&pre),
+            None => self.alloc_id(),
+        };
+        if let Some(frame) = self.scopes.first_mut() {
+            frame.insert(name.to_string(), LocalEntry { id, ty });
+        }
+        self.function_scoped
+            .insert(name.to_string(), LocalEntry { id, ty });
+        id
+    }
+
+    pub(crate) fn remove_predeclared_shadow(&mut self, name: &str) {
+        if let Some(top_pre) = self.predeclared.last_mut() {
+            top_pre.remove(name);
+        }
+    }
+
+    pub(crate) fn type_of_local(&self, id: LocalId) -> Option<TypeId> {
+        self.scopes.iter().rev().find_map(|frame| {
+            frame
+                .values()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.ty)
+        })
+    }
+
+    pub(crate) fn predeclare_typed(&mut self, name: &str, ty: TypeId) {
+        if let Some(top) = self.scopes.last()
+            && top.contains_key(name)
+        {
+            return;
+        }
+        if let Some(top_pre) = self.predeclared.last_mut() {
+            match top_pre.get_mut(name) {
+                Some(pre) => pre.ty = ty,
+                None => {
+                    top_pre.insert(
+                        name.to_string(),
+                        PredeclaredEntry {
+                            ty,
+                            allocated: Cell::new(None),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn lookup(&self, name: &str) -> Option<(LocalId, TypeId)> {
+        for index in (0..self.scopes.len()).rev() {
+            if let Some(entry) = self.scopes[index].get(name) {
+                return Some((entry.id, entry.ty));
+            }
+            if let Some(pre) = self
+                .predeclared
+                .get(index)
+                .and_then(|frame| frame.get(name))
+            {
                 let id = self.alloc_for_predeclared(pre);
                 return Some((id, pre.ty));
             }
@@ -368,12 +616,24 @@ impl BodyScope {
         self.next_local.set(self.next_local.get().max(value));
     }
 
+    pub(crate) fn predeclared_is_allocated(&self, name: &str) -> bool {
+        self.predeclared
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name))
+            .is_some_and(|pre| pre.allocated.get().is_some())
+    }
+
     pub(crate) fn type_of_visible(&self, name: &str) -> Option<TypeId> {
-        if let Some(entry) = self.lookup_in_scopes(name) {
-            return Some(entry.ty);
-        }
-        for frame in self.predeclared.iter().rev() {
-            if let Some(pre) = frame.get(name) {
+        for index in (0..self.scopes.len()).rev() {
+            if let Some(entry) = self.scopes[index].get(name) {
+                return Some(entry.ty);
+            }
+            if let Some(pre) = self
+                .predeclared
+                .get(index)
+                .and_then(|frame| frame.get(name))
+            {
                 return Some(pre.ty);
             }
         }
@@ -398,6 +658,28 @@ impl BodyScope {
         }
         seen
     }
+
+    pub(crate) fn name_of_local(&self, id: LocalId) -> Option<String> {
+        for scope in &self.scopes {
+            for (name, entry) in scope {
+                if entry.id.raw() == id.raw() {
+                    return Some(name.clone());
+                }
+            }
+        }
+        for frame in &self.predeclared {
+            for (name, pre) in frame {
+                if pre
+                    .allocated
+                    .get()
+                    .is_some_and(|allocated| allocated.raw() == id.raw())
+                {
+                    return Some(name.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +692,18 @@ mod tests {
 
     fn id(raw: u32) -> LocalId {
         LocalId::from_raw(raw)
+    }
+
+    #[test]
+    fn a_block_local_predeclaration_shadows_an_outer_binding() {
+        let mut scope = BodyScope::new(0);
+        let outer = scope.declare("x", ty(1));
+        scope.push();
+        scope.predeclare("x", ty(2));
+        assert_eq!(scope.type_of_visible("x"), Some(ty(2)));
+        assert_eq!(scope.lookup("x").map(|(_, ty)| ty), Some(ty(2)));
+        scope.pop();
+        assert_eq!(scope.lookup("x"), Some((outer, ty(1))));
     }
 
     #[test]

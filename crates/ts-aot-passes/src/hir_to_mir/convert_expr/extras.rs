@@ -11,6 +11,50 @@ use crate::hir_to_mir::convert_expr::util::{
 };
 use crate::hir_to_mir::converter::ExprConverter;
 
+fn optional_chain_index_element_ty(
+    base: &HirExpr,
+    types: &mut TypeTable,
+) -> Option<(TypeId, TypeId)> {
+    let HirExpr::Index { owner, .. } = base else {
+        return None;
+    };
+    let owner_ty = crate::monomorphize::hir_expr_ty(owner, types)?;
+    let element = match types.resolve(owner_ty) {
+        Some(Type::Array { element }) => *element,
+        _ => return None,
+    };
+    let inner = match types.resolve(element) {
+        Some(Type::Optional { inner, .. }) => *inner,
+        _ => return None,
+    };
+    let opt_ty = types.intern(&Type::Optional {
+        inner,
+        nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
+    });
+    Some((element, opt_ty))
+}
+
+fn optional_index_init_position(
+    local: LocalId,
+    out: &[MirStmt],
+    types: &TypeTable,
+) -> Option<usize> {
+    out.iter().position(|stmt| {
+        let MirStmt::Let {
+            local: declared,
+            ty,
+            init: Some(MirExpr::Index { ty: element_ty, .. }),
+            ..
+        } = stmt
+        else {
+            return false;
+        };
+        *declared == local
+            && *ty == *element_ty
+            && matches!(types.resolve(*ty), Some(Type::Optional { .. }))
+    })
+}
+
 impl ExprConverter {
     fn propagate_constructor_throws(
         &mut self,
@@ -296,14 +340,22 @@ impl ExprConverter {
                     .as_ref()
                     .and_then(|tys| tys.get(i + offset).copied());
                 if let Some(param_ty) = expected {
-                    crate::hir_to_mir::nullish::check_nullish_write(
+                    crate::hir_to_mir::nullish::check_argument_nullish_write(
                         a,
-                        crate::hir_to_mir::nullish::argument_check_ty(param_ty, types),
+                        param_ty,
                         types,
                         a.span(),
                         ctx,
                         "this constructor parameter",
-                        false,
+                    );
+                    super::control::is_call_argument_compatible(
+                        a,
+                        self.call_argument_effective_ty(a, types),
+                        param_ty,
+                        types,
+                        a.span(),
+                        ctx,
+                        self,
                     );
                 }
                 let value = self.convert_call_arg(
@@ -484,7 +536,67 @@ impl ExprConverter {
         types: &mut TypeTable,
         ctx: &mut PassContext,
     ) -> MirExpr {
+        if let HirExpr::Index { owner, index, .. } = base
+            && let Some((element_ty, opt_ty)) = optional_chain_index_element_ty(base, types)
+        {
+            let owner = self.convert_expr(
+                owner,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            let index = self.convert_expr(
+                index,
+                out,
+                shared_struct_ids,
+                shared_next_struct,
+                types,
+                ctx,
+            );
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, opt_ty);
+            out.push(MirStmt::Runtime {
+                op: RuntimeOp::ArrayGetOrDefault,
+                args: vec![owner, index],
+                dest: Some(dest),
+                ty: element_ty,
+                target_ty: None,
+            });
+            return MirExpr::OptionalChain {
+                base: Box::new(MirExpr::Local(dest)),
+                ty: opt_ty,
+            };
+        }
         let inner = self.convert_expr(base, out, shared_struct_ids, shared_next_struct, types, ctx);
+        if let MirExpr::Local(local) = &inner
+            && let Some(position) = optional_index_init_position(*local, out, types)
+        {
+            let (owner, index, binding_ty) = match &out[position] {
+                MirStmt::Let {
+                    ty,
+                    init: Some(MirExpr::Index { base, index, .. }),
+                    ..
+                } => ((**base).clone(), (**index).clone(), *ty),
+                _ => unreachable!(),
+            };
+            let dest = self.fresh_local();
+            self.push_temp_local(dest, binding_ty);
+            out.insert(
+                position,
+                MirStmt::Runtime {
+                    op: RuntimeOp::ArrayGetOrDefault,
+                    args: vec![owner, index],
+                    dest: Some(dest),
+                    ty: binding_ty,
+                    target_ty: None,
+                },
+            );
+            if let MirStmt::Let { init, .. } = &mut out[position + 1] {
+                *init = Some(MirExpr::Local(dest));
+            }
+        }
         let base_ty = crate::monomorphize::hir_expr_ty(base, types)
             .or_else(|| self.mir_expr_static_ty(&inner, types))
             .unwrap_or_else(|| types.intern(&Type::Error));
@@ -628,10 +740,18 @@ impl ExprConverter {
             Some(Type::Optional { .. } | Type::Error) | None
         );
         if value_is_optional && !target_is_optional {
-            return MirExpr::UnwrapOptional {
-                expr: Box::new(value),
-                ty: target,
-            };
+            let mut value = value;
+            let mut current = value_ty;
+            while let Some(Type::Optional { inner, .. }) =
+                current.and_then(|ty| types.resolve(ty)).cloned()
+            {
+                value = MirExpr::UnwrapOptional {
+                    expr: Box::new(value),
+                    ty: inner,
+                };
+                current = Some(inner);
+            }
+            return value;
         }
         value
     }

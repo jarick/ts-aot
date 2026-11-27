@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use ts_aot_core::{Atom, LocalId, Span, StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, LocalId, NullishKinds, Span, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::{HirBinaryOp, HirCallee, HirExpr, HirStmt, Visitor, walk_expr, walk_stmt};
 use ts_aot_ir_mir::{
     ConstValue, MirBlock, MirExpr, MirLocalDecl, MirPlace, MirStmt, SwitchCase, UnaryOp,
@@ -81,6 +81,30 @@ impl ExprConverter {
             Span::new(0, 0),
         );
         declared
+    }
+
+    fn check_declared_nullish_write(
+        &self,
+        value: &HirExpr,
+        target_ty: TypeId,
+        types: &TypeTable,
+        span: Span,
+        ctx: &mut PassContext,
+        site: &str,
+    ) -> bool {
+        if self.declared_void_result(value, types) {
+            return crate::hir_to_mir::nullish::check_nullish_write_kinds(
+                NullishKinds::UNDEFINED_ONLY,
+                target_ty,
+                types,
+                span,
+                ctx,
+                site,
+            );
+        }
+        crate::hir_to_mir::nullish::check_nullish_write(
+            value, target_ty, types, span, ctx, site, false,
+        )
     }
 
     pub fn convert_block(
@@ -231,17 +255,14 @@ impl ExprConverter {
                 let mutable = mutable_locals.contains(id);
                 let declared_known = !matches!(types.resolve(*ty), None | Some(Type::Error));
                 let init_compatible = match init.as_ref() {
-                    Some(init_expr) if declared_known => {
-                        crate::hir_to_mir::nullish::check_nullish_write(
-                            init_expr,
-                            *ty,
-                            types,
-                            init_expr.span(),
-                            ctx,
-                            &format!("the annotation of `{}`", name.as_str()),
-                            false,
-                        )
-                    }
+                    Some(init_expr) if declared_known => self.check_declared_nullish_write(
+                        init_expr,
+                        *ty,
+                        types,
+                        init_expr.span(),
+                        ctx,
+                        &format!("the annotation of `{}`", name.as_str()),
+                    ),
                     _ => true,
                 };
                 let init_expected_ty = declared_known.then_some(*ty);
@@ -741,17 +762,14 @@ impl ExprConverter {
             }
             HirStmt::Return { value } => {
                 let return_compatible = match (value.as_ref(), self.current_return_ty) {
-                    (Some(expr), Some(return_ty)) => {
-                        crate::hir_to_mir::nullish::check_nullish_write(
-                            expr,
-                            return_ty,
-                            types,
-                            expr.span(),
-                            ctx,
-                            "the declared return type of this function",
-                            false,
-                        )
-                    }
+                    (Some(expr), Some(return_ty)) => self.check_declared_nullish_write(
+                        expr,
+                        return_ty,
+                        types,
+                        expr.span(),
+                        ctx,
+                        "the declared return type of this function",
+                    ),
                     _ => true,
                 };
                 let value_mir = if return_compatible {

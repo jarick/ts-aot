@@ -254,6 +254,34 @@ fn nullish_kind(expr: &MirExpr) -> Option<NullishKind> {
     }
 }
 
+fn optional_nullish_chain(ty: TypeId, types: &TypeTable) -> Vec<ts_aot_core::NullishKinds> {
+    let mut chain = Vec::new();
+    let mut current = ty;
+    while let Some(Type::Optional { inner, nullish }) = types.resolve(current) {
+        chain.push(*nullish);
+        current = *inner;
+    }
+    chain
+}
+
+fn undecidable_nullish_comparison(op: BinaryOp) -> BackendError {
+    let op_name = match op {
+        BinaryOp::StrictNe => "!==",
+        _ => "===",
+    };
+    BackendError::UndecidableNullishComparison {
+        code: "P0020",
+        message: format!(
+            "`{op_name}` compares an optional value that allows both `null` and `undefined` \
+             with a nullish literal; the AOT target stores both as one `Option::None`, so the \
+             runtime value cannot decide the comparison (`null === undefined` is `false` in \
+             JavaScript while `None == None` is `true`). Narrow the operand to a single nullish \
+             kind (`T | null` or `T | undefined`), or use a presence test (`x == null` / \
+             `x != null`)"
+        ),
+    }
+}
+
 pub(super) fn emit_nullish_literal_equality(
     op: BinaryOp,
     left: &MirExpr,
@@ -283,22 +311,57 @@ pub(super) fn emit_nullish_literal_equality(
     };
     let resolved = emit_env.types.resolve(ty);
     if let Some(Type::Optional { nullish, .. }) = resolved {
+        let chain = optional_nullish_chain(ty, emit_env.types);
+        if chain.len() > 1 {
+            if strict && chain.iter().any(|kinds| kinds.null && kinds.undefined) {
+                return Err(undecidable_nullish_comparison(op));
+            }
+            let matching: Vec<usize> = chain
+                .iter()
+                .enumerate()
+                .filter(|(_, kinds)| {
+                    !strict
+                        || match literal {
+                            NullishKind::Null => kinds.null,
+                            NullishKind::Undefined => kinds.undefined,
+                        }
+                })
+                .map(|(level, _)| level)
+                .collect();
+            if matching.is_empty() {
+                let folded = if neg { quote!(true) } else { quote!(false) };
+                return Ok(Some(if is_pure_operand(operand) {
+                    folded
+                } else {
+                    let tokens = emit_expr(operand, ctx, emit_env, body_ctx)?;
+                    quote!({ let _ = &(#tokens); #folded })
+                }));
+            }
+            let tokens = emit_expr(operand, ctx, emit_env, body_ctx)?;
+            let bound = format_ident!("__ts_nullish_value");
+            let mut terms: Option<TokenStream> = None;
+            for level in matching {
+                let mut pattern = quote!(None);
+                for _ in 0..level {
+                    pattern = quote!(Some(#pattern));
+                }
+                let term = quote!(matches!(#bound, #pattern));
+                terms = Some(match terms {
+                    Some(terms) => quote!((#terms) || (#term)),
+                    None => term,
+                });
+            }
+            let mut expression = terms.unwrap_or_else(|| quote!(false));
+            if neg {
+                expression = quote!(!(#expression));
+            }
+            return Ok(Some(quote!({
+                let #bound = &(#tokens);
+                #expression
+            })));
+        }
         if strict && nullish.null && nullish.undefined {
-            let op_name = match op {
-                BinaryOp::StrictNe => "!==",
-                _ => "===",
-            };
-            return Err(BackendError::UndecidableNullishComparison {
-                code: "P0020",
-                message: format!(
-                    "`{op_name}` compares an optional value that allows both `null` and \
-                     `undefined` with a nullish literal; the AOT target stores both as one \
-                     `Option::None`, so the runtime value cannot decide the comparison \
-                     (`null === undefined` is `false` in JavaScript while `None == None` is \
-                     `true`). Narrow the operand to a single nullish kind (`T | null` or \
-                     `T | undefined`), or use a presence test (`x == null` / `x != null`)"
-                ),
-            });
+            return Err(undecidable_nullish_comparison(op));
         }
         let includes_literal = !strict
             || match literal {

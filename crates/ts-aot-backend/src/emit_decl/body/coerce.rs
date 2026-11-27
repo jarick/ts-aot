@@ -10,7 +10,7 @@ use crate::error::BackendError;
 use proc_macro2::{Literal, TokenStream};
 use quote::quote;
 use ts_aot_core::{Type, TypeId, TypeTable};
-use ts_aot_ir_mir::{MirExpr, UnaryOp};
+use ts_aot_ir_mir::{BinaryOp, MirExpr, UnaryOp};
 
 pub(super) fn emit_owned_value(
     expr: &MirExpr,
@@ -83,7 +83,7 @@ fn integer_width(ty: &Type) -> Option<(bool, u8)> {
     }
 }
 
-fn existing_f64_id(types: &TypeTable) -> Option<TypeId> {
+pub(super) fn existing_f64_id(types: &TypeTable) -> Option<TypeId> {
     types
         .types()
         .iter()
@@ -151,6 +151,69 @@ pub(super) fn numeric_binary_result_ty(
     emit_env: &EmitEnv,
 ) -> Option<TypeId> {
     common_numeric_target(left, right, emit_env)
+}
+
+pub(super) fn bitwise_operand_ty(
+    expr: &MirExpr,
+    other: Option<TypeId>,
+    emit_env: &EmitEnv,
+) -> Option<TypeId> {
+    if !is_js_bitwise_expr(expr) {
+        return None;
+    }
+    let other_is_numeric = other
+        .and_then(|ty| emit_env.types.resolve(ty))
+        .is_some_and(is_numeric_type);
+    if other_is_numeric {
+        other
+    } else {
+        existing_f64_id(emit_env.types)
+    }
+}
+
+pub(super) fn numeric_expr_ty(
+    expr: &MirExpr,
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+) -> Option<TypeId> {
+    if let Some(ty) = value_ty(expr, ctx, emit_env, body_ctx)
+        && emit_env.types.resolve(ty).is_some_and(is_numeric_type)
+    {
+        return Some(ty);
+    }
+    if is_js_bitwise_expr(expr) {
+        return existing_f64_id(emit_env.types);
+    }
+    if let MirExpr::Unary {
+        op: UnaryOp::Neg,
+        expr: operand,
+        ..
+    } = expr
+    {
+        return numeric_expr_ty(operand, ctx, emit_env, body_ctx);
+    }
+    let MirExpr::Binary {
+        op, left, right, ..
+    } = expr
+    else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod
+    ) {
+        return None;
+    }
+    let left_base = numeric_expr_ty(left, ctx, emit_env, body_ctx);
+    let right_base = numeric_expr_ty(right, ctx, emit_env, body_ctx);
+    let left_ty = bitwise_operand_ty(left, right_base, emit_env).or(left_base);
+    let right_ty = bitwise_operand_ty(right, left_base, emit_env).or(right_base);
+    if matches!(op, BinaryOp::Div) && (is_js_bitwise_expr(left) || is_js_bitwise_expr(right)) {
+        return existing_f64_id(emit_env.types)
+            .or_else(|| common_numeric_target(left_ty, right_ty, emit_env));
+    }
+    common_numeric_target(left_ty, right_ty, emit_env)
 }
 
 pub(super) fn dynamic_string_coerce(
@@ -443,6 +506,23 @@ fn numeric_coerce_impl(
     }
 }
 
+pub(super) fn is_js_bitwise_expr(expr: &MirExpr) -> bool {
+    matches!(
+        expr,
+        MirExpr::Unary {
+            op: UnaryOp::BitNot,
+            ..
+        } | MirExpr::Binary {
+            op: BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr,
+            ..
+        }
+    )
+}
+
 fn numeric_coerce_from_source_ty(
     value: &MirExpr,
     tokens: TokenStream,
@@ -453,7 +533,17 @@ fn numeric_coerce_from_source_ty(
     body_ctx: &BodyCtx,
     cast_int_widths: bool,
 ) -> TokenStream {
-    let Some(src) = value_ty(value, ctx, emit_env, body_ctx) else {
+    if is_js_bitwise_expr(value) {
+        let Some(dst) = dst else {
+            return tokens;
+        };
+        if is_numeric_type(dst) && !matches!(dst, Type::I32) {
+            let dst_tokens = emit_type_id_with_ctx(target, emit_env, ctx);
+            return quote!(((#tokens) as #dst_tokens));
+        }
+        return tokens;
+    }
+    let Some(src) = numeric_expr_ty(value, ctx, emit_env, body_ctx) else {
         return tokens;
     };
     let (Some(src), Some(dst)) = (emit_env.types.resolve(src), dst) else {

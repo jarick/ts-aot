@@ -2130,3 +2130,100 @@ fn main() {
     let stdout = run_generated_crate("optional_struct_global", &rust, MAIN);
     assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
 }
+
+#[test]
+fn a_static_generic_method_is_specialized_and_runs() {
+    const SOURCE: &str = r"
+class C { static s<T>(x: T): T { return x; } }
+export function got(): number { return C.s(5); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(static_generic_method::got(&ctx), 5.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("fnC__s_mono"),
+        "a call to a static generic method must be rewritten to a specialization that is \
+         emitted, not left pointing at an undefined generic name; got:\n{flat}"
+    );
+    check_generated_crate("static_generic_method", &rust);
+    let stdout = run_generated_crate("static_generic_method", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn a_static_and_an_instance_generic_method_share_the_name() {
+    const SOURCE: &str = r"
+class C {
+  static m<T>(x: T): number { return 2; }
+  m<T>(x: T): number { return 4; }
+}
+export function via_static(): number { return C.m(0); }
+export function via_instance(): number { const c = new C(); return c.m(0); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(shared_method_name::via_static(&ctx), 2.0);
+    assert_eq!(shared_method_name::via_instance(&ctx), 4.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    check_generated_crate("shared_method_name", &rust);
+    let stdout = run_generated_crate("shared_method_name", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}
+
+#[test]
+fn two_static_generic_methods_are_specialized_independently() {
+    const SOURCE: &str = r"
+class C {
+  static a<T>(x: T, y: T): T { return x; }
+  static b<T>(x: T, y: T): T { return y; }
+}
+export function got(): number { return C.a(3, 30) * 100 + C.b(4, 400); }
+";
+    const MAIN: &str = r#"
+use ts_aot_runtime::{Bump, Ctx, Host};
+
+struct NoHost;
+impl Host for NoHost {}
+
+fn main() {
+    let host = NoHost;
+    let bump = Bump::new();
+    let ctx = Ctx { arena: &bump, host: &host };
+    assert_eq!(two_static_generics::got(&ctx), 700.0);
+    println!("ok");
+}
+"#;
+    let rust = crate_rust_of(SOURCE);
+    let flat = normalized(&rust);
+    assert!(
+        flat.contains("fnC__a_mono") && flat.contains("fnC__b_mono"),
+        "both static generic methods must get their own specialization; got:\n{flat}"
+    );
+    check_generated_crate("two_static_generics", &rust);
+    let stdout = run_generated_crate("two_static_generics", &rust, MAIN);
+    assert!(stdout.contains("ok"), "got stdout:\n{stdout}");
+}

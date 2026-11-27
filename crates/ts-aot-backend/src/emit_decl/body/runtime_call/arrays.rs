@@ -16,37 +16,148 @@ use quote::{format_ident, quote};
 use ts_aot_core::{Atom, Type, TypeId};
 use ts_aot_ir_mir::{MirDecl, MirExpr, MirProgram, RuntimeOp};
 
+fn element_type_has_rust_default(ty: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> bool {
+    match emit_env.types.resolve(ty) {
+        Some(Type::Fn { .. }) => ctx.fn_value_kind(ty).is_none(),
+        Some(other) => other.has_rust_default(emit_env.types),
+        None => false,
+    }
+}
+
+fn emits_erased_unit(ty: TypeId, emit_env: &EmitEnv, ctx: &EmitCtx) -> bool {
+    match emit_env.types.resolve(ty) {
+        Some(
+            Type::Void
+            | Type::Null
+            | Type::Error
+            | Type::Tuple { .. }
+            | Type::Union { .. }
+            | Type::Intersection { .. },
+        ) => true,
+        Some(Type::Fn { .. }) => ctx.fn_value_kind(ty).is_none(),
+        _ => false,
+    }
+}
+
+fn emit_destructured_element_read(
+    arr: &TokenStream,
+    index: &TokenStream,
+    ty: TypeId,
+    emit_env: &EmitEnv,
+    ctx: &EmitCtx,
+) -> TokenStream {
+    let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
+    if element_type_has_rust_default(ty, emit_env, ctx) {
+        quote!(__ts_aot_array_get_or_default::<#element_ty>(#arr, #index))
+    } else {
+        quote!(match __ts_aot_array_get::<#element_ty>(#arr, #index) {
+            Some(__ts_element) => __ts_element,
+            None => {
+                unreachable!("array destructuring read an element that the array does not hold")
+            }
+        })
+    }
+}
+
+fn emit_destructured_optional_read(
+    arr: &TokenStream,
+    index: &TokenStream,
+    element_ty_id: TypeId,
+    emit_env: &EmitEnv,
+    ctx: &EmitCtx,
+) -> TokenStream {
+    let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
+    quote!(__ts_aot_array_get::<#element_ty>(#arr, #index))
+}
+
+fn emit_destructured_read(
+    args: &[MirExpr],
+    ctx: &EmitCtx,
+    emit_env: &EmitEnv,
+    body_ctx: &BodyCtx,
+    read: impl Fn(&TokenStream, &TokenStream) -> TokenStream,
+) -> Result<TokenStream, BackendError> {
+    let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
+    let receiver = quote!(__ts_array);
+    let index = quote!(__ts_index);
+    Ok(match &args[0] {
+        MirExpr::Global(name) if is_owned_global(name, ctx, emit_env) => {
+            let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
+            let read = read(&arr, &index);
+            quote!({
+                let __ts_index = #idx as i64;
+                #read
+            })
+        }
+        MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
+            let place = body_ctx.local_ref(*id);
+            let read = read(&receiver, &index);
+            quote!({
+                let __ts_array = &(#place);
+                let __ts_index = #idx as i64;
+                #read
+            })
+        }
+        other => {
+            let arr = emit_array_slice_arg(other, ctx, emit_env, body_ctx)?;
+            let read = read(&receiver, &index);
+            quote!({
+                let __ts_array = #arr;
+                let __ts_index = #idx as i64;
+                #read
+            })
+        }
+    })
+}
+
 fn emit_array_op_with_element_type(
     op_name: &'static str,
     args: &[MirExpr],
     ty: TypeId,
     coerce_optionals: bool,
+    erase_unit_elements: bool,
     ctx: &EmitCtx,
     emit_env: &EmitEnv,
     body_ctx: &BodyCtx,
 ) -> Result<TokenStream, BackendError> {
     let EmitEnv { types, .. } = emit_env;
+    let declared_is_array = matches!(types.resolve(ty), Some(Type::Array { .. }));
     let element_ty_id = match types.resolve(ty) {
         Some(Type::Array { element }) => *element,
         _ => ty,
     };
     let element_ty = emit_type_id_with_ctx(element_ty_id, emit_env, ctx);
+    let element_is_unit = erase_unit_elements && emits_erased_unit(element_ty_id, emit_env, ctx);
+    let result_is_unit =
+        erase_unit_elements && !declared_is_array && emits_erased_unit(ty, emit_env, ctx);
     let parts: Vec<TokenStream> = args
         .iter()
         .map(|a| {
             let tokens = emit_owned_value(a, ctx, emit_env, body_ctx)?;
             let tokens = numeric_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx);
-            Ok::<_, BackendError>(if coerce_optionals {
+            let tokens = if coerce_optionals {
                 optional_coerce(a, tokens, element_ty_id, ctx, emit_env, body_ctx, false)?
+            } else {
+                tokens
+            };
+            Ok::<_, BackendError>(if element_is_unit {
+                quote!({
+                    let _ = #tokens;
+                })
             } else {
                 tokens
             })
         })
         .collect::<Result<_, _>>()?;
     let name = format_ident!("{op_name}");
-    Ok(
-        quote!(#name::<#element_ty>(__ctx, ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#parts),*])),
-    )
+    let call = quote!(#name::<#element_ty>(__ctx, ts_aot_runtime::bumpalo::vec![in __ctx.arena; #(#parts),*]));
+    Ok(if result_is_unit {
+        quote!({
+            let _ = #call;
+        })
+    } else {
+        call
+    })
 }
 
 fn mapped_function_param_ty(program: &MirProgram, name: &Atom, index: usize) -> Option<TypeId> {
@@ -105,33 +216,18 @@ pub(super) fn emit_arrays_runtime_call(
             )))
         }
         RuntimeOp::ArrayGetOrDefault => {
-            let element_ty = emit_type_id_with_ctx(ty, emit_env, ctx);
-            let idx = emit_expr(&args[1], ctx, emit_env, body_ctx)?;
-            match &args[0] {
-                MirExpr::Global(name) if is_owned_global(name, ctx, emit_env) => {
-                    let arr = emit_array_slice_arg(&args[0], ctx, emit_env, body_ctx)?;
-                    Ok(quote!({
-                        let __ts_index = #idx as i64;
-                        __ts_aot_array_get_or_default::<#element_ty>(#arr, __ts_index)
-                    }))
-                }
-                MirExpr::Local(id) if body_ctx.shared_access_for_local(*id).is_none() => {
-                    let place = body_ctx.local_ref(*id);
-                    Ok(quote!({
-                        let __ts_array = &(#place);
-                        let __ts_index = #idx as i64;
-                        __ts_aot_array_get_or_default::<#element_ty>(__ts_array, __ts_index)
-                    }))
-                }
-                other => {
-                    let arr = emit_array_slice_arg(other, ctx, emit_env, body_ctx)?;
-                    Ok(quote!({
-                        let __ts_array = #arr;
-                        let __ts_index = #idx as i64;
-                        __ts_aot_array_get_or_default::<#element_ty>(__ts_array, __ts_index)
-                    }))
-                }
-            }
+            emit_destructured_read(args, ctx, emit_env, body_ctx, |arr, index| {
+                emit_destructured_element_read(arr, index, ty, emit_env, ctx)
+            })
+        }
+        RuntimeOp::ArrayGetOptional => {
+            let element_ty_id = match types.resolve(ty) {
+                Some(Type::Optional { inner, .. }) => *inner,
+                _ => ty,
+            };
+            emit_destructured_read(args, ctx, emit_env, body_ctx, |arr, index| {
+                emit_destructured_optional_read(arr, index, element_ty_id, emit_env, ctx)
+            })
         }
         RuntimeOp::ArrayFromMapped => {
             let arr = emit_expr(&args[0], ctx, emit_env, body_ctx)?;
@@ -192,6 +288,7 @@ pub(super) fn emit_arrays_runtime_call(
             args,
             ty,
             true,
+            true,
             ctx,
             emit_env,
             body_ctx,
@@ -200,6 +297,7 @@ pub(super) fn emit_arrays_runtime_call(
             "__ts_aot_array_concat",
             args,
             ty,
+            false,
             false,
             ctx,
             emit_env,

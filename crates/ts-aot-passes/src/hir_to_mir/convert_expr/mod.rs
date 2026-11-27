@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use ts_aot_core::{StructId, Type, TypeId, TypeTable};
+use ts_aot_core::{Atom, StructId, Type, TypeId, TypeTable};
 use ts_aot_ir_hir::HirExpr;
 use ts_aot_ir_mir::{MirExpr, MirStmt};
 
 use crate::PassContext;
-use crate::hir_to_mir::converter::ExprConverter;
+use crate::hir_to_mir::converter::{ExprConverter, build_class_index, class_at_path};
 
 mod array_buffer_dispatch;
 mod array_instance_dispatch;
@@ -113,16 +113,24 @@ impl ExprConverter {
                 }
                 let resolved_field =
                     self.resolve_field_id(owner, field_name, *field, shared_struct_ids, types, ctx);
-                let field_ty = match types.resolve(owner.ty()) {
-                    Some(Type::AsyncGenYield { inner }) => match field_name.as_str() {
+                let gen_yield_inner = match types.resolve(owner.ty()) {
+                    Some(Type::AsyncGenYield { inner }) => Some(*inner),
+                    _ => None,
+                };
+                let field_ty = if let Some(inner) = gen_yield_inner {
+                    match field_name.as_str() {
                         "value" => types.intern(&Type::Optional {
-                            inner: *inner,
+                            inner,
                             nullish: ts_aot_core::NullishKinds::UNDEFINED_ONLY,
                         }),
                         "done" => types.intern(&Type::Bool),
                         _ => *ty,
-                    },
-                    _ => *ty,
+                    }
+                } else if matches!(types.resolve(*ty), None | Some(Type::Error)) {
+                    self.declared_field_value_ty(owner, field_name, types)
+                        .unwrap_or(*ty)
+                } else {
+                    *ty
                 };
                 MirExpr::Field {
                     base: Box::new(self.convert_expr(
@@ -140,6 +148,17 @@ impl ExprConverter {
             HirExpr::Index {
                 owner, index, ty, ..
             } => {
+                if index_base_is_tuple(owner.ty(), types) {
+                    ctx.error(
+                        "E0420",
+                        "indexing a tuple is not supported in this AOT target: a tuple is erased \
+                         to `()` and has no Rust value representation, so its elements cannot be \
+                         read by index; use a homogeneous array type such as `number[]` instead"
+                            .to_owned(),
+                        owner.span(),
+                    );
+                    return MirExpr::Unit;
+                }
                 let resolved_index_ty = types
                     .resolve(owner.ty())
                     .and_then(|t| match t {
@@ -371,5 +390,46 @@ impl ExprConverter {
                 ctx,
             ),
         }
+    }
+
+    pub(super) fn declared_field_value_ty(
+        &self,
+        owner: &HirExpr,
+        field_name: &Atom,
+        types: &mut TypeTable,
+    ) -> Option<TypeId> {
+        let owner_ty = if matches!(owner, HirExpr::Call { .. })
+            && matches!(types.resolve(owner.ty()), Some(Type::Error) | None)
+        {
+            self.expr_type(owner, types).unwrap_or_else(|| owner.ty())
+        } else {
+            owner.ty()
+        };
+        let owner_ty = match types.resolve(owner_ty) {
+            Some(Type::Optional { inner, .. }) => *inner,
+            _ => owner_ty,
+        };
+        let class_index = self
+            .class_index
+            .get_or_init(|| build_class_index(&self.program.declarations));
+        let class = class_at_path(
+            &self.program.declarations,
+            class_index.get(&owner_ty)?.clone(),
+        )?;
+        let field = class
+            .fields
+            .iter()
+            .find(|field| field.name == *field_name)?;
+        (!matches!(types.resolve(field.ty), None | Some(Type::Error))).then_some(field.ty)
+    }
+}
+
+fn index_base_is_tuple(ty: TypeId, types: &TypeTable) -> bool {
+    match types.resolve(ty) {
+        Some(Type::Tuple { .. }) => true,
+        Some(Type::Optional { inner, .. }) => {
+            matches!(types.resolve(*inner), Some(Type::Tuple { .. }))
+        }
+        _ => false,
     }
 }

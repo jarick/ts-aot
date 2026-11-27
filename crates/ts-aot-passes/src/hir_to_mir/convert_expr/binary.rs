@@ -72,6 +72,24 @@ impl ExprConverter {
             .or_else(|| self.hir_static_ty(expr, types))
             .or_else(|| self.expr_type(expr, types))
     }
+
+    fn nullable_mir_type(
+        &self,
+        ty: Option<TypeId>,
+        mir: &MirExpr,
+        types: &TypeTable,
+    ) -> Option<TypeId> {
+        let mir_ty = self.mir_expr_static_ty(mir, types);
+        match (ty, mir_ty) {
+            (Some(current), Some(mir_ty))
+                if !is_nullable_type(types.resolve(current), types)
+                    && is_nullable_type(types.resolve(mir_ty), types) =>
+            {
+                Some(mir_ty)
+            }
+            (current, _) => current,
+        }
+    }
 }
 
 fn type_name(types: &TypeTable, ty: TypeId) -> String {
@@ -163,6 +181,41 @@ fn optional_inner(ty: Option<TypeId>, types: &TypeTable) -> Option<TypeId> {
         Some(Type::Optional { inner, .. }) => known_type(Some(*inner), types),
         _ => None,
     }
+}
+
+fn optional_value_ty_deep(ty: TypeId, types: &TypeTable) -> TypeId {
+    let mut current = ty;
+    while let Some(Type::Optional { inner, .. }) = types.resolve(current) {
+        if matches!(types.resolve(*inner), None | Some(Type::Error)) {
+            break;
+        }
+        current = *inner;
+    }
+    current
+}
+
+fn nested_optional_type(ty: TypeId, types: &TypeTable) -> bool {
+    matches!(
+        types.resolve(ty),
+        Some(Type::Optional { inner, .. })
+            if matches!(types.resolve(*inner), Some(Type::Optional { .. }))
+    )
+}
+
+fn coalesce_lhs_needs_flattening(
+    lhs_ty: Option<TypeId>,
+    expected_ty: Option<TypeId>,
+    parameter_abi_read: bool,
+    types: &TypeTable,
+) -> bool {
+    let Some(lhs_ty) = lhs_ty else {
+        return false;
+    };
+    let Some(Type::Optional { inner, .. }) = types.resolve(lhs_ty).cloned() else {
+        return false;
+    };
+    matches!(types.resolve(inner), Some(Type::Optional { .. }))
+        && !(parameter_abi_read && expected_ty == Some(inner))
 }
 
 fn types_compatible(a: TypeId, b: TypeId, types: &TypeTable) -> bool {
@@ -1247,6 +1300,15 @@ impl ExprConverter {
         let lhs_ty = lhs_hir_ty
             .or_else(|| self.mir_expr_static_ty(&left_mir, types))
             .or_else(|| self.hir_static_ty(lhs, types));
+        let lhs_ty = self.nullable_mir_type(lhs_ty, &left_mir, types);
+        let parameter_abi_read =
+            matches!(lhs, HirExpr::Local { id, .. } if self.param_locals.contains(id));
+        let (left_mir, lhs_ty) =
+            if coalesce_lhs_needs_flattening(lhs_ty, self.expected_ty, parameter_abi_read, types) {
+                self.flatten_optional_chain_lhs(left_mir, lhs_ty, out, types)
+            } else {
+                (left_mir, lhs_ty)
+            };
         self.convert_coalesce_operand(
             left_mir,
             lhs_ty,
@@ -1260,6 +1322,86 @@ impl ExprConverter {
             ctx,
             None,
         )
+    }
+
+    fn flatten_optional_chain_lhs(
+        &mut self,
+        value: MirExpr,
+        ty: Option<TypeId>,
+        out: &mut Vec<MirStmt>,
+        types: &mut TypeTable,
+    ) -> (MirExpr, Option<TypeId>) {
+        let Some(ty) = ty else {
+            return (value, ty);
+        };
+        let Some(Type::Optional { inner, nullish }) = types.resolve(ty).cloned() else {
+            return (value, Some(ty));
+        };
+        let mut present_ty = inner;
+        while let Some(Type::Optional { inner: next, .. }) = types.resolve(present_ty).cloned() {
+            if matches!(types.resolve(next), None | Some(Type::Error)) {
+                break;
+            }
+            present_ty = next;
+        }
+        if present_ty == inner {
+            return (value, Some(ty));
+        }
+        let (left_place, mut left_stmts) = self.bind_to_temp(value, ty);
+        out.append(&mut left_stmts);
+        let bool_ty = types.intern(&Type::Bool);
+        let mut cond = MirExpr::IsSome {
+            expr: Box::new(left_place.clone()),
+            ty: bool_ty,
+        };
+        let mut present_value = left_place.clone();
+        let mut current_ty = ty;
+        while current_ty != present_ty {
+            let Some(Type::Optional { inner: next, .. }) = types.resolve(current_ty).cloned()
+            else {
+                break;
+            };
+            present_value = MirExpr::UnwrapOptional {
+                expr: Box::new(present_value),
+                ty: next,
+            };
+            current_ty = next;
+            if current_ty != present_ty {
+                cond = MirExpr::Binary {
+                    op: BinaryOp::And,
+                    left: Box::new(cond),
+                    right: Box::new(MirExpr::IsSome {
+                        expr: Box::new(present_value.clone()),
+                        ty: bool_ty,
+                    }),
+                    ty: bool_ty,
+                };
+            }
+        }
+        let flat_ty = types.intern(&Type::Optional {
+            inner: present_ty,
+            nullish,
+        });
+        let flat = self.fresh_local();
+        self.push_temp_local(flat, flat_ty);
+        out.push(MirStmt::Let {
+            local: flat,
+            ty: flat_ty,
+            init: None,
+            mutable: true,
+        });
+        out.push(MirStmt::If {
+            cond,
+            then_block: MirBlock::with(MirStmt::Assign {
+                target: MirPlace::Local { id: flat },
+                value: present_value,
+            }),
+            else_block: Some(MirBlock::with(MirStmt::Assign {
+                target: MirPlace::Local { id: flat },
+                value: MirExpr::Unit,
+            })),
+        });
+        (MirExpr::Local(flat), Some(flat_ty))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1348,10 +1490,10 @@ impl ExprConverter {
             rhs_ty.map_or(NO_KINDS, |ty| kinds_of_ty(ty, types))
         };
         let rhs_value_ty = match rhs_ty {
-            Some(ty) => Some(optional_value_ty(ty, types)),
+            Some(ty) => Some(optional_value_ty_deep(ty, types)),
             None if is_literal(rhs) => self
                 .mir_expr_static_ty(&right_mir, types)
-                .map(|ty| optional_value_ty(ty, types)),
+                .map(|ty| optional_value_ty_deep(ty, types)),
             None => None,
         };
         let nullable_fallback = nullish_fallback
@@ -1423,7 +1565,11 @@ impl ExprConverter {
                     ty: inner,
                 }
             };
-            (self.optional_type(value_ty, rhs_kinds, types), then_value)
+            let dest_ty = match rhs_ty.filter(|rhs| nested_optional_type(*rhs, types)) {
+                Some(rhs) => rhs,
+                None => self.optional_type(value_ty, rhs_kinds, types),
+            };
+            (dest_ty, then_value)
         } else {
             (
                 value_ty,
@@ -1979,7 +2125,15 @@ impl ExprConverter {
             return value;
         };
         let source_ty = self.mir_expr_static_ty(&value, types).unwrap_or(ty);
-        if !super::control::is_assignment_compatible(rhs, source_ty, ty, types, rhs.span(), ctx) {
+        if !super::control::is_assignment_compatible(
+            rhs,
+            source_ty,
+            ty,
+            types,
+            rhs.span(),
+            ctx,
+            self,
+        ) {
             return MirExpr::Unit;
         }
         let kinds = if is_nullish_hir_literal(rhs) {
